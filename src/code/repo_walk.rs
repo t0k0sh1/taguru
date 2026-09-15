@@ -102,7 +102,25 @@ impl RepoWalk {
 
     /// The work list between `commit` and HEAD. `-M` turns a
     /// delete+add pair back into the rename it was.
+    ///
+    /// `commit` is the anchor `code-sync.json` recorded — a file in
+    /// the working tree, which a hostile branch can rewrite. It rides
+    /// into `git diff` as a positional argument, so anything but an
+    /// object name is refused before git sees it: `--output=PATH`
+    /// would otherwise make git write the diff (whose content the
+    /// same branch controls) to any path this process can, `.git/
+    /// hooks/pre-commit` included. A refusal degrades the caller to
+    /// a full re-sync, the same path a garbage-collected anchor takes.
     pub(crate) fn changes_since(&self, commit: &str) -> Result<Vec<Change>, String> {
+        // The value itself stays out of the message: it is attacker-
+        // shaped by construction, and `sync` prints this to a terminal.
+        if !is_object_name(commit) {
+            return Err(
+                "sync anchor in code-sync.json is not a commit id (expected 4 to 64 hex \
+                 digits)"
+                    .to_string(),
+            );
+        }
         let out = self.git(&["diff", "--name-status", "-z", "-M", commit, "HEAD"])?;
         let mut fields = split_nul(&out)?.into_iter();
         let mut changes = Vec::new();
@@ -234,6 +252,13 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(output.stdout)
+}
+
+/// Whether `text` is a git object name: 4 to 64 hex digits (an
+/// abbreviated or full SHA-1, or a SHA-256 name). Symbolic refs are
+/// refused too — the anchor is always the sha `head()` recorded.
+fn is_object_name(text: &str) -> bool {
+    (4..=64).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// NUL-separated git output as owned strings. A non-UTF-8 field is a
@@ -532,5 +557,41 @@ mod tests {
             walk.changes_since("0000000000000000000000000000000000000000")
                 .is_err()
         );
+    }
+
+    /// The anchor comes from a file a hostile branch can rewrite and
+    /// rides into `git diff` as a positional argument: anything but an
+    /// object name is refused before git sees it. `--output=PATH`
+    /// would otherwise make git write the diff to that path.
+    #[test]
+    fn changes_since_refuses_an_anchor_that_is_not_an_object_name() {
+        let repo = TestRepo::new("anchor-shape");
+        repo.write("src/a.rs", "fn a() {}\n");
+        repo.commit("base");
+        let walk = RepoWalk::discover(&repo.dir).unwrap();
+        let planted = repo.dir.join(".git").join("hooks").join("pre-commit");
+        let _ = fs::remove_file(&planted);
+        let injection = format!("--output={}", planted.display());
+        for anchor in [injection.as_str(), "-p", "HEAD", "main", "", "abc", "xyz1"] {
+            let error = walk
+                .changes_since(anchor)
+                .expect_err("a non-hex anchor must be refused");
+            assert!(error.contains("not a commit id"), "{anchor:?}: {error}");
+            // Never echoed: the value is attacker-shaped and reaches a
+            // terminal through `sync`'s stderr.
+            if !anchor.is_empty() {
+                assert!(!error.contains(anchor), "{anchor:?}: {error}");
+            }
+        }
+        assert!(
+            !planted.exists(),
+            "git must never have run with the injected --output argument"
+        );
+        // A real (abbreviated) sha still diffs.
+        let head = walk.head().unwrap();
+        assert!(walk.changes_since(&head[..7]).unwrap().is_empty());
+        assert!(is_object_name(&head));
+        assert!(is_object_name(&"f".repeat(64)));
+        assert!(!is_object_name(&"f".repeat(65)));
     }
 }
