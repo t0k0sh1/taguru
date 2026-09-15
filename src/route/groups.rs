@@ -154,6 +154,15 @@ where
     Ok(answers)
 }
 
+/// Why a body could not be projected: a refusal the router answers
+/// itself, or a shape the single-instance extractor would refuse —
+/// sent to one shard verbatim (`forward_group_probe`) so the refusal
+/// is the shard's own, never a router-invented one.
+enum Unprojectable {
+    Refusal(Box<Response>),
+    Probe,
+}
+
 /// Projects the named member-list fields of a JSON body per shard.
 /// Members of a `checked` field (the create/add lists) that the map
 /// does not place are refused up front with the single-instance
@@ -162,38 +171,68 @@ where
 /// that gate: a single instance's `update_group` treats removals as an
 /// idempotent set difference and never validates their existence, so
 /// an unplaced member simply projects to no shard — the same no-op.
+///
+/// Three gates before any of that. A body that is not a JSON object
+/// is refused here as `invalid_argument`: indexing a non-object
+/// `Value` by key would panic into a 500, and forwarding it to one
+/// shard is no answer either — serde reads a JSON array as a
+/// positional struct, so a single instance accepts `[]` as an empty
+/// request, and a probe would create the group on that one shard
+/// alone. Refusing is the one outcome that lands nothing anywhere
+/// (the single instance's positional reading is a serde artefact no
+/// client relies on, and this is the documented divergence). A member
+/// list that is not an array of strings is [`Unprojectable::Probe`]:
+/// the shard's typed extractor refuses it in its own shape, where the
+/// router used to drop a stray non-string member in silence. A list
+/// past `MAX_INPUT_ITEMS` is refused with `api::overlong`'s shape on
+/// the WHOLE list — split per shard, each shard's slice would pass its
+/// own cap and the intended hard limit would scale with the shard
+/// count.
 fn project_body(
     map: &RouteMap,
     base: &Value,
     checked: &[&str],
     unchecked: &[&str],
     started_at: Instant,
-) -> Result<impl Fn(usize) -> Option<Bytes> + use<>, Box<Response>> {
+) -> Result<impl Fn(usize) -> Option<Bytes> + use<>, Unprojectable> {
+    if !base.is_object() {
+        return Err(Unprojectable::Refusal(Box::new(api::error(
+            ErrorCode::InvalidArgument,
+            "a group request is a JSON object; nothing was applied",
+            started_at,
+        ))));
+    }
     let mut lists: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let fields = checked
         .iter()
         .map(|field| (*field, true))
         .chain(unchecked.iter().map(|field| (*field, false)));
     for (field, check) in fields {
-        let members: Vec<String> = base
-            .get(field)
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let members: Vec<String> = match base.get(field) {
+            None => Vec::new(),
+            Some(Value::Array(values)) => {
+                let mut members = Vec::with_capacity(values.len());
+                for value in values {
+                    match value.as_str() {
+                        Some(member) => members.push(member.to_string()),
+                        None => return Err(Unprojectable::Probe),
+                    }
+                }
+                members
+            }
+            Some(_) => return Err(Unprojectable::Probe),
+        };
+        if let Some(refusal) = api::overlong(field, members.len(), started_at) {
+            return Err(Unprojectable::Refusal(Box::new(refusal)));
+        }
         if check {
             for member in &members {
                 if map.shard_of(member).is_none() {
-                    return Err(Box::new(api::error(
+                    return Err(Unprojectable::Refusal(Box::new(api::error(
                         ErrorCode::NoContext,
                         format!("context '{member}' not found; nothing was applied"),
                         started_at,
-                    )));
+                    ))));
                 }
             }
         }
@@ -256,7 +295,11 @@ pub(super) async fn create_group_broadcast(
     let path = format!("/groups/{}", urlencode(&name));
     let body_for = match project_body(&map, &base, &["contexts"], &[], started_at) {
         Ok(body_for) => body_for,
-        Err(refusal) => return *refusal,
+        Err(Unprojectable::Refusal(refusal)) => return *refusal,
+        Err(Unprojectable::Probe) => {
+            return forward_group_probe(&state, &map, Method::PUT, &name, headers, body, deadline)
+                .await;
+        }
     };
     match broadcast_group_write(
         &state,
@@ -308,7 +351,19 @@ pub(super) async fn update_group_broadcast(
         started_at,
     ) {
         Ok(body_for) => body_for,
-        Err(refusal) => return *refusal,
+        Err(Unprojectable::Refusal(refusal)) => return *refusal,
+        Err(Unprojectable::Probe) => {
+            return forward_group_probe(
+                &state,
+                &map,
+                Method::PATCH,
+                &name,
+                headers,
+                body,
+                deadline,
+            )
+            .await;
+        }
     };
     match broadcast_group_write(
         &state,
@@ -344,9 +399,11 @@ pub(super) async fn update_group_broadcast(
     }
 }
 
-/// Sends an unparseable body to the `group`'s first shard verbatim, so
-/// the refusal (shape, status, message) is the single-instance
-/// extractor's own.
+/// Sends a body the single-instance extractor refuses — unparseable,
+/// not an object, a member list that is not an array of strings — to
+/// the `group`'s first shard verbatim, so the refusal (shape, status,
+/// message) is that extractor's own. Nothing lands: the shard refuses
+/// before it touches state, exactly as it would have alone.
 #[allow(clippy::too_many_arguments)]
 async fn forward_group_probe(
     state: &RouterState,
@@ -598,4 +655,113 @@ fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
         contexts: string_set("contexts"),
         groups: string_set("groups"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn two_shards() -> RouteMap {
+        RouteMap::parse("a = http://a:1\nb = http://b:1\n* = http://b:1\n").unwrap()
+    }
+
+    async fn refusal_body(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A non-object body is refused by the router itself — indexing it
+    /// by key would panic into a 500, and a probe would let serde's
+    /// positional reading create the group on one shard alone.
+    #[tokio::test]
+    async fn a_non_object_body_is_refused_before_any_shard_sees_it() {
+        let map = two_shards();
+        for base in [
+            json!([]),
+            json!(["d", ["a"]]),
+            json!(42),
+            json!("x"),
+            json!(true),
+        ] {
+            let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+            let Err(Unprojectable::Refusal(refusal)) = outcome else {
+                panic!("{base} must be refused, never probed or projected");
+            };
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST, "{base}");
+            let body = refusal_body(*refusal).await;
+            assert_eq!(body["code"], "invalid_argument", "{base}: {body}");
+        }
+    }
+
+    /// A member list the single-instance extractor would refuse is a
+    /// probe, never projected: a list that is not an array, a member
+    /// that is not a string (it used to be dropped in silence).
+    #[test]
+    fn a_body_the_typed_extractor_refuses_is_a_probe_not_a_projection() {
+        let map = two_shards();
+        for base in [
+            json!({"contexts": "a"}),
+            json!({"contexts": {"a": 1}}),
+            json!({"contexts": ["a", 42]}),
+            json!({"contexts": ["a", null]}),
+        ] {
+            let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+            assert!(
+                matches!(outcome, Err(Unprojectable::Probe)),
+                "{base} must probe a shard"
+            );
+        }
+        // The unchecked (remove) lists are typed the same way.
+        let base = json!({"remove_contexts": [1]});
+        let outcome = project_body(&map, &base, &[], &["remove_contexts"], Instant::now());
+        assert!(matches!(outcome, Err(Unprojectable::Probe)));
+        // An absent list is empty, a null body field is not an array.
+        assert!(project_body(&map, &json!({}), &["contexts"], &[], Instant::now()).is_ok());
+        let outcome = project_body(
+            &map,
+            &json!({"contexts": null}),
+            &["contexts"],
+            &[],
+            Instant::now(),
+        );
+        assert!(matches!(outcome, Err(Unprojectable::Probe)));
+    }
+
+    /// The per-request cap is judged on the whole list, before the
+    /// split per shard: 1001 members over two shards is refused with
+    /// `api::overlong`'s shape even though each shard's slice would
+    /// pass its own cap; 1000 projects.
+    #[tokio::test]
+    async fn the_member_cap_is_the_whole_list_not_the_per_shard_slice() {
+        let map = two_shards();
+        let members: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
+        let base = json!({"contexts": members});
+        let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+        let Err(Unprojectable::Refusal(refusal)) = outcome else {
+            panic!("1001 members must be refused as overlong");
+        };
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        let body = refusal_body(*refusal).await;
+        assert_eq!(body["code"], "over_limit", "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("contexts carries 1001 items"),
+            "{body}"
+        );
+
+        let members: Vec<String> = (0..1000).map(|i| format!("c{i}")).collect();
+        let base = json!({"contexts": members, "description": "d"});
+        let body_for = project_body(&map, &base, &["contexts"], &[], Instant::now())
+            .unwrap_or_else(|_| panic!("1000 members must project"));
+        // Every member falls to the `*` shard; the other gets none.
+        let shard_a: serde_json::Value = serde_json::from_slice(&body_for(0).unwrap()).unwrap();
+        let shard_b: serde_json::Value = serde_json::from_slice(&body_for(1).unwrap()).unwrap();
+        assert_eq!(shard_a["contexts"].as_array().unwrap().len(), 0);
+        assert_eq!(shard_b["contexts"].as_array().unwrap().len(), 1000);
+        assert_eq!(shard_b["description"], "d");
+    }
 }
