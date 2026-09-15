@@ -418,6 +418,25 @@ mod local {
         }
     }
 
+    /// The finiteness gate the HTTP provider's `decode` applies at its
+    /// boundary, applied to local inference's output too: a NaN or
+    /// ±inf component would pass `PassageVectorStore::push` (which
+    /// checks the width only) and sit in the live store as a row every
+    /// `total_cmp`-ranked similarity places at one extreme — served as
+    /// the top match until a disk reload's `from_bytes` finally
+    /// refused it. Named here instead, like any malformed answer.
+    fn reject_non_finite(vectors: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+        for (index, vector) in vectors.iter().enumerate() {
+            if let Some(position) = vector.iter().position(|value| !value.is_finite()) {
+                return Err(format!(
+                    "local embedding failed: entry {index} contains a non-finite component \
+                     at {position}"
+                ));
+            }
+        }
+        Ok(vectors)
+    }
+
     impl EmbeddingProvider for LocalEmbeddings {
         fn model(&self) -> &str {
             &self.model_name
@@ -477,11 +496,13 @@ mod local {
                     texts.iter().map(|text| format!("{marker}{text}")).collect();
                 return engine
                     .embed(marked, None)
-                    .map_err(|error| format!("local embedding failed: {error}"));
+                    .map_err(|error| format!("local embedding failed: {error}"))
+                    .and_then(reject_non_finite);
             }
             engine
                 .embed(texts, None)
                 .map_err(|error| format!("local embedding failed: {error}"))
+                .and_then(reject_non_finite)
         }
     }
 
@@ -493,6 +514,29 @@ mod local {
         /// The feature-free table and the feature-gated match must
         /// name the same models — a row added to one without the
         /// other would otherwise surface only as a runtime panic.
+        /// Local inference output passes the same finiteness gate the
+        /// HTTP provider applies at its boundary: a NaN or ±inf
+        /// component is a named refusal, never a stored row.
+        #[test]
+        fn reject_non_finite_names_the_entry_and_component() {
+            let clean = vec![vec![0.1, 0.2], vec![0.3, 0.4]];
+            assert_eq!(reject_non_finite(clean.clone()).unwrap(), clean);
+            assert!(reject_non_finite(Vec::new()).unwrap().is_empty());
+            for (bad, position) in [(f32::NAN, 1), (f32::INFINITY, 0), (f32::NEG_INFINITY, 1)] {
+                let mut vectors = clean.clone();
+                vectors[1][position] = bad;
+                let error = reject_non_finite(vectors).unwrap_err();
+                assert_eq!(
+                    error,
+                    format!(
+                        "local embedding failed: entry 1 contains a non-finite component at \
+                         {position}"
+                    ),
+                    "{bad}"
+                );
+            }
+        }
+
         #[test]
         fn every_listed_model_maps_to_a_fastembed_model() {
             for info in &LOCAL_MODELS {
