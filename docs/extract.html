@@ -1037,6 +1037,11 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <a href="#pipeline"><code>validate</code></a> output, keyed by the piece's own text hash —
       an unnamed precedent for the per-step storage <a
       href="https://github.com/t0k0sh1/taguru/issues/781">#781</a> is building on.
+      One run per <code>--out</code> at a time: the manifest and each checkpoint file are
+      rewritten whole from the running process's memory, so a second <code>extract</code> on
+      the same directory is refused up front (<code>output directory … is held by another
+      taguru process</code>) by an advisory <code>.extract.lock</code> that dies with its
+      holder; <code>--dry-run</code> takes none.
     </p>
     <p>
       Each checkpointed unit is keyed by the <b>hash of its own text</b>, not by chunk index. This

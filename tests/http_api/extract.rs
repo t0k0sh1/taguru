@@ -286,10 +286,14 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
             // chunk checkpoint directory (one file per document,
             // cleared but never removed itself once a document's
             // batch lands) — and, since ADR 0023, the trace directory
-            // (one file per written document, the batch's sibling).
+            // (one file per written document, the batch's sibling) —
+            // and the advisory lock that admits one run per --out,
+            // an empty file left behind on purpose (the lock lives on
+            // the descriptor, not the file).
             name.to_str() != Some(".extract-manifest.json")
                 && name.to_str() != Some(".extract-checkpoints")
                 && name.to_str() != Some(".extract-trace")
+                && name.to_str() != Some(".extract.lock")
         })
         .collect()
 }
@@ -10986,4 +10990,61 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
         "the subject IS in paragraph 0"
     );
     assert_eq!(named[0]["paragraph"], 0);
+}
+
+/// One extract per `--out` at a time: a second run on a directory
+/// another run holds is refused up front, naming the directory, and
+/// never calls the model — the manifest and every checkpoint file are
+/// rewritten whole from memory, so two writers silently discarded each
+/// other's records. `--dry-run` writes nothing and is not held back;
+/// once the holder is gone, the same command runs.
+#[test]
+fn a_second_extract_on_the_same_out_is_refused_while_the_first_holds_it() {
+    let docs = batch_dir("extract-out-lock-docs");
+    let doc = docs.join("doc.md");
+    std::fs::write(&doc, "青嶺酒造は1907年に創業した。\n").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-out-lock-out");
+
+    // What a running extract holds: the same advisory lock, from this
+    // process (flock binds the open file description, so a second
+    // File::create + try_lock contends exactly as a second process would).
+    let held = std::fs::File::create(out.join(".extract.lock")).unwrap();
+    held.try_lock()
+        .expect("the test must be able to take the lock first");
+
+    let (url, requests) = stub_chat_server(vec![
+        r#"{"associations":[{"subject":"青嶺酒造","label":"創業年","object":"1907年","weight":1.0,"paragraph":0}],"aliases":[]}"#.to_string(),
+    ]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "sake", doc_src]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "output directory {} is held by another taguru process",
+            out.display()
+        )) && stderr.contains("another extract on the same --out"),
+        "{stderr}"
+    );
+    assert!(
+        !out.join(".extract-manifest.json").exists(),
+        "a refused run must write nothing"
+    );
+    // A dry run only reads.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--dry-run", "--context", "sake", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    drop(held);
+    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "sake", doc_src]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(out.join(".extract-manifest.json").is_file());
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1, "only the admitted run calls the model");
 }

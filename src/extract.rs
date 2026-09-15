@@ -703,6 +703,22 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("taguru: extract: creating {}: {error}", args.out.display());
         return 1;
     }
+    // One extract per --out at a time: the manifest and every segment's
+    // checkpoint file are rewritten whole from an in-memory copy, so a
+    // second run on the same directory would silently discard what
+    // this one records (and vice versa). Held until this run returns;
+    // --dry-run writes nothing and takes nothing.
+    let _out_lock = if args.dry_run {
+        None
+    } else {
+        match crate::storage::lock_extract_out_dir(&args.out) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                eprintln!("taguru: extract: {error}");
+                return 1;
+            }
+        }
+    };
     let manifest_path = args.out.join(MANIFEST_NAME);
     // Validated with the same strength as --parallel itself: extract
     // never initializes a tracing subscriber (it exits before serve()'s
