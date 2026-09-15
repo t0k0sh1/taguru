@@ -281,6 +281,95 @@ Entries that change an on-disk format or a response shape say so.
   endpoint or unmapped context that shard hosts. No change for paths
   without a dot segment.
 
+- `taguru router`: group writes (`PUT`/`PATCH /groups/{name}`) now
+  judge the per-request member cap (1000) on the whole
+  `contexts`/`add_contexts`/`remove_contexts` list before splitting it
+  per shard — each shard's slice used to pass its own cap, so the
+  intended hard limit scaled with the shard count. A member that is
+  not a string is refused in the shard's own extractor shape instead
+  of being dropped in silence, and a body that is not a JSON object is
+  refused with `invalid_argument` instead of a router panic (500) —
+  the one deliberate divergence from a single instance, which reads a
+  JSON array as a positional struct (a serde artefact); refusing is
+  what lands nothing on any shard.
+
+- `taguru-code sync`/`watch`: the sync anchor read from
+  `.taguru/code-sync.json` is refused unless it is a git object name
+  (4–64 hex digits) before it reaches `git diff` as a positional
+  argument. A hostile branch that committed a `code-sync.json` with
+  `"commit": "--output=.git/hooks/pre-commit"` could otherwise make
+  git write a diff of its own choosing to any path the process can —
+  a hook included. A refused anchor degrades to the full re-sync a
+  garbage-collected anchor already takes, and says so.
+
+- `taguru benchmark extract`: `--redact [secrets|pii]` and
+  `--redact-rules FILE` (ADR 0038), forwarded to every cell. Every
+  cell's `TAGURU_EXTRACT_*` environment is scrubbed and re-pinned on
+  purpose (issue #734), but `TAGURU_EXTRACT_REDACT`/`_REDACT_RULES` —
+  and the seven knobs added to extract since (`CHUNK_BYTES`,
+  `CHUNK_CONTEXT`, `ESCALATION_FACTOR`, `RUNAWAY_RATIO`,
+  `TRACE_ATTEMPTS`, `REPLAY`, `REPLAY_FROM`) — were scrubbed without
+  being re-pinned, so an operator's `TAGURU_EXTRACT_REDACT=1` was
+  silently dropped from the one command that sends real documents to
+  several external model endpoints, with no flag to turn it back on.
+  The pinned list is now one function whose key set a test holds equal
+  to `config.rs`'s inventory. The manifest's `extraction_settings`
+  gains `redact`, `redact_rules_sha256`, `chunk_context`,
+  `escalation_factor`, `runaway_ratio`, `trace_attempts`, and `replay`
+  (all default-valued for an unredacted run; an existing results
+  directory still resumes). No response-shape change.
+
+- `taguru inspect <stem>.attempts.jsonl`: a resumed segment's later run
+  restarts `attempt_seq` at 1 in the same appended log, and the text
+  view joined each ladder move to the attempt it followed by that
+  number alone — so run 2's moves printed under run 1's `#1` and run
+  2's own `#1` showed none. Moves now join by `(run_id, seq)`; a
+  `corrects #N` / `replayed from #N` reference into another run says
+  `(run <id>)`; and a log holding several runs prints a `— run <id> —`
+  marker where each run's rows begin. `--json` gains `run_id` on every
+  attempt row and `after_run` on every move (additive; the existing
+  fields are unchanged).
+
+- `taguru extract`: one run per `--out` at a time. The manifest and
+  every segment's checkpoint file are rewritten whole from an
+  in-memory copy, so two runs on one `--out` (an operator re-invoking
+  a still-running command) each silently discarded what the other
+  recorded — a unit re-extracted on the next resume, a segment
+  credited to the wrong batch — with no error on either side. The
+  second run is now refused up front, naming the directory
+  (`output directory … is held by another taguru process`), via an
+  advisory `.extract.lock` that dies with its holder. `--dry-run`
+  takes no lock. `taguru benchmark` is unaffected (every cell has its
+  own `--out`).
+
+- Local embeddings (`fastembed`): inference output passes the same
+  finiteness gate the HTTP provider applies at its boundary. A NaN or
+  ±inf component used to pass the vector store's width-only check and
+  sit in the live store as a row every similarity ranked at one
+  extreme, served as the top match until a disk reload refused it; it
+  is now a named embedding failure.
+- BM25 term hashing: the per-term bucket is no longer a public
+  function of the term's bytes. The #606 finalizer is kept (it fixed
+  accidental bigram clustering) and XORed with a per-index random
+  seed, so whoever can write text into an index cannot choose terms
+  that collide on purpose and rebuild the ~1000× lookup degradation
+  deliberately. Nothing reads the map in hash order; results are
+  unchanged.
+- Performance, no behavior change: `resolve`/embedding-refresh
+  glosses select their few heaviest facts in O(degree) instead of
+  sorting a hub concept's whole edge list; the background hydration
+  fill fetches pending families in parallel like the boot preload
+  instead of one at a time; `extract --coverage` tests each distinct
+  name once per sentence instead of once per triple.
+
+- HTTP API: a handler panic's 500 no longer echoes the panic payload
+  in the response body (`internal error: <panic message>`). The
+  message is whatever the failing code formatted — an `expect`
+  string, an index and a length, request data an `assert!`
+  interpolated — and goes to the server log only; the client gets the
+  same fixed sentence the router's panic handler already answered.
+  Status, `code: internal`, and the error envelope are unchanged.
+
 ## [0.9.6] - 2026-08-31
 
 An `extract` context-and-replay release. A chunk no longer arrives at
