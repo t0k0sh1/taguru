@@ -648,6 +648,27 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     );
     assert_eq!(*calls.lock().unwrap(), 10);
 
+    // A malformed bare stamp is not rescued by a legacy stamp riding
+    // beside it: the key that is present is the one judged (ADR 0041).
+    overwrite_manifest(
+        &server,
+        &json!({
+            "consolidation": "bad",
+            "taguru_consolidation": 1,
+            "detector": "consolidation/1",
+            "context": "sake"
+        })
+        .to_string(),
+    );
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("carries no consolidation stamp"),
+        "{stderr}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+
     // A format stamp from another program: refused by number.
     overwrite_manifest(
         &server,

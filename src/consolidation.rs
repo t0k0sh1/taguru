@@ -387,10 +387,14 @@ fn stored_judgments(
         Some(text) => {
             let manifest: Value = serde_json::from_str(text)
                 .map_err(|error| format!("the stored manifest did not parse: {error}"))?;
-            match manifest["consolidation"]
-                .as_u64()
-                .or_else(|| manifest["taguru_consolidation"].as_u64())
-            {
+            // The bare key wins when present: a malformed `consolidation`
+            // is refused, never hidden behind a legacy `taguru_consolidation`
+            // riding beside it (ADR 0041 §3.2).
+            let stamp = match manifest.get("consolidation") {
+                Some(value) => value.as_u64(),
+                None => manifest.get("taguru_consolidation").and_then(Value::as_u64),
+            };
+            match stamp {
                 Some(CONSOLIDATION_FORMAT) => {}
                 Some(other) => {
                     return Err(format!(

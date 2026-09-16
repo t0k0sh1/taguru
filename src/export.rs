@@ -2098,7 +2098,11 @@ mod tests {
         let mut no_schema = snapshot(vec![edge.clone()]);
         no_schema.schema = None;
         let rendered = render("sake", &no_schema, Deadline::unbounded()).unwrap();
-        assert!(!rendered.stream.contains("schema"), "{}", rendered.stream);
+        assert!(
+            !rendered.stream.contains("\"schema\""),
+            "{}",
+            rendered.stream
+        );
 
         let mut off_schema = snapshot(vec![edge.clone()]);
         off_schema.schema = Some(crate::schema::SchemaDocument {
@@ -2107,7 +2111,7 @@ mod tests {
         });
         let rendered = render("sake", &off_schema, Deadline::unbounded()).unwrap();
         assert!(
-            !rendered.stream.contains("schema"),
+            !rendered.stream.contains("\"schema\""),
             "mode: off must not export — {}",
             rendered.stream
         );

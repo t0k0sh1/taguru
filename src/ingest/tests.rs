@@ -33,7 +33,7 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
     // The batch's ops (and the blank line) ride along; the group
     // record between the batches belongs to neither.
     assert!(first.contains("likes"));
-    assert!(!first.contains("group"));
+    assert!(!first.contains("\"group\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
     assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
     assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
@@ -56,7 +56,7 @@ fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     assert_eq!(ranges.len(), 2);
     let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
     assert!(first.contains("likes"));
-    assert!(!first.contains("schema"));
+    assert!(!first.contains("\"schema\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
     assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
 }

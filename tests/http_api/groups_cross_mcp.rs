@@ -407,7 +407,8 @@ fn flush_and_export_ride_the_mcp_transport() {
     let group = tool(3, "export_group", json!({"name": "kura"}));
     assert!(group.get("isError").is_none(), "{group}");
     let text = group["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("group"), "{text}");
+    assert!(text.contains("\"group\""), "{text}");
+    assert!(!text.contains("\"taguru_group\""), "{text}");
     assert!(text.contains("\"kura\""), "{text}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
