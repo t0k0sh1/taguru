@@ -737,7 +737,7 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
 
     let runs_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-1",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-1",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -799,7 +799,7 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
     fs::write(dir.join("runs/m.run01.jsonl"), runs_text).unwrap();
 
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -977,7 +977,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
 
     let run01_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-multi",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-multi",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1019,7 +1019,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
 
     let run02_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-multi",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-multi",
             "cell_id": "m.run02", "model_id": "m", "model_name": "m-model",
             "run_index": 2, "prompt_version": 1,
         }),
@@ -1053,7 +1053,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-multi",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:10:00Z",
@@ -1217,7 +1217,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     let dir = synthetic_results_dir("smoke");
     let measurements = compute_measurements(&dir).expect("computes");
 
-    assert_eq!(measurements.taguru_benchmark_measurements, 2);
+    assert_eq!(measurements.benchmark_measurements, 2);
     assert_eq!(measurements.run_id, "run-1");
     assert_eq!(measurements.percentile_method, "nearest-rank");
     assert_eq!(
@@ -1467,7 +1467,7 @@ fn stability_metrics_are_deterministic_across_two_runs() {
 fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
     let dir = temp_dir("missing-runs-file");
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-1",
         "cells": [
             {"cell_id": "m.run01", "model_id": "m", "run_index": 1,
@@ -1617,7 +1617,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let alpha_run01_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
             "cell_id": "alpha.run01", "model_id": "alpha", "model_name": "alpha-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1655,7 +1655,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let alpha_run02_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
             "cell_id": "alpha.run02", "model_id": "alpha", "model_name": "alpha-model",
             "run_index": 2, "prompt_version": 1,
         }),
@@ -1685,7 +1685,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let beta_run01_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
             "cell_id": "beta.run01", "model_id": "beta", "model_name": "beta-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1714,7 +1714,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-diff",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:10:00Z",
@@ -1817,7 +1817,7 @@ fn differences_header_matches_the_adr_shape() {
     let lines = compute_differences_lines(&dir, false).expect("computes");
     let header = &lines[0];
     assert_eq!(header["kind"], "header");
-    assert_eq!(header["taguru_benchmark_differences"], 3);
+    assert_eq!(header["benchmark_differences"], 3);
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
     assert_eq!(

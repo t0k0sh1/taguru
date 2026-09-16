@@ -68,7 +68,7 @@ fn seed_context(server: &Server, context: &str, token: Option<&str>) {
 fn write_smoke_eval(dir: &Path) -> PathBuf {
     write_eval_file(
         dir,
-        "{\"taguru_eval\":1,\"name\":\"evaluate smoke\"}\n\
+        "{\"eval\":1,\"name\":\"evaluate smoke\"}\n\
          {\"case_id\":\"brand-origin-001\",\"query\":\"青嶺\",\"cues\":[\"青嶺\"],\
          \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":3}],\
          \"expected_concepts\":[\"青嶺酒造\"],\
@@ -106,7 +106,7 @@ fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
 
     let evaluation: Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
-    assert_eq!(evaluation["taguru_evaluation"], 1);
+    assert_eq!(evaluation["evaluation"], 1);
     assert_eq!(evaluation["thresholds"], Value::Null, "{evaluation}");
     assert_eq!(evaluation["corpus"]["stable"], true, "{evaluation}");
     assert_eq!(
@@ -230,7 +230,7 @@ fn evaluate_refuses_an_expected_source_the_context_does_not_carry() {
     let dir = eval_dir("missing-source");
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"missing source\"}\n\
+        "{\"eval\":1,\"name\":\"missing source\"}\n\
          {\"case_id\":\"ghost-001\",\"query\":\"青嶺\",\
          \"expected_sources\":[{\"source\":\"corpus/does-not-exist.md\",\"relevance\":1}]}\n",
     );
@@ -279,7 +279,7 @@ fn evaluate_marks_an_ambiguous_position_and_never_calls_query_for_it() {
     let dir = eval_dir("ambiguous");
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"ambiguous subject\"}\n\
+        "{\"eval\":1,\"name\":\"ambiguous subject\"}\n\
          {\"case_id\":\"kyoto-001\",\"query\":\"京都\",\
          \"expected_associations\":[{\"subject\":\"京都\",\"label\":\"位置\",\"object\":\"関西\"}]}\n",
     );
@@ -335,7 +335,7 @@ fn evaluate_runs_the_citation_lane_without_preflighting_it_and_distinguishes_no_
     // expected_sources) never sees them and never aborts the run.
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"citation lane\"}\n\
+        "{\"eval\":1,\"name\":\"citation lane\"}\n\
          {\"case_id\":\"citations-001\",\"query\":\"存在しないクエリ\",\
          \"expected_citations\":[\
            {\"source\":\"corpus/does-not-exist.md\",\"paragraph\":0},\
@@ -412,7 +412,7 @@ fn evaluate_exits_0_and_records_a_passing_thresholds_block_when_every_bound_is_s
     let eval_path = write_smoke_eval(&dir);
     let thresholds_path = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"aggregate\":{\"recall.recall_at_k\":{\"min\":1.0},\"citations.recall\":{\"min\":1.0}},\
          \"cases\":{\"default\":{\"recall.recall_at_k\":{\"min\":1.0}}}}",
     );
@@ -514,7 +514,7 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
     // violated without depending on the exact timing.
     let thresholds_path = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"aggregate\":{\"latency.passage_ms\":{\"min\":999999.0}}}",
     );
     let out_path = dir.join("evaluation.json");
@@ -595,7 +595,7 @@ fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
     let eval_path = write_smoke_eval(&dir);
     let thresholds_path = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\"allow_unstable_corpus\":false}",
+        "{\"evaluate_thresholds\":1,\"allow_unstable_corpus\":false}",
     );
     let out_path = dir.join("evaluation.json");
 

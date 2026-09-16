@@ -627,7 +627,7 @@ pub(super) async fn export_group_union(
 }
 
 /// One shard's export body back into a record: a single
-/// `taguru_group` line, the same shape `parse_group` reads.
+/// `group` line, the same shape `parse_group` reads.
 fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
     let text = std::str::from_utf8(body).ok()?;
     let line = text.lines().find(|line| !line.trim().is_empty())?;

@@ -1,6 +1,6 @@
 //! `eval.jsonl` (ADR 0003 §11, ADR 0004 §6): the dataset `taguru
 //! benchmark search` (issue #260) and `taguru evaluate` (issue #215)
-//! share. One `taguru_eval` header on line 1 (equality-checked — the
+//! share. One `eval` header on line 1 (equality-checked — the
 //! same `taguru_batch` reasoning applies, since the producer is a
 //! person hand-writing the file, not §10's `IMAGE_VERSION` range
 //! acceptance for taguru's own artifacts), then one case record per
@@ -20,7 +20,7 @@
 //! them ride through. Detected extension use warns once per run, never
 //! once per case (ADR 0003 §11).
 //!
-//! **Versioning (ADR 0004 §6).** `taguru_eval` stays `1`. Completing a
+//! **Versioning (ADR 0004 §6).** `eval` stays `1`. Completing a
 //! field that was reserved-but-undefined finishes version 1; it does
 //! not revise it — `Option<Value>` on the extension fields was never a
 //! schema promise, only what `deny_unknown_fields` forced so a
@@ -56,7 +56,8 @@ const EVAL_VERSION: u64 = 1;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireHeader {
-    taguru_eval: u64,
+    #[serde(alias = "taguru_eval")]
+    eval: u64,
     #[serde(default)]
     name: Option<String>,
     /// A #215 execution binding (ADR 0003 §11) — #260 always overrides
@@ -425,10 +426,10 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
             let parsed: WireHeader = serde_json::from_value(value).map_err(|error| {
                 format!("{label}: line {number}: not a valid eval header: {error}")
             })?;
-            if parsed.taguru_eval != EVAL_VERSION {
+            if parsed.eval != EVAL_VERSION {
                 return Err(format!(
-                    "{label}: line {number}: taguru_eval must be {EVAL_VERSION}, got {}",
-                    parsed.taguru_eval
+                    "{label}: line {number}: eval must be {EVAL_VERSION}, got {}",
+                    parsed.eval
                 ));
             }
             header = Some(parsed);
@@ -511,9 +512,7 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
     }
 
     let Some(header) = header else {
-        return Err(format!(
-            "{label}: empty file: expected a taguru_eval header line"
-        ));
+        return Err(format!("{label}: empty file: expected a eval header line"));
     };
     if cases.is_empty() {
         return Err(format!(
@@ -553,7 +552,7 @@ mod tests {
     }
 
     const CONSUMER: &str = "taguru benchmark search";
-    const HEADER: &str = r#"{"taguru_eval":1,"name":"sake retrieval cases"}"#;
+    const HEADER: &str = r#"{"eval":1,"name":"sake retrieval cases"}"#;
     const CASE: &str = r#"{"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],"expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],"expected_concepts":["青嶺酒造"],"options":{"limit":10}}"#;
 
     fn carry_through() -> Extensions {
@@ -571,11 +570,23 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// An eval file written before the `taguru_` prefix came off (#933)
+    /// still loads through the old key.
+    #[test]
+    fn accepts_the_legacy_taguru_eval_header() {
+        let legacy = r#"{"taguru_eval":1,"name":"sake retrieval cases"}"#;
+        let path = write_temp("legacy", &format!("{legacy}\n{CASE}\n"));
+        let loaded = load_eval_file(&path, Extensions::Interpret).unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("sake retrieval cases"));
+        assert_eq!(loaded.cases.len(), 1);
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn a_wrong_version_is_refused_by_equality_not_range() {
-        let path = write_temp("version", "{\"taguru_eval\":2}\n");
+        let path = write_temp("version", "{\"eval\":2}\n");
         let error = load_eval_file(&path, Extensions::Interpret).unwrap_err();
-        assert!(error.contains("taguru_eval must be 1"), "{error}");
+        assert!(error.contains("eval must be 1"), "{error}");
         let _ = fs::remove_file(&path);
     }
 

@@ -503,7 +503,7 @@ fn a_lone_batch_the_server_still_413s_is_a_hard_error_naming_both_remedies() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
-/// A `taguru_group` record in an earlier file, naming contexts a later
+/// A `group` record in an earlier file, naming contexts a later
 /// file's batches create, still restores — proof that group units ride
 /// after every batch unit on the wire, the same order the local path
 /// already applies them in.
@@ -513,7 +513,7 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let group_file = batches.join("00-group.jsonl");
     std::fs::write(
         &group_file,
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"beer\"]}\n",
+        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"beer\"]}\n",
     )
     .expect("fixture must be writable");
     let batch_file = batches.join("01-batches.jsonl");
@@ -573,9 +573,9 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
          {\"taguru_batch\": 1, \"context\": \"e\", \"source\": \"e.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
-         {\"taguru_schema\": 1, \"context\": \"a\", \"mode\": \"warn\", \
+         {\"schema\": 1, \"context\": \"a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-         {\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"a\"]}\n",
+         {\"group\": 1, \"name\": \"g\", \"contexts\": [\"a\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -1048,7 +1048,7 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
         "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"schema:type\", \"object\": \"Brewery\", \"weight\": 1.0}\n\
-         {\"taguru_schema\": 1, \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
+         {\"schema\": 1, \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
          \"types\": {\"Brewery\": {\"is_a\": []}, \"Person\": {\"is_a\": []}}, \
          \"relations\": {\"杜氏\": {\"domain\": [\"Brewery\"], \"range\": [\"Person\"]}}}\n",
     )

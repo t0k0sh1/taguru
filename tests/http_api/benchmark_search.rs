@@ -45,7 +45,7 @@ fn write_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = json!({
-        "taguru_benchmark_manifest": 2,
+        "benchmark_manifest": 2,
         "run_id": "run-search-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -99,7 +99,7 @@ fn write_eval_file(dir: &Path) -> PathBuf {
     let path = dir.join("eval.jsonl");
     std::fs::write(
         &path,
-        "{\"taguru_eval\":1,\"name\":\"sake retrieval cases\"}\n\
+        "{\"eval\":1,\"name\":\"sake retrieval cases\"}\n\
          {\"case_id\":\"brand-origin-001\",\"query\":\"青嶺\",\
          \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":3}],\
          \"expected_concepts\":[\"青嶺酒造\"],\"options\":{\"limit\":10}}\n",
@@ -150,7 +150,7 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
     };
 
     let manifest = json!({
-        "taguru_benchmark_manifest": 2,
+        "benchmark_manifest": 2,
         "run_id": "run-search-two-run",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -221,7 +221,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     let retrieval: Value =
         serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
             .unwrap();
-    assert_eq!(retrieval["taguru_benchmark_retrieval"], 3);
+    assert_eq!(retrieval["benchmark_retrieval"], 3);
     assert_eq!(retrieval["run_id"], "run-search-1");
     assert_eq!(retrieval["corpus"]["m1"]["outcome"], "built", "{retrieval}");
     assert_eq!(retrieval["corpus"]["m2"]["outcome"], "built", "{retrieval}");

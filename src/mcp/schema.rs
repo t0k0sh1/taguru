@@ -916,7 +916,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "export_group",
-            "One `group` as its import-stream record (a single `taguru_group` JSON line — the `group`'s complete truth); importing it restores the `group` as a whole-record replace. A `context`-scoped key exports exactly the slice its grant can read.",
+            "One `group` as its import-stream record (a single `group` JSON line — the `group`'s complete truth); importing it restores the `group` as a whole-record replace. A `context`-scoped key exports exactly the slice its grant can read.",
             object_schema(
                 json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
                 &["name"],
@@ -942,10 +942,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "import",
-            "Apply (or, with dry_run: true, preview) an NDJSON import stream — the same format `taguru import`/POST /import accept: a create block, associations, aliases, and passage per source, retract-then-apply and idempotent (admin role). A dry run writes nothing; its `associations`/`aliases` counts are optimistic previews, every other field exact. `taguru_group` records in the stream are not applied through this tool (their outcome is likewise not previewed) — use POST /import directly for a stream that carries any. Bounded by the server's request body cap (TAGURU_MAX_BODY_BYTES, 8 MiB by default) — and smaller over the /mcp HTTP transport, where the stream is escaped into the JSON-RPC envelope that must itself fit that cap — with a hard 32 MiB tool ceiling above it; a larger stream needs POST /import or `taguru import` directly. This is the ONE all-or-nothing call across facts+aliases+passage for a source; a rejection identifies the failing batch/source/line/path and reports write integrity explicitly: `nothing_written` when no batch landed yet, or a `durable_prefix` naming exactly how many earlier batches in this stream already did (never implying any part of the REJECTED batch itself was accepted — each batch is whole-or-none). Correct exactly the named path and resend the COMPLETE remaining stream (every batch from the failure point on, unless already fixed and durable) — never delete the offending line, never resend only a subset.",
+            "Apply (or, with dry_run: true, preview) an NDJSON import stream — the same format `taguru import`/POST /import accept: a create block, associations, aliases, and passage per source, retract-then-apply and idempotent (admin role). A dry run writes nothing; its `associations`/`aliases` counts are optimistic previews, every other field exact. `group` records in the stream are not applied through this tool (their outcome is likewise not previewed) — use POST /import directly for a stream that carries any. Bounded by the server's request body cap (TAGURU_MAX_BODY_BYTES, 8 MiB by default) — and smaller over the /mcp HTTP transport, where the stream is escaped into the JSON-RPC envelope that must itself fit that cap — with a hard 32 MiB tool ceiling above it; a larger stream needs POST /import or `taguru import` directly. This is the ONE all-or-nothing call across facts+aliases+passage for a source; a rejection identifies the failing batch/source/line/path and reports write integrity explicitly: `nothing_written` when no batch landed yet, or a `durable_prefix` naming exactly how many earlier batches in this stream already did (never implying any part of the REJECTED batch itself was accepted — each batch is whole-or-none). Correct exactly the named path and resend the COMPLETE remaining stream (every batch from the failure point on, unless already fixed and durable) — never delete the offending line, never resend only a subset.",
             object_schema(
                 json!({
-                    "stream": { "type": "string", "description": "NDJSON import stream (one taguru_batch/taguru_group/fact/alias/passage line per row)" },
+                    "stream": { "type": "string", "description": "NDJSON import stream (one taguru_batch/group/fact/alias/passage line per row)" },
                     "dry_run": { "type": "boolean", "description": "preview without writing anything (default false)" }
                 }),
                 &["stream"],

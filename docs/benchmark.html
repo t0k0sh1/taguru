@@ -161,7 +161,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   <section id="models-json">
     <h2>models.json: the model matrix</h2>
     <pre><code>{
-  "taguru_benchmark_models": 1,
+  "benchmark_models": 1,
   "defaults": {
     "timeout_secs": 300,
     "structured_output": "auto"
@@ -188,7 +188,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   ]
 }</code></pre>
     <p>
-      <code>taguru_benchmark_models</code> must equal <code>1</code> exactly — unlike
+      <code>benchmark_models</code> must equal <code>1</code> exactly — unlike
       <code>manifest.json</code> below, this file is authored by hand, not written and re-read by
       taguru itself, so a shape this build was not built for is refused rather than silently
       defaulted. <code>id</code> matches <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>, must be unique,
@@ -278,7 +278,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       model, so repeating it per cell would be N×M copies of one fact.
     </p>
     <p>
-      <code>taguru_benchmark_manifest</code> accepts any version from <code>1</code> through the
+      <code>benchmark_manifest</code> accepts any version from <code>1</code> through the
       current one — unlike <code>models.json</code>, this file is written <i>and later re-read</i>
       by taguru itself (on resume), and compatibility across the tool's own evolution is the point
       of keeping one on disk.
@@ -375,7 +375,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     </p>
     <p class="section-sub">measurements.json</p>
     <pre><code>{
-  "taguru_benchmark_measurements": 2,
+  "benchmark_measurements": 2,
   "run_id": "...",
   "generated_at": "2026-07-26T10:05:12Z",
   "percentile_method": "nearest-rank",
@@ -553,7 +553,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       <code>b</code>, bound to a <code>model_id</code> — never <code>baseline</code>/
       <code>candidate</code> — and an absent side serializes <code>null</code>, never a count.
     </p>
-    <pre><code>{"kind":"header","taguru_benchmark_differences":3,"run_id":"...",
+    <pre><code>{"kind":"header","benchmark_differences":3,"run_id":"...",
  "pairs":[{"pair_id":"hosted-120b__qwen25-7b-q4","a":"hosted-120b","b":"qwen25-7b-q4"}],
  "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
    "alias_expansion":"batch-local","weight_tolerance":0.0},
@@ -680,12 +680,12 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       after a corpus was built once.
     </p>
     <p class="section-sub">eval.jsonl: the dataset shared with <a href="evaluate.html">the evaluate quality gate</a></p>
-    <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+    <pre><code>{"eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
  "expected_concepts":["青嶺酒造"],"options":{"limit":10}}</code></pre>
     <p>
-      One <code>taguru_eval</code> header (equality-checked — this file is hand-authored, so a
+      One <code>eval</code> header (equality-checked — this file is hand-authored, so a
       version this build was not built for is refused rather than silently reinterpreted, the same
       posture <a href="import.html">batch import's</a> <code>taguru_batch</code> takes), then one
       case per line. Every case field this command does not know is still declared and accepted —
@@ -711,7 +711,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     </p>
     <p class="section-sub">retrieval.json</p>
     <pre><code>{
-  "taguru_benchmark_retrieval": 3,
+  "benchmark_retrieval": 3,
   "run_id": "...", "generated_at": "2026-07-26T10:05:12Z",
   "matching": { "module": "benchmark::identity", "case_fold": true,
       "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
@@ -738,7 +738,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
   "pairs": { "hosted-120b__qwen25-7b-q4": { "overlap.jaccard": { "n": 12, "...": "..." }, "...": "..." } }
 }</code></pre>
     <p>
-      <code>taguru_benchmark_retrieval</code> accepts any version from <code>1</code> through the
+      <code>benchmark_retrieval</code> accepts any version from <code>1</code> through the
       current one, like <code>manifest.json</code> — this is taguru's own written-and-re-readable
       artifact, not a hand-authored input. No CSV is written; a static
       <code>report.html</code> (issue #261, optional) is where visualization belongs.

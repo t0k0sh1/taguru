@@ -206,7 +206,7 @@ struct InputsBlock {
 
 #[derive(Debug, Clone, Serialize)]
 struct MeasurementsFile {
-    taguru_benchmark_measurements: u64,
+    benchmark_measurements: u64,
     run_id: String,
     generated_at: String,
     percentile_method: &'static str,
@@ -804,7 +804,7 @@ fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) ->
     let definitions = build_definitions(&loaded.observed_finish_reasons);
 
     MeasurementsFile {
-        taguru_benchmark_measurements: BENCHMARK_MEASUREMENTS_VERSION,
+        benchmark_measurements: BENCHMARK_MEASUREMENTS_VERSION,
         run_id: manifest.run_id.clone(),
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         percentile_method: "nearest-rank",

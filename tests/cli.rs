@@ -1292,7 +1292,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
 
     let runs_lines = [
         serde_json::json!({
-            "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-1",
+            "kind": "header", "benchmark_runs": 1, "run_id": "run-1",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1333,7 +1333,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
     std::fs::write(dir.join("runs/m.run01.jsonl"), runs_text).unwrap();
 
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -1423,7 +1423,7 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
 
     let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
     let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
-    assert_eq!(measurements["taguru_benchmark_measurements"], 2);
+    assert_eq!(measurements["benchmark_measurements"], 2);
     assert_eq!(measurements["percentile_method"], "nearest-rank");
     assert!(measurements["cells"]["m.run01"].is_object());
     assert!(measurements["models"]["m"].is_object());
@@ -1551,7 +1551,7 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
     fn cell_lines(cell_id: &str, model_id: &str, batch_path: &str) -> Vec<serde_json::Value> {
         vec![
             serde_json::json!({
-                "kind": "header", "taguru_benchmark_runs": 1, "run_id": "run-diff-cli",
+                "kind": "header", "benchmark_runs": 1, "run_id": "run-diff-cli",
                 "cell_id": cell_id, "model_id": model_id, "model_name": format!("{model_id}-model"),
                 "run_index": 1, "prompt_version": 1,
             }),
@@ -1587,7 +1587,7 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
     }
 
     let manifest = serde_json::json!({
-        "taguru_benchmark_manifest": 1,
+        "benchmark_manifest": 1,
         "run_id": "run-diff-cli",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -1664,7 +1664,7 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
 
     let lines = read_differences_lines(&dir);
     assert_eq!(lines[0]["kind"], "header");
-    assert_eq!(lines[0]["taguru_benchmark_differences"], 3);
+    assert_eq!(lines[0]["benchmark_differences"], 3);
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],
@@ -2150,7 +2150,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     // batch of the run, so the file order never matters.
     std::fs::write(
         dir.join("batches/kura.jsonl"),
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2193,7 +2193,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let group_stream = std::fs::read_to_string(exports.join("kura.group.jsonl"))
         .expect("the group record must exist");
     assert!(
-        group_stream.contains("\"taguru_group\":1") && group_stream.contains("蔵まとめ"),
+        group_stream.contains("\"group\":1") && group_stream.contains("蔵まとめ"),
         "{group_stream}"
     );
 
@@ -2332,9 +2332,9 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
          {\"taguru_batch\": 1, \"context\": \"old\", \"source\": \"b.md\", \
          \"create\": {\"description\": \"o\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"k\", \
+         {\"group\": 1, \"name\": \"kura\", \"description\": \"k\", \
          \"contexts\": [\"sake\"]}\n\
-         {\"taguru_group\": 1, \"name\": \"dead\", \"description\": \"x\", \
+         {\"group\": 1, \"name\": \"dead\", \"description\": \"x\", \
          \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2484,7 +2484,7 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("kura.jsonl"),
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -3267,7 +3267,7 @@ fn eval_scratch_dir(tag: &str) -> PathBuf {
     let eval_path = dir.join("eval.jsonl");
     std::fs::write(
         &eval_path,
-        "{\"taguru_eval\":1}\n{\"case_id\":\"c1\",\"query\":\"q\"}\n",
+        "{\"eval\":1}\n{\"case_id\":\"c1\",\"query\":\"q\"}\n",
     )
     .expect("eval.jsonl must be writable");
     dir
@@ -3282,7 +3282,7 @@ fn write_thresholds(dir: &std::path::Path, contents: &str) -> PathBuf {
 #[test]
 fn evaluate_rejects_a_thresholds_file_with_the_wrong_stamp() {
     let dir = eval_scratch_dir("bad-stamp");
-    let thresholds = write_thresholds(&dir, "{\"taguru_evaluate_thresholds\":2}");
+    let thresholds = write_thresholds(&dir, "{\"evaluate_thresholds\":2}");
     let output = run(&[
         "evaluate",
         "--eval",
@@ -3294,7 +3294,7 @@ fn evaluate_rejects_a_thresholds_file_with_the_wrong_stamp() {
     ]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("taguru_evaluate_thresholds"), "{stderr}");
+    assert!(stderr.contains("evaluate_thresholds"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3303,7 +3303,7 @@ fn evaluate_rejects_a_thresholds_file_naming_an_unknown_aggregate_metric() {
     let dir = eval_scratch_dir("unknown-metric");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"aggregate\":{\"not.a.real.metric\":{\"min\":0.5}}}",
     );
     let output = run(&[
@@ -3326,7 +3326,7 @@ fn evaluate_rejects_a_thresholds_file_naming_an_unknown_case_id_override() {
     let dir = eval_scratch_dir("unknown-case-id");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"cases\":{\"overrides\":{\"no-such-case\":{\"recall.recall_at_k\":{\"min\":0.5}}}}}",
     );
     let output = run(&[
@@ -3349,7 +3349,7 @@ fn evaluate_rejects_a_thresholds_file_naming_a_non_case_scoped_metric_in_cases_d
     let dir = eval_scratch_dir("non-case-scoped");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"cases\":{\"default\":{\"latency.resolve_ms\":{\"max\":100.0}}}}",
     );
     let output = run(&[
@@ -3372,7 +3372,7 @@ fn evaluate_rejects_a_bound_with_neither_min_nor_max() {
     let dir = eval_scratch_dir("empty-bound");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"aggregate\":{\"recall.recall_at_k\":{}}}",
     );
     let output = run(&[
@@ -3393,7 +3393,7 @@ fn evaluate_rejects_a_bound_with_min_greater_than_max() {
     let dir = eval_scratch_dir("inverted-bound");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\
+        "{\"evaluate_thresholds\":1,\
          \"aggregate\":{\"recall.recall_at_k\":{\"min\":0.9,\"max\":0.1}}}",
     );
     let output = run(&[
@@ -3414,7 +3414,7 @@ fn evaluate_thresholds_flag_given_twice_is_a_usage_error() {
     let dir = eval_scratch_dir("dup-thresholds");
     let thresholds = write_thresholds(
         &dir,
-        "{\"taguru_evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{\"min\":0.5}}}",
+        "{\"evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{\"min\":0.5}}}",
     );
     let output = run(&[
         "evaluate",
@@ -4052,8 +4052,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     // judging the set would be exactly the defect this pins.
     std::fs::write(
         &group,
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
-         {\"taguru_group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
+         {\"group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4257,9 +4257,9 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let dir = common::scratch_dir("cli-import-restated-records");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let first = dir.join("first.jsonl");
-    let records = "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+    let records = "{\"schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
                    \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-                   {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+                   {\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
     std::fs::write(&first, records).expect("fixture must be writable");
     let second = dir.join("second.jsonl");
     std::fs::write(&second, records).expect("fixture must be writable");
@@ -4314,13 +4314,13 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let valid = dir.join("valid.jsonl");
     std::fs::write(
         &valid,
-        "{\"taguru_group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");

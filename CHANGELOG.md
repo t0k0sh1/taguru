@@ -9,6 +9,15 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- Record keys drop the `taguru_` prefix (ADR 0041, #933): `group`,
+  `schema`, `eval`, `evaluation`, `evaluate_thresholds`,
+  `consolidation`, and the six `benchmark_*` keys are what `taguru
+  export`, `taguru evaluate`, `taguru consolidation`, and `taguru
+  benchmark` now write, and what `taguru import`'s stream-level
+  records are called. Readers still accept the old `taguru_*`
+  spelling, so files and streams written by earlier releases load
+  unchanged. `taguru_batch` and `taguru_communities` are unchanged (their
+  bare nouns are taken; #851).
 - Terminology (#851 wave 3, #930): the unit that fails extraction is
   the segment, and the wording now says so — `extract --help`, the
   stderr lines at the split floor, docs/extract.html,

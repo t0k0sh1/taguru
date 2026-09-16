@@ -134,7 +134,7 @@ fn write_models_json(dir: &Path, entries: &[(&str, &str)]) -> PathBuf {
     let path = dir.join("models.json");
     std::fs::write(
         &path,
-        json!({"taguru_benchmark_models": 1, "models": models}).to_string(),
+        json!({"benchmark_models": 1, "models": models}).to_string(),
     )
     .unwrap();
     path
@@ -181,7 +181,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
 
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["taguru_benchmark_manifest"], 2);
+    assert_eq!(manifest["benchmark_manifest"], 2);
     assert_eq!(manifest["harness"]["execution"], "subprocess");
     assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
@@ -352,7 +352,7 @@ fn a_models_json_edited_after_the_fact_refuses_to_resume() {
     std::fs::write(
         &models,
         json!({
-            "taguru_benchmark_models": 1,
+            "benchmark_models": 1,
             "models": [{"id": "stub-c", "model": "different-model", "url": format!("{url}/v1/chat/completions")}]
         })
         .to_string(),

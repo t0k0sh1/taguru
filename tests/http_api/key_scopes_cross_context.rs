@@ -274,7 +274,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     // A schema record's context is judged by the same grant, one step
     // earlier than groups (schemas install before groups restore) —
     // and with the same nothing-written integrity claim.
-    let schema_record = "{\"taguru_schema\": 1, \"context\": \"bunko\", \"mode\": \"warn\", \
+    let schema_record = "{\"schema\": 1, \"context\": \"bunko\", \"mode\": \"warn\", \
                          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
     let (status, schema_refused) = post_import(&server, schema_record, Some("ctok"));
     assert_eq!(status, 403, "{schema_refused}");

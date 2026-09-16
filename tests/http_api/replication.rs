@@ -133,7 +133,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     );
     // A schema too (ADR 0009 §13, #384): the ship→restore round trip
     // must carry {stem}.schema.json exactly like every other family
-    // member, and export must re-emit it as a taguru_schema record so
+    // member, and export must re-emit it as a schema record so
     // the equivalence check below (source vs restored export streams)
     // actually exercises it rather than passing vacuously.
     server.ok(
@@ -233,7 +233,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         "the restored directory must export byte-identical streams"
     );
     // Not vacuous: prove the schema actually rode along, both as the
-    // family's own file and as the export's taguru_schema record.
+    // family's own file and as the export's schema record.
     assert!(
         restored.join("sake.schema.json").exists(),
         "the restored directory must carry the schema file"
@@ -244,7 +244,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
             .expect("sake.jsonl must be among the restored exports"),
     )
     .unwrap();
-    assert!(sake_stream.contains("\"taguru_schema\":1"), "{sake_stream}");
+    assert!(sake_stream.contains("\"schema\":1"), "{sake_stream}");
 
     // The grant store rode along, owner-only like the server writes it.
     let grants = restored.join("oauth.json");

@@ -996,7 +996,7 @@ export interface Issue {
 }
 
 /**
- * What installing one `taguru_schema` record via import accomplished. No
+ * What installing one `schema` record via import accomplished. No
  * outcome verb (unlike `GroupImportOutcome`): the install cannot distinguish
  * itself from a no-op PUT of the identical document (ADR 0009 §13).
  */
@@ -1045,7 +1045,7 @@ export interface ImportOutcome {
 }
 
 /**
- * Outcome of restoring one `taguru_group` record via import. A restore is a
+ * Outcome of restoring one `group` record via import. A restore is a
  * replace of the whole record; `outcome` says what it replaced.
  */
 export interface GroupImportOutcome {
@@ -1058,7 +1058,7 @@ export interface GroupImportOutcome {
 
 /**
  * What `POST /import` accomplished: per-batch outcomes plus any `group`
- * restores and `taguru_schema` installs. `issues`/`schema_violations` are
+ * restores and `schema` installs. `issues`/`schema_violations` are
  * the response envelope's warn-mode carrier (ADR 0009 §8.3), stream-wide;
  * each batch's own `ImportOutcome.schema_violations` breaks the count down
  * per source, surviving `issues`' truncation.

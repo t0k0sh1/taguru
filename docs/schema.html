@@ -337,7 +337,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
     <p>
       The schema document rides in <code>context_files</code> like every other per-<code>context</code> file
       (last in the array, so a lagging or missing schema file never blocks a rename), and travels
-      through export/import as its own <code>taguru_schema</code> stream record — see
+      through export/import as its own <code>schema</code> stream record — see
       <a href="import.html#format">Schema records</a> in the batch contract for the record shape,
       and the CHANGELOG's #379/#384 entries for the downgrade hazard an older binary's shorter
       <code>context_files</code> array creates.

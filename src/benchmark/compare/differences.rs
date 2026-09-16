@@ -76,7 +76,7 @@ struct PairInfo {
 #[derive(Serialize)]
 struct DifferencesHeader {
     kind: &'static str,
-    taguru_benchmark_differences: u64,
+    benchmark_differences: u64,
     run_id: String,
     pairs: Vec<PairInfo>,
     matching: identity::Matching,
@@ -529,7 +529,7 @@ pub(super) fn compute_differences(
 
     let header = DifferencesHeader {
         kind: "header",
-        taguru_benchmark_differences: BENCHMARK_DIFFERENCES_VERSION,
+        benchmark_differences: BENCHMARK_DIFFERENCES_VERSION,
         run_id: manifest.run_id.clone(),
         pairs: pairs.clone(),
         matching,

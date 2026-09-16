@@ -74,7 +74,7 @@ const MEMBERS_PER_HIT: usize = 12;
 /// written by `taguru communities`, read back by `search` for the
 /// staleness verdict and per-hit community facts. The version key
 /// follows the batch/group convention (`taguru_batch`,
-/// `taguru_group`).
+/// `group`).
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CommunitiesManifest {
     pub taguru_communities: u64,

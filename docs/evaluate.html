@@ -398,7 +398,7 @@
 
   <section id="dataset">
     <h2>eval.jsonl: the dataset shared with benchmark search</h2>
-    <pre><code>{"taguru_eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+    <pre><code>{"eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
  "expected_concepts":["青嶺酒造"],
@@ -406,7 +406,7 @@
    "quote":"1897年に創業"}],
  "options":{"limit":10}}</code></pre>
     <p>
-      One <code>taguru_eval</code> header (equality-checked — this file is hand-authored, so a
+      One <code>eval</code> header (equality-checked — this file is hand-authored, so a
       version this build was not built for is refused rather than silently reinterpreted), then
       one case per line. This is the exact dataset
       <a href="benchmark.html#search"><code>taguru benchmark search</code></a> reads — the one
@@ -503,7 +503,7 @@
   <section id="evaluation-json">
     <h2>evaluation.json</h2>
     <pre><code>{
-  "taguru_evaluation": 1,
+  "evaluation": 1,
   "generated_at": "2026-07-28T10:05:12Z",
   "matching": { "normalization": "taguru::context::normalize_entry",
       "normalized": ["expected_concepts", "expected_labels"],
@@ -547,7 +547,7 @@
     <p class="note">
       <code>inputs.mode</code>/<code>.budget</code>/<code>.rerank</code> and the per-case
       <code>evidence</code>/<code>budget</code>/<code>diversity_sources</code> blocks (#308, ADR
-      0006 §14) are additive — <code>taguru_evaluation</code> stays <code>1</code>.
+      0006 §14) are additive — <code>evaluation</code> stays <code>1</code>.
       <code>inputs.budget</code> is absent in <code>baseline</code> mode unless a
       <code>--max-*</code> flag was given; <code>inputs.rerank</code> is absent unless
       <code>--rerank MODEL</code> was. A case's own <code>evidence</code> block is present only
@@ -557,7 +557,7 @@
       corpus body text, ADR 0004 §11).
     </p>
     <p>
-      Stamp <code>taguru_evaluation: 1</code>, <b>range acceptance</b> — taguru writes this file
+      Stamp <code>evaluation: 1</code>, <b>range acceptance</b> — taguru writes this file
       and its own <code>compare</code> mode re-reads it, so within an accepted range a later
       revision may only add a field, never remove or repurpose one. Every field is
       <code>#[serde(default)]</code>. A metric's concrete shape — <code>Distribution</code>,
@@ -621,14 +621,14 @@
   <section id="thresholds">
     <h2>The thresholds file and the exit-3 gate</h2>
     <pre><code>{
-  "taguru_evaluate_thresholds": 1,
+  "evaluate_thresholds": 1,
   "aggregate": { "recall.recall_at_k": { "min": 0.8 }, "citations.recall": { "min": 0.9 } },
   "cases": { "default": {}, "overrides": { "known-miss-003": { "citations.recall": { "min": 0.0 } } } },
   "allow_unstable_corpus": false
 }</code></pre>
     <p>
       <code>--thresholds FILE</code> is a checked-in, user-authored JSON file — stamp
-      <code>taguru_evaluate_thresholds: 1</code>, <b>equality-checked</b> (the same posture
+      <code>evaluate_thresholds: 1</code>, <b>equality-checked</b> (the same posture
       <code>eval.jsonl</code>'s own header takes, not <code>evaluation.json</code>'s range
       acceptance, because a human authors this file by hand), and
       <code>deny_unknown_fields</code>. Three top-level keys:
@@ -685,8 +685,8 @@
       file, or malformed/out-of-range JSON.
     </p>
     <pre><code>{"kind":"header","taguru_evaluation_changes":1,"generated_at":"...",
- "base":{"path":"base.json","context":"sake","taguru_evaluation":1,"...":"..."},
- "head":{"path":"head.json","context":"sake","taguru_evaluation":1,"...":"..."},
+ "base":{"path":"base.json","context":"sake","evaluation":1,"...":"..."},
+ "head":{"path":"head.json","context":"sake","evaluation":1,"...":"..."},
  "counts":{"improved":2,"regressed":1,"added":0,"removed":0,"unchanged":9,
    "cases_base":12,"cases_head":12},
  "metrics":[{"metric":"recall.recall_at_k","statistic":"distribution",
@@ -705,7 +705,7 @@
       is classified <b><code>regressed</code></b>, quality-gate-first, and the record still lists
       both directions. <code>added</code>/<code>removed</code> cases carry one-sided metrics
       (<code>direction: "not_comparable"</code>). A mismatched <code>context</code>, corpus
-      revision, threshold-file identity, or <code>taguru_evaluation</code> stamp between the two
+      revision, threshold-file identity, or <code>evaluation</code> stamp between the two
       files is a <b>warning, never a refusal</b> — and so is a mismatched <code>inputs.budget</code>
       between the two runs (#308, ADR 0006 §14): comparing citation recall or source diversity
       across different budgets is exactly the dishonest comparison an equal-budget evaluation

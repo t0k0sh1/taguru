@@ -2,7 +2,7 @@
 //! `Stream` shapes [`super::rejection::apply_batch`] and
 //! [`super::rejection::preview_batch`] act on, plus every line shape
 //! (`taguru_batch` header, association, alias, passage, question,
-//! section, locator, `taguru_group`, `taguru_schema`) `parse_stream`
+//! section, locator, `group`, `schema`) `parse_stream`
 //! reads.
 
 use super::*;
@@ -234,13 +234,14 @@ struct CreateBlock {
     semantic_floor: Option<f32>,
 }
 
-/// The `taguru_group` record line: one `group`'s complete truth, the
+/// The `group` record line: one `group`'s complete truth, the
 /// same fields `GET /groups/{name}` serves. Absent fields read as
 /// empty — matching what export omits — so the round trip is exact.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GroupLine {
-    taguru_group: u64,
+    #[serde(alias = "taguru_group")]
+    group: u64,
     name: String,
     #[serde(default)]
     description: String,
@@ -257,11 +258,11 @@ struct GroupLine {
 fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, GroupRecord), String> {
     let line: GroupLine = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a group record: {error}"))?;
-    if line.taguru_group != GROUP_VERSION {
+    if line.group != GROUP_VERSION {
         return Err(format!(
-            "line {number}: taguru_group {} is not a version this taguru reads (it reads \
+            "line {number}: group {} is not a version this taguru reads (it reads \
              {GROUP_VERSION})",
-            line.taguru_group
+            line.group
         ));
     }
     check_size(number, "name", &line.name, MAX_CONTEXT_NAME_BYTES)?;
@@ -297,7 +298,7 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
     Ok((line.name, record))
 }
 
-/// The `taguru_schema` record line: one `context`'s whole schema
+/// The `schema` record line: one `context`'s whole schema
 /// document, plus the `context` it installs onto. Unlike
 /// [`GroupLine`], NO field defaults — every field required mirrors
 /// [`schema::SchemaDocument`]'s own at-rest posture (a missing field
@@ -305,7 +306,8 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaLine {
-    taguru_schema: u64,
+    #[serde(alias = "taguru_schema")]
+    schema: u64,
     context: String,
     mode: schema::SchemaMode,
     closed_labels: bool,
@@ -316,7 +318,7 @@ struct SchemaLine {
 /// Validates one schema record line into the installed document its
 /// `context` restores to. Follows [`parse_group`]'s exact wording shape
 /// for the version refusal (ADR 0009 §13 bullet 4) — a
-/// `taguru_schema` this build cannot read refuses by line number,
+/// `schema` this build cannot read refuses by line number,
 /// never a silent skip. Every other structural rule (type/relation
 /// caps, name lengths, `is_a` cycles and depth, the reserved relation)
 /// runs through [`schema::install`], the same gate a hand-edited
@@ -327,18 +329,18 @@ fn parse_schema(
 ) -> Result<(String, schema::InstalledSchema), String> {
     let line: SchemaLine = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a schema record: {error}"))?;
-    if line.taguru_schema != schema::SCHEMA_VERSION {
+    if line.schema != schema::SCHEMA_VERSION {
         return Err(format!(
-            "line {number}: taguru_schema {} is not a version this taguru reads (it reads \
+            "line {number}: schema {} is not a version this taguru reads (it reads \
              {})",
-            line.taguru_schema,
+            line.schema,
             schema::SCHEMA_VERSION
         ));
     }
     check_size(number, "context", &line.context, MAX_CONTEXT_NAME_BYTES)?;
     check_nonempty(number, "context", &line.context)?;
     let document = schema::SchemaDocument {
-        schema: line.taguru_schema,
+        schema: line.schema,
         mode: line.mode,
         closed_labels: line.closed_labels,
         types: line.types,
@@ -441,9 +443,9 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
 }
 
 /// Parses a batch stream: one batch, or several concatenated — the
-/// shape `taguru export` renders — with any `taguru_group` records
+/// shape `taguru export` renders — with any `group` records
 /// riding alongside. Every `taguru_batch` header line closes the batch
-/// before it and opens the next; a `taguru_group` line closes it too
+/// before it and opens the next; a `group` line closes it too
 /// and stands alone, so an op line after one needs a fresh header.
 /// Line numbers in errors count from the stream's first line. Two
 /// batches claiming one (`context`, source) pair — or two records
@@ -518,8 +520,8 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
                 .is_some_and(|object| object.contains_key(key))
         };
         let is_header = has_key("taguru_batch");
-        let is_schema = has_key("taguru_schema");
-        let is_group = has_key("taguru_group");
+        let is_schema = has_key("schema") || has_key("taguru_schema");
+        let is_group = has_key("group") || has_key("taguru_group");
         if is_header || is_schema || is_group {
             // Any stream-level record closes the batch before it — one
             // boundary step, however many marker kinds exist.
@@ -601,8 +603,8 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
 
 /// Byte ranges of each batch in a stream [`parse_stream`] already
 /// validated: a batch runs from its `taguru_batch` header line to the
-/// next stream-level record (header, `taguru_schema`, or
-/// `taguru_group` line) or EOF. Schema- and `group`-record bytes belong
+/// next stream-level record (header, `schema`, or
+/// `group` line) or EOF. Schema- and `group`-record bytes belong
 /// to no batch — they are re-rendered from the parsed records instead
 /// of sliced. Lives beside the parser because the boundary rule is a
 /// property of the stream FORMAT, not of either caller: `router`'s
@@ -634,7 +636,9 @@ pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
             continue;
         };
         if object.contains_key("taguru_batch")
+            || object.contains_key("schema")
             || object.contains_key("taguru_schema")
+            || object.contains_key("group")
             || object.contains_key("taguru_group")
         {
             if let Some(batch_start) = current_start.take() {

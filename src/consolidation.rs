@@ -387,7 +387,10 @@ fn stored_judgments(
         Some(text) => {
             let manifest: Value = serde_json::from_str(text)
                 .map_err(|error| format!("the stored manifest did not parse: {error}"))?;
-            match manifest["taguru_consolidation"].as_u64() {
+            match manifest["consolidation"]
+                .as_u64()
+                .or_else(|| manifest["taguru_consolidation"].as_u64())
+            {
                 Some(CONSOLIDATION_FORMAT) => {}
                 Some(other) => {
                     return Err(format!(
@@ -396,9 +399,7 @@ fn stored_judgments(
                     ));
                 }
                 None => {
-                    return Err(
-                        "the stored manifest carries no taguru_consolidation stamp".to_string()
-                    );
+                    return Err("the stored manifest carries no consolidation stamp".to_string());
                 }
             }
             manifest["detector"].as_str().map(str::to_string)
@@ -523,7 +524,7 @@ fn manifest_batch(artifact: &str, context: &str) -> String {
         "source": MANIFEST_SOURCE,
     });
     let manifest = json!({
-        "taguru_consolidation": CONSOLIDATION_FORMAT,
+        "consolidation": CONSOLIDATION_FORMAT,
         "detector": CONSOLIDATION_DETECTOR,
         "context": context,
     });
@@ -603,7 +604,7 @@ mod tests {
         );
         let passage: Value = serde_json::from_str(manifest.lines().nth(1).unwrap()).unwrap();
         let stored: Value = serde_json::from_str(passage["passage"].as_str().unwrap()).unwrap();
-        assert_eq!(stored["taguru_consolidation"], 1);
+        assert_eq!(stored["consolidation"], 1);
         assert_eq!(stored["detector"], CONSOLIDATION_DETECTOR);
     }
 }

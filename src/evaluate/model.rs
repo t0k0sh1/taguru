@@ -18,7 +18,7 @@ use super::*;
 // write-once artifact needs.
 #[derive(Serialize)]
 pub(crate) struct EvaluationFile {
-    pub(crate) taguru_evaluation: u64,
+    pub(crate) evaluation: u64,
     pub(crate) generated_at: String,
     pub(crate) matching: MatchingBlock,
     pub(crate) inputs: InputsBlock,

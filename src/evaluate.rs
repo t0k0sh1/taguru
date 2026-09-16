@@ -395,7 +395,7 @@ fn run_evaluate(args: &[String]) -> i32 {
 
     let metrics = build_metrics(&cases, run_config.rerank.is_some());
     let evaluation = EvaluationFile {
-        taguru_evaluation: EVALUATION_VERSION,
+        evaluation: EVALUATION_VERSION,
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         matching: MatchingBlock::default(),
         inputs: InputsBlock {

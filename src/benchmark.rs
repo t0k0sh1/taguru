@@ -781,7 +781,7 @@ mod args_tests {
 //
 // ADR 0003 §8: a per-model record names provider identity and capability
 // only, never a task setting — the fairness invariant is enforced by
-// construction: no such field exists to parse. `taguru_benchmark_models`
+// construction: no such field exists to parse. `benchmark_models`
 // is equality-checked (ADR 0003 §10): this file is authored by hand, not
 // written and re-read by taguru itself, so a shape it wasn't built for is
 // refused rather than defaulted.
@@ -791,7 +791,8 @@ const MAX_MODEL_ID_BYTES: usize = 64;
 
 #[derive(Deserialize)]
 struct ModelsFile {
-    taguru_benchmark_models: u64,
+    #[serde(alias = "taguru_benchmark_models")]
+    benchmark_models: u64,
     #[serde(default)]
     defaults: ModelDefaults,
     #[serde(default)]
@@ -859,11 +860,11 @@ fn load_models_file(path: &Path) -> Result<LoadedModelsFile, String> {
         fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let parsed: ModelsFile =
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-    if parsed.taguru_benchmark_models != MODELS_VERSION {
+    if parsed.benchmark_models != MODELS_VERSION {
         return Err(format!(
-            "{}: taguru_benchmark_models must be {MODELS_VERSION}, got {}",
+            "{}: benchmark_models must be {MODELS_VERSION}, got {}",
             path.display(),
-            parsed.taguru_benchmark_models
+            parsed.benchmark_models
         ));
     }
     if parsed.models.is_empty() {
@@ -1044,13 +1045,13 @@ fn validate_api_key_env_name(path: &Path, model_id: &str, name: &str) -> Result<
 
 #[derive(Serialize)]
 struct ModelsLock<'a> {
-    taguru_benchmark_models: u64,
+    benchmark_models: u64,
     models: &'a [ResolvedModel],
 }
 
 fn write_models_lock(path: &Path, models: &[ResolvedModel]) -> io::Result<()> {
     let lock = ModelsLock {
-        taguru_benchmark_models: MODELS_VERSION,
+        benchmark_models: MODELS_VERSION,
         models,
     };
     let text = serde_json::to_string_pretty(&lock).expect("a models lock serializes");
@@ -1075,10 +1076,10 @@ mod models_json_tests {
     fn a_wrong_version_is_refused_by_equality_not_range() {
         let path = write_temp(
             "version",
-            r#"{"taguru_benchmark_models":2,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"benchmark_models":2,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
         );
         let error = load_models_file(&path).unwrap_err();
-        assert!(error.contains("taguru_benchmark_models"), "{error}");
+        assert!(error.contains("benchmark_models"), "{error}");
         let _ = fs::remove_file(&path);
     }
 
@@ -1093,7 +1094,7 @@ mod models_json_tests {
 
         let path = write_temp(
             "dup",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions"},
                 {"id":"m","model":"y","url":"http://h/v1/chat/completions"}
             ]}"#,
@@ -1103,11 +1104,33 @@ mod models_json_tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// A models file written before the `taguru_` prefix came off
+    /// (#933) still loads through the old key; the equality check
+    /// applies to it unchanged.
+    #[test]
+    fn accepts_the_legacy_taguru_benchmark_models_stamp() {
+        let path = write_temp(
+            "legacy-stamp",
+            r#"{"taguru_benchmark_models":1,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+        );
+        let models = load_models_file(&path).expect("the old key must still load");
+        assert_eq!(models.1.len(), 1);
+        let _ = fs::remove_file(&path);
+
+        let path = write_temp(
+            "legacy-stamp-version",
+            r#"{"taguru_benchmark_models":2,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+        );
+        let error = load_models_file(&path).unwrap_err();
+        assert!(error.contains("benchmark_models"), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn a_url_carrying_inline_userinfo_is_refused() {
         let path = write_temp(
             "userinfo",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"x","url":"http://user:pass@h/v1/chat/completions"}
             ]}"#,
         );
@@ -1120,7 +1143,7 @@ mod models_json_tests {
     fn an_api_key_env_that_looks_like_a_key_value_is_refused() {
         let path = write_temp(
             "keyshaped",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","api_key_env":"sk-abc123"}
             ]}"#,
         );
@@ -1138,7 +1161,7 @@ mod models_json_tests {
         unsafe { std::env::remove_var("TAGURU_BENCH_TEST_UNSET_KEY") };
         let path = write_temp(
             "unsetkey",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","api_key_env":"TAGURU_BENCH_TEST_UNSET_KEY"}
             ]}"#,
         );
@@ -1151,7 +1174,7 @@ mod models_json_tests {
     fn an_unrecognized_structured_output_value_is_refused() {
         let path = write_temp(
             "badstructured",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","structured_output":"json_schema"}
             ]}"#,
         );
@@ -1164,7 +1187,7 @@ mod models_json_tests {
     fn an_empty_model_name_is_refused() {
         let path = write_temp(
             "emptymodel",
-            r#"{"taguru_benchmark_models":1,"models":[
+            r#"{"benchmark_models":1,"models":[
                 {"id":"m","model":"","url":"http://h/v1/chat/completions"}
             ]}"#,
         );
@@ -1177,7 +1200,7 @@ mod models_json_tests {
     fn validation_errors_and_warnings_name_the_actual_configured_path_not_a_fixed_literal() {
         let path = write_temp(
             "custompath",
-            r#"{"taguru_benchmark_models":1,"models":[{"id":"Bad","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"benchmark_models":1,"models":[{"id":"Bad","model":"x","url":"http://h/v1/chat/completions"}]}"#,
         );
         let error = load_models_file(&path).unwrap_err();
         assert!(
@@ -1192,7 +1215,7 @@ mod models_json_tests {
     fn defaults_fold_into_entries_that_omit_the_field() {
         let path = write_temp(
             "defaults",
-            r#"{"taguru_benchmark_models":1,
+            r#"{"benchmark_models":1,
                 "defaults":{"timeout_secs":123,"structured_output":"auto"},
                 "models":[
                     {"id":"a","model":"x","url":"http://h/v1/chat/completions"},
@@ -1212,7 +1235,7 @@ mod models_json_tests {
     fn an_unknown_key_earns_a_warning_not_a_hard_error() {
         let path = write_temp(
             "typo",
-            r#"{"taguru_benchmark_models":1,"modles":"typo","models":[
+            r#"{"benchmark_models":1,"modles":"typo","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","nte":"typo"}
             ]}"#,
         );
@@ -2192,7 +2215,8 @@ struct ManifestCell {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct BenchManifest {
     #[serde(default)]
-    taguru_benchmark_manifest: u64,
+    #[serde(alias = "taguru_benchmark_manifest")]
+    benchmark_manifest: u64,
     #[serde(default)]
     run_id: String,
     #[serde(default)]
@@ -2224,12 +2248,12 @@ fn load_bench_manifest(path: &Path) -> Result<BenchManifest, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let manifest: BenchManifest =
         serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    if !(1..=BENCHMARK_MANIFEST_VERSION).contains(&manifest.taguru_benchmark_manifest) {
+    if !(1..=BENCHMARK_MANIFEST_VERSION).contains(&manifest.benchmark_manifest) {
         return Err(format!(
-            "{}: taguru_benchmark_manifest {} is not supported by this build (accepts \
+            "{}: benchmark_manifest {} is not supported by this build (accepts \
              1..={BENCHMARK_MANIFEST_VERSION})",
             path.display(),
-            manifest.taguru_benchmark_manifest
+            manifest.benchmark_manifest
         ));
     }
     Ok(manifest)
@@ -2312,9 +2336,25 @@ mod manifest_tests {
             std::process::id(),
             line!()
         ));
-        fs::write(&path, r#"{"taguru_benchmark_manifest":3}"#).unwrap();
+        fs::write(&path, r#"{"benchmark_manifest":3}"#).unwrap();
         let error = load_bench_manifest(&path).unwrap_err();
-        assert!(error.contains("taguru_benchmark_manifest"), "{error}");
+        assert!(error.contains("benchmark_manifest"), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A manifest written before the `taguru_` prefix came off (#933)
+    /// still loads through the old key.
+    #[test]
+    fn accepts_the_legacy_taguru_benchmark_manifest_stamp() {
+        let path = std::env::temp_dir().join(format!(
+            "taguru-benchmark-manifest-legacy-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(&path, r#"{"taguru_benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
+        let manifest = load_bench_manifest(&path).expect("the old key must still load");
+        assert_eq!(manifest.benchmark_manifest, 1);
+        assert_eq!(manifest.run_id, "abc");
         let _ = fs::remove_file(&path);
     }
 
@@ -2325,7 +2365,7 @@ mod manifest_tests {
             std::process::id(),
             line!()
         ));
-        fs::write(&path, r#"{"taguru_benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
+        fs::write(&path, r#"{"benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
         let manifest = load_bench_manifest(&path).expect("must load with defaults");
         assert_eq!(manifest.run_id, "abc");
         assert!(manifest.segments.is_empty());
@@ -2341,7 +2381,7 @@ mod manifest_tests {
         ));
         fs::write(
             &path,
-            r#"{"taguru_benchmark_manifest":1,"run_id":"abc",
+            r#"{"benchmark_manifest":1,"run_id":"abc",
                 "harness":{"documents_root":"corpus","document_order":["corpus/a.md"]},
                 "documents":[{"document_id":"a","path":"corpus/a.md","bytes":1,"sha256":"s",
                 "paragraph_count":1,"chunk_total":1,"chunks":[]}]}"#,
@@ -3028,7 +3068,7 @@ fn run_cell(
     } else {
         Some(serde_json::json!({
             "kind": "header",
-            "taguru_benchmark_runs": BENCHMARK_RUNS_VERSION,
+            "benchmark_runs": BENCHMARK_RUNS_VERSION,
             "run_id": run_id,
             "cell_id": cell_id,
             "model_id": model.id,
@@ -3645,7 +3685,7 @@ fn run_extract(args: &[String]) -> i32 {
             return 1;
         }
         let manifest = BenchManifest {
-            taguru_benchmark_manifest: BENCHMARK_MANIFEST_VERSION,
+            benchmark_manifest: BENCHMARK_MANIFEST_VERSION,
             run_id: generate_run_id(),
             started_at: iso8601_utc(now_unix_secs()),
             finished_at: None,

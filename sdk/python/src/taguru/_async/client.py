@@ -343,7 +343,7 @@ class AsyncTaguru:
 
         Each batch is one source's retract-then-apply, so re-importing is
         idempotent. ``batches`` is normalized to a list even for a single
-        batch; ``groups`` carries one entry per ``taguru_group`` record the
+        batch; ``groups`` carries one entry per ``group`` record the
         stream restored.
         """
         content = data.encode("utf-8") if isinstance(data, str) else data
@@ -750,7 +750,7 @@ class AsyncGroups:
         return bool(result)
 
     async def export(self, name: str) -> str:
-        """The ``group`` as one import-stream record (a ``taguru_group`` JSON
+        """The ``group`` as one import-stream record (a ``group`` JSON
         line); ``import_batches`` restores it as a whole-record replace."""
         response = await self._client._send("GET", f"/groups/{encode_name(name)}/export")
         return response.text
