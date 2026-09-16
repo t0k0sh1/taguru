@@ -1213,7 +1213,7 @@ class TaguruIngester:
         # correction can rename an association another chunk's alias
         # depended on, introducing a FRESH cross-chunk issue. This is the
         # bounded re-check, not a second round — any issue here fails the
-        # source.
+        # segment.
         recheck = combined_cross_output_issues([r.output for r in records], schema)
         if recheck:
             record_index, issues = recheck[0]

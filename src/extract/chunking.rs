@@ -631,7 +631,7 @@ pub(super) fn extract_piece(
             }
             if let Some(answer_bytes) = runaway {
                 // ADR 0035 §3.4: nothing left to demote — fail the
-                // source now instead of splitting a piece whose
+                // segment now instead of splitting a piece whose
                 // output was never a function of its input.
                 return Err(piece_failure(
                     piece,
