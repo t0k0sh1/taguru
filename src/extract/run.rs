@@ -1590,7 +1590,7 @@ impl Run {
     /// removed with accounting instead (ADR 0022, #763) — the records
     /// are returned for the report line, stderr, and the sidecar; a
     /// standing issue about anything but an alias still fails the
-    /// source.
+    /// segment.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn correct_cross_output_issues(
         &self,
