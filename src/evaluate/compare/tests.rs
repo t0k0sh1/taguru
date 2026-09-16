@@ -91,9 +91,9 @@ fn with_citation_recall(mut case: CaseView, value: f64) -> CaseView {
     case
 }
 
-fn evaluation_view(context: &str, taguru_evaluation: u64, cases: Vec<CaseView>) -> EvaluationView {
+fn evaluation_view(context: &str, evaluation: u64, cases: Vec<CaseView>) -> EvaluationView {
     EvaluationView {
-        taguru_evaluation,
+        evaluation,
         generated_at: "2026-07-29T00:00:00Z".to_string(),
         inputs: InputsView {
             context: context.to_string(),
@@ -374,7 +374,7 @@ fn a_taguru_evaluation_stamp_mismatch_warns() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("taguru_evaluation stamp differs"))
+            .any(|w| w.contains("evaluation stamp differs"))
     );
 }
 
@@ -555,17 +555,17 @@ fn load_report_rejects_malformed_json() {
 fn load_report_rejects_a_stamp_above_evaluation_version() {
     let path = write_temp(
         "stamp",
-        &format!(r#"{{"taguru_evaluation":{}}}"#, EVALUATION_VERSION + 1),
+        &format!(r#"{{"evaluation":{}}}"#, EVALUATION_VERSION + 1),
     );
     let error = load_report(&path).unwrap_err();
-    assert!(error.contains("taguru_evaluation must be within"));
+    assert!(error.contains("evaluation must be within"));
 }
 
 #[test]
 fn load_report_accepts_a_well_formed_report() {
     let path = write_temp(
         "ok",
-        r#"{"taguru_evaluation":1,"generated_at":"2026-07-29T00:00:00Z",
+        r#"{"evaluation":1,"generated_at":"2026-07-29T00:00:00Z",
            "inputs":{"context":"demo"},
            "corpus":{"revision_after":{"graph":1,"passages":1,"config":1},"stable":true},
            "cases":[]}"#,
@@ -592,4 +592,20 @@ fn compare_lexicon_test() {
     expected.sort_unstable();
     actual.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+/// A report written before the `taguru_` prefix came off (#933) still
+/// loads: `taguru_evaluation` reads as `evaluation`.
+#[test]
+fn load_report_accepts_the_legacy_taguru_evaluation_stamp() {
+    let path = write_temp(
+        "legacy-stamp",
+        r#"{"taguru_evaluation":1,"generated_at":"2026-07-29T00:00:00Z",
+           "inputs":{"context":"demo"},
+           "corpus":{"revision_after":{"graph":1,"passages":1,"config":1},"stable":true},
+           "cases":[]}"#,
+    );
+    let report = load_report(&path).unwrap();
+    assert_eq!(report.view.evaluation, 1);
+    assert_eq!(report.view.inputs.context, "demo");
 }

@@ -1,6 +1,6 @@
 //! `--thresholds FILE` (#276, ADR 0004 §9.3, §5, §12): a checked-in,
 //! user-authored JSON file that turns `evaluate` from a report-only run
-//! into a CI gate. Stamp `taguru_evaluate_thresholds: 1`,
+//! into a CI gate. Stamp `evaluate_thresholds: 1`,
 //! equality-checked (`load_thresholds` below) — the same `taguru_batch`
 //! posture `eval.jsonl` itself uses (`evalset.rs`'s module doc), not
 //! `evaluation.json`'s own `IMAGE_VERSION` range acceptance, because a
@@ -76,7 +76,8 @@ struct CasesThresholds {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThresholdsFile {
-    taguru_evaluate_thresholds: u64,
+    #[serde(alias = "taguru_evaluate_thresholds")]
+    evaluate_thresholds: u64,
     #[serde(default)]
     aggregate: BTreeMap<String, Bound>,
     #[serde(default)]
@@ -187,11 +188,11 @@ pub(super) fn load_thresholds(
         fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let file: ThresholdsFile =
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-    if file.taguru_evaluate_thresholds != THRESHOLDS_VERSION {
+    if file.evaluate_thresholds != THRESHOLDS_VERSION {
         return Err(format!(
-            "{}: taguru_evaluate_thresholds must be {THRESHOLDS_VERSION}, got {}",
+            "{}: evaluate_thresholds must be {THRESHOLDS_VERSION}, got {}",
             path.display(),
-            file.taguru_evaluate_thresholds
+            file.evaluate_thresholds
         ));
     }
 
@@ -473,17 +474,14 @@ mod tests {
 
     #[test]
     fn rejects_a_stamp_mismatch() {
-        let path = write_temp("stamp", "{\"taguru_evaluate_thresholds\":2}");
+        let path = write_temp("stamp", "{\"evaluate_thresholds\":2}");
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
-        assert!(error.contains("taguru_evaluate_thresholds"), "{error}");
+        assert!(error.contains("evaluate_thresholds"), "{error}");
     }
 
     #[test]
     fn rejects_an_unknown_top_level_key() {
-        let path = write_temp(
-            "top-level",
-            "{\"taguru_evaluate_thresholds\":1,\"bogus\":true}",
-        );
+        let path = write_temp("top-level", "{\"evaluate_thresholds\":1,\"bogus\":true}");
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
         assert!(error.to_lowercase().contains("bogus"), "{error}");
     }
@@ -492,7 +490,7 @@ mod tests {
     fn rejects_an_unknown_aggregate_metric_name() {
         let path = write_temp(
             "agg-unknown",
-            "{\"taguru_evaluate_thresholds\":1,\"aggregate\":{\"not.a.metric\":{\"min\":0.1}}}",
+            "{\"evaluate_thresholds\":1,\"aggregate\":{\"not.a.metric\":{\"min\":0.1}}}",
         );
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
         assert!(error.contains("not.a.metric"), "{error}");
@@ -502,7 +500,7 @@ mod tests {
     fn rejects_a_non_case_scoped_metric_in_cases_default() {
         let path = write_temp(
             "case-default-bad",
-            "{\"taguru_evaluate_thresholds\":1,\
+            "{\"evaluate_thresholds\":1,\
              \"cases\":{\"default\":{\"latency.resolve_ms\":{\"max\":1.0}}}}",
         );
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
@@ -513,7 +511,7 @@ mod tests {
     fn rejects_an_unknown_case_id_in_overrides() {
         let path = write_temp(
             "case-id-bad",
-            "{\"taguru_evaluate_thresholds\":1,\
+            "{\"evaluate_thresholds\":1,\
              \"cases\":{\"overrides\":{\"ghost\":{\"recall.recall_at_k\":{\"min\":0.1}}}}}",
         );
         let case_ids: BTreeSet<String> = ["real-case".to_string()].into_iter().collect();
@@ -525,7 +523,7 @@ mod tests {
     fn rejects_a_bound_with_neither_min_nor_max() {
         let path = write_temp(
             "empty-bound",
-            "{\"taguru_evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{}}}",
+            "{\"evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{}}}",
         );
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
         assert!(error.contains("min/max"), "{error}");
@@ -535,7 +533,7 @@ mod tests {
     fn rejects_min_greater_than_max() {
         let path = write_temp(
             "inverted",
-            "{\"taguru_evaluate_thresholds\":1,\
+            "{\"evaluate_thresholds\":1,\
              \"aggregate\":{\"recall.recall_at_k\":{\"min\":0.9,\"max\":0.1}}}",
         );
         let error = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap_err();
@@ -552,7 +550,7 @@ mod tests {
         // loading fails, not what it says.
         let path = write_temp(
             "overflow",
-            "{\"taguru_evaluate_thresholds\":1,\
+            "{\"evaluate_thresholds\":1,\
              \"aggregate\":{\"recall.recall_at_k\":{\"min\":1e400}}}",
         );
         assert!(load_thresholds(&path, &build_definitions(), &BTreeSet::new()).is_err());
@@ -576,9 +574,19 @@ mod tests {
         );
     }
 
+    /// A thresholds file written before the `taguru_` prefix came off
+    /// (#933) still loads through the old key.
+    #[test]
+    fn accepts_the_legacy_taguru_evaluate_thresholds_stamp() {
+        let path = write_temp("legacy-stamp", "{\"taguru_evaluate_thresholds\":1}");
+        let loaded = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap();
+        assert!(loaded.file.aggregate.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn sha256_hashes_the_raw_file_bytes() {
-        let contents = "{\"taguru_evaluate_thresholds\":1}";
+        let contents = "{\"evaluate_thresholds\":1}";
         let path = write_temp("sha", contents);
         let loaded = load_thresholds(&path, &build_definitions(), &BTreeSet::new()).unwrap();
         assert_eq!(
@@ -591,7 +599,7 @@ mod tests {
     fn every_problem_in_a_file_is_reported_together_not_just_the_first() {
         let path = write_temp(
             "many-problems",
-            "{\"taguru_evaluate_thresholds\":1,\
+            "{\"evaluate_thresholds\":1,\
              \"aggregate\":{\"not.a.metric\":{\"min\":0.1}},\
              \"cases\":{\"overrides\":{\"ghost\":{\"recall.recall_at_k\":{\"min\":0.1}}}}}",
         );
@@ -651,7 +659,7 @@ mod tests {
             MetricValue::Ratio(ratio_metric(3, 4)), // value 0.75
         );
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: bounds(&[
                 (
                     "recall.recall_at_k",
@@ -679,7 +687,7 @@ mod tests {
     fn a_metric_with_no_samples_is_a_violation_with_no_actual_value() {
         let metrics: MetricsMap = BTreeMap::new(); // recall.recall_at_k never inserted (n=0)
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: bounds(&[(
                 "recall.recall_at_k",
                 Bound {
@@ -700,7 +708,7 @@ mod tests {
     fn a_case_that_never_declared_the_expectation_is_skipped_not_violated() {
         let case = minimal_case("c1"); // no recall block at all
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: BTreeMap::new(),
             cases: CasesThresholds {
                 default: bounds(&[(
@@ -739,7 +747,7 @@ mod tests {
             matched: 1,
         });
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: BTreeMap::new(),
             cases: CasesThresholds {
                 default: bounds(&[(
@@ -774,7 +782,7 @@ mod tests {
     #[test]
     fn an_unstable_corpus_violates_the_gate_by_default() {
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: BTreeMap::new(),
             cases: CasesThresholds::default(),
             allow_unstable_corpus: false,
@@ -788,7 +796,7 @@ mod tests {
     #[test]
     fn allow_unstable_corpus_opts_out_of_the_corpus_stability_gate() {
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: BTreeMap::new(),
             cases: CasesThresholds::default(),
             allow_unstable_corpus: true,
@@ -826,7 +834,7 @@ mod tests {
             case
         };
         let file = ThresholdsFile {
-            taguru_evaluate_thresholds: 1,
+            evaluate_thresholds: 1,
             aggregate: BTreeMap::new(),
             cases: CasesThresholds {
                 default: bounds(&[(

@@ -281,7 +281,7 @@ fn seed_offline_corpus(server: &Server, context: &str) {
 /// `expected_sources` of its own — ADR 0004 §8's orthogonality claim.
 fn write_offline_eval(dir: &Path) -> PathBuf {
     let lines = [
-        r#"{"taguru_eval":1,"name":"evaluate fixture: offline corpus"}"#,
+        r#"{"eval":1,"name":"evaluate fixture: offline corpus"}"#,
         r#"{"case_id":"graph-only-001","query":"青嶺酒造とは","cues":["青嶺酒造"],"expected_concepts":["青嶺酒造"],"expected_associations":[{"subject":"青嶺酒造","label":"醸造元","object":"蔵元"}]}"#,
         r#"{"case_id":"bm25-only-002","query":"青嶺","expected_sources":[{"source":"corpus/brewery.md","relevance":3}]}"#,
         r#"{"case_id":"tag-filter-003","query":"共通見出し語句","expected_sources":[{"source":"corpus/filter-a.md","relevance":3}],"options":{"tags":["蔵"]}}"#,
@@ -507,7 +507,7 @@ fn evaluate_never_crosses_into_a_sibling_group_members_sources() {
     let dir = eval_dir("grouping");
     let eval_path = write_eval_file(
         &dir,
-        r#"{"taguru_eval":1,"name":"grouping boundary"}
+        r#"{"eval":1,"name":"grouping boundary"}
 {"case_id":"boundary-001","query":"青嶺","expected_sources":[{"source":"corpus/brewery.md","relevance":3}]}
 "#,
     );
@@ -570,7 +570,7 @@ fn evaluate_preflight_refuses_a_sibling_group_members_source() {
     let dir = eval_dir("grouping-preflight");
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"grouping preflight\"}\n\
+        "{\"eval\":1,\"name\":\"grouping preflight\"}\n\
          {\"case_id\":\"ghost-001\",\"query\":\"青嶺\",\
          \"expected_sources\":[{\"source\":\"corpus/hops.md\",\"relevance\":1}]}\n",
     );
@@ -677,7 +677,7 @@ fn evaluate_fixture_covers_fusion_and_semantic_paraphrase_under_a_provider() {
     let dir = eval_dir("provider");
     let eval_path = write_eval_file(
         &dir,
-        r#"{"taguru_eval":1,"name":"provider suite"}
+        r#"{"eval":1,"name":"provider suite"}
 {"case_id":"fusion-001","query":"ぶどう畑","expected_sources":[{"source":"corpus/grape.md","relevance":3}]}
 {"case_id":"paraphrase-002","query":"果樹園の様子","expected_sources":[{"source":"corpus/grape.md","relevance":3}]}
 "#,
@@ -763,7 +763,7 @@ fn evaluate_records_a_null_provider_model_when_no_provider_is_configured() {
     let dir = eval_dir("no-provider");
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"no provider\"}\n\
+        "{\"eval\":1,\"name\":\"no provider\"}\n\
          {\"case_id\":\"c1\",\"query\":\"青嶺\",\
          \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":1}]}\n",
     );
@@ -824,11 +824,11 @@ fn evaluate_fails_the_gate_when_a_write_lands_mid_run() {
     let dir = eval_dir("unstable");
     let eval_path = write_eval_file(
         &dir,
-        "{\"taguru_eval\":1,\"name\":\"mid-run write\"}\n\
+        "{\"eval\":1,\"name\":\"mid-run write\"}\n\
          {\"case_id\":\"stability-001\",\"query\":\"初期状態\",\
          \"expected_sources\":[{\"source\":\"corpus/seed.md\",\"relevance\":1}]}\n",
     );
-    let thresholds_path = write_thresholds(&dir, "{\"taguru_evaluate_thresholds\":1}");
+    let thresholds_path = write_thresholds(&dir, "{\"evaluate_thresholds\":1}");
     let out_path = dir.join("evaluation.json");
 
     let (code, _stdout, stderr) = run_cli(

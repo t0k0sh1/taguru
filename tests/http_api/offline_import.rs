@@ -240,7 +240,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     std::fs::write(
         &schema,
         format!(
-            "{batch}{{\"taguru_schema\": 1, \"context\": \"nowhere\", \"mode\": \"warn\", \
+            "{batch}{{\"schema\": 1, \"context\": \"nowhere\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
         ),
     )
@@ -262,7 +262,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let group = batches.join("group.jsonl");
     std::fs::write(
         &group,
-        format!("{batch}{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"nowhere\"]}}\n"),
+        format!("{batch}{{\"group\": 1, \"name\": \"g\", \"contexts\": [\"nowhere\"]}}\n"),
     )
     .unwrap();
     let data_dir = common::scratch_dir("http-import-exit-group");
@@ -527,7 +527,7 @@ fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n\
-         {\"taguru_group\": 1, \"name\": \"brewers\", \"contexts\": [\"sake\"]}\n",
+         {\"group\": 1, \"name\": \"brewers\", \"contexts\": [\"sake\"]}\n",
     )
     .unwrap();
 
@@ -1327,13 +1327,13 @@ fn dry_run_and_a_real_import_reach_the_same_predicted_alias_rejection() {
     assert_eq!(dry_body["code"], real_body["code"]);
 }
 
-/// A stream that mixes batches with a `taguru_group` record previews
+/// A stream that mixes batches with a `group` record previews
 /// the batches but skips the group record entirely — the response
 /// omits `groups`, and no group is created.
 #[test]
 fn import_dry_run_skips_group_records() {
     let server = Server::start("http-import-dry-run-groups");
-    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n\
+    let stream = "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n\
                   {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
                    \"create\": {\"description\": \"d\"}}\n";
     let (status, preview) = post_import_dry_run(&server, stream, None);
@@ -1734,9 +1734,9 @@ fn import_restores_group_records_after_the_batches() {
     // The group records sit FIRST: apply order is batches-then-groups,
     // not stream order — and `kura` names `kid`, which only this same
     // stream brings.
-    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+    let stream = "{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
                    \"contexts\": [\"sake\", \"bunko\"], \"groups\": [\"kid\"]}\n\
-                  {\"taguru_group\": 1, \"name\": \"kid\", \"contexts\": [\"bunko\"]}\n\
+                  {\"group\": 1, \"name\": \"kid\", \"contexts\": [\"bunko\"]}\n\
                   {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
                    \"create\": {\"description\": \"d\"}}\n\
                   {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
@@ -1775,7 +1775,7 @@ fn import_restores_group_records_after_the_batches() {
     assert!(plain["result"].get("groups").is_none(), "{plain}");
 
     // A restore REPLACES the record: whatever it omits drops.
-    let shrunk = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let shrunk = "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
     let (status, third) = post_import(&server, shrunk, None);
     assert_eq!(status, 200, "{third}");
     assert_eq!(
@@ -1802,7 +1802,7 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
     let server = Server::start("http-import-group-refuse");
     let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
                    \"create\": {\"description\": \"d\"}}\n\
-                  {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n";
+                  {\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 404, "{refusal}");
     assert_eq!(refusal["code"], json!("no_context"), "{refusal}");
@@ -1820,7 +1820,7 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
     assert_eq!(status, 404, "{gone}");
 
     // A child that neither exists nor rides the stream: no_group.
-    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"], \
+    let stream = "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"], \
                    \"groups\": [\"nope\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 404, "{refusal}");
@@ -1828,14 +1828,14 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
 
     // A cycle the incoming set closes with itself: the request's own
     // shape, 400.
-    let stream = "{\"taguru_group\": 1, \"name\": \"a\", \"groups\": [\"b\"]}\n\
-                  {\"taguru_group\": 1, \"name\": \"b\", \"groups\": [\"a\"]}\n";
+    let stream = "{\"group\": 1, \"name\": \"a\", \"groups\": [\"b\"]}\n\
+                  {\"group\": 1, \"name\": \"b\", \"groups\": [\"a\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 400, "{refusal}");
     assert_eq!(refusal["code"], json!("invalid_argument"), "{refusal}");
 
     // Restating one group in one stream is a parse-stage refusal.
-    let stream = "{\"taguru_group\": 1, \"name\": \"a\"}\n{\"taguru_group\": 1, \"name\": \"a\"}\n";
+    let stream = "{\"group\": 1, \"name\": \"a\"}\n{\"group\": 1, \"name\": \"a\"}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 400, "{refusal}");
     assert!(
@@ -1889,7 +1889,7 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
     // Out of grant through the record's own members: the whole request
     // refuses — the in-grant batch beside it included.
     let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s.md\"}\n\
-                  {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+                  {\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"bunko\"]}\n";
     let (status, refusal) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
     assert!(
@@ -1905,17 +1905,17 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
     );
 
     // Inside the grant the same key restores normally.
-    let stream = "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let stream = "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
     let (status, applied) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 200, "{applied}");
 
     // The replace side is judged too: shrinking a standing group that
     // bundles an out-of-grant member would release that member, so the
     // scoped replace refuses.
-    let wide = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+    let wide = "{\"group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\", \"bunko\"]}\n";
     let (status, seeded) = post_import(&server, wide, Some("atok"));
     assert_eq!(status, 200, "{seeded}");
-    let shrink = "{\"taguru_group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\"]}\n";
+    let shrink = "{\"group\": 1, \"name\": \"wide\", \"contexts\": [\"sake\"]}\n";
     let (status, refusal) = post_import(&server, shrink, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
 }
@@ -2003,7 +2003,7 @@ fn a_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
     assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 404);
 }
 
-/// `GET /groups/{name}/export` serves one `taguru_group` record that
+/// `GET /groups/{name}/export` serves one `group` record that
 /// `POST /import` restores whole — and a scoped key exports exactly
 /// the slice its grant lets it read.
 #[test]
@@ -2064,7 +2064,7 @@ fn a_group_exports_as_one_import_record() {
     assert_eq!(status, 200, "{exported}");
     assert_eq!(
         exported,
-        json!({"taguru_group": 1, "name": "kura", "description": "蔵まとめ",
+        json!({"group": 1, "name": "kura", "description": "蔵まとめ",
                "contexts": ["bunko", "sake"], "groups": ["kid"]})
     );
 

@@ -1925,7 +1925,7 @@ fn loaded_cases_carry_their_line() {
     let path = dir.join("eval.jsonl");
     std::fs::write(
         &path,
-        "{\"taguru_eval\": 1, \"name\": \"n\"}\n\
+        "{\"eval\": 1, \"name\": \"n\"}\n\
          {\"case_id\": \"a\", \"query\": \"q\", \"expected_sources\": []}\n\
          \n\
          {\"case_id\": \"b\", \"query\": \"q\", \"expected_sources\": []}\n",

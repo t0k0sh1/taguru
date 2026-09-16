@@ -94,7 +94,7 @@ fn seed_assembly_corpus(server: &Server, context: &str) {
 /// modes too.
 fn write_shared_eval(dir: &Path) -> PathBuf {
     let lines = [
-        r#"{"taguru_eval":1,"name":"evaluate assembly fixture: #308 equal budget"}"#,
+        r#"{"eval":1,"name":"evaluate assembly fixture: #308 equal budget"}"#,
         r#"{"case_id":"diversity-001","query":"青嶺酒造","cues":["青嶺酒造"],"expected_sources":[{"source":"corpus/kura-a.md","relevance":3},{"source":"corpus/kura-b.md","relevance":2}],"expected_citations":[{"source":"corpus/kura-a.md","paragraph":0}]}"#,
     ];
     write_eval_file(dir, &(lines.join("\n") + "\n"))
@@ -308,7 +308,7 @@ fn assembly_passes_a_checked_in_recall_and_diversity_threshold() {
     let eval_path = write_shared_eval(&dir);
     let thresholds_path = write_thresholds(
         &dir,
-        r#"{"taguru_evaluate_thresholds":1,
+        r#"{"evaluate_thresholds":1,
             "aggregate":{
                 "recall.recall_at_k":{"min":0.5},
                 "citations.recall":{"min":1.0},
@@ -346,7 +346,7 @@ fn the_same_diversity_threshold_fails_the_gate_against_baseline() {
     let eval_path = write_shared_eval(&dir);
     let thresholds_path = write_thresholds(
         &dir,
-        r#"{"taguru_evaluate_thresholds":1,
+        r#"{"evaluate_thresholds":1,
             "aggregate":{"diversity.sources":{"min":3}}}"#,
     );
 

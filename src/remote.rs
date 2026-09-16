@@ -622,7 +622,7 @@ impl Api {
     }
 
     /// `import --url`'s ADR 0009 §13 preflight — call only when the
-    /// payload actually carries a `taguru_schema` record; a
+    /// payload actually carries a `schema` record; a
     /// schema-free import must behave exactly as it did before this
     /// method existed. `Some(message)` refuses before a byte ships.
     /// Unlike [`Api::schema_export_refusal`], an ABSENT
@@ -639,13 +639,13 @@ impl Api {
             Some(formats) => Some(format!(
                 "taguru: import: this CLI writes schema format {mine} but the server at {} \
                  reads {formats:?} — nothing was sent; upgrade the server, or import \
-                 without the taguru_schema record",
+                 without the schema record",
                 self.base
             )),
             None => Some(format!(
                 "taguru: import: this CLI writes schema format {mine} but the server at {} \
                  does not report a schema_formats — nothing was sent; upgrade the server, \
-                 or import without the taguru_schema record",
+                 or import without the schema record",
                 self.base
             )),
         }
@@ -658,7 +658,7 @@ impl Api {
     /// one, and probing each `context` first would cost a request per
     /// `context` for no better an answer. An ABSENT `schema_formats` is
     /// SAFE here, not fatal: a server that has never heard of the key
-    /// cannot have emitted a `taguru_schema` line, so there is nothing
+    /// cannot have emitted a `schema` line, so there is nothing
     /// for this CLI to fail to read — only a format this CLI does not
     /// recognize refuses.
     pub(crate) fn schema_export_refusal(&self) -> Option<String> {
@@ -985,7 +985,7 @@ mod tests {
     /// fatal for `import` (a server that never heard of the key would
     /// either drop the record or answer `parse_stream`'s misleading
     /// "not a batch header" refusal), safe for `export` (such a
-    /// server cannot have emitted a `taguru_schema` line to begin
+    /// server cannot have emitted a `schema` line to begin
     /// with).
     #[test]
     fn schema_import_refusal_covers_match_mismatch_and_absence() {

@@ -1,4 +1,4 @@
-//! The `taguru_schema` export/import stream record and its
+//! The `schema` export/import stream record and its
 //! replication parity (#384, S6 of #218's ADR 0009 split, §13):
 //! `POST /import` installing a schema record after every batch and
 //! before any group, its context-scope check, its response shape, and
@@ -14,7 +14,7 @@ use crate::support::*;
 
 fn schema_line(context: &str, mode: &str) -> String {
     format!(
-        "{{\"taguru_schema\": 1, \"context\": \"{context}\", \"mode\": \"{mode}\", \
+        "{{\"schema\": 1, \"context\": \"{context}\", \"mode\": \"{mode}\", \
          \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
          \"relations\": {{\"杜氏\": {{\"domain\": [\"Brewery\"], \"range\": []}}}}}}\n"
     )
@@ -34,7 +34,7 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
         "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
           \"create\": {{\"description\": \"d\"}}}}\n\
          {schema_record}\
-         {{\"taguru_group\": 1, \"name\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
+         {{\"group\": 1, \"name\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
         schema_record = schema_line("sake", "warn"),
     );
     let (status, outcome) = post_import(&server, &stream, None);
@@ -200,7 +200,7 @@ fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
 }
 
 /// `taguru export --url` / `taguru import --url`: a schema installed
-/// on the server rides the fetched stream as a `taguru_schema` record
+/// on the server rides the fetched stream as a `schema` record
 /// and reinstalls on the other side — the CLI round trip
 /// `remote_import.rs`'s own full-stream test proves for batches/
 /// groups, extended to cover a schema.
@@ -238,9 +238,9 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
     );
     assert_eq!(code, 0, "{stderr}");
     let stream = std::fs::read_to_string(out.join("sake.jsonl")).expect("sake.jsonl must exist");
-    assert!(stream.contains("\"taguru_schema\":1"), "{stream}");
+    assert!(stream.contains("\"schema\":1"), "{stream}");
     assert!(
-        stream.find("taguru_schema").unwrap() < stream.find("taguru_batch").unwrap_or(usize::MAX),
+        stream.find("schema").unwrap() < stream.find("taguru_batch").unwrap_or(usize::MAX),
         "the schema record must ride first — {stream}"
     );
 

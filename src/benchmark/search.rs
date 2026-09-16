@@ -310,7 +310,7 @@ pub(super) fn run_search(args: &[String]) -> i32 {
     let (models_agg, pairs_agg) = aggregate(&cases);
 
     let retrieval = RetrievalFile {
-        taguru_benchmark_retrieval: BENCHMARK_RETRIEVAL_VERSION,
+        benchmark_retrieval: BENCHMARK_RETRIEVAL_VERSION,
         run_id: manifest.run_id.clone(),
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         matching,
@@ -1523,7 +1523,7 @@ fn write_retrieval(dir: &Path, retrieval: &RetrievalFile) -> Result<(), String> 
 
 #[derive(Debug, Clone, Serialize)]
 struct RetrievalFile {
-    taguru_benchmark_retrieval: u64,
+    benchmark_retrieval: u64,
     run_id: String,
     generated_at: String,
     matching: identity::Matching,

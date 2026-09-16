@@ -17,7 +17,7 @@
 //! `context`.
 //!
 //! A FULL export (no CONTEXT arguments) also writes every `group` as
-//! `{out}/{group}.group.jsonl` — one `taguru_group` record each, the
+//! `{out}/{group}.group.jsonl` — one `group` record each, the
 //! `group`'s complete truth the way a batch is a source's. Import
 //! applies `group` records after every batch of its run, so the files
 //! restore in any order; re-importing one REPLACES the record, the
@@ -71,10 +71,10 @@ usage: taguru export [--config FILE] [--url URL] --out DIR [CONTEXT...]
 Writes each context back out as a JSONL batch stream —
 {out}/{context}.jsonl, the exact format `taguru import` and POST
 /import apply. A context's own schema (ADR 0009 §13) rides inside
-that same stream as one taguru_schema record — no separate file —
+that same stream as one schema record — no separate file —
 when the context has one installed and its mode is not \"off\". No
 CONTEXT arguments means every context, plus every group as
-{out}/{group}.group.jsonl (one taguru_group record each; import
+{out}/{group}.group.jsonl (one group record each; import
 restores groups after every batch and schema, so the files re-apply
 in any order). A full export owns DIR's *.jsonl files: one left by a
 previous export whose context or group no longer exists is removed,
@@ -126,7 +126,7 @@ pub(crate) struct ExportSnapshot {
     /// (alias, canonical) pairs, label namespace.
     pub(crate) label_aliases: Vec<(String, String)>,
     pub(crate) passages: Vec<(String, Arc<PassageRecord>)>,
-    /// The installed schema, if any — `render` emits a `taguru_schema`
+    /// The installed schema, if any — `render` emits a `schema`
     /// record for it only when `mode != off` (ADR 0009 §13): a schema
     /// left in `off` while its types are drafted is not carried across
     /// export/restore, the same way `mode: off` is indistinguishable
@@ -223,7 +223,7 @@ struct AliasLine<'a> {
     kind: &'a str,
 }
 
-/// The `taguru_schema` record — [`crate::ingest`] parses the same
+/// The `schema` record — [`crate::ingest`] parses the same
 /// shape. Unlike [`GroupLine`], every field is required on the wire
 /// (no `skip_serializing_if`): this mirrors [`crate::schema::
 /// SchemaDocument`]'s own at-rest posture, where a missing field is a
@@ -232,7 +232,7 @@ struct AliasLine<'a> {
 /// go missing, not only ones that show up uninvited).
 #[derive(Serialize)]
 struct SchemaLine<'a> {
-    taguru_schema: u64,
+    schema: u64,
     context: &'a str,
     mode: crate::schema::SchemaMode,
     closed_labels: bool,
@@ -241,7 +241,7 @@ struct SchemaLine<'a> {
 }
 
 /// Renders one `context`'s schema as its import-stream record: one
-/// `taguru_schema` line, newline-terminated. [`render`] calls this
+/// `schema` line, newline-terminated. [`render`] calls this
 /// only for a schema whose `mode != off` (see [`ExportSnapshot::
 /// schema`]'s doc); `import --url`'s remote chunk packer
 /// (`src/ingest.rs`) calls it directly to re-render a parsed record
@@ -252,7 +252,7 @@ pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocum
     push_line(
         &mut line,
         &SchemaLine {
-            taguru_schema: crate::schema::SCHEMA_VERSION,
+            schema: crate::schema::SCHEMA_VERSION,
             context,
             mode: document.mode,
             closed_labels: document.closed_labels,
@@ -263,12 +263,12 @@ pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocum
     line
 }
 
-/// The `taguru_group` record — [`crate::ingest`] parses the same
+/// The `group` record — [`crate::ingest`] parses the same
 /// shape. Empty fields are omitted and read back as empty, so the
 /// round trip is exact.
 #[derive(Serialize)]
 struct GroupLine<'a> {
-    taguru_group: u64,
+    group: u64,
     name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
@@ -278,7 +278,7 @@ struct GroupLine<'a> {
     groups: &'a BTreeSet<String>,
 }
 
-/// Renders one `group` as its import-stream record: one `taguru_group`
+/// Renders one `group` as its import-stream record: one `group`
 /// line, newline-terminated — the `group`'s complete truth, so
 /// re-importing REPLACES the record (a restore, never a merge).
 pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
@@ -286,7 +286,7 @@ pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
     push_line(
         &mut line,
         &GroupLine {
-            taguru_group: crate::ingest::GROUP_VERSION,
+            group: crate::ingest::GROUP_VERSION,
             name,
             description: &record.description,
             contexts: &record.contexts,
@@ -905,7 +905,7 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     // if any, carries a schema) but only fatal when the server's
     // `schema_formats` names a version this CLI cannot read; an
     // absent key (a pre-schema server) is safe, since such a server
-    // cannot have emitted a `taguru_schema` line in the first place.
+    // cannot have emitted a `schema` line in the first place.
     if let Some(message) = api.schema_export_refusal() {
         eprintln!("{message}");
         return 1;
@@ -1042,7 +1042,7 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
     if !parsed.groups.is_empty() {
         return Err(format!(
             "context '{name}': not a taguru export stream: the response carries a \
-             taguru_group record"
+             group record"
         ));
     }
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
@@ -1083,7 +1083,7 @@ fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<S
         _ => {
             return Err(format!(
                 "group '{name}': not a taguru group record: the response is not exactly one \
-                 taguru_group line"
+                 group line"
             ));
         }
     };
@@ -1216,7 +1216,7 @@ fn summary_line(
     )
 }
 
-/// Writes one `group`'s `taguru_group` record beside the `context`
+/// Writes one `group`'s `group` record beside the `context`
 /// streams, `{out}/{stem}.group.jsonl` — a name a `context` stream can
 /// never claim (stems percent-encode `.`), exactly the collision
 /// argument the data directory's own `.group` extension makes.
@@ -2012,7 +2012,7 @@ mod tests {
         );
     }
 
-    /// One `group` renders as one `taguru_group` line, empties omitted,
+    /// One `group` renders as one `group` line, empties omitted,
     /// and the parser reads it back exactly — the `group` half of the
     /// stream's fixed point.
     #[test]
@@ -2025,14 +2025,14 @@ mod tests {
         let line = render_group("kura", &record);
         assert_eq!(
             line,
-            "{\"taguru_group\":1,\"name\":\"kura\",\"description\":\"蔵まとめ\",\
+            "{\"group\":1,\"name\":\"kura\",\"description\":\"蔵まとめ\",\
              \"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
         assert_eq!(stream.groups, vec![("kura".to_string(), record)]);
 
         let bare = render_group("kid", &GroupRecord::default());
-        assert_eq!(bare, "{\"taguru_group\":1,\"name\":\"kid\"}\n");
+        assert_eq!(bare, "{\"group\":1,\"name\":\"kid\"}\n");
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
         assert_eq!(stream.groups[0].1, GroupRecord::default());
     }
@@ -2059,7 +2059,7 @@ mod tests {
 
     /// `render_schema`'s exact bytes, and the round trip back through
     /// `parse_stream` — [`a_group_renders_as_one_record_and_round_trips`]'s
-    /// `taguru_schema` twin (ADR 0009 §13). Unlike a `group` record, no
+    /// `schema` twin (ADR 0009 §13). Unlike a `group` record, no
     /// field is ever omitted: every one of `SchemaDocument`'s fields is
     /// required on the wire, matching its own at-rest posture.
     #[test]
@@ -2068,7 +2068,7 @@ mod tests {
         let line = render_schema("sake", &document);
         assert_eq!(
             line,
-            "{\"taguru_schema\":1,\"context\":\"sake\",\"mode\":\"warn\",\
+            "{\"schema\":1,\"context\":\"sake\",\"mode\":\"warn\",\
              \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
              \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
         );
@@ -2078,7 +2078,7 @@ mod tests {
         assert_eq!(stream.schemas[0].1.document(), &document);
     }
 
-    /// `render`'s own gate (ADR 0009 §13): a `taguru_schema` record
+    /// `render`'s own gate (ADR 0009 §13): a `schema` record
     /// rides first, before any batch header, but ONLY when the
     /// `context` has a schema AND its mode is not `off` — the three
     /// cases side by side so a regression in the gate shows up as an
@@ -2099,7 +2099,7 @@ mod tests {
         no_schema.schema = None;
         let rendered = render("sake", &no_schema, Deadline::unbounded()).unwrap();
         assert!(
-            !rendered.stream.contains("taguru_schema"),
+            !rendered.stream.contains("\"schema\""),
             "{}",
             rendered.stream
         );
@@ -2111,7 +2111,7 @@ mod tests {
         });
         let rendered = render("sake", &off_schema, Deadline::unbounded()).unwrap();
         assert!(
-            !rendered.stream.contains("taguru_schema"),
+            !rendered.stream.contains("\"schema\""),
             "mode: off must not export — {}",
             rendered.stream
         );
@@ -2121,7 +2121,7 @@ mod tests {
         let rendered = render("sake", &warn_schema, Deadline::unbounded()).unwrap();
         let first_line = rendered.stream.lines().next().unwrap();
         assert!(
-            first_line.starts_with("{\"taguru_schema\":1,\"context\":\"sake\""),
+            first_line.starts_with("{\"schema\":1,\"context\":\"sake\""),
             "the schema record must ride first — {}",
             rendered.stream
         );

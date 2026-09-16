@@ -1,11 +1,11 @@
-//! Installing a parsed `taguru_schema` record onto a `context` — the
+//! Installing a parsed `schema` record onto a `context` — the
 //! offline CLI's own leg of the two entrances that share
 //! [`apply_schema_record`] (the other is `POST /import`'s apply stage,
 //! `src/api/import.rs`).
 
 use super::*;
 
-/// Why a `taguru_schema` record's install failed after it already
+/// Why a `schema` record's install failed after it already
 /// parsed and validated — [`crate::registry::PutSchemaError`]'s
 /// entrance-agnostic twin, so both the offline CLI (this module) and
 /// `POST /import` (`src/api/import.rs`) can format or map each case

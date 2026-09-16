@@ -398,7 +398,7 @@ export class Taguru {
    * Apply an NDJSON batch stream (the format `export` produces). Each batch
    * is one source's retract-then-apply, so re-importing is idempotent.
    * `batches` is normalized to an array even for a single batch; `groups`
-   * carries one entry per `taguru_group` record the stream restored.
+   * carries one entry per `group` record the stream restored.
    */
   async importBatches(data: string | Uint8Array): Promise<ImportResult> {
     const response = await this.send("POST", "/import", {
@@ -809,7 +809,7 @@ export class Groups {
   }
 
   /**
-   * The `group` as one import-stream record (a `taguru_group` JSON line);
+   * The `group` as one import-stream record (a `group` JSON line);
    * `importBatches` restores it as a whole-record replace.
    */
   async export(name: string): Promise<string> {

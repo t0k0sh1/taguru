@@ -591,7 +591,7 @@ fn import_refusal_pins_the_durable_prefix_fields() {
     );
 }
 
-/// The `taguru_schema` record's own wire shape (#384, ADR 0009 §13) —
+/// The `schema` record's own wire shape (#384, ADR 0009 §13) —
 /// `import.json` above never carries one, so this pins
 /// `response.result.schemas[]`'s exact fields (`context`/`mode`/
 /// `types`/`relations`, no outcome verb) separately.
@@ -602,7 +602,7 @@ fn import_with_schema_reports_the_schema_outcome() {
                   \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                   \"weight\": 1.0}\n\
-                  {\"taguru_schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \
+                  {\"schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \
                   \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \
                   \"range\": [\"Concept\"]}}}\n";

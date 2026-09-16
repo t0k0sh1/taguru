@@ -145,8 +145,8 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
       <code>POST /import</code>'s own <code>result</code> object carries — one
       <code>ImportOutcome</code> per batch under <code>batches</code>, one
-      <code>SchemaImportOutcome</code> per <code>taguru_schema</code> record under
-      <code>schemas</code>, one <code>GroupImportOutcome</code> per <code>taguru_group</code>
+      <code>SchemaImportOutcome</code> per <code>schema</code> record under
+      <code>schemas</code>, one <code>GroupImportOutcome</code> per <code>group</code>
       record under <code>groups</code> (both omitted entirely when the stream carried none) — so a
       script parses one schema whether it called the CLI or the HTTP endpoint directly. The two
       outer shapes differ: the CLI prints <code>{"dry_run": ..., "batches": [...], ...}</code>
@@ -219,7 +219,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
 
   <section id="format">
     <h2>The file format</h2>
-    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>taguru_schema</code> and <code>taguru_group</code> records — see below.)</p>
+    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>schema</code> and <code>group</code> records — see below.)</p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>, <span class="k">"date"</span>: <span class="nu">1700000000</span>, <span class="k">"tags"</span>: [<span class="s">"会社概要"</span>]}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
@@ -336,7 +336,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <a href="schema.html">The <code>context</code> schema</a>.
     </p>
     <p>
-      <code>{"taguru_schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
+      <code>{"schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
       — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13), the same shape
       <code>PUT /contexts/{name}/schema</code> installs. Unlike a <code>group</code> record, every field is
       required — there is no default for an absent one, matching the document's own at-rest
@@ -372,7 +372,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
 
     <h3><code>group</code> records</h3>
     <p>
-      <code>{"taguru_group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
+      <code>{"group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
       — one line states one <b><code>group</code>'s</b> complete truth, the way a batch states a source's:
       applying it is a create-or-replace of the whole record, never a delta, so re-importing
       stays idempotent. Only <code>name</code> is required; absent fields read as empty. A <code>group</code>
@@ -518,7 +518,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li>
         The input is split on <b>batch boundaries only</b>, never mid-batch: a batch runs from its
         <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/
-        <code>taguru_schema</code>/<code>taguru_group</code> line or EOF, the exact rule
+        <code>schema</code>/<code>group</code> line or EOF, the exact rule
         <code>taguru router</code>'s own cross-shard import splitting already uses. Whole batches
         are packed into each request up to a byte budget starting at 4&nbsp;MiB (half the
         8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom for a server
@@ -540,14 +540,14 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         automate since the server refuses a <code>413</code> before applying anything.
       </li>
       <li>
-        <code>taguru_schema</code> records ride after every batch chunk, and
-        <code>taguru_group</code> records after every schema chunk in turn — the same order the
+        <code>schema</code> records ride after every batch chunk, and
+        <code>group</code> records after every schema chunk in turn — the same order the
         local path already applies them in, so a schema naming a <code>context</code> an earlier chunk's batch
         creates, or a <code>group</code> naming a <code>context</code> an earlier chunk's schema installs onto, always
         arrives after it.
       </li>
       <li>
-        A stream that actually carries a <code>taguru_schema</code> record gets one more preflight
+        A stream that actually carries a <code>schema</code> record gets one more preflight
         first: the CLI reads the server's <code>GET /version</code> <code>schema_formats</code>
         and refuses up front, naming both sides, if the server cannot read this build's schema
         format — nothing is sent. A schema-free stream never triggers this check.
@@ -593,7 +593,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       One <code>context</code> = one stream: one batch per source id, in order, with a <code>create</code>
       block (description, pinning, floors) on the first batch and the alias table riding the last.
       A <code>context</code> whose schema is installed and not in <code>off</code> mode carries one more line —
-      a <code>taguru_schema</code> record, first in the stream (ADR 0009 §13) — so its constraints
+      a <code>schema</code> record, first in the stream (ADR 0009 §13) — so its constraints
       travel with the data rather than being a separate, easy-to-forget backup step; a schema left
       in <code>off</code> while its types are drafted is not exported. Restore is a normal import —
       per-source replacement makes it idempotent; to match a snapshot exactly, delete the <code>context</code>

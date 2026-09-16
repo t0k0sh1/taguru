@@ -36,7 +36,7 @@
 //! drifting apart.
 //!
 //! Beside batches, a stream may carry GROUP records: one
-//! `taguru_group` line states one `group`'s complete truth (name,
+//! `group` line states one `group`'s complete truth (name,
 //! description, member `contexts`, child `groups`) the way one batch
 //! states one source's. Applying one is a create-or-replace of the
 //! whole record — never a delta — so re-importing stays idempotent.
@@ -51,7 +51,7 @@
 //! wire path, `model` is the batch/stream data model and JSONL line
 //! parser, `rejection` predicts and applies pre-write refusals
 //! ([`apply_batch`]/[`preview_batch`]), `schema_apply` installs a
-//! parsed `taguru_schema` record, and `report` formats the CLI's
+//! parsed `schema` record, and `report` formats the CLI's
 //! per-batch line and sets up logging. This hub keeps the `run`
 //! dispatcher, the format-version constants, and the shared surface
 //! `src/api/import.rs`, `extract.rs`, `compact.rs`, `export.rs`, and
@@ -136,10 +136,10 @@ server with --url. One batch = one source's complete truth: import
 retracts the source, then applies the batch, so re-importing is
 idempotent. A file carries one batch or a whole stream of them (each
 `taguru_batch` header line starts the next) — `taguru export` writes
-such streams. A `taguru_schema` line states one context's whole
+such streams. A `schema` line states one context's whole
 schema document (ADR 0009 §13); it installs AFTER every batch, BEFORE
 any group, so a schema record can name a context a batch of the same
-stream just created. A `taguru_group` line states one group's complete
+stream just created. A `group` line states one group's complete
 truth the same way; groups restore AFTER every batch and schema of
 the run (create-or-replace of the whole record), so group files
 re-apply in any order. A directory expands to its *.jsonl files,
@@ -217,7 +217,7 @@ sorted by name. Format: docs/import.html.
 /// report it under `batch_formats`.
 pub(crate) const BATCH_VERSION: u64 = 1;
 
-/// The `taguru_group` record's own version stamp — separate from
+/// The `group` record's own version stamp — separate from
 /// [`BATCH_VERSION`] so either shape can rev without dragging the
 /// other along. Export serializes it; parse refuses any other value.
 pub(crate) const GROUP_VERSION: u64 = 1;

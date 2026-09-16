@@ -828,8 +828,8 @@ describe("groups and cross-context search", () => {
     await client.groups.create(group, { description: "蔵元一式", contexts: [sake, tea] });
 
     const line = await client.groups.export(group);
-    const record = JSON.parse(line) as { taguru_group: number; name: string; contexts: string[] };
-    expect(typeof record.taguru_group).toBe("number");
+    const record = JSON.parse(line) as { group: number; name: string; contexts: string[] };
+    expect(typeof record.group).toBe("number");
     expect(record.name).toBe(group);
     expect(record.contexts).toEqual([sake, tea].sort());
 

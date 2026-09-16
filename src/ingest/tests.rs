@@ -21,7 +21,7 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
         "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
         "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
         "\n",
-        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}\n",
+        "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}\n",
         "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
         "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
     )
@@ -33,14 +33,14 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
     // The batch's ops (and the blank line) ride along; the group
     // record between the batches belongs to neither.
     assert!(first.contains("likes"));
-    assert!(!first.contains("taguru_group"));
+    assert!(!first.contains("\"group\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
     assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
     assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
 }
 
 /// [`split_batches_slices_exactly_the_bytes_between_stream_level_records`]'s
-/// `taguru_schema` case: a schema record between two batches
+/// `schema` case: a schema record between two batches
 /// belongs to neither, the same as a `group` record.
 #[test]
 fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
@@ -56,7 +56,7 @@ fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     assert_eq!(ranges.len(), 2);
     let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
     assert!(first.contains("likes"));
-    assert!(!first.contains("taguru_schema"));
+    assert!(!first.contains("\"schema\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
     assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
 }
@@ -266,9 +266,9 @@ fn group_records_ride_a_stream_and_stand_alone() {
     let stream = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
-         {{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵\", \
+         {{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵\", \
            \"contexts\": [\"sake\", \"sake\"], \"groups\": [\"kid\"]}}\n\
-         {{\"taguru_group\": 1, \"name\": \"kid\"}}\n"
+         {{\"group\": 1, \"name\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
@@ -287,7 +287,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
     // one has no batch to join.
     let error = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
-         {{\"taguru_group\": 1, \"name\": \"kura\"}}\n\
+         {{\"group\": 1, \"name\": \"kura\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
     )))
     .unwrap_err();
@@ -298,10 +298,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
 
     // A groups-only stream is a legitimate restore; an empty one is
     // still a mistake.
-    let alone = parse_stream(std::io::Cursor::new(
-        "{\"taguru_group\": 1, \"name\": \"kura\"}\n",
-    ))
-    .unwrap();
+    let alone = parse_stream(std::io::Cursor::new("{\"group\": 1, \"name\": \"kura\"}\n")).unwrap();
     assert!(alone.batches.is_empty());
     assert_eq!(alone.groups.len(), 1);
     assert!(
@@ -314,21 +311,21 @@ fn group_records_ride_a_stream_and_stand_alone() {
 #[test]
 fn group_records_validate_their_shape_with_line_numbers() {
     let case = |line: &str| parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
-    assert!(case("{\"taguru_group\": 2, \"name\": \"g\"}").contains("taguru_group 2"));
-    assert!(case("{\"taguru_group\": 1, \"name\": \"\"}").contains("must not be empty"));
-    assert!(case("{\"taguru_group\": 1, \"name\": \"g\", \"nope\": 1}").contains("unknown field"));
+    assert!(case("{\"group\": 2, \"name\": \"g\"}").contains("group 2"));
+    assert!(case("{\"group\": 1, \"name\": \"\"}").contains("must not be empty"));
+    assert!(case("{\"group\": 1, \"name\": \"g\", \"nope\": 1}").contains("unknown field"));
     let long = "x".repeat(65);
-    assert!(case(&format!("{{\"taguru_group\": 1, \"name\": \"{long}\"}}")).contains("65 bytes"));
+    assert!(case(&format!("{{\"group\": 1, \"name\": \"{long}\"}}")).contains("65 bytes"));
     assert!(
         case(&format!(
-            "{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"{long}\"]}}"
+            "{{\"group\": 1, \"name\": \"g\", \"contexts\": [\"{long}\"]}}"
         ))
         .contains("65 bytes")
     );
 
     // Restating one group refuses the whole stream, by line.
     let error = parse_stream(std::io::Cursor::new(
-        "{\"taguru_group\": 1, \"name\": \"g\"}\n{\"taguru_group\": 1, \"name\": \"g\"}\n",
+        "{\"group\": 1, \"name\": \"g\"}\n{\"group\": 1, \"name\": \"g\"}\n",
     ))
     .unwrap_err();
     assert!(
@@ -342,7 +339,7 @@ fn group_records_validate_their_shape_with_line_numbers() {
         .collect::<Vec<_>>()
         .join(", ");
     let error = case(&format!(
-        "{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [{over_set}]}}"
+        "{{\"group\": 1, \"name\": \"g\", \"contexts\": [{over_set}]}}"
     ));
     assert!(error.contains("split into nested child groups"), "{error}");
 }
@@ -353,15 +350,15 @@ fn group_records_validate_their_shape_with_line_numbers() {
 fn parse_batch_refuses_group_records() {
     let error = parse(
         "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
-         {\"taguru_group\": 1, \"name\": \"kura\"}\n",
+         {\"group\": 1, \"name\": \"kura\"}\n",
     )
     .unwrap_err();
     assert!(error.contains("exactly one batch was expected"), "{error}");
 }
 
-const SCHEMA_LINE: &str = r#"{"taguru_schema": 1, "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
+const SCHEMA_LINE: &str = r#"{"schema": 1, "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
 
-/// `taguru_schema` records ride a stream and stand alone — the
+/// `schema` records ride a stream and stand alone — the
 /// schema twin of [`group_records_ride_a_stream_and_stand_alone`]
 /// (ADR 0009 §13). A schema record closes the batch before it, an
 /// op line after one has no batch to join, a schema-only stream is
@@ -373,7 +370,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {SCHEMA_LINE}\n\
-         {{\"taguru_group\": 1, \"name\": \"kid\"}}\n"
+         {{\"group\": 1, \"name\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
@@ -418,14 +415,14 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // parse_group's exact wording shape (ADR 0009 §13 bullet 4).
     assert!(
         case(
-            r#"{"taguru_schema": 2, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"schema": 2, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
-        .contains("taguru_schema 2 is not a version this taguru reads (it reads 1)")
+        .contains("schema 2 is not a version this taguru reads (it reads 1)")
     );
 
     assert!(
         case(
-            r#"{"taguru_schema": 1, "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"schema": 1, "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
         .contains("must not be empty")
     );
@@ -436,20 +433,18 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     let long = "x".repeat(65);
     assert!(
         case(&format!(
-            r#"{{"taguru_schema": 1, "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+            r#"{{"schema": 1, "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
         ))
         .contains("65 bytes")
     );
 
     // Every field is required — no struct-level default, matching
     // SchemaDocument's own at-rest posture.
-    assert!(
-        case(r#"{"taguru_schema": 1, "context": "sake", "mode": "off"}"#).contains("missing field")
-    );
+    assert!(case(r#"{"schema": 1, "context": "sake", "mode": "off"}"#).contains("missing field"));
 
     assert!(
         case(
-            r#"{"taguru_schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
+            r#"{"schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
         )
         .contains("unknown field")
     );
@@ -458,7 +453,7 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // (here: the relation named the reserved type label) surfaces
     // with the line number, not just the bare violation text.
     let error = case(
-        r#"{"taguru_schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
+        r#"{"schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
     );
     assert!(
         error.contains("line 1") && error.contains("reserved"),
@@ -1751,7 +1746,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{batches}"
     );
-    let schema = "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+    let schema = "{\"schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {}, \"relations\": {}}";
     let schemas = parse_stream(format!("{schema}\n{schema}\n").as_bytes()).unwrap_err();
     assert!(
@@ -1761,7 +1756,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{schemas}"
     );
-    let group = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}";
+    let group = "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}";
     let groups = parse_stream(format!("{group}\n{group}\n").as_bytes()).unwrap_err();
     assert!(
         groups.starts_with(
@@ -1989,5 +1984,52 @@ fn the_oversized_unit_message_names_unit_size_and_budget() {
     assert!(
         message.contains("TAGURU_MAX_BODY_BYTES alone will not help"),
         "{message}"
+    );
+}
+
+/// Streams written before the `taguru_` prefix came off the record
+/// keys (#933) still parse: `taguru_schema` and `taguru_group` are read
+/// as `schema` and `group`, and the stream-level boundary they mark is
+/// the same one.
+#[test]
+fn legacy_taguru_prefixed_schema_and_group_records_still_parse() {
+    let stream = parse_stream(std::io::Cursor::new(format!(
+        "{{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+           \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
+         {HEADER}\n\
+         {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
+         {{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}}\n"
+    )))
+    .unwrap();
+    assert_eq!(
+        stream.schemas.len(),
+        1,
+        "the prefixed schema record must be read"
+    );
+    assert_eq!(stream.batches.len(), 1);
+    assert_eq!(stream.groups.len(), 1);
+    assert_eq!(stream.groups[0].0, "kura");
+
+    // The prefixed group line closes the batch before it exactly like
+    // the bare one does.
+    let error = parse_stream(std::io::Cursor::new(format!(
+        "{HEADER}\n\
+         {{\"taguru_group\": 1, \"name\": \"kura\"}}\n\
+         {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
+    )))
+    .unwrap_err();
+    assert!(
+        error.contains("line 3") && error.contains("not a batch header"),
+        "{error}"
+    );
+
+    // The version check still applies through the old key.
+    let error = parse_stream(std::io::Cursor::new(
+        "{\"taguru_group\": 2, \"name\": \"kura\"}\n",
+    ))
+    .unwrap_err();
+    assert!(
+        error.contains("group 2 is not a version this taguru reads"),
+        "{error}"
     );
 }

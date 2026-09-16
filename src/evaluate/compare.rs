@@ -31,7 +31,7 @@
 //! `context`, `corpus.revision_after`, threshold-file identity
 //! (`thresholds.sha256`, persisted in each `evaluation.json` — this
 //! module never reads the original thresholds file), or
-//! `taguru_evaluation` stamp between `BASE` and `HEAD` all land in
+//! `evaluation` stamp between `BASE` and `HEAD` all land in
 //! `warnings`, printed to stderr and echoed in the header, without
 //! changing the exit code.
 
@@ -75,7 +75,7 @@ recall@k/MRR/nDCG, concept/label/association coverage, and citation
 recall/locator validity (latency is excluded: too noisy run-to-run to
 drive a verdict). unchanged cases are counted in the header only. A
 mismatched context, corpus revision, threshold-file identity, or
-taguru_evaluation stamp between the two files is a warning, never a
+evaluation stamp between the two files is a warning, never a
 refusal. A human-readable terminal summary accompanies the file.
 
   BASE.json   an evaluation.json from an earlier run
@@ -191,7 +191,8 @@ fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct EvaluationView {
-    taguru_evaluation: u64,
+    #[serde(alias = "taguru_evaluation")]
+    evaluation: u64,
     generated_at: String,
     inputs: InputsView,
     corpus: CorpusView,
@@ -294,11 +295,11 @@ fn load_report(path: &Path) -> Result<LoadedReport, String> {
         fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
     let view: EvaluationView = serde_json::from_str(&text)
         .map_err(|error| format!("{}: malformed evaluation.json: {error}", path.display()))?;
-    if !(1..=EVALUATION_VERSION).contains(&view.taguru_evaluation) {
+    if !(1..=EVALUATION_VERSION).contains(&view.evaluation) {
         return Err(format!(
-            "{}: taguru_evaluation must be within 1..={EVALUATION_VERSION}, got {}",
+            "{}: evaluation must be within 1..={EVALUATION_VERSION}, got {}",
             path.display(),
-            view.taguru_evaluation
+            view.evaluation
         ));
     }
     Ok(LoadedReport {
@@ -620,7 +621,7 @@ fn report_identity(loaded: &LoadedReport) -> ReportIdentity {
     ReportIdentity {
         path: loaded.path.clone(),
         context: loaded.view.inputs.context.clone(),
-        taguru_evaluation: loaded.view.taguru_evaluation,
+        evaluation: loaded.view.evaluation,
         generated_at: loaded.view.generated_at.clone(),
         corpus_revision_after: loaded.view.corpus.revision_after,
         corpus_stable: loaded.view.corpus.stable,
@@ -662,10 +663,10 @@ fn mismatch_warnings(base: &LoadedReport, head: &LoadedReport, warnings: &mut Ve
             head_sha.map_or("none", |sha| &sha[..12.min(sha.len())]),
         ));
     }
-    if base.view.taguru_evaluation != head.view.taguru_evaluation {
+    if base.view.evaluation != head.view.evaluation {
         warnings.push(format!(
-            "taguru_evaluation stamp differs: BASE {} vs HEAD {}",
-            base.view.taguru_evaluation, head.view.taguru_evaluation
+            "evaluation stamp differs: BASE {} vs HEAD {}",
+            base.view.evaluation, head.view.evaluation
         ));
     }
     // #308 (ADR 0006 §14): comparing two runs whose --max-items/
@@ -754,7 +755,7 @@ enum ChangeRecord {
 struct ReportIdentity {
     path: String,
     context: String,
-    taguru_evaluation: u64,
+    evaluation: u64,
     generated_at: String,
     corpus_revision_after: ContextRevision,
     corpus_stable: bool,

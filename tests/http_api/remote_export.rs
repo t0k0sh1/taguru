@@ -60,7 +60,7 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
          {\"taguru_batch\": 1, \"context\": \"酒蔵\", \"source\": \"c.md\", \
           \"create\": {\"description\": \"蔵元台帳\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+         {\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\", \"酒蔵\"]}\n",
     )
     .expect("fixture must be writable");
@@ -458,8 +458,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // group.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"taguru_group":1,"name":"h","description":"x","contexts":["sake"]}"#
-                    .to_string(),
+                r#"{"group":1,"name":"h","description":"x","contexts":["sake"]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -737,7 +736,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups/h/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"taguru_group":1,"name":"h","description":"x","contexts":[]}"#.to_string(),
+                r#"{"group":1,"name":"h","description":"x","contexts":[]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {

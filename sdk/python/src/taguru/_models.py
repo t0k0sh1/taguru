@@ -1011,7 +1011,7 @@ class Issue:
 
 @dataclass(slots=True, frozen=True)
 class SchemaImportOutcome:
-    """What installing one ``taguru_schema`` record via import accomplished.
+    """What installing one ``schema`` record via import accomplished.
 
     No outcome verb (unlike :class:`GroupImportOutcome`): the install
     cannot distinguish itself from a no-op PUT of the identical document
@@ -1066,7 +1066,7 @@ class ImportOutcome:
 
 @dataclass(slots=True, frozen=True)
 class GroupImportOutcome:
-    """Outcome of restoring one ``taguru_group`` record via import.
+    """Outcome of restoring one ``group`` record via import.
 
     A restore is a replace of the whole record; ``outcome`` is one of
     ``"created"``, ``"replaced"``, or ``"unchanged"``. ``contexts``/``groups``
@@ -1082,7 +1082,7 @@ class GroupImportOutcome:
 @dataclass(slots=True, frozen=True)
 class ImportResult:
     """What ``POST /import`` accomplished: per-batch outcomes plus any
-    ``group`` restores and ``taguru_schema`` installs.
+    ``group`` restores and ``schema`` installs.
 
     ``issues``/``schema_violations`` are the response envelope's
     warn-mode carrier (ADR 0009 §8.3), stream-wide; each batch's own

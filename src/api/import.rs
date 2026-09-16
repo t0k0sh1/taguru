@@ -71,19 +71,19 @@ pub struct ImportOutcome {
 #[derive(Serialize)]
 pub struct ImportStreamOutcome {
     pub batches: Vec<ImportOutcome>,
-    /// One entry per `taguru_schema` record, stream order — absent
+    /// One entry per `schema` record, stream order — absent
     /// entirely for a stream that carried none, keeping the
     /// pre-schema response byte-identical (ADR 0009 §13).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<SchemaImportOutcome>,
-    /// One entry per `taguru_group` record, stream order — absent
+    /// One entry per `group` record, stream order — absent
     /// entirely for a stream that carried none, keeping the pre-`group`
     /// response byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupImportOutcome>,
 }
 
-/// What installing one `taguru_schema` record accomplished. No
+/// What installing one `schema` record accomplished. No
 /// outcome verb (unlike [`GroupImportOutcome`]'s "created"/"replaced"/
 /// "unchanged"): `put_schema` cannot itself distinguish an install
 /// from a no-op PUT of the identical document, and a guessed verb
@@ -455,7 +455,7 @@ pub(super) fn restore_refusal(
     }
 }
 
-/// Maps one `taguru_schema` record's [`crate::ingest::SchemaApplyError`]
+/// Maps one `schema` record's [`crate::ingest::SchemaApplyError`]
 /// onto the response — the schema twin of [`import_refusal`], simpler
 /// because `put_schema` is atomic (no partial-write "how much of this
 /// one record landed" question a batch's own refusal has to answer).
@@ -602,7 +602,7 @@ fn injected_schema_loop_expiry() -> bool {
 /// The refusal a budget spent partway through the schema-record loop
 /// answers (issue #620) — [`import_budget_refusal`]'s twin for this
 /// second phase of the stream, which previously had no deadline check
-/// at all: a stream carrying many `taguru_schema` records could run
+/// at all: a stream carrying many `schema` records could run
 /// past `TAGURU_REQUEST_TIMEOUT_SECS` entirely, since each record's
 /// `put_schema` (`context` hydration plus two fsyncs) is not free.
 /// Accounting mirrors [`schema_import_refusal`]'s own: `durable_batches`
@@ -781,7 +781,7 @@ pub(super) fn quota_refusal_from_apply(
 /// as on any endpoint; embeddings ride the next flush
 /// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
 ///
-/// `taguru_schema` records (ADR 0009 §13) ride the same stream and
+/// `schema` records (ADR 0009 §13) ride the same stream and
 /// install AFTER every batch, BEFORE any `group` — a schema record's
 /// `context` may exist only because a batch of this same body just
 /// created it, and a schema landing before `groups` restore lets a
@@ -791,7 +791,7 @@ pub(super) fn quota_refusal_from_apply(
 /// `groups`' whole-set validation, later schema records and every `group`
 /// are simply never reached.
 ///
-/// `taguru_group` records ride the same stream and apply LAST — after
+/// `group` records ride the same stream and apply LAST — after
 /// every batch, wherever they sat — so a `group` and the member
 /// `contexts` it names can travel in one body in any order. Restoring a
 /// record replaces the whole `group`; the set is validated whole and a
@@ -815,7 +815,7 @@ pub(super) fn quota_refusal_from_apply(
 /// a fresh-name restore's post-first batches preview clean, exactly
 /// as they apply. Two counts per batch, `associations` and `aliases`,
 /// are optimistic (see [`crate::ingest::preview_batch`]); every other
-/// field is exact. `taguru_schema` and `taguru_group` records are both
+/// field is exact. `schema` and `group` records are both
 /// a known gap: they apply through a path (`put_schema`,
 /// `restore_groups`) that dry-run does not preview, so a stream
 /// carrying either is parsed and scope-checked like normal but not
@@ -1071,7 +1071,7 @@ pub async fn import_batch(
         // Schemas install after every batch, before groups restore
         // (ADR 0009 §13): a schema record's context may exist only
         // because a batch of THIS SAME stream just created it. Like
-        // `taguru_group` records, `put_schema` has no read-only twin
+        // `group` records, `put_schema` has no read-only twin
         // to preview through, so a dry run skips this entirely — the
         // response omits `schemas` rather than report a guess. Unlike
         // groups (one whole SET validated together), each schema
@@ -1122,7 +1122,7 @@ pub async fn import_batch(
         }
         // Groups apply LAST — after every batch — so a record and the
         // member contexts it names can ride one stream in any order.
-        // `taguru_group` records apply through a separate path
+        // `group` records apply through a separate path
         // (`restore_groups`) that has no read-only twin, so a dry run
         // skips them entirely — the response omits `groups` rather than
         // report a guess.
@@ -1301,7 +1301,7 @@ pub(super) fn export_response(
 }
 
 /// `GET /groups/{name}/export` — the `group` back out as its import
-/// record: one `taguru_group` line (JSON Lines body, not the JSON
+/// record: one `group` line (JSON Lines body, not the JSON
 /// envelope), [`export_context`]'s twin one storey up. `POST /import`
 /// (or `taguru import`) restores it by replacing the whole record, so
 /// re-importing is idempotent; the members must exist at import time,
@@ -1349,7 +1349,7 @@ mod tests {
 
     fn schema_line(context: &str) -> String {
         format!(
-            "{{\"taguru_schema\": 1, \"context\": \"{context}\", \"mode\": \"warn\", \
+            "{{\"schema\": 1, \"context\": \"{context}\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
              \"relations\": {{}}}}\n"
         )

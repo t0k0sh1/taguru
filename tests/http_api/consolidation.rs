@@ -322,7 +322,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(manifest["taguru_consolidation"], json!(1));
+    assert_eq!(manifest["consolidation"], json!(1));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
 
     // Second run over the unchanged graph: zero LLM calls.
@@ -595,8 +595,7 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     // stderr says why.
     overwrite_manifest(
         &server,
-        &json!({"taguru_consolidation": 1, "detector": "consolidation/0", "context": "sake"})
-            .to_string(),
+        &json!({"consolidation": 1, "detector": "consolidation/0", "context": "sake"}).to_string(),
     );
     let (code, stdout, stderr) =
         run_consolidation(&["--context", "sake", &server.base], &extract_env);
@@ -633,11 +632,47 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     );
     assert_eq!(*calls.lock().unwrap(), 10);
 
+    // A manifest stamped before the `taguru_` prefix came off (#933)
+    // reads as current: nothing re-judged, nothing refused.
+    overwrite_manifest(
+        &server,
+        &json!({"taguru_consolidation": 1, "detector": "consolidation/1", "context": "sake"})
+            .to_string(),
+    );
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10);
+
+    // A malformed bare stamp is not rescued by a legacy stamp riding
+    // beside it: the key that is present is the one judged (ADR 0041).
+    overwrite_manifest(
+        &server,
+        &json!({
+            "consolidation": "bad",
+            "taguru_consolidation": 1,
+            "detector": "consolidation/1",
+            "context": "sake"
+        })
+        .to_string(),
+    );
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("carries no consolidation stamp"),
+        "{stderr}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+
     // A format stamp from another program: refused by number.
     overwrite_manifest(
         &server,
-        &json!({"taguru_consolidation": 2, "detector": "consolidation/1", "context": "sake"})
-            .to_string(),
+        &json!({"consolidation": 2, "detector": "consolidation/1", "context": "sake"}).to_string(),
     );
     let (code, _stdout, stderr) =
         run_consolidation(&["--context", "sake", &server.base], &extract_env);
@@ -656,7 +691,7 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         stored["passages"]["consolidation:manifest"]
             .as_str()
             .unwrap()
-            .contains("\"taguru_consolidation\":2"),
+            .contains("\"consolidation\":2"),
         "a refusal must not rewrite the manifest it refused: {stored}"
     );
 
@@ -669,7 +704,7 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         run_consolidation(&["--context", "sake", &server.base], &extract_env);
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("carries no taguru_consolidation stamp"),
+        stderr.contains("carries no consolidation stamp"),
         "{stderr}"
     );
     assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
