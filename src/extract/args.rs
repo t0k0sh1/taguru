@@ -984,7 +984,7 @@ pub(super) struct LadderConfig {
     /// multiple of the piece's bytes is a runaway — the output is not
     /// tracking the input, so the escalated resend and the split rung
     /// are skipped (only ADR 0021's demotion is still tried before
-    /// the source fails). `0` disables the judgment.
+    /// the segment fails). `0` disables the judgment.
     pub(super) runaway_ratio: usize,
 }
 

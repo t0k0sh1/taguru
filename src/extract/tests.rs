@@ -1814,7 +1814,7 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
 /// standing is removed with accounting — highest index first within an
 /// output so every recorded path names the alias its issue did — while
 /// a standing issue about anything else hands the caller that output's
-/// non-alias issues to fail the source with.
+/// non-alias issues to fail the segment with.
 #[test]
 fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
     assert_eq!(
@@ -5236,7 +5236,7 @@ fn ladder_length_limited_escalates_once_then_splits_the_piece() {
 }
 
 /// A piece already too small to split that still overruns the
-/// escalated budget fails the source with the named diagnosis rather
+/// escalated budget fails the segment with the named diagnosis rather
 /// than importing a truncated extraction.
 /// ADR 0019 (#761): the escalated resend's cap follows the factor —
 /// an explicit one multiplies the budget, and 0 restores ADR 0001 §7's
@@ -5418,7 +5418,7 @@ fn manifests_reextract_when_the_runaway_ratio_changes() {
 /// skips the escalated resend AND the split rung — this splittable
 /// piece would otherwise take four requests (see
 /// `ladder_length_limited_escalates_once_then_splits_the_piece`) —
-/// and the source fails with the sizes and the knob named.
+/// and the segment fails with the sizes and the knob named.
 #[test]
 fn ladder_a_runaway_answer_fails_the_source_without_escalation_or_split() {
     let block_a = "あ".repeat(200);
@@ -5605,7 +5605,7 @@ fn ladder_a_timeout_splits_the_piece_without_a_same_size_retry() {
     );
 }
 
-/// At the split floor a timeout fails the source with the timeout
+/// At the split floor a timeout fails the segment with the timeout
 /// named and the two knobs that would have helped — after exactly one
 /// attempt, not RETRY_ATTEMPTS of them.
 #[test]

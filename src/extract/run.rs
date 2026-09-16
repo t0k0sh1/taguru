@@ -1583,7 +1583,7 @@ impl Run {
     /// `max_attempts` (the issue's "one targeted corrective turn"),
     /// plus ADR 0032's (#811) one escalated resend when that turn
     /// ends at the output cap under a configured budget: a
-    /// still-invalid, refused, or empty reply fails the source
+    /// still-invalid, refused, or empty reply fails the segment
     /// outright — Stage 2 never splits and never loops a second
     /// round. An alias issue that the turn leaves standing — or that
     /// a correction cut off at the ladder's top never delivered — is
@@ -1696,7 +1696,7 @@ impl Run {
                     // output keeps its accepted Stage 1 answer and the
                     // re-check below rules on what stands (ADR 0022:
                     // an alias is removed with accounting; anything
-                    // else fails the source). Never a truncated
+                    // else fails the segment). Never a truncated
                     // correction imported.
                     eprintln!(
                         "taguru: extract: {source}: {label}: the cross-chunk correction was \
@@ -1717,7 +1717,7 @@ impl Run {
         // issue still standing is removed with accounting (the loop
         // re-checks after each removal pass — removing aliases can only
         // shrink the issue set, so it ends); anything else standing
-        // fails the source.
+        // fails the segment.
         loop {
             let remaining = combined_cross_output_issues(outputs, self.schema.as_deref());
             if remaining.is_empty() {
@@ -1819,7 +1819,7 @@ impl Run {
             // Under the default (strict) mode, a surviving `dropped`
             // count is only ever merge()'s policy trim (duplicate
             // overflow, questions_cap == 0 volunteers) — issue #199's
-            // validity issues are corrected or fail the source before
+            // validity issues are corrected or fail the segment before
             // merge() ever runs. `--lossy` restores the pre-#199
             // drop-and-proceed behavior, so its drops are marked
             // explicitly: a report line must never look identical

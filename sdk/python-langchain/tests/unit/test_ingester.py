@@ -994,7 +994,7 @@ def test_a_cross_chunk_correction_that_does_not_fix_the_issue_fails_without_impo
     """The bounded re-check, not a second round: a "corrective" reply that
     still structurally passes Stage 1 (so the single Stage 2 call itself
     counts as "valid") but repeats the exact same shadowing alias must
-    still fail the source — Stage 2 never loops for a second attempt."""
+    still fail the segment — Stage 2 never loops for a second attempt."""
     ingester, _llm = make_ingester(
         sync_client,
         async_client,

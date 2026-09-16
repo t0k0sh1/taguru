@@ -100,7 +100,7 @@ export interface IngestOutcome {
   /** Under the strict default this counts only merge()'s policy trims
    * (per-paragraph question-cap overflow, a volunteered question when
    * none was requested) — a business-rule-invalid item is corrected or
-   * fails the source before merge() ever runs (issue #181). Under
+   * fails the segment before merge() ever runs (issue #181). Under
    * `lossy: true` it is the old drop-and-proceed tally: every item
    * merge() silently discarded. */
   duplicates_dropped: number;
@@ -234,10 +234,10 @@ export interface TaguruIngesterFields {
   /**
    * Restore the pre-issue-#181 drop-and-proceed behavior: a
    * business-rule-invalid item (bad weight, dangling alias, out-of-range
-   * question, ...) is silently dropped and the source still reports
+   * question, ...) is silently dropped and the segment still reports
    * success, exactly like merge() always did. Default `false` (ADR 0001
    * §8's never-silent-drop default): an invalid item instead earns one
-   * targeted, path-addressed corrective turn, and the source fails
+   * targeted, path-addressed corrective turn, and the segment fails
    * outright (no /import call) if it is still invalid afterward. See
    * `IngestOutcome.invalid_dropped`.
    */
@@ -477,7 +477,7 @@ function crossChunkFailureMessage(label: string, result: AttemptResult): string 
   if (result.kind === "length_limited") {
     return (
       `${label}: the cross-chunk correction was cut off at the output limit — ` +
-      "failing the source rather than importing a truncated correction"
+      "failing the segment rather than importing a truncated correction"
     );
   }
   if (result.kind === "refusal") {
@@ -670,7 +670,7 @@ export class TaguruIngester {
    * (never the whole document's) and replaying its own final answer as
    * the prior bad turn. Bounded to exactly one extra call per offending
    * chunk regardless of max_attempts: a still-invalid, still-cross-
-   * conflicting, length-limited, refused, or empty reply fails the source
+   * conflicting, length-limited, refused, or empty reply fails the segment
    * outright — Stage 2 never loops a second round. Mirrors extract.rs's
    * correct_cross_output_issues.
    */
@@ -738,7 +738,7 @@ export class TaguruIngester {
     // Re-check rather than trust the single corrective turn blindly: a
     // correction can rename an association another chunk's alias depended
     // on, introducing a FRESH cross-chunk issue. This is the bounded
-    // re-check, not a second round — any issue here fails the source.
+    // re-check, not a second round — any issue here fails the segment.
     const recheck = combinedCrossOutputIssues(
       records.map((r) => r.output),
       schema,

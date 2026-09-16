@@ -115,7 +115,7 @@ TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                     budget; 0 = uncapped (default 2)
 TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
                     times its piece's bytes is a runaway: no escalation, no
-                    split — the source fails, after a demotion attempt under
+                    split — the segment fails, after a demotion attempt under
                     an auto-resolved rung (a pinned rung never demotes);
                     0 = no runaway judgment (default 8)
 TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
@@ -699,18 +699,18 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       shadowing or conflicting alias can only be judged once every chunk of the segment has
       answered — that check runs once per segment, right before the facts are merged, and (like
       the per-chunk check) spends at most one corrective turn; an alias issue that turn leaves standing is then
-      <b>removed with accounting</b> rather than failing the source (ADR 0022: an alias records a
+      <b>removed with accounting</b> rather than failing the segment (ADR 0022: an alias records a
       spelling variant, never a fact, so losing one costs nothing the consolidation audit cannot
       propose later — while failing the segment cost every fact it held; a standing issue about
-      an association, such as a schema domain/range violation, still fails the source); a
+      an association, such as a schema domain/range violation, still fails the segment); a
       <i>dangling</i>
       alias found at that same point is mechanically pruned instead, after any corrective turns,
       since an alias whose canonical resolves to nothing cannot import at all — and so is an alias
       that would rewire a spelling an earlier segment of the run already claimed, which the
       model cannot correct (it can re-judge its own associations, never un-claim a previous
       segment's name). If the corrected answer is <i>still</i> invalid, or the
-      model answers with something cut off, refused, or empty, the source fails outright and
-      nothing is written — a batch is only ever the source's complete, valid truth, never a subset
+      model answers with something cut off, refused, or empty, the segment fails outright and
+      nothing is written — a batch is only ever the complete, valid truth, never a subset
       quietly missing the items that didn't fit. <code>--lossy</code> (or
       <code>TAGURU_EXTRACT_LOSSY</code>) opts back into the pre-this-behavior default: invalid
       items are dropped and counted without ever costing a corrective turn, and the one-line report
@@ -796,7 +796,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       discarded (its prefix is never salvaged, even when it happens to parse); if the escalated
       ask still overruns, the chunk <b>splits</b> — each half re-labeled with its paragraph numbers and
       run through the ladder from the top at the configured budget; a piece too small to split
-      fails the source with a named diagnosis rather than importing a truncated extraction.
+      fails the segment with a named diagnosis rather than importing a truncated extraction.
       The escalated resend is capped on purpose (ADR 0019): a model that loops under constrained
       decoding never ends an uncapped resend with <code>length</code> — it ends with the
       <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> timeout, retried as a transport failure, and the
@@ -815,20 +815,20 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <b>runaway</b> (ADR 0035): no escalated resend, no split — under an <code>auto</code>-resolved
       rung, a demotion is still tried first (a constrained rung looping produces the same
       signature; a pinned rung never demotes, same as every other exhausted-ladder case), and
-      with nothing left to demote the source fails immediately with both sizes named, rather
+      with nothing left to demote the segment fails immediately with both sizes named, rather
       than paying for rounds that cannot converge.
       A completion that runs <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> out under the ladder is
       treated the same way as <code>length</code> (ADR 0020): the piece is too big for the
       <i>time</i> budget, so it goes straight to the split rung — never retried at the same
       size (the split is the retry; transport failures, 429 and 5xx keep their four attempts),
       never escalated (a larger output cap cannot make a slow piece faster) — and at the split
-      floor it fails the source with the timeout named and the two knobs that would have helped.
+      floor it fails the segment with the timeout named and the two knobs that would have helped.
       The Stage 2 cross-chunk corrective turn climbs the same ladder as far as it goes (ADR 0032):
       a corrective answer that ends at the cap is resent <b>once</b> at the escalated budget, the
       truncated answer discarded; but there is no piece to split, so a resend cut off too — or a
       cut-off with no budget configured — is treated as a correction that left its issues
       standing: the output keeps its accepted Stage 1 answer and ADR 0022 rules on what stands (an
-      alias is removed with accounting, anything else fails the source). A truncated correction is
+      alias is removed with accounting, anything else fails the segment). A truncated correction is
       never imported.
       Policy refusals (<code>finish_reason: content_filter</code>) are terminal immediately —
       no corrective turn argues with a policy. Both controls are manifest compute inputs like

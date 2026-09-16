@@ -894,7 +894,7 @@ pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
 /// the segment held. Anything that is NOT an alias item (a schema
 /// domain/range violation on an association) is content, and keeps
 /// ADR 0001 §8's ruling: `Err` with that output's issues, the caller
-/// fails the source. Indices are removed highest-first within an
+/// fails the segment. Indices are removed highest-first within an
 /// output so each recorded path still names the alias the issue did.
 pub(super) fn prune_uncorrected_aliases(
     outputs: &mut [ChunkOutput],
