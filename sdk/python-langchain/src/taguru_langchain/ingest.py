@@ -3,7 +3,7 @@
 The LangChain twin of ``taguru extract``: a chat model decomposes each
 document into associations/aliases (and optional doc2query questions) under
 the protocol's ingest discipline, and the result is applied through
-``POST /import`` — one batch per source, retract-then-apply, so re-ingesting
+``POST /import`` as one retract-then-apply per source, so re-ingesting
 a document replaces its contribution instead of double-counting weights.
 
 Two improvements over the offline extractor, possible only against a live
@@ -107,9 +107,9 @@ MAX_ATTEMPTS_CEILING = 10
 class IngestOutcome:
     """What one document's ingest amounted to.
 
-    ``ndjson`` always carries the rendered batch for inspection (dry-run or
-    not). The ``created``/``retracted``/... fields pass through the server's
-    ImportOutcome when the batch was applied.
+    ``ndjson`` always carries the rendered source file for inspection
+    (dry-run or not). The ``created``/``retracted``/... fields pass through
+    the server's ImportOutcome when the source file was applied.
     """
 
     source: str
@@ -368,7 +368,7 @@ class TaguruIngester:
             mirroring taguru extract.
         client / async_client: Core-SDK clients; built from
             ``base_url``/``api_key`` (or env) when neither is given.
-        create_context: Stamp a create block on each batch so the ``context`` is
+        create_context: Stamp a create block on each source file so the ``context`` is
             created on first ingest (requires ``context_description``).
         source_key: Document metadata key holding the source id — REQUIRED on
             every document, no hashing fallback: the source id is the
@@ -405,7 +405,7 @@ class TaguruIngester:
             bounds, an in-range paragraph index, ...) — a schema only
             narrows what shape a well-behaved provider can return, it does
             not replace validation.
-        include_passage: Store the verbatim document as the batch's passage
+        include_passage: Store the verbatim document as the source file's passage
             (paragraph locators are stripped when off, matching extract).
         chunk_bytes: Prompt-input chunk cap; the stored passage is never
             chunked.
@@ -439,7 +439,7 @@ class TaguruIngester:
             keyed by its own content hash before the next chunk starts, a
             settings or content change invalidates the whole cache rather
             than risking a false reuse, and the checkpoint is cleared once
-            the document's batch has landed (kept if the document
+            the source file has landed (kept if the document
             ultimately fails, so the next attempt can resume).
         checkpoint_model_id: Explicit model identity folded into the
             checkpoint fingerprint. Required only when ``checkpoint_store``
@@ -800,7 +800,7 @@ class TaguruIngester:
         self, source: str, checkpoints: _DocumentCheckpoints | None = None
     ) -> None:
         """Best-effort: the checkpoint's whole purpose (resuming an
-        INCOMPLETE document) no longer applies once the batch has landed.
+        INCOMPLETE document) no longer applies once the source file has landed.
         A failure here is silently ignored — nothing correctness-critical
         depends on this file disappearing promptly. Skipped entirely when
         this run never held ``source``'s lock (``checkpoints.locked_out``)
@@ -840,7 +840,7 @@ class TaguruIngester:
         (``IngestOutcome.sections_dropped``/``locators_dropped``), never a
         hard failure. Silently dropped (not an error) when
         ``include_passage=False`` — a locator/section attaches to this
-        batch's own passage line, and import refuses the dangling
+        source's own passage line, and import refuses the dangling
         reference when there is none.
 
         ``should_stop`` (issue #211, a zero-argument callable or a

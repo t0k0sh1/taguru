@@ -2915,7 +2915,7 @@ mod tests {
         assert_eq!(body["code"], ErrorCode::Timeout.as_str());
         let message = body["error"].as_str().expect("error is a string");
         assert!(
-            message.contains("group restore exceeded its budget with 2 batch(es) durable"),
+            message.contains("group restore exceeded its budget with 2 source file(s) durable"),
             "{message}"
         );
         // The same machine-readable claim the batch loop's own timeout
@@ -3090,7 +3090,7 @@ mod tests {
             body["error"]
                 .as_str()
                 .expect("error is a string")
-                .contains("batch 2 of 2"),
+                .contains("source file 2 of 2"),
             "{body}"
         );
         assert_eq!(body["integrity"], "durable_prefix", "{body}");

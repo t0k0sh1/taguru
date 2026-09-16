@@ -102,7 +102,7 @@ pub(super) fn refusal_issue_lines(body: &Value, units: &[Unit]) -> Vec<String> {
 pub(super) fn never_sent_lines(queue: &VecDeque<Chunk>) -> Vec<String> {
     let mut lines = Vec::new();
     for (kind, what) in [
-        (UnitKind::Batch, "batch(es)"),
+        (UnitKind::Batch, "source(s)"),
         (UnitKind::Schema, "schema record(s)"),
         (UnitKind::Group, "group record(s)"),
     ] {
@@ -231,9 +231,9 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
 pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
     format!(
         "{label} alone is {size} byte(s), over the {budget}-byte chunk \
-         budget — splitting a batch's own record set client-side would break the \
+         budget — splitting a source's own record set client-side would break the \
          retract-then-apply contract's atomicity boundary, so this cannot be packed \
-         automatically; reduce what this source's batch carries (split the source \
+         automatically; reduce what this source file carries (split the source \
          upstream of import) — raising the server's TAGURU_MAX_BODY_BYTES alone will \
          not help, since this budget is fixed client-side regardless of the server's cap"
     )
@@ -250,10 +250,10 @@ pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) ->
 fn server_refused_single_unit_error(label: &str, size: usize) -> i32 {
     eprintln!(
         "taguru: import: {label} ({size} byte(s)) was refused by the server as too \
-         large, and cannot be split further — splitting a batch's own record set \
+         large, and cannot be split further — splitting a source's own record set \
          client-side would break the retract-then-apply contract's atomicity \
          boundary. Raise the server's TAGURU_MAX_BODY_BYTES, or reduce what this \
-         source's batch carries (split the source upstream of import)."
+         source file carries (split the source upstream of import)."
     );
     1
 }
@@ -289,7 +289,7 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
         .filter_map(|o| o["schema_violations"].as_u64())
         .sum();
     format!(
-        "{} batch(es){} ({retracted} association(s) retracted): +{associations} \
+        "{} source(s){} ({retracted} association(s) retracted): +{associations} \
          association(s), +{aliases} alias(es){}{}",
         outcomes.len(),
         match created {
@@ -397,7 +397,7 @@ pub(super) fn run_remote(
                 if ranges.len() != stream.batches.len() {
                     eprintln!(
                         "taguru: import: {}: internal error: split_batches sliced {} \
-                         range(s) for {} parsed batch(es) — refusing rather than risk \
+                         range(s) for {} parsed source(s) — refusing rather than risk \
                          silently dropping batches",
                         path.display(),
                         ranges.len(),
@@ -804,8 +804,8 @@ pub(super) fn run_remote(
                 } else {
                     eprintln!(
                         "taguru: import: {landed_chunks} chunk(s) already landed durably; \
-                         re-running the corrected stream is exact (each batch replaces its \
-                         own source)"
+                         re-running the corrected stream is exact (each source file replaces its \
+                         predecessor)"
                     );
                 }
                 if as_json {
@@ -834,7 +834,7 @@ pub(super) fn run_remote(
             None,
         );
     } else if dry_run {
-        let mut summary = format!("dry run: {batch_count} batch(es)");
+        let mut summary = format!("dry run: {batch_count} source(s)");
         if schema_count > 0 {
             summary.push_str(&format!(", {schema_count} schema record(s)"));
         }
@@ -844,11 +844,11 @@ pub(super) fn run_remote(
         summary.push_str(" valid, nothing applied");
         println!("{summary}");
         if refused_count > 0 {
-            println!("import: {refused_count} batch(es) refused (sensitive)");
+            println!("import: {refused_count} source(s) refused (sensitive)");
         }
     } else {
         println!(
-            "import: {batches_landed} batch(es) applied across {} context(s) in {total} \
+            "import: {batches_landed} source(s) applied across {} context(s) in {total} \
              chunk(s)",
             contexts.len()
         );
@@ -861,7 +861,7 @@ pub(super) fn run_remote(
             println!("import: {group_records_landed} of {group_count} group record(s) restored");
         }
         if refused_count > 0 {
-            println!("import: {refused_count} batch(es) refused (sensitive)");
+            println!("import: {refused_count} source(s) refused (sensitive)");
         }
     }
     if refused_count > 0 { 1 } else { 0 }

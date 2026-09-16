@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -212,7 +212,7 @@
         <code>_stale</code> / <code>_guarded</code> / <code>_miss</code>, <code>cue_cache_hit</code>.</li>
     </ul>
     <p class="note">
-      One producer sits outside those three event names: a batch import whose schema record
+      One producer sits outside those three event names: an import whose schema record
       cannot be applied warns with <code>taguru.reason=schema_load_failed</code> /
       <code>schema_write_failed</code> on its own <code>import schema record failed</code>
       event — the same stable-code discipline, a different event name.

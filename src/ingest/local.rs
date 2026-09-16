@@ -175,7 +175,7 @@ pub(super) fn run_local(
         for (path, name, record) in &groups {
             println!("{}: {}", path.display(), describe_group(name, record));
         }
-        let mut summary = format!("dry run: {} batch(es)", batches.len());
+        let mut summary = format!("dry run: {} source(s)", batches.len());
         if !schemas.is_empty() {
             summary.push_str(&format!(", {} schema record(s)", schemas.len()));
         }
@@ -187,7 +187,7 @@ pub(super) fn run_local(
         if refused.is_empty() {
             return 0;
         }
-        println!("import: {} batch(es) refused (sensitive)", refused.len());
+        println!("import: {} source(s) refused (sensitive)", refused.len());
         return 1;
     }
 
@@ -438,13 +438,13 @@ pub(super) fn run_local(
         );
     } else {
         println!(
-            "import: {} of {} batch(es) applied across {} context(s)",
+            "import: {} of {} source(s) applied across {} context(s)",
             batches.len() - failures,
             batches.len(),
             touched.len()
         );
         if refused_count > 0 {
-            println!("import: {refused_count} batch(es) refused (sensitive)");
+            println!("import: {refused_count} source(s) refused (sensitive)");
         }
         if !schemas.is_empty() {
             println!(

@@ -79,11 +79,11 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        stdout.contains("dry run: 1 source(s) valid, nothing applied"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        stdout.contains("import: 1 source(s) refused (sensitive)"),
         "{stdout}"
     );
     assert!(
@@ -109,11 +109,11 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("source 'clean.md'"), "{stdout}");
     assert!(
-        stdout.contains("import: 1 of 1 batch(es) applied across 1 context(s)"),
+        stdout.contains("import: 1 of 1 source(s) applied across 1 context(s)"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        stdout.contains("import: 1 source(s) refused (sensitive)"),
         "{stdout}"
     );
     assert!(
@@ -193,7 +193,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 2 of 2 batch(es) applied"),
+        stdout.contains("import: 2 of 2 source(s) applied"),
         "{stdout}"
     );
     assert!(
@@ -249,7 +249,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let (code, stdout, stderr) = run_import(&data_dir, &[schema.to_str().unwrap()]);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 1 of 1 batch(es) applied"),
+        stdout.contains("import: 1 of 1 source(s) applied"),
         "{stdout}"
     );
     assert!(
@@ -269,7 +269,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let (code, stdout, stderr) = run_import(&data_dir, &[group.to_str().unwrap()]);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 1 of 1 batch(es) applied"),
+        stdout.contains("import: 1 of 1 source(s) applied"),
         "{stdout}"
     );
     assert!(
@@ -294,7 +294,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let (code, stdout, stderr) = run_import(&data_dir, &[conflict.to_str().unwrap()]);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 1 of 2 batch(es) applied"),
+        stdout.contains("import: 1 of 2 source(s) applied"),
         "{stdout}"
     );
     assert!(stderr.contains("alias 'A'"), "{stderr}");
@@ -320,7 +320,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 1 of 1 batch(es) applied"),
+        stdout.contains("import: 1 of 1 source(s) applied"),
         "{stdout}"
     );
     assert!(stderr.contains("embedding refresh failed"), "{stderr}");
@@ -495,7 +495,7 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
         failed["error"]
             .as_str()
             .unwrap()
-            .contains("does not exist and the batch brought no create block"),
+            .contains("does not exist and the source file brought no create block"),
         "{report}"
     );
 
@@ -1445,7 +1445,7 @@ fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_sou
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
     let message = body["error"].as_str().unwrap();
-    assert!(message.contains("batch 2 of 2"), "{message}");
+    assert!(message.contains("source file 2 of 2"), "{message}");
     assert!(
         message.contains("landed durably"),
         "the note must credit the earlier batch as durable: {message}"

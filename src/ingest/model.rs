@@ -421,18 +421,18 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
     let mut stream = parse_stream(reader)?;
     if let Some((context, _)) = stream.schemas.first() {
         return Err(format!(
-            "schema record for context '{context}' in a file where exactly one batch was \
+            "schema record for context '{context}' in a file where exactly one source was \
              expected"
         ));
     }
     if let Some((name, _)) = stream.groups.first() {
         return Err(format!(
-            "group record '{name}' in a file where exactly one batch was expected"
+            "group record '{name}' in a file where exactly one source was expected"
         ));
     }
     if stream.batches.len() > 1 {
         return Err(format!(
-            "{} batches in one file where exactly one was expected",
+            "{} sources in one file where exactly one was expected",
             stream.batches.len()
         ));
     }
@@ -536,8 +536,8 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
             if let Some(earlier) = owners.get(&(batch.context.clone(), batch.source.clone())) {
                 return Err(format!(
                     "line {number}: source '{}' in context '{}' is already stated by \
-                     an earlier batch of this stream, at line {earlier} — one batch owns \
-                     one source's truth",
+                     an earlier source of this stream, at line {earlier} — a source's truth is \
+                     stated once, by one file",
                     batch.source, batch.context
                 ));
             }
@@ -568,7 +568,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
             match &mut current {
                 None => {
                     return Err(format!(
-                        "line {number}: not a batch header (no taguru_batch field) where \
+                        "line {number}: not a source file header (no taguru_batch field) where \
                          one was expected"
                     ));
                 }
@@ -588,7 +588,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         // restore; a stream of nothing is a mistake.
         None if batches.is_empty() && schemas.is_empty() && groups.is_empty() => {
             return Err(
-                "empty file: expected a batch header, schema record, or group record line"
+                "empty file: expected a source file header, schema record, or group record line"
                     .to_string(),
             );
         }
@@ -665,7 +665,7 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     if !batch.questions.is_empty() && batch.passage.is_none() {
         return Err(format!(
             "line {}: {} question line(s) but no passage line — questions attach to the \
-             passage of the batch headed at line {header}",
+             passage of the source headed at line {header}",
             batch.first_question_line.unwrap_or(header),
             batch.questions.len()
         ));
@@ -675,7 +675,7 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     if !batch.sections.is_empty() && batch.passage.is_none() {
         return Err(format!(
             "line {}: {} section line(s) but no passage line — sections attach to the \
-             passage of the batch headed at line {header}",
+             passage of the source headed at line {header}",
             batch.first_section_line.unwrap_or(header),
             batch.sections.len()
         ));
@@ -685,7 +685,7 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     if !batch.locators.is_empty() && batch.passage.is_none() {
         return Err(format!(
             "line {}: {} locator line(s) but no passage line — locators attach to the \
-             passage of the batch headed at line {header}",
+             passage of the source headed at line {header}",
             batch.first_locator_line.unwrap_or(header),
             batch.locators.len()
         ));
@@ -701,7 +701,7 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
         && let Some(paragraph) = batch.associations.iter().find_map(|op| op.paragraph)
     {
         return Err(format!(
-            "line {}: an association names paragraph {paragraph} but the batch headed at \
+            "line {}: an association names paragraph {paragraph} but the source headed at \
              line {header} has no passage line — a paragraph locator attaches to that passage",
             batch.first_paragraph_line.unwrap_or(header)
         ));
@@ -711,7 +711,7 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
 
 fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String> {
     let header: Header = serde_json::from_value(value)
-        .map_err(|error| format!("line {number}: not a batch header: {error}"))?;
+        .map_err(|error| format!("line {number}: not a source file header: {error}"))?;
     if header.taguru_batch != BATCH_VERSION {
         return Err(format!(
             "line {number}: taguru_batch {} is not a version this taguru reads (it reads \
@@ -769,7 +769,9 @@ fn parse_op(
     number: usize,
 ) -> Result<(), String> {
     let Some(object) = value.as_object() else {
-        return Err(format!("line {number}: a batch line must be a JSON object"));
+        return Err(format!(
+            "line {number}: a source file line must be a JSON object"
+        ));
     };
     if object.contains_key("subject") {
         let op: AssociationLine = serde_json::from_value(value)
@@ -839,7 +841,7 @@ fn parse_op(
         }
         if batch.passage.replace(op.passage).is_some() {
             return Err(format!(
-                "line {number}: a second passage line — one batch file carries at most \
+                "line {number}: a second passage line — one source file carries at most \
                  one passage (the header source's original text)"
             ));
         }

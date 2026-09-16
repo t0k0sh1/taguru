@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -126,26 +126,26 @@
         tags, and only its <em>own</em> share of every edge's weight — with no LLM
         anywhere in the path. Source ids survive, so promoted citations still name the
         session; per-source retract-then-apply makes re-promotion idempotent; the
-        destination must already exist and its own schema judges the incoming batches;
+        destination must already exist and its own schema judges the incoming sources;
         <code>sources</code> shares the API's list ceiling (1,000 ids per call —
         <code>over_limit</code> past it; split a bigger promotion);
         the landing-zone audit rides back in the response (<code>audit: false</code>
-        opts out), and a dry run previews the transfer batches only, with nothing
+        opts out), and a dry run previews the sources to transfer only, with nothing
         written and no audit. What stays yours is exactly the judgment:
         which sources (step 1's review), the audit's candidates (step 5's rubric),
         and retirement (step 6). Steps 3–4 below are the <b>text path</b>, needed only
         when the keepers exist as prose that still wants extraction.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
-        passages (or hand-write the batch), targeting the <b>permanent</b> <code>context</code> — keeping
+        passages (or hand-write the source file), targeting the <b>permanent</b> <code>context</code> — keeping
         the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s:
         <code>--source-id</code>, <code>--date</code>, and <code>--tag</code> bake all three
-        conventions into the emitted batch directly (ADR 0017), so no hand-editing of the
+        conventions into the emitted source file directly (ADR 0017), so no hand-editing of the
         generated file remains. Resolve spellings against the permanent <code>context</code> rather than
         forking its vocabulary: export it (<code>taguru export --out DIR</code>) and hand the
         export to <code>--vocabulary</code> (ADR 0015), which steers the extraction toward
         the <code>context</code>'s existing spellings and admits them through validation — the manual
         <code>resolve</code>/<code>resolve_label</code> pass remains for hand-written
-        batches. <code>--coverage</code> (ADR 0016) reports what the extraction left behind,
+        source files. <code>--coverage</code> (ADR 0016) reports what the extraction left behind,
         sentence by sentence — the mechanical floor under the review this step owes.</li>
       <li><b>Import</b> via <code>POST /import</code> / <code>taguru import</code> —
         retract-then-apply per source makes re-promoting the same session idempotent.</li>

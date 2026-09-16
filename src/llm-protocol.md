@@ -173,7 +173,7 @@ answers back into prose are your job.
    store still fails, or vice versa. When a single all-or-nothing
    write across facts, aliases, and passage for one source matters,
    use `POST /import`/`taguru import` instead (retract-then-apply,
-   whole batch or nothing).
+   whole source or nothing).
 3. Register originals: `POST /contexts/{name}/sources` (source id →
    passage). Store the segment's full text as-is: the server splits it
    into paragraphs internally (blank-line boundaries) and searches at
@@ -324,7 +324,7 @@ Source code takes the same discipline; only the naming changes.
 | PATCH | `/groups/{name}` | `{description?, add_contexts?, remove_contexts?, add_groups?, remove_groups?}` → the updated row (deltas, not a replacement list; removals apply first; added members must exist, removing a non-member is a no-op; the result holds at most 1000 member contexts and 1000 child groups — `over_limit` past that; split into nested child groups) |
 | DELETE | `/groups/{name}` | delete the bundling only — member contexts and child groups are untouched (deleting a context or a group also drops it from every group) |
 | POST | `/groups/{name}/rename` | `{to}` → rename the bundling (admin): the group's file moves to `to` and every OTHER group naming `name` as a child is rewritten to match, member contexts untouched; refused when `to` already exists. Renaming touches every member's grant — nested included — so a context-scoped key needs them all, exactly like DELETE |
-| GET | `/groups/{name}/export` | the group as one import-stream record (a `group` JSON Lines line, not the JSON envelope) — `POST /import` (or `taguru import`) restores it as a create-or-replace of the WHOLE record; batches in the same stream apply first, so a group and its member contexts can travel together in any order |
+| GET | `/groups/{name}/export` | the group as one import-stream record (a `group` JSON Lines line, not the JSON envelope) — `POST /import` (or `taguru import`) restores it as a create-or-replace of the WHOLE record; sources in the same stream apply first, so a group and its member contexts can travel together in any order |
 | POST | `/contexts/{name}/associations` | `[{subject,label,object,weight,source?,paragraph?}]` → applied count (`paragraph` locates the fact within `source` and is ignored without one) |
 | POST | `/contexts/{name}/recall` | `{cue, limit?, after?, since?, until?}` → `{total, matches, plan}` (`plan.contexts` = the contexts actually searched — trivially `[name]` here; the cross variants are where it earns its place). `since`/`until` (epoch seconds, half-open, over each source's `date ?? stored_at`) window the graph by assertion time on all four single-context graph lanes — only facts an in-window source attests, weights/citations from those attributions alone; refused on the cross variants |
 | POST | `/recall` | `{contexts?:[name], groups?:[group], cue, limit?, after?}` → `{total, matches, plan}` — recall across several contexts at once (full names, and/or groups: each searches every context it reaches, nested children included, overlaps deduped; every match tagged with its `context`; past the limit the strongest \|weight\| survives, one scale across contexts; `plan.contexts` = the RESOLVED target list in effective order — groups expanded, your key's grants applied — so a target that came back empty is still visibly distinct from one your grant dropped) |
@@ -361,8 +361,8 @@ Source code takes the same discipline; only the naming changes.
 | GET/PUT | `/contexts/{name}/schema` | GET → the installed schema document `{schema:1, mode, closed_labels, types, relations}` / 404 `no_schema` (distinct from `no_context`) when none is installed; PUT installs (or replaces) it, answering the document as installed — refused (400) for a document whose `relations` declare the reserved `schema:type` label, or when an already-persisted label alias resolves to it (rename the alias first). Installing changes what `strict` refuses from this point on; dry-run with `schema/validate` first |
 | POST | `/contexts/{name}/schema/audit` | `{limit?, after?}` (body optional) → `{total, violations:[{association, issues}], untyped_concepts:{total, names}, undeclared_types:{total, names}, unknown_labels:{total, names}, reserved_alias_conflicts:{total, aliases}}` — judges every LIVE association against the installed document, the pre-existing violations `strict` can never surface on its own; candidates for review, never auto-fixed; only `violations` pages (`total` constant across pages, same cursor as recall/query); 404 `no_schema` without an installed document |
 | POST | `/contexts/{name}/schema/validate` | `{document, limit?, after?}` → the same audit shape over the PROPOSED document, validated and evaluated without ever being persisted — the pre-flight before a `strict` flip; works identically with or without an installed schema |
-| GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |
-| POST | `/contexts/{name}/promote` | `{into, sources, audit?=true}`, `?dry_run=true` to preview → `{batches: [...], aliases_dropped, audit?, audit_skipped?}` graph-path memory promotion (ADR 0018, docs/promotion.html): move the named source ids from this (scratch) context into the established context `into` WITHOUT re-extraction — the export/import round trip in one call. Each source moves whole (passage, `date`, tags, only its own share of every edge's weight; aliases ride exactly when their canonical is live in the promoted slice, `aliases_dropped` counts the rest), source ids survive (promoted citations still name the session), and applying is per-source retract-then-apply — re-promoting is idempotent. `into` must exist (never created here; write grant checked like `/import`'s body contexts) and its own schema judges the incoming batches; a named source missing from the scratch refuses the WHOLE request path-addressed, `nothing_written`; over 1,000 `sources` refuses `over_limit` before any per-id validation, like every list-shaped input. After a real apply, `audit` carries `consolidation/audit`'s full default report on `into` (all three checks) — candidates to judge, never applied; `audit_skipped` names why it could not run (the batches are durable by then). The dry run previews the same `batches` shape, writes nothing, audits nothing. Retiring the promoted scratch stays an explicit `sources/retract` |
+| GET | `/contexts/{name}/export` | the context as an import source stream (JSON Lines body, not the JSON envelope) — one source file per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`group` records ride the same stream, restore after every source as whole-record replaces, and answer under `groups: [...]`) |
+| POST | `/contexts/{name}/promote` | `{into, sources, audit?=true}`, `?dry_run=true` to preview → `{batches: [...], aliases_dropped, audit?, audit_skipped?}` graph-path memory promotion (ADR 0018, docs/promotion.html): move the named source ids from this (scratch) context into the established context `into` WITHOUT re-extraction — the export/import round trip in one call. Each source moves whole (passage, `date`, tags, only its own share of every edge's weight; aliases ride exactly when their canonical is live in the promoted slice, `aliases_dropped` counts the rest), source ids survive (promoted citations still name the session), and applying is per-source retract-then-apply — re-promoting is idempotent. `into` must exist (never created here; write grant checked like `/import`'s body contexts) and its own schema judges the incoming sources; a named source missing from the scratch refuses the WHOLE request path-addressed, `nothing_written`; over 1,000 `sources` refuses `over_limit` before any per-id validation, like every list-shaped input. After a real apply, `audit` carries `consolidation/audit`'s full default report on `into` (all three checks) — candidates to judge, never applied; `audit_skipped` names why it could not run (the sources are durable by then). The dry run previews the same `batches` shape, writes nothing, audits nothing. Retiring the promoted scratch stays an explicit `sources/retract` |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records, and rewrite the passage log without retracted sources' text (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped, passages_compacted, image_persisted}` — `image_persisted: false` means the rebuild itself succeeded (the numbers above are real) but the smaller image has not yet reached disk (e.g. a full disk); the next flush tick retries it |
 | POST | `/flush` | force every context's unflushed state to disk now, ahead of the periodic flusher → the flushed context names; admin, server-wide (refused for a context-scoped key — the answer names every flushed context, grant or no grant) |
 | POST | `/mcp` | the MCP Streamable HTTP transport, stateless profile: each POSTed JSON-RPC message answered as plain `application/json` (no SSE stream, no session id — the spec's stateless profile). Tool calls dispatch in process onto the routes above under the outer request's own auth, scope, deadline, and body cap — one client request, one budget, one log line; `initialize` hands out the same manual `GET /protocol` serves |
@@ -471,10 +471,10 @@ above; `path` always disambiguates (`.weight` for the numeric case,
 describe the mismatch in the same words a human reads in `error`.
 `integrity` says what a rejection actually left behind:
 `"nothing_written"` (the whole call, or the whole rejected
-`import` batch, wrote nothing) or `"durable_prefix"` (a multi-batch
-`import` stream where earlier batches already landed — `durable_batches`
-names exactly how many; never implies any part of the REJECTED batch
-itself landed, since every batch is whole-or-none). `retryable_after_correction: true` marks a
+`import` stream, wrote nothing) or `"durable_prefix"` (a multi-source
+`import` stream where earlier sources already landed — `durable_batches`
+names exactly how many; never implies any part of the REJECTED source
+itself landed, since every source is whole-or-none). `retryable_after_correction: true` marks a
 rejection a corrected, COMPLETE resend can resolve (a validation issue,
 a batch over its cap, a predicted alias conflict) — absent for a
 rejection resending the same content cannot fix (auth, quota,
@@ -484,7 +484,7 @@ again, parsed, as `structuredContent` — read either, but branch on
 `code`/`kind`, never on wording. The correction discipline for all
 three tools: preserve every association/alias/question/passage from
 the attempted write, correct only the listed paths, resend the
-COMPLETE source write or batch (never a partial resubmission of just
+COMPLETE write for that source (never a partial resubmission of just
 the fixed items), add no fact that was not already there, and if
 correction still fails, leave the source unmodified and report the
 failure rather than retrying blindly. The MCP tool-call layer's own
@@ -499,10 +499,10 @@ responsibility.
 
 **The one success-envelope exception:** `import` against a context
 whose schema mode is `warn` (ADR 0009 §7.1) answers `200` with the
-batch applied, but the same `issues` array rides the success envelope
+source applied, but the same `issues` array rides the success envelope
 alongside `result` — `domain`/`range` violations this write raised,
 identical `Issue` values to what a `strict` context would have refused
-with. `warn` never refuses a write; it reports. Each affected batch's
+with. `warn` never refuses a write; it reports. Each affected source's
 own `ImportOutcome.schema_violations` carries the true count, surviving
 `issues`' own 20-item cap. `off` mode and a schema-free context both
 omit `issues` from a success exactly as before — this exception fires
@@ -516,18 +516,18 @@ only under `warn`.
   cap (further knowledge goes to a new context), or it reached a
   per-context storage quota the operator declared
   (`TAGURU_CONTEXT_QUOTAS`) — the message says which. One scope note:
-  a multi-batch `/import` that hits 507 partway is a resumable
-  prefix, not a no-op — its message reports the batches before the
-  stop as landed durably, and a batch refused mid-apply may already
+  a multi-source `/import` that hits 507 partway is a resumable
+  prefix, not a no-op — its message reports the sources before the
+  stop as landed durably, and a source refused mid-apply may already
   have retracted the source it was replacing; re-sending the stream
-  is exact either way (each batch replaces its own source). At a
+  is exact either way (each source file replaces its predecessor). At a
   quota, retractions, alias removals, `DELETE`, and compaction still
   work: shrink the context (or have the operator raise its quota)
   and retry; do not blindly re-send the refused write. "Shrink" means
   those explicit operations — a replacement that carries new content
   counts as growth even when it would net smaller, because its true
   size is only knowable after it applies. To slim a source at the
-  ceiling: retract it first (over `/import`, a header-only batch —
+  ceiling: retract it first (over `/import`, a header-only source file —
   just `taguru_batch`/`context`/`source` — is exactly that
   retraction), then re-send the smaller version.
 - `501` `/embeddings/refresh` without a provider configured
@@ -636,8 +636,8 @@ only under `warn`.
   and never on an absent or unreadable `/version` (a server predating
   this endpoint is treated as speaking `http_contract: 1`, not refused
   outright).
-- The batch format (`taguru_batch: 1`) and the image format are
-  versioned independently of the API: old batch files stay readable,
+- The source file format (`taguru_batch: 1`) and the image format are
+  versioned independently of the API: old source files stay readable,
   and images migrate forward on load. Rolling a server BINARY back
   past an image-format bump needs the data rolled back with it — the
   release notes flag format bumps.

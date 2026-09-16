@@ -98,7 +98,7 @@ fn the_first_line_must_be_a_header_of_a_readable_version() {
     let error =
         parse("{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}\n")
             .unwrap_err();
-    assert!(error.contains("not a batch header"), "{error}");
+    assert!(error.contains("not a source file header"), "{error}");
 
     let error =
         parse("{\"taguru_batch\": 2, \"context\": \"c\", \"source\": \"s\"}\n").unwrap_err();
@@ -149,7 +149,7 @@ fn a_stream_restating_one_source_is_refused() {
     )))
     .unwrap_err();
     assert!(
-        error.contains("line 3") && error.contains("one batch owns one source's truth"),
+        error.contains("line 3") && error.contains("a source's truth is stated once, by one file"),
         "{error}"
     );
 }
@@ -292,7 +292,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
     )))
     .unwrap_err();
     assert!(
-        error.contains("line 3") && error.contains("not a batch header"),
+        error.contains("line 3") && error.contains("not a source file header"),
         "{error}"
     );
 
@@ -353,7 +353,7 @@ fn parse_batch_refuses_group_records() {
          {\"group\": 1, \"name\": \"kura\"}\n",
     )
     .unwrap_err();
-    assert!(error.contains("exactly one batch was expected"), "{error}");
+    assert!(error.contains("exactly one source was expected"), "{error}");
 }
 
 const SCHEMA_LINE: &str = r#"{"schema": 1, "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
@@ -389,7 +389,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
     )))
     .unwrap_err();
     assert!(
-        error.contains("line 3") && error.contains("not a batch header"),
+        error.contains("line 3") && error.contains("not a source file header"),
         "{error}"
     );
 
@@ -479,7 +479,7 @@ fn parse_batch_refuses_schema_records() {
     let error = parse(&format!("{HEADER}\n{SCHEMA_LINE}\n")).unwrap_err();
     assert!(
         error.contains("schema record for context 'sake'")
-            && error.contains("exactly one batch was expected"),
+            && error.contains("exactly one source was expected"),
         "{error}"
     );
 }
@@ -1696,7 +1696,7 @@ fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
     assert_eq!(
         question,
         "line 2: 2 question line(s) but no passage line — questions attach to the passage \
-         of the batch headed at line 1"
+         of the source headed at line 1"
     );
     let section = parse(&format!(
         "{HEADER}\n{{\"subject\": \"a\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n\
@@ -1706,7 +1706,7 @@ fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
     assert_eq!(
         section,
         "line 3: 1 section line(s) but no passage line — sections attach to the passage of \
-         the batch headed at line 1"
+         the source headed at line 1"
     );
     let locator = parse(&format!(
         "{HEADER}\n{{\"paragraph\": 0, \"locator\": {{\"kind\": \"page\", \"value\": \"3\"}}}}\n"
@@ -1715,7 +1715,7 @@ fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
     assert_eq!(
         locator,
         "line 2: 1 locator line(s) but no passage line — locators attach to the passage of \
-         the batch headed at line 1"
+         the source headed at line 1"
     );
     let paragraph = parse(&format!(
         "{HEADER}\n{{\"subject\": \"a\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n\
@@ -1725,7 +1725,7 @@ fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
     .unwrap_err();
     assert_eq!(
         paragraph,
-        "line 3: an association names paragraph 2 but the batch headed at line 1 has no \
+        "line 3: an association names paragraph 2 but the source headed at line 1 has no \
          passage line — a paragraph locator attaches to that passage"
     );
 }
@@ -1742,7 +1742,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
     assert!(
         batches.starts_with(
             "line 3: source 'doc-1' in context 'sake' is already stated by an \
-                             earlier batch of this stream, at line 1"
+                             earlier source of this stream, at line 1"
         ),
         "{batches}"
     );
@@ -1784,7 +1784,7 @@ fn a_schema_rejection_lists_every_issue_offline() {
     };
     let text = rejection.text();
     assert!(text.starts_with(&format!(
-        "this batch's associations refused {count} issue(s):"
+        "this source file's associations refused {count} issue(s):"
     )));
     for index in 0..count {
         assert!(
@@ -1800,7 +1800,7 @@ fn a_schema_rejection_lists_every_issue_offline() {
             reserved: true,
         }
         .what(),
-        "this batch's label aliases"
+        "this source file's label aliases"
     );
 }
 
@@ -1877,7 +1877,7 @@ fn never_sent_lines_count_each_kind_across_the_queue_and_name_the_first() {
     assert_eq!(
         never_sent_lines(&queue),
         vec![
-            "3 batch(es) after this chunk were never sent, from a.jsonl: context 'a' source 'c.md'"
+            "3 source(s) after this chunk were never sent, from a.jsonl: context 'a' source 'c.md'"
                 .to_string(),
             "1 group record(s) after this chunk were never sent, from b.jsonl: group 'g'"
                 .to_string(),
@@ -2019,7 +2019,7 @@ fn legacy_taguru_prefixed_schema_and_group_records_still_parse() {
     )))
     .unwrap_err();
     assert!(
-        error.contains("line 3") && error.contains("not a batch header"),
+        error.contains("line 3") && error.contains("not a source file header"),
         "{error}"
     );
 

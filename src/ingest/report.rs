@@ -16,7 +16,7 @@ pub(super) fn report(batch: &Batch, applied: &Applied) -> String {
         applied.aliases,
         match (applied.passage_stored, applied.passage_dropped) {
             (true, _) => ", passage stored",
-            (false, true) => ", previous passage dropped (batch carried none)",
+            (false, true) => ", previous passage dropped (the source file carried none)",
             (false, false) => "",
         },
         match (applied.questions_stored, applied.questions_dropped) {

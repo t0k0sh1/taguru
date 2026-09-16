@@ -159,7 +159,7 @@ def normalize_import_outcomes(
     Current servers always answer ``{batches: [...], groups: [...],
     schemas: [...]}`` (``groups``/``schemas`` omitted entirely when the
     stream carried none); servers predating that change answered a bare
-    outcome for a single batch — both parse here, so callers never branch
+    outcome for a single source — both parse here, so callers never branch
     on response shape. ``issues``/``schema_violations`` are the response
     envelope's warn-mode carrier, passed through by ``import_batches``.
     """

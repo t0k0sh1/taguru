@@ -4,7 +4,7 @@
 module: the paragraph split mirrors src/paragraph.rs, the prompt mirrors
 `system_prompt()` (PROMPT_VERSION is kept in sync deliberately), and
 merge/render mirror `merge()`/`render_batch()` so both producers emit the
-same batch contract. Revising the prompt here without revising extract.rs
+same source file contract. Revising the prompt here without revising extract.rs
 (or vice versa) is drift — treat the two as one artifact.
 
 One deliberate divergence (issue #736): the port mirrors extract's
@@ -1584,7 +1584,7 @@ def merge(outputs: list[ModelOutput], questions_cap: int, paragraph_count: int) 
     return extraction
 
 
-# -- batch rendering (mirrors extract.rs render_batch) ------------------------------
+# -- source file rendering (mirrors extract.rs render_batch) -----------------------
 
 
 def _line(obj: dict[str, Any]) -> str:
@@ -1605,7 +1605,7 @@ def render_batch(
     ``POST /import`` applies.
 
     ``sections``/``locators`` (ADR 0007 §7, issue #347) attach to THIS
-    batch's passage line exactly like a question or an association's
+    source's passage line exactly like a question or an association's
     ``paragraph`` pointer does: with the passage stripped
     (``passage is None``) there is nothing to locate into, and import
     refuses the dangling reference (src/ingest.rs:1518-1524) — so both are
@@ -1631,7 +1631,7 @@ def render_batch(
             "object": fact.object,
             "weight": fact.weight,
         }
-        # A paragraph locator attaches to THIS batch's passage line; with the
+        # A paragraph locator attaches to THIS source's passage line; with the
         # passage stripped there is nothing to locate into, and import refuses
         # the dangling reference.
         if passage is not None and fact.paragraph is not None:
@@ -1650,7 +1650,7 @@ def reparse_batch(ndjson: str) -> None:
     leaking in). Raises ``ValueError`` on the first bad line."""
     for number, line in enumerate(ndjson.splitlines(), start=1):
         if not line.strip():
-            raise ValueError(f"line {number}: blank line inside a batch")
+            raise ValueError(f"line {number}: blank line inside a source file")
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError as error:

@@ -592,7 +592,7 @@ export class RunRecorder {
    *
    * `ImportStarted` is the only variant this cares about: it fires exactly
    * once per document, exactly after every chunk has been extracted and
-   * the batch rendered, immediately before the network `importBatches`
+   * the source file rendered, immediately before the network `importBatches`
    * call (ingest.ts's `ingestText`) — precisely the honest moment
    * `extracted` needs, and the only one available without synthesizing a
    * timestamp (ADR 0007 §11.1 rejects that as "the quietly degraded output

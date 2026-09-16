@@ -235,11 +235,11 @@ proxy, floor calibration, and the access-gate diagnosis commands.
 ## Loading knowledge in bulk
 
 Initial loads and migrations skip HTTP entirely: `taguru import
-FILE|DIR...` applies JSONL batch files straight to `TAGURU_DATA_DIR`
-through the same WAL-staged write path the server uses. One batch
-states one **source**'s complete truth — import retracts the source,
-then applies the batch — so re-importing is idempotent and a revised
-file replaces cleanly instead of double-counting weights.
+FILE|DIR...` applies JSONL source files straight to `TAGURU_DATA_DIR`
+through the same WAL-staged write path the server uses. One source
+file states one **source**'s complete truth — import retracts the
+source, then applies its file — so re-importing is idempotent and a
+revised file replaces cleanly instead of double-counting weights.
 
 ```jsonl
 {"taguru_batch": 1, "context": "sake", "source": "docs/aomine.md", "create": {"description": "酒蔵の知識"}}
@@ -249,13 +249,13 @@ file replaces cleanly instead of double-counting weights.
 ```
 
 A **running** server takes the same contract at `POST /import` (one
-request = one batch file or stream, same validation, same
+request = one source file or source stream, same validation, same
 replace-a-source semantics), so live systems bulk-load without a
 downtime window. `taguru import --url URL FILE|DIR...` is the
 shortcut ([ADR 0002](adr/0002-remote-cli-access.md) §9): the input is
-split into complete batches under the server's body cap automatically
-(never mid-batch), a 413 halves the offending chunk and resends, and
-`--dry-run` previews every chunk first:
+split into chunks of whole source files under the server's body cap
+automatically (never mid-source), a 413 halves the offending chunk
+and resends, and `--dry-run` previews every chunk first:
 
 ```sh
 taguru import --url "$TAGURU_URL" backups/
@@ -269,17 +269,17 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
   --data-binary @docs-aomine.jsonl   # --data-binary: -d strips the newlines
 ```
 
-Where do batch files come from? Any pipeline that speaks the format —
+Where do source files come from? Any pipeline that speaks the format —
 or the packaged producer: `taguru extract` reads `.md`/`.txt`
-segments, has any OpenAI-compatible chat model decompose each into
-associations under the /protocol discipline, and writes one batch
-file per segment, ready for either import entrance:
+segments and has any OpenAI-compatible chat model decompose each into
+associations under the /protocol discipline. Each becomes one source
+file, ready for either import entrance:
 
 ```sh
 TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
 TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
-taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
-taguru import batches/
+taguru extract --context sake --description "酒蔵の知識" --out sources/ docs/
+taguru import sources/
 ```
 
 The server never holds model credentials; `TAGURU_EXTRACT_*` lives in
@@ -289,7 +289,7 @@ the offline producer's environment only, and local or bridged models
 `taguru extract` reads `.md`/`.txt` only. For PDF, HTML, DOCX, PPTX, or
 objects in cloud storage (S3-compatible, GCS, Azure Blob), the Python SDK's
 `taguru_langchain.ingest_connectors` module is the producer instead —
-same normalized document shape, same batch contract, and its own
+same normalized document shape, same source-file contract, and its own
 checkpoint discipline (no separate manifest file — see
 [ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html#checkpoints)),
 plus its own observability (run report, event log):
@@ -303,7 +303,7 @@ report = sync_references(["manuals/", "https://example.com/guide"],
 
 Full contracts:
 [`context` schema](https://t0k0sh1.github.io/taguru/schema.html) ·
-[batch import](https://t0k0sh1.github.io/taguru/import.html) ·
+[import](https://t0k0sh1.github.io/taguru/import.html) ·
 [segment extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
 [ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html) ·
 [long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html)
@@ -312,7 +312,7 @@ Full contracts:
 A special case of bulk loading is your own repository:
 [`taguru-code`](https://t0k0sh1.github.io/taguru/taguru-code.html) (a
 third binary in the same crate) turns a git work tree into a code map
-— `sync`/`watch` ingest it through the same batch contract into
+— `sync`/`watch` ingest it through the same source-file contract into
 `$REPO/.taguru`, and `find`/`tree` answer "where is this symbol, what
 does this file contain" in milliseconds with no server running, with
 a built-in accuracy gate (`evalset`/`eval`, exit 3 on regression).
@@ -447,8 +447,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   equivalence is pinned by an integration test, cursors included
   (`after` anchors on the last match itself, so it forwards to every
   shard verbatim). `groups` exist on every shard with members projected
-  by the map; `/import` splits its batch stream by `context` and
-  dry-run-preflights batch chunks and projected `group` records alike,
+  by the map; `/import` splits its source stream by `context` and
+  dry-run-preflights chunks of whole source files and projected
+  `group` records alike,
   so a stream one instance would refuse with nothing applied is
   refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
   behind one LB. Auth passes through: shards enforce keys and scopes
@@ -532,7 +533,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   namespace), and the general access log (every request against the
   `context`, by key and timestamp) — together they say precisely when
   the alias existed. Cross-reference that window against your own
-  ingestion record (or the `source retracted`/`import batch applied`
+  ingestion record (or the `source retracted`/`import source applied`
   audit lines, if the affected sources were re-imported rather than
   freshly asserted) to find which sources landed under the bad
   spelling, then retract each (`POST /contexts/{name}/sources/

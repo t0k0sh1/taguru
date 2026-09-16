@@ -278,7 +278,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
-name) and writes one batch file per document into --out, ready for
+name) and writes one source file per input into --out, ready for
 `taguru import` or POST /import. The model is any OpenAI-compatible
 chat endpoint:
 
@@ -323,7 +323,7 @@ chat endpoint:
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
-  --no-passage        omit the document text from the batch (facts only)
+  --no-passage        omit the passage from the source file (facts only)
   --questions N       doc2query: also propose up to N search questions per
                       paragraph (embedded beside it by servers running
                       TAGURU_EMBED_PASSAGES); rides the same model calls
@@ -405,7 +405,7 @@ chat endpoint:
                       The file's SHA-256 joins the redaction version, so
                       editing it re-extracts. Needs --redact
   --vocabulary PATH   steer spellings toward a target context's existing
-                      vocabulary: PATH is an exported batch stream (or a
+                      vocabulary: PATH is an exported source stream (or a
                       directory of them, e.g. taguru export --out DIR);
                       its concept names and relation labels are offered
                       to the model as preferred spellings, and a
@@ -415,9 +415,9 @@ chat endpoint:
                       document's own names (the --candidates segmentation)
                       yet is covered by no extracted association — one
                       stderr line per sentence, a count on the report
-                      line. Report-only: the batch is never changed, no
+                      line. Report-only: the source file is never changed, no
                       extra model call is made, and a manifest-skipped
-                      document is judged from its already-written batch.
+                      segment is judged from its already-written file.
                       Off by default
   --diagnostics-out FILE  write a JSONL sidecar of tagged records (`kind`):
                       one \"chunk\" record per chunk with its provenance
@@ -436,22 +436,22 @@ chat endpoint:
                       appended across runs. Default (unset): no sidecar,
                       stdout/stderr unchanged. Ignored under --dry-run, which
                       calls nothing to record.
-  --source-id ID      write ID as the batch header's source instead of the
+  --source-id ID      write ID as the header line's source instead of the
                       document path — the promotion runbook's
                       session:{agent}:{id} convention (docs/promotion.html).
                       With several documents, each gets ID/{file stem}; two
                       documents landing on one source id is an error (import
                       retracts-then-applies per source id). Changing it
-                      rewrites the batch but reuses cached chunk answers
-  --date WHEN         the session's own date, written on the batch's passage
+                      rewrites the source file but reuses cached chunk answers
+  --date WHEN         the session's own date, written on the source file's passage
                       line (the assertion time windowed reads and the
                       staleness audit run on): YYYY-MM-DD (UTC midnight) or
                       positive epoch seconds. Needs the passage
-  --tag TAG           tag the batch's source (repeatable, deduplicated) —
+  --tag TAG           tag the source (repeatable, deduplicated) —
                       written on the passage line; how a later session finds
                       its trail via passage search's tags filter. Needs the
                       passage
-  --context NAME      the context every batch file targets
+  --context NAME      the context every source file targets
   --description TEXT  add a create block (used only if the context is absent)
   --schema FILE       the target context's schema document (same shape as
                       {stem}.schema.json / GET /contexts/{name}/schema):
@@ -1314,7 +1314,7 @@ pub fn run(args: &[String]) -> i32 {
                 if let Err(error) = run.manifest.save(&manifest_path) {
                     eprintln!(
                         "taguru: extract: {source}: saving the manifest: {error} — \
-                         the batch is written; the next run re-extracts it"
+                         the source file is written; the next run re-extracts it"
                     );
                 }
             }
@@ -1335,7 +1335,7 @@ pub fn run(args: &[String]) -> i32 {
         && let Err(error) = run.manifest.save(&manifest_path)
     {
         eprintln!(
-            "taguru: extract: saving the manifest: {error} — the batches are written; \
+            "taguru: extract: saving the manifest: {error} — the source files are written; \
              the next run re-extracts"
         );
     }

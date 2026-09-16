@@ -400,7 +400,7 @@ export function deriveModelIdentity(llm: BaseChatModel): string | null {
 }
 
 /**
- * The same compatibility inputs a batch's manifest entry would check,
+ * The same compatibility inputs a source file's manifest entry would check,
  * minus anything that shapes only how many corrective turns a chunk takes
  * rather than the validity of an accepted output. Any field mismatch
  * (content edited, model/prompt/questions/fact_budget/structured_output/
@@ -572,8 +572,9 @@ export class DocumentCheckpoints {
   /**
    * Set by the ingester when another run holds this source's advisory
    * lock (`CheckpointLockedError`): every later save is skipped for this
-   * document — one warning, not one per chunk — and the batch-landed
-   * cleanup leaves the OTHER run's on-disk checkpoint alone.
+   * document — one warning, not one per chunk — and the cleanup that
+   * runs once the source file lands leaves the OTHER run's on-disk
+   * checkpoint alone.
    */
   lockedOut = false;
 

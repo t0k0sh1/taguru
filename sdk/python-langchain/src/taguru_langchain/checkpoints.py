@@ -337,7 +337,7 @@ def _derive_model_identity(llm: BaseChatModel) -> str | None:
 
 @dataclass(frozen=True)
 class _CheckpointFingerprint:
-    """The same compatibility inputs a batch's manifest entry would check,
+    """The same compatibility inputs a source file's manifest entry would check,
     minus anything that shapes only how many corrective turns a chunk
     takes rather than the validity of an accepted output. Any field
     mismatch (content edited, model/prompt/questions/fact_budget/

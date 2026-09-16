@@ -98,7 +98,7 @@ usage: taguru benchmark search --eval FILE [--url URL] [--config FILE]
                       RESULTS_DIR
 
 Builds one per-model corpus (a context named PREFIX::MODEL_ID) from a
-finished `taguru benchmark extract` results directory's batch files,
+finished `taguru benchmark extract` results directory's source files,
 runs eval.jsonl's shared question set against each corpus over
 POST /contexts/{name}/sources/search (ADR 0003 §11), and writes
 RESULTS_DIR/retrieval.json: per-case/per-model hit counts, lane
@@ -566,7 +566,7 @@ fn build_corpus(
         return corpus_block(
             context,
             "skipped",
-            Some(format!("no batch files in {}", cell_dir.display())),
+            Some(format!("no source files in {}", cell_dir.display())),
         );
     }
 
@@ -681,7 +681,7 @@ fn rewrite_and_import(api: &Api, path: &Path, context: &str, marker: &str) -> Re
 fn rewrite_batch_header(text: &str, context: &str, marker: &str) -> Result<String, String> {
     let mut lines = text.lines();
     let Some(header_line) = lines.next() else {
-        return Err("empty batch file".to_string());
+        return Err("empty source file".to_string());
     };
     let mut header: Value = serde_json::from_str(header_line)
         .map_err(|error| format!("header is not JSON: {error}"))?;

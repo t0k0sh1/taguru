@@ -615,7 +615,7 @@ impl Metrics {
             &mut out,
             "taguru_storage_quota_refusals_total",
             "counter",
-            "Growth writes refused at a declared per-context storage ceiling (TAGURU_CONTEXT_QUOTAS) — graph writes, passage stores, and the import loop's per-batch pre-check all count here.",
+            "Growth writes refused at a declared per-context storage ceiling (TAGURU_CONTEXT_QUOTAS) — graph writes, passage stores, and the import loop's per-source pre-check all count here.",
             self.storage_quota_refusals.load(Ordering::Relaxed),
         );
         push_value(

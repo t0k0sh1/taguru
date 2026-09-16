@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -303,7 +303,7 @@ docker run --rm -v /mnt/restore/data:/data \
         boots with; a non-zero exit means the copy is corrupt, and a snapshot you have never
         restored is not a backup.</li>
       <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
-        against the running server writes portable JSONL batch streams — ship them to S3 on a
+        against the running server writes portable JSONL source streams — ship them to S3 on a
         schedule. They restore anywhere through <code>taguru import</code>, across versions and
         machines. Note the export's own caveat: each <code>context</code>'s stream is internally consistent,
         but a multi-<code>context</code> export is not one point in time — the snapshot lane is.</li>

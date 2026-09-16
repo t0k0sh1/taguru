@@ -168,7 +168,7 @@ fn alias_rejection_issue(batch_index: usize, rejection: &AliasRejection) -> Issu
         AliasError::UnknownCanonical => Issue::unknown_reference(
             path,
             format!(
-                "'{}' already interned as a concept or label this batch's associations use",
+                "'{}' already interned as a concept or label this source file's associations use",
                 rejection.canonical
             ),
         ),
@@ -239,12 +239,12 @@ pub(super) fn import_budget_refusal(
         landed,
         dry_run,
         ErrorCode::Timeout,
-        "request exceeded its budget partway through a multi-batch import \
+        "request exceeded its budget partway through a multi-source import \
          (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
         (
             "re-running the preview with more time or a narrower stream is exact",
-            "re-POSTing the remaining stream is exact (each batch replaces its \
-             own source)",
+            "re-POSTing the remaining stream is exact (each source file replaces its \
+             predecessor)",
         ),
         started_at,
     )
@@ -422,7 +422,7 @@ pub(super) fn restore_refusal(
             validation_error(
                 code,
                 format!(
-                    "group restore exceeded its budget with {batches_landed} batch(es) durable \
+                    "group restore exceeded its budget with {batches_landed} source file(s) durable \
                      (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
                     refusal.text()
                 ),
@@ -439,7 +439,7 @@ pub(super) fn restore_refusal(
             validation_error(
                 code,
                 format!(
-                    "group records refused with every batch landed ({batches_landed} durable); \
+                    "group records refused with every source file landed ({batches_landed} durable); \
                      fixing the stream and re-POSTing it whole is exact: {}",
                     refusal.text()
                 ),
@@ -495,7 +495,7 @@ pub(super) fn schema_import_refusal(
             RefusalDetail {
                 issues: vec![Issue::missing(
                     format!("context '{context}'"),
-                    "an earlier batch of this stream (or a previous request) creating it, \
+                    "an earlier source file of this stream (or a previous request) creating it, \
                      since a schema record's context must already exist",
                 )],
                 issues_total: None,
@@ -538,7 +538,7 @@ pub(super) fn schema_import_refusal(
                 ErrorCode::Internal,
                 format!(
                     "schema record: context '{context}' could not be loaded — see server \
-                     logs; every batch before it is durable"
+                     logs; every source file before it is durable"
                 ),
                 started_at,
             )
@@ -553,7 +553,7 @@ pub(super) fn schema_import_refusal(
                 ErrorCode::Internal,
                 format!(
                     "schema record: context '{context}' schema not persisted — see server \
-                     logs; every batch before it is durable"
+                     logs; every source file before it is durable"
                 ),
                 started_at,
             )
@@ -629,7 +629,7 @@ pub(super) fn schema_import_budget_refusal(
         format!(
             "schema record {} of {total} (context '{context}') not attempted — request \
              exceeded its budget partway through a multi-record schema install \
-             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); every batch and schema record \
+             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); every source file and schema record \
              before it is durable",
             index + 1,
         ),
@@ -669,7 +669,7 @@ pub(super) fn import_batch_note(
         (verb.1, "landed durably", next_step.1)
     };
     format!(
-        "batch {} of {total} (context '{}', source '{}') {verb} — the {done} batch(es) \
+        "source file {} of {total} (context '{}', source '{}') {verb} — the {done} source file(s) \
          before it {clause}; {next_step}: ",
         index + 1,
         batch.context,
@@ -731,8 +731,8 @@ pub(super) fn stream_refusal(
 const QUOTA_NEXT_STEP: (&str, &str) = (
     "re-running the preview against a shrunk context is exact",
     "retracting or compacting the context (or raising its quota), then \
-     re-POSTing the remaining stream is exact (each batch replaces its \
-     own source)",
+     re-POSTing the remaining stream is exact (each source file replaces its \
+     predecessor)",
 );
 
 /// Reroutes a deep-write-path storage-quota refusal onto the same
@@ -862,7 +862,7 @@ pub async fn import_batch(
         return validation_error(
             ErrorCode::Forbidden,
             format!(
-                "key '{}' has no grant on context '{}' (batch source '{}'); nothing \
+                "key '{}' has no grant on context '{}' (source '{}'); nothing \
                  was applied",
                 key_name(&key),
                 refused.context,
@@ -1009,7 +1009,7 @@ pub async fn import_batch(
                         retracted = applied.retracted,
                         associations = applied.associations,
                         dry_run = query.dry_run,
-                        "import batch applied",
+                        "import source applied",
                     );
                     outcomes.push(import_outcome(batch, &applied));
                     warn_total += applied.schema_violations;
@@ -1051,8 +1051,8 @@ pub async fn import_batch(
                         ("would be refused", "refused"),
                         (
                             "fixing the stream and re-running the preview is exact",
-                            "fixing the stream and re-POSTing it whole is exact (each batch \
-                             replaces its own source)",
+                            "fixing the stream and re-POSTing it whole is exact (each source file \
+                             replaces its predecessor)",
                         ),
                     );
                     return Err(Box::new(import_refusal(

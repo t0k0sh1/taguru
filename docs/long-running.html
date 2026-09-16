@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -78,7 +78,7 @@
       A local model turns a corpus of any real size into a job that runs for hours, not seconds.
       This page composes <a href="extract.html"><code>taguru extract</code></a>'s manifest and
       chunk checkpoints with <a href="import.html"><code>taguru import</code></a>'s atomic,
-      idempotent batch contract into one operating picture: enumerate the work, run it in bounded
+      idempotent source-file contract into one operating picture: enumerate the work, run it in bounded
       windows, survive a kill at any point, and converge to done without ever paying twice for
       the same chunk. Neither reference page's contract changes here — this page names the
       pattern and draws the line between what Taguru guarantees and what your runner decides.
@@ -95,7 +95,7 @@
       <div class="arch-layer">
         <div class="arch-label">enumerate</div>
         <div class="arch-row">
-          <div class="arch-box dim"><b>112 work units</b><span>the whole corpus listed before any model call — <code>taguru extract --dry-run --out batches/ docs/</code></span></div>
+          <div class="arch-box dim"><b>112 work units</b><span>the whole corpus listed before any model call — <code>taguru extract --dry-run --out sources/ docs/</code></span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
@@ -157,8 +157,8 @@
           <tr><td>Durable writes, source attribution, atomic per-source import (<a href="import.html#one-file-one-source">retract-then-apply</a>, nothing partial ever visible)</td><td>Splitting a corpus into work units (documents, or PDF sections) and a queue to drive them</td></tr>
           <tr><td>The extract manifest and chunk checkpoints — free re-run of what's already done</td><td>A time or item bound on one process invocation</td></tr>
           <tr><td>Source listing / <code>--dry-run</code> as the completion test</td><td>Signal handling and the decision of when a kill is "safe" vs "now"</td></tr>
-          <tr><td>Validation errors, the per-source batch-open marker for torn imports</td><td>Progress UI/log, a failure summary, and the policy for what gets retried</td></tr>
-          <tr><td>A re-runnable batch contract — the same file or command is always safe to run again</td><td>Deciding when "good enough" is reached and the job is done</td></tr>
+          <tr><td>Validation errors, the per-source header line for torn imports</td><td>Progress UI/log, a failure summary, and the policy for what gets retried</td></tr>
+          <tr><td>A re-runnable source-file contract — the same file or command is always safe to run again</td><td>Deciding when "good enough" is reached and the job is done</td></tr>
         </tbody>
       </table>
     </div>
@@ -176,8 +176,8 @@
   <section id="units">
     <h2>Work units, checkpoint keys, and deciding what is done</h2>
     <p>
-      The default unit is <b>one segment</b> — one file under <code>taguru extract</code>'s input
-      directory becomes one batch file, whose header names its own source id, which becomes one
+      The default unit is <b>one segment</b>. One file under <code>taguru extract</code>'s input
+      directory becomes one source file, whose header names its own source id, which becomes one
       row in <code>--out</code>'s manifest. The same one-segment, one-source-id granularity holds
       for the standard <a href="connectors.html">ingest connectors</a>: one PDF, DOCX, PPTX file,
       or S3 object becomes one <code>ConnectorDocument</code>, one retract-then-apply unit — page,
@@ -188,7 +188,7 @@
       heading yourself and feed each section through as its own segment with a source id that
       names its parent, e.g. <code>manual.pdf#installation</code> — a runner's choice to make when
       it wants finer granularity than a connector gives by default, not something Taguru requires.
-      Each section is then an independent batch, its own manifest row, its own retract-then-apply
+      Each section is then an independent source file, its own manifest row, its own retract-then-apply
       unit — a failure in one section never touches another's.
     </p>
     <p>
@@ -196,7 +196,7 @@
     </p>
     <ul>
       <li><b>Extract stage</b>: a segment is done when its entry in <code>.extract-manifest.json</code> matches the current compute-input fingerprint (content hash × model × prompt version × <code>context</code> × output-shaping flags). <code>taguru extract --dry-run</code> reports this without calling the model. A connector-driven run has its own two-layer version of this same test — see <a href="connectors.html#checkpoints">ingest connectors: checkpoints</a>.</li>
-      <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{name}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed batch now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
+      <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{name}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed source now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
     </ul>
     <p>
       Below segment granularity, <a href="extract.html#checkpoints">chunk checkpoints</a> key
@@ -249,16 +249,16 @@
 # -s INT sends the same signal Ctrl+C would (taguru's cooperative first-stage stop);
 # -k 30 sends SIGKILL 30s later only if the process is still stuck on the graceful path.</span>
 timeout -k 30 -s INT 45m taguru extract --context sake --description "酒蔵の知識" \
-  --out batches/ docs/                <span class="c"># --description is ignored once the context already exists</span>
+  --out sources/ docs/                <span class="c"># --description is ignored once the context already exists</span>
 rc=$?
-taguru import batches/            <span class="c"># apply whatever this window finished — safe even if extract above was cut short</span>
+taguru import sources/            <span class="c"># apply whatever this window finished — safe even if extract above was cut short</span>
 
 <span class="c"># rc: 130 window's time ran out mid-run   → requeue the identical command
 #      1   some segments failed, the rest completed → rerun retries only the failures
 #           (the manifest records only successes, so a plain rerun already does this)
 #      0   nothing left to extract → converged, the job is done</span>
 case "$rc" in
-  130) echo "window expired, $(taguru extract --dry-run --out batches/ docs/ | grep -c 'would extract') unit(s) still not extracted" ;;
+  130) echo "window expired, $(taguru extract --dry-run --out sources/ docs/ | grep -c 'would extract') unit(s) still not extracted" ;;
   1)   echo "some segments failed — see stderr above; rerun to retry them" ;;
   0)   echo "converged" ;;
 esac</code></pre>
@@ -272,7 +272,7 @@ esac</code></pre>
       Bounding by <b>count</b> instead of time means passing a slice of the not-yet-extracted
       files as explicit arguments — <code>taguru extract</code> accepts individual file paths
       alongside directories, so
-      <code>taguru extract --out batches/ $(taguru extract --dry-run --out batches/ docs/ | sed -n 's/: would extract.*//p' | head -20)</code>
+      <code>taguru extract --out sources/ $(taguru extract --dry-run --out sources/ docs/ | sed -n 's/: would extract.*//p' | head -20)</code>
       processes at most 20 segments this invocation; run lifecycle's relation-label convergence
       (extract.html's <a href="extract.html#prompt">prompt section</a>) happens within one
       invocation, so slicing this way is safe, just less able to converge vocabulary across the
@@ -398,17 +398,17 @@ for source, exc in failures:
     <p>
       Import-side failure is where "torn" becomes possible in principle:
       <a href="import.html#validate">validate-then-apply</a> already rejects a malformed file
-      before anything is written, but a fault reaching mid-batch (capacity, disk) between the
+      before anything is written, but a fault reaching mid-source (capacity, disk) between the
       four durable steps (retract → passage → associations → aliases) is caught by a per-source
-      <b>batch-open marker</b>, written before the first step and removed only after the last.
+      <b>header line</b>, written before the first step and removed only after the last.
       A surviving marker is named at the server's next boot and by <code>taguru inspect</code>,
       verbatim:
     </p>
     <pre><code>sake: WARNING — the import of source 'docs/aomine.md' never completed; its truth
-may be half-applied — re-import its batch file or retract the source</code></pre>
+may be half-applied — re-import its source file or retract the source</code></pre>
     <p>
       Both repairs are exact, because retract-then-apply already makes them so: re-import the
-      original (or corrected) batch file, or retract the source outright and leave it absent.
+      original (or corrected) source file, or retract the source outright and leave it absent.
       Over HTTP, <code>POST /import</code> reports the same fault as <code>409</code> (conflict)
       or <code>507</code> (capacity) with a message naming what landed — the retraction still
       makes the corrected retry exact. The one operational rule that keeps this from happening
@@ -421,8 +421,8 @@ may be half-applied — re-import its batch file or retract the source</code></p
     <h2>When sources change or disappear</h2>
     <p>
       A segment edited between runs is just a manifest mismatch: its content hash no longer
-      matches the recorded compute inputs, so it re-extracts, and the resulting batch's
-      retract-then-apply replaces the old source's facts wholesale on import — no separate
+      matches the recorded compute inputs, so it re-extracts. The resulting source file's
+      retract-then-apply then replaces the old facts wholesale on import — no separate
       "diff" step exists or is needed.
     </p>
     <p>
@@ -432,7 +432,7 @@ may be half-applied — re-import its batch file or retract the source</code></p
       job — diff the corpus's current file list (or section list) against
       <code>iter_sources()</code>/<code>GET /contexts/{name}/sources</code>, and for anything
       present in Taguru but absent from the corpus, emit a header-only <b>pure retraction</b>
-      batch (a <code>taguru_batch</code> header with no operation lines) naming that source — see
+      source file (a <code>taguru_batch</code> header with no operation lines) naming that source — see
       <a href="import.html#one-file-one-source">"one file = one source's complete truth"</a>.
     </p>
   </section>
@@ -442,7 +442,7 @@ may be half-applied — re-import its batch file or retract the source</code></p
     <p>This page is a composition, not a new contract — the normative source for each piece:</p>
     <ul>
       <li>Extract manifest — <a href="extract.html#manifest">extract.html#manifest</a>; chunk checkpoints and cooperative stop — <a href="extract.html#checkpoints">extract.html#checkpoints</a>; diagnostics sidecar — <a href="extract.html#diagnostics">extract.html#diagnostics</a>; replaying a recorded run and <code>--resume-from</code> — <a href="extract.html#replay">extract.html#replay</a>.</li>
-      <li>One-source-one-batch idempotency — <a href="import.html#one-file-one-source">import.html#one-file-one-source</a>; validate-then-apply and the batch-open marker — <a href="import.html#validate">import.html#validate</a>; HTTP status semantics — <a href="import.html#http">import.html#http</a>.</li>
+      <li>One-source-one-file idempotency — <a href="import.html#one-file-one-source">import.html#one-file-one-source</a>; validate-then-apply and the header line — <a href="import.html#validate">import.html#validate</a>; HTTP status semantics — <a href="import.html#http">import.html#http</a>.</li>
       <li>LangChain SDK progress events (issue <a href="https://github.com/t0k0sh1/taguru/issues/177">#177</a>) and checkpoint/resume (issue <a href="https://github.com/t0k0sh1/taguru/issues/179">#179</a>) — <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/python-langchain#checkpointresume-for-spot-and-preemptible-instances">Python SDK README</a> · <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/typescript-langchain#checkpointresume-for-spot-and-preemptible-instances">TypeScript SDK README</a>.</li>
       <li>Atomic per-source import (the fix that makes source listing a sound completion test) — <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>.</li>
     </ul>
@@ -452,8 +452,8 @@ may be half-applied — re-import its batch file or retract the source</code></p
         <p>The full manifest, chunk checkpoint, and diagnostics contract this page composes.</p>
       </a>
       <a class="nav-card" href="import.html" style="flex:1 1 16rem">
-        <span class="nc-title">Batch import reference</span>
-        <p>Retract-then-apply, validation, the batch-open marker, and POST /import.</p>
+        <span class="nc-title">Import reference</span>
+        <p>Retract-then-apply, validation, the header line, and POST /import.</p>
       </a>
     </div>
   </section>

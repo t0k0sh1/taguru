@@ -31,7 +31,7 @@ pub(super) async fn route_import(
             return api::error(
                 ErrorCode::NoContext,
                 format!(
-                    "batch source '{}': context '{}' has no route-map entry and no '*' \
+                    "source '{}': context '{}' has no route-map entry and no '*' \
                      fallback (TAGURU_ROUTE_MAP); nothing was applied",
                     batch.source, batch.context
                 ),
@@ -432,16 +432,16 @@ fn rewrap_import_refusal(
         ),
     };
     let landed = match (batches_landed, schemas_landed) {
-        (batches, 0) => format!("{batches} batch(es)"),
+        (batches, 0) => format!("{batches} source(s)"),
         (0, schemas) => format!("{schemas} schema record(s)"),
-        (batches, schemas) => format!("{batches} batch(es) and {schemas} schema record(s)"),
+        (batches, schemas) => format!("{batches} source(s) and {schemas} schema record(s)"),
     };
     let mut rewrapped = json!({
         "status": "error",
         "code": code,
         "error": format!(
             "{landed} landed durably on earlier shards before this refusal (re-POSTing the \
-             whole stream is exact — each batch replaces its own source, each schema install \
+             whole stream is exact — each source file replaces its predecessor, each schema install \
              is independent); the refusing shard says: {message}"
         ),
         // `other_landed` is true only when at least one of the two

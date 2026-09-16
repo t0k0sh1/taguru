@@ -3,7 +3,7 @@
 the "end to end" wiring the issue asks for: a
 :class:`~taguru_langchain.ingest_connectors.document.ConnectorDocument`
 goes in, an :class:`~taguru_langchain.ingest.IngestOutcome` comes out,
-through the exact same retract-then-apply batch/import path any other
+through the exact same retract-then-apply import path any other
 source uses.
 
 Depends on ``taguru_langchain.ingest`` in one direction only —

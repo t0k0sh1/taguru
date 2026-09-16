@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Aggregate `taguru extract`'s trace records into metric tables (#792).
 
-Reads the per-segment records extract writes beside every batch
-(ADR 0023-0029: `<out>/.extract-trace/<batch>.jsonl` and
-`<batch stem>.attempts.jsonl`) and rolls the #784 metrics up through
+Reads the per-segment records extract writes; each lives beside its own
+source file (ADR 0023-0029: `<out>/.extract-trace/<source>.jsonl` and
+`<source stem>.attempts.jsonl`) and rolls the #784 metrics up through
 the granularities: segment -> context -> group -> run.
 
     python3 scripts/extract_metrics.py OUT_DIR [OUT_DIR ...]
@@ -81,18 +81,19 @@ def load_segments(out_dirs: list[Path]) -> list[dict]:
     """One entry per segment the out-dirs hold records for: its
     records, split by kind.
 
-    A traced segment (a `<batch>.jsonl` trace, written only when the
-    batch was) carries its attempts log beside it. An attempts log
-    with NO trace is one of two things, told apart by whether the
-    batch it names — `<out>/<stem>.jsonl`, the trace's own file name
-    one directory up — exists: if it does, the batch landed and only
-    the trace write failed (advisory, ADR 0023 §3.6), so the segment
-    counts as a segment with an empty trace (`untraced: True`, its
-    quality metrics empty, its cost real); if it does not, the
-    segment never produced a batch — it failed, or the run was
-    interrupted before it finished — and the log was kept exactly so
-    its cost is visible (ADR 0025 §3.2): `failed: True`. Either way
-    the attempts log's own `segment` record names the source (#807).
+    A traced segment carries its attempts log beside it. It is
+    traced when a `<source>.jsonl` trace exists, written only when
+    the source file was. An attempts log with NO trace is one of two
+    things, told apart by whether the source file it names —
+    `<out>/<stem>.jsonl`, the trace's own file name one directory up
+    — exists. If it does, the source file landed and only the trace
+    write failed (advisory, ADR 0023 §3.6). It then counts as one
+    with an empty trace (`untraced: True`, its quality metrics
+    empty, its cost real). If it does not, no source file resulted —
+    it failed, or the run was interrupted before it finished — and
+    the log was kept exactly so its cost is visible (ADR 0025 §3.2):
+    `failed: True`. Either way the attempts log's own `segment`
+    record names the source (#807).
     """
     segments = []
     for out_dir in out_dirs:
@@ -141,8 +142,8 @@ def load_segments(out_dirs: list[Path]) -> list[dict]:
             batch_landed = (out_dir / f"{stem}.jsonl").is_file()
             if batch_landed:
                 print(
-                    f"warning: {attempts_path} has no trace but its batch exists; "
-                    "counted as a segment with no quality metrics (the trace write "
+                    f"warning: {attempts_path} has no trace but its source file exists. "
+                    "Counted as a segment with no quality metrics (the trace write "
                     "failed — see the run's stderr)",
                     file=sys.stderr,
                 )
@@ -172,8 +173,8 @@ def entropy_bits(counts: list[int]) -> float:
 def blank_metrics() -> dict:
     return {
         "segments": 0,
-        # attempts-only segments (no batch, no trace): counted apart
-        # from `segments` so the quality rates stay over what landed
+        # Attempts-only entries (no source file, no trace) are counted
+        # apart from `segments` so the quality rates stay over what landed
         # while cost/attempts/moves include what it took to fail.
         "failed": 0,
         "kept": Counter(),
@@ -609,9 +610,10 @@ def markdown(report: dict) -> str:
     if any(entry.get("failed") for entry in report["segments"].values()):
         lines += [
             "",
-            "`failed`: segments with an attempts log but no trace — no batch was "
-            "written (the extraction failed, or the run stopped before it finished); "
-            "quality columns are `-`, cost/attempts/moves are what it took.",
+            "`failed`: segments with an attempts log but no trace. "
+            "No source file was written — the extraction failed, or the run "
+            "stopped before it finished; quality columns are `-`, "
+            "cost/attempts/moves are what it took.",
         ]
     anchored = [("run", report["run"])] + [
         (name, m) for section in ("contexts", "groups") for name, m in report[section].items()
@@ -773,9 +775,10 @@ def self_test() -> int:
         (trace_dir / "f.attempts.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in failed_attempts), encoding="utf-8"
         )
-        # A batch that landed but whose trace write failed (advisory,
-        # ADR 0023 §3.6): attempts log, no trace, batch present — a
-        # segment, not a failure; its cost counts, its quality is empty.
+        # A source file that landed but whose trace write failed
+        # (advisory, ADR 0023 §3.6): attempts log, no trace, source
+        # file present. Counted as a segment, not a failure — its
+        # cost counts, its quality is empty.
         (trace_dir / "h.attempts.jsonl").write_text(
             "".join(
                 json.dumps(r) + "\n"

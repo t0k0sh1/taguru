@@ -2,7 +2,7 @@
  * The bridge from a connector's normalized document to `TaguruIngester`
  * (ingest.ts) (ADR 0007, issue #347) — the "end to end" wiring the issue
  * asks for: a `ConnectorDocument` goes in, an `IngestOutcome` comes out,
- * through the exact same retract-then-apply batch/import path any other
+ * through the exact same retract-then-apply import path any other
  * source uses. The mechanical mirror of the Python
  * `taguru_langchain.ingest_connectors.bridge` module (issue #415).
  *

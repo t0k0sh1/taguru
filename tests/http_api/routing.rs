@@ -1029,7 +1029,7 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("1 batch(es) and 1 schema record(s)")),
+            .is_some_and(|error| error.contains("1 source(s) and 1 schema record(s)")),
         "both landed counts must ride the rewrap: {body}"
     );
 }
@@ -1058,7 +1058,7 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
     assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
     assert_eq!(body["durable_batches"], json!(1), "{body}");
     let error = body["error"].as_str().unwrap_or_default();
-    assert!(error.contains("1 batch(es) landed"), "{body}");
+    assert!(error.contains("1 source(s) landed"), "{body}");
     assert!(
         !error.contains("schema record"),
         "no schema anywhere in this stream: {body}"

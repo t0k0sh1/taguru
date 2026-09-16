@@ -482,7 +482,7 @@ fn render_batches(
     manifest: &CommunitiesManifest,
 ) -> Result<Vec<String>, String> {
     let render = |value: &Value| -> Result<String, String> {
-        serde_json::to_string(value).map_err(|error| format!("batch line: {error}"))
+        serde_json::to_string(value).map_err(|error| format!("source file line: {error}"))
     };
     let mut batches = Vec::with_capacity(analysis.communities.len() + 1);
     let mut first = true;

@@ -333,12 +333,12 @@ class Taguru:
         return [str(name) for name in result]
 
     def import_batches(self, data: str | bytes) -> ImportResult:
-        """Apply an NDJSON batch stream (the format ``export`` produces).
+        """Apply an NDJSON source stream (the format ``export`` produces).
 
-        Each batch is one source's retract-then-apply, so re-importing is
-        idempotent. ``batches`` is normalized to a list even for a single
-        batch; ``groups`` carries one entry per ``group`` record the
-        stream restored.
+        Each record applies one source via retract-then-apply, so
+        re-importing is idempotent. ``batches`` is normalized to a list
+        even for a single source; ``groups`` carries one entry per
+        ``group`` record the stream restored.
         """
         content = data.encode("utf-8") if isinstance(data, str) else data
         response = self._send(
@@ -348,7 +348,7 @@ class Taguru:
         return normalize_import_outcomes(result, issues, schema_violations)
 
     def import_file(self, path: str | Path) -> ImportResult:
-        """Apply an NDJSON batch file (see ``import_batches``)."""
+        """Apply an NDJSON source file (see ``import_batches``)."""
         data = call_blocking(Path(path).read_bytes)
         return self.import_batches(data)
 
@@ -1642,14 +1642,14 @@ class Context:
     # -- export ------------------------------------------------------------------------
 
     def export(self) -> str:
-        """The ``context`` as an import batch stream (NDJSON text)."""
+        """The ``context`` as an import source stream (NDJSON text)."""
         response = self._client._send("GET", self._path + "/export")
         return response.text
 
     def export_stream(self) -> Generator[bytes, None]:
         """Stream the export body without buffering it whole (no retry)."""
         # The one call site that reaches the network without going
-        # through `_send` (ADR 0005 §3.8) — a batch export can be a
+        # through `_send` (ADR 0005 §3.8) — a source-stream export can be a
         # client's only call, so the compatibility preflight has to run
         # here explicitly too.
         self._client._ensure_contract()

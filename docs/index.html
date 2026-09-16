@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -143,12 +143,12 @@
         <p>An optional per-<code>context</code> type and relation ontology. The document shape, off/warn/strict modes, the reserved <code>schema:type</code> label, write-time enforcement, the HTTP/MCP surface, type-aware reads, and the metrics.</p>
       </a>
       <a class="nav-card" href="import.html">
-        <span class="nc-title">The batch contract (import)</span>
+        <span class="nc-title">The source-file contract (import)</span>
         <p>One file = one source's complete truth. Every line type of the file format, the caps, validation and apply, <code>POST /import</code>, and the concurrency rules.</p>
       </a>
       <a class="nav-card" href="extract.html">
         <span class="nc-title">Segment extraction (extract)</span>
-        <p>The offline producer that turns segments into batch files. Prompt and enforcement, chunking, doc2query, the manifest, trust and quality.</p>
+        <p>The offline producer that turns segments into files. Each becomes one source file. Prompt and enforcement, chunking, doc2query, the manifest, trust and quality.</p>
       </a>
       <a class="nav-card" href="taguru-code.html">
         <span class="nc-title">Code map (taguru-code)</span>
@@ -156,7 +156,7 @@
       </a>
       <a class="nav-card" href="connectors.html">
         <span class="nc-title">Ingest connectors</span>
-        <p>PDF, HTML, DOCX, PPTX, and S3 into the same batch contract — the Python shape, the credential boundary, work units, checkpoints, and observability.</p>
+        <p>PDF, HTML, DOCX, PPTX, and S3 into the same source-file contract — the Python shape, the credential boundary, work units, checkpoints, and observability.</p>
       </a>
       <a class="nav-card" href="benchmark.html">
         <span class="nc-title">Extraction benchmark (benchmark)</span>

@@ -571,7 +571,7 @@ pub(super) fn write_trace(out: &Path, file_name: &str, body: &str) {
         .and_then(|()| crate::storage::write_atomic(&dir.join(file_name), body.as_bytes()));
     if let Err(error) = result {
         eprintln!(
-            "taguru: extract: trace: writing {}: {error} — the batch is written; its trace \
+            "taguru: extract: trace: writing {}: {error} — the source file is written; its trace \
              is not",
             dir.join(file_name).display()
         );

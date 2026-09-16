@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -213,7 +213,7 @@ assert taguru.__version__.startswith('0.9.') and tl.__version__.startswith('0.9.
 print(taguru.__version__, tl.__version__)"</span></code></pre>
     <p>
       <code>GET /version</code> also names the wire-contract versions
-      (<code>http_contract</code>/<code>mcp_contract</code>) and the accepted batch/image formats,
+      (<code>http_contract</code>/<code>mcp_contract</code>) and the accepted source-file/image formats,
       and it answers without auth — the first probe when versions are in doubt. The same build
       identity rides <code>/metrics</code> too:
       <code>curl -s localhost:8248/metrics | grep taguru_build_info</code>. Full triage for a

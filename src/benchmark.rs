@@ -74,14 +74,14 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
                                   diagnostics sidecar's own records,
                                   carried through unmodified, plus
                                   harness identity), cell totals
-  cells/<model_id>/run<NN>/       the child's own --out: batch files,
+  cells/<model_id>/run<NN>/       the child's own --out: source files,
                                   .extract-manifest.json,
                                   .extract-checkpoints/, diagnostics.jsonl,
                                   stdout.log, stderr.log, exit_code
 
   --models FILE        model matrix (see docs/benchmark.html for the
                       schema)
-  --context NAME      the context every cell's batch files target
+  --context NAME      the context every cell's source files target
   --out DIR           results directory; re-running the same --out
                       resumes — a cell already recorded complete or
                       failed is never re-run

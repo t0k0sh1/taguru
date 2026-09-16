@@ -26,7 +26,7 @@ impl std::fmt::Display for SchemaApplyError {
             Self::NoContext => write!(
                 f,
                 "does not exist — a schema record's context must already exist (created \
-                 by an earlier batch of the same stream, or previously) before its schema \
+                 by an earlier source file of the same stream, or previously) before its schema \
                  can install"
             ),
             Self::ReservedAlias(alias) => write!(

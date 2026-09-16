@@ -239,7 +239,7 @@ function parseLocatorEntry(data: unknown): LocatorEntry | null {
 
 /**
  * One paragraph-indexed free-text section heading — extends to the next
- * marker, exactly like a batch file's `{"paragraph": N, "section": ...}`
+ * marker, exactly like a source file's `{"paragraph": N, "section": ...}`
  * line (src/ingest.rs's `SectionLine`). `section`'s meaning is unchanged
  * by ADR 0007 §7.1: prose, never overloaded with positional metadata.
  */

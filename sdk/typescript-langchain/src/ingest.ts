@@ -765,7 +765,7 @@ export class TaguruIngester {
    * index outside that range is dropped and counted
    * (`IngestOutcome.sections_dropped`/`locators_dropped`), never a hard
    * failure. Silently dropped (not an error) when `include_passage:
-   * false` — a locator/section attaches to this batch's own passage
+   * false` — a locator/section attaches to this source's own passage
    * line, and import refuses the dangling reference when there is none.
    */
   async ingestText(
@@ -1243,7 +1243,7 @@ export class TaguruIngester {
   }
 
   /**
-   * Best-effort cleanup once a document's batch has actually landed —
+   * Best-effort cleanup once a document's source file has actually landed —
    * failures are silently ignored (the save/delete asymmetry, inherited
    * from the Rust twin: nothing correctness-critical depends on prompt
    * cleanup, unlike a save that a resume would otherwise repeat).

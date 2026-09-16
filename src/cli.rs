@@ -74,7 +74,7 @@ USAGE:
   taguru estimate --associations N ...  size memory/disk for a target corpus
                                         by building and measuring one
                                         (see: taguru estimate --help)
-  taguru import [--dry-run] FILE|DIR... apply JSONL batch files to the data
+  taguru import [--dry-run] FILE|DIR... apply JSONL source files to the data
                                         directory offline — bulk/initial
                                         loads (see: taguru import --help);
                                         the directory lock refuses to run
@@ -82,7 +82,7 @@ USAGE:
                                         import itself at one with --url
   taguru export --out DIR [CONTEXT...]  write contexts — and, on a full
                                         export, groups — back out of the data
-                                        directory as import batch streams,
+                                        directory as source streams,
                                         the portable backup (see: taguru
                                         export --help); a running server
                                         serves the same at
@@ -101,9 +101,9 @@ USAGE:
                                         TAGURU_REPLICATE_URL — verify the
                                         result with taguru inspect
   taguru extract --context NAME --out DIR FILE|DIR...
-                                        decompose documents into batch files
-                                        through an OpenAI-compatible chat
-                                        model (see: taguru extract --help)
+                                        turn each segment into an import-ready
+                                        JSONL file through an OpenAI-compatible
+                                        chat model (see: taguru extract --help)
   taguru benchmark extract --models FILE --context NAME --out DIR CORPUS_DIR
                                         run taguru extract across a model
                                         matrix, one subprocess per (model,
@@ -146,8 +146,8 @@ USAGE:
                                         regressed/added/removed cases (ADR
                                         0004 §9.2; see: taguru evaluate
                                         compare --help)
-  taguru anchoring BATCH_OR_DIR... [--vocabulary PATH] [--json FILE]
-                                        judge extraction batches against their
+  taguru anchoring FILE_OR_DIR... [--vocabulary PATH] [--json FILE]
+                                        judge extracted source files against their
                                         own passage text: the anchoring rate
                                         (subject and object present in the
                                         cited paragraph, else the passage;
