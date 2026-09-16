@@ -97,7 +97,7 @@ pub(super) fn sensitive_hits(
 pub(super) fn refused_batch_message(batch_index: usize, batch: &Batch) -> String {
     format!(
         "batches[{batch_index}] (context '{}', source '{}') refused: sensitive content — \
-         re-extract with `taguru extract --redact`, or edit the batch; nothing of it was \
+         re-extract with `taguru extract --redact`, or edit the source file; nothing of it was \
          applied",
         batch.context, batch.source
     )

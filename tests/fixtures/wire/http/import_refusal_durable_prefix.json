@@ -6,12 +6,12 @@
   "response": {
     "code": "conflict",
     "durable_batches": 1,
-    "error": "batch 2 of 2 (context 'corpus-h', source 'doc-2') refused — the 1 batch(es) before it landed durably; fixing the stream and re-POSTing it whole is exact (each batch replaces its own source): concept alias 'Alpha' → '存在しない': the canonical spelling is not interned; nothing was applied",
+    "error": "source file 2 of 2 (context 'corpus-h', source 'doc-2') refused — the 1 source file(s) before it landed durably; fixing the stream and re-POSTing it whole is exact (each source replaces its predecessor): concept alias 'Alpha' → '存在しない': the canonical spelling is not interned; nothing was applied",
     "integrity": "durable_prefix",
     "issues": [
       {
         "actual": "not present in this request",
-        "expected": "'存在しない' already interned as a concept or label this batch's associations use",
+        "expected": "'存在しない' already interned as a concept or label this source file's associations use",
         "kind": "unknown_reference",
         "path": "batches[1].concepts['Alpha']"
       }

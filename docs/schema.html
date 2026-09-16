@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html" aria-current="page"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -87,7 +87,7 @@
 
   <section id="document">
     <h2>The document</h2>
-    <p class="section-sub">One JSON object per <code>context</code>, independent of the batch/<code>group</code>/image format versions.</p>
+    <p class="section-sub">One JSON object per <code>context</code>, independent of the source-file/<code>group</code>/image format versions.</p>
     <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
  <span class="k">"types"</span>: {<span class="s">"Brewery"</span>: {<span class="k">"is_a"</span>: []}, <span class="s">"Person"</span>: {<span class="k">"is_a"</span>: []}},
  <span class="k">"relations"</span>: {<span class="s">"杜氏"</span>: {<span class="k">"domain"</span>: [<span class="s">"Brewery"</span>], <span class="k">"range"</span>: [<span class="s">"Person"</span>]}}}</code></pre>
@@ -99,7 +99,7 @@
       <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every top-level
       field is required and unknown fields are refused, both on the wire
       (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
-      <code>{stem}.schema.json</code>): unlike a batch's <code>group</code> record, nothing here defaults,
+      <code>{stem}.schema.json</code>): unlike the source stream's <code>group</code> record, nothing here defaults,
       because a silently-dropped field would be indistinguishable from under-enforcing
       <code>strict</code>. <code>types</code> maps a type name to its declared parents
       (<code>is_a</code>, possibly empty); <code>relations</code> maps a relation label to the
@@ -182,7 +182,7 @@
       <li>The label is inert with no schema installed — asserting it on a schema-free <code>context</code> is
         just another fact, judged by nothing.</li>
       <li>No alias path may ever resolve any spelling to <code>schema:type</code> once a schema
-        exists — <code>add_label_alias</code>, an import batch's own inline <code>labels</code>
+        exists — <code>add_label_alias</code>, an import source's own inline <code>labels</code>
         declaration, and a <code>PUT /contexts/{name}/schema</code>-time check over
         already-persisted aliases all enforce it. This refusal fires regardless of mode, even <code>off</code>: it is a
         namespace-ownership rule, not something enforcement toggles.</li>
@@ -230,7 +230,7 @@
     </p>
     <p class="note">
       A reserved-label conflict (guard 2 above) and a domain/range violation are reported and
-      dispatched the same way regardless of which one a batch triggers, but they mean different
+      dispatched the same way regardless of which one a source triggers, but they mean different
       things: the former is a namespace collision (409, like an alias conflict), the latter a
       refused value (400). Both refuse the whole write before anything lands.
     </p>
@@ -338,7 +338,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       The schema document rides in <code>context_files</code> like every other per-<code>context</code> file
       (last in the array, so a lagging or missing schema file never blocks a rename), and travels
       through export/import as its own <code>schema</code> stream record — see
-      <a href="import.html#format">Schema records</a> in the batch contract for the record shape,
+      <a href="import.html#format">Schema records</a> in the source-file contract for the record shape,
       and the CHANGELOG's #379/#384 entries for the downgrade hazard an older binary's shorter
       <code>context_files</code> array creates.
     </p>

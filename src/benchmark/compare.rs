@@ -1820,7 +1820,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "association",
             "distribution",
             CMD_SCOPES,
-            "Number of association lines in a written batch whose weight is greater than 0.",
+            "Number of association lines in a written source file whose weight is greater than 0.",
             "cells/**/*.jsonl association lines, .weight > 0",
             Some(&format!(
                 "A weight of exactly 0 counts toward neither this metric nor \
@@ -1834,7 +1834,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "association",
             "distribution",
             CMD_SCOPES,
-            "Number of association lines in a written batch whose weight is less than 0.",
+            "Number of association lines in a written source file whose weight is less than 0.",
             "cells/**/*.jsonl association lines, .weight < 0",
             Some(&format!(
                 "A weight of exactly 0 counts toward neither this metric nor \
@@ -1848,7 +1848,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "subject",
             "distribution",
             CMD_SCOPES,
-            "Number of distinct .subject values among a written batch's association lines.",
+            "Number of distinct .subject values among a written source file's association lines.",
             "cells/**/*.jsonl association lines, distinct .subject",
             Some(&format!(
                 "This is the distinct-subject count within each segment (or, at cell/model \
@@ -1863,10 +1863,10 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "relation",
             "distribution",
             CMD_SCOPES,
-            "Number of distinct .label values among a written batch's association lines.",
+            "Number of distinct .label values among a written source file's association lines.",
             "cells/**/*.jsonl association lines, distinct .label",
             Some(&format!(
-                "taguru's own batch format calls this field label, not relation; this metric \
+                "taguru's own source file format calls this field label, not relation; this metric \
                  counts distinct label values. It is the distinct-relation count within each \
                  segment, not the union across an entire run or model. {COUNT_SCOPE_CAVEAT}"
             )),
@@ -1878,11 +1878,11 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "alias",
             "distribution",
             CMD_SCOPES,
-            "Number of alias lines in a written batch whose canonical does not match any \
-             subject/object (kind=concept) or label (kind=label) used in the same batch.",
-            "cells/**/*.jsonl alias lines vs. the same batch's association lines",
+            "Number of alias lines in a written source file whose canonical does not match any \
+             subject/object (kind=concept) or label (kind=label) used in the same file.",
+            "cells/**/*.jsonl alias lines vs. the same file's association lines",
             Some(&format!(
-                "extract already drops orphaned aliases before writing a batch (src/extract.rs), \
+                "extract already drops orphaned aliases before writing a source file (src/extract.rs), \
                  so a nonzero count here signals a harness or writer defect rather than normal \
                  model behavior. {COUNT_SCOPE_CAVEAT}"
             )),
@@ -1894,7 +1894,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "record",
             "distribution",
             CMD_SCOPES,
-            "Number of association/question lines in a written batch whose paragraph locator is \
+            "Number of association/question lines in a written source file whose paragraph locator is \
              at or past the segment's paragraph_count.",
             "cells/**/*.jsonl association/question .paragraph vs. manifest.json \
              segments[].paragraph_count",
@@ -1907,7 +1907,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "line",
             "distribution",
             CMD_SCOPES,
-            "Number of lines in a written batch that parse as JSON but match none of the batch \
+            "Number of lines in a written source file that parse as JSON but match none of the source file \
              format's known shapes (header, passage, question, association, alias), or that fail \
              to parse as JSON at all.",
             "cells/**/*.jsonl, classified leniently rather than with crate::ingest's fail-fast \
@@ -1921,11 +1921,11 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "ratio",
             "ratio",
             CMD_SCOPES,
-            "Share of association lines in a written batch that carry a paragraph locator.",
+            "Share of association lines in a written source file that carry a paragraph locator.",
             "cells/**/*.jsonl association lines with a .paragraph field, over all association \
-             lines in the batch",
+             lines in the source file",
             Some(
-                "With --no-passage, taguru's own batch writer (render_batch, src/extract.rs) \
+                "With --no-passage, taguru's own source file writer (render_batch, src/extract.rs) \
                  strips every paragraph locator before writing, since there is no passage line \
                  left to locate into — this metric is structurally 0 for a --no-passage run \
                  regardless of what the model attributed, not a measurement of model behavior.",
@@ -1979,7 +1979,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "Number of distinct association keys observed across every run this model \
              completed at least one segment in.",
             MATCHING_SOURCE,
-            Some("n is the number of completed (run, segment) batches pooled, not the number of keys."),
+            Some("n is the number of completed (run, segment) outputs pooled, not the number of keys."),
         ),
     );
     d.insert(
@@ -2062,7 +2062,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             MATCHING_SOURCE,
             Some(
                 "Structurally 0 for a --no-passage run, since every association line's \
-                 paragraph locator is stripped before the batch is written — the same caveat \
+                 paragraph locator is stripped before the source file is written — the same caveat \
                  extraction.paragraph_attributed_rate states.",
             ),
         ),
@@ -2076,7 +2076,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "Share of (segment, alias-kind, alias-spelling) triples declared in 2 or more \
              completed runs whose resolved canonical was not the same in every declaring run.",
             MATCHING_SOURCE,
-            Some("Alias resolution is batch-local (matching.alias_expansion): only the declaring batch's own alias lines are consulted."),
+            Some("Alias resolution is local to one source file (matching.alias_expansion: batch-local): only the declaring file's own alias lines are consulted."),
         ),
     );
     d.insert(

@@ -256,7 +256,7 @@ impl AppState {
                 context,
                 source,
                 %error,
-                "import marker not removed; boot will keep reporting this batch as torn",
+                "import marker not removed; boot will keep reporting this import as torn",
             );
         }
     }

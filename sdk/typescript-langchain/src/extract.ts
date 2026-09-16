@@ -1816,7 +1816,7 @@ export function merge(
   return extraction;
 }
 
-// -- batch rendering (mirrors extract.rs render_batch) ---------------------------------
+// -- source file rendering (mirrors extract.rs render_batch) ---------------------------
 
 /**
  * Lexicographic order on [alias, canonical] tuples — the default `.sort()`
@@ -1834,7 +1834,7 @@ function byAliasThenCanonical(a: [string, string], b: [string, string]): number 
  * facts, then aliases — one JSON object per line, the exact stream
  * `POST /import` applies.
  *
- * `sections`/`locators` (ADR 0007 §7, issue #347) attach to THIS batch's
+ * `sections`/`locators` (ADR 0007 §7, issue #347) attach to THIS source's
  * passage line exactly like a question or an association's `paragraph`
  * pointer does: with the passage stripped (`passage === null`) there is
  * nothing to locate into, and import refuses the dangling reference
@@ -1875,7 +1875,7 @@ export function renderBatch(
       object: fact.object,
       weight: fact.weight,
     };
-    // A paragraph locator attaches to THIS batch's passage line; with the
+    // A paragraph locator attaches to THIS source's passage line; with the
     // passage stripped there is nothing to locate into.
     if (passage !== null && fact.paragraph !== null) {
       entry["paragraph"] = fact.paragraph;
@@ -1896,7 +1896,7 @@ export function reparseBatch(ndjson: string): void {
   const lines = ndjson.replace(/\n$/, "").split("\n");
   lines.forEach((line, index) => {
     if (!line.trim()) {
-      throw new Error(`line ${index + 1}: blank line inside a batch`);
+      throw new Error(`line ${index + 1}: blank line inside a source file`);
     }
     let parsed: unknown;
     try {

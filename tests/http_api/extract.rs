@@ -9349,7 +9349,7 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     let (with, with_err) = run(true);
     assert!(with.contains("TOTAL\t1\t0.000\t1.000\t-"), "{with}");
     assert!(
-        with.contains("(1 batch(es) without a passage skipped)"),
+        with.contains("(1 source file(s) without a passage skipped)"),
         "{with}"
     );
     assert!(with_err.contains("no passage"), "{with_err}");
@@ -9369,7 +9369,7 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     assert_eq!(empty.status.code(), Some(1));
     let empty_err = String::from_utf8_lossy(&empty.stderr);
     assert!(
-        empty_err.contains("no batch with a passage to judge"),
+        empty_err.contains("no source file with a passage to judge"),
         "{empty_err}"
     );
 
@@ -10965,7 +10965,7 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
         "the good file is still judged: {stdout}"
     );
     assert!(
-        stdout.contains("(1 batch file(s) could not be read or parsed — named on stderr)"),
+        stdout.contains("(1 source file(s) could not be read or parsed — named on stderr)"),
         "{stdout}"
     );
     assert!(

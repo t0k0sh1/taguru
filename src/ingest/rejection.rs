@@ -185,11 +185,13 @@ impl ApplyRefusal {
     pub(crate) fn text(&self) -> String {
         match self {
             Self::NoContext(context) => {
-                format!("context '{context}' does not exist and the batch brought no create block")
+                format!(
+                    "context '{context}' does not exist and the source file brought no create block"
+                )
             }
             Self::Io(message) => message.clone(),
             Self::Access(AccessError::NotFound) => {
-                "the context was deleted out from under the batch".to_string()
+                "the context was deleted out from under the import".to_string()
             }
             Self::Access(AccessError::Load(error)) => {
                 format!("the context image would not load: {error}")
@@ -416,9 +418,9 @@ impl SchemaRejection {
     /// What the issues are about, for the refusal's prose.
     pub(crate) fn what(&self) -> &'static str {
         if self.reserved {
-            "this batch's label aliases"
+            "this source file's label aliases"
         } else {
-            "this batch's associations"
+            "this source file's associations"
         }
     }
 
@@ -651,7 +653,7 @@ pub(crate) fn apply_batch(
     // the marker (and the documented repair) in place.
     if passage_removal_errored && batch.passage.is_none() {
         return Err(ApplyRefusal::Io(format!(
-            "old passage for source '{}' could not be retracted and this batch carries no \
+            "old passage for source '{}' could not be retracted and this source file carries no \
              replacement passage to overwrite it with — its truth may be half-applied",
             batch.source
         )));
@@ -725,7 +727,7 @@ pub(crate) fn apply_batch(
                 return Err(ApplyRefusal::Partial {
                     applied,
                     message: format!(
-                        "applied {applied} association(s), then: {} — fix the batch and \
+                        "applied {applied} association(s), then: {} — fix the source file and \
                          re-import; the retraction makes the retry exact",
                         partial.message
                     ),

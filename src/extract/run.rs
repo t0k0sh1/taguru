@@ -493,7 +493,7 @@ impl Run {
         let file_name = batch_file_name(source);
         if let Some(other) = self.claimed.get(&file_name) {
             return Err(format!(
-                "its batch file name collides with '{other}' — rename one of the segments"
+                "its file name collides with '{other}' — rename one of the segments"
             ));
         }
         self.claimed.insert(file_name.clone(), source.to_string());
@@ -942,7 +942,7 @@ impl Run {
                 attempt_log.as_ref(),
                 self.diagnostics.as_ref(),
                 format!(
-                    "the emitted batch failed self-validation \
+                    "the emitted source file failed self-validation \
                      ({message}) — a bug in taguru, not in the segment"
                 ),
             ));

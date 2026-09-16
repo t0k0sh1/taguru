@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- Wording (#851 wave 5, #935): the JSONL file `taguru extract` writes
+  for one source, and a stream of them, are called a source file and a
+  source stream — `batch` no longer names them in `--help`, CLI output
+  (`import: 2 of 2 source(s) applied …`, `not a source file header`,
+  `source file 2 of 2 … refused`), MCP tool descriptions, the docs, and
+  the SDK READMEs and docstrings. Nothing on the wire changed: the
+  `taguru_batch` header key, the `batches` / `failed_batches` /
+  `durable_batches` response fields, and the SDK names
+  `import_batches` / `importBatches` / `BatchApplyResult` stay, and
+  `batch` keeps its other meaning (many associations written in one
+  call).
 - Record keys drop the `taguru_` prefix (ADR 0041, #933): `group`,
   `schema`, `eval`, `evaluation`, `evaluate_thresholds`,
   `consolidation`, and the six `benchmark_*` keys are what `taguru

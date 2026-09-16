@@ -456,7 +456,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         warnings.extend(facts.warnings.iter().cloned());
         let rendered = facts::render_batch(&args.context, &facts, Some(CREATE_DESCRIPTION));
         let batch = crate::ingest::parse_batch(rendered.as_bytes())
-            .map_err(|message| format!("{path}: rendered batch refused: {message}"))?;
+            .map_err(|message| format!("{path}: rendered source file refused: {message}"))?;
         batches.push((path.clone(), batch, fingerprint));
     }
 

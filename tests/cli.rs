@@ -2180,7 +2180,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     assert_eq!(exported.status.code(), Some(0), "{exported:?}");
     let stdout = String::from_utf8_lossy(&exported.stdout);
     assert!(stdout.contains("sake.jsonl"), "{stdout}");
-    assert!(stdout.contains("2 batch(es)"), "{stdout}");
+    assert!(stdout.contains("2 source(s)"), "{stdout}");
     // The full export carries the group as its own record file.
     assert!(stdout.contains("group 'kura'"), "{stdout}");
     assert!(stdout.contains("1 of 1 group(s)"), "{stdout}");
@@ -2205,7 +2205,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     assert_eq!(checked.status.code(), Some(0), "{checked:?}");
     assert!(
         String::from_utf8_lossy(&checked.stdout)
-            .contains("2 batch(es) and 1 group record(s) valid"),
+            .contains("2 source(s) and 1 group record(s) valid"),
         "{}",
         String::from_utf8_lossy(&checked.stdout)
     );
@@ -4177,7 +4177,7 @@ fn a_failing_files_apply_does_not_stop_the_files_after_it() {
     assert!(stderr.contains("missing"), "{stderr}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("1 of 2 batch(es) applied"),
+        stdout.contains("1 of 2 source(s) applied"),
         "the healthy file after the failure must still apply: {stdout}"
     );
 

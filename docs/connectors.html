@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ingest connectors — Taguru</title>
-  <meta name="description" content="The reference for taguru_langchain.ingest_connectors: PDF, HTML, DOCX, PPTX, and S3 into the batch contract. The Python shape, the credential boundary, what a connector produces, work units and checkpoints, observability, and OCR as a boundary.">
+  <meta name="description" content="The reference for taguru_langchain.ingest_connectors: PDF, HTML, DOCX, PPTX, and S3 into the source-file contract. The Python shape, the credential boundary, what a connector produces, work units and checkpoints, observability, and OCR as a boundary.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html" aria-current="page">Ingest connectors</a>
@@ -80,7 +80,7 @@
       SDK module instead. A connector normalizes a source document — plain text plus
       paragraph-indexed section headings and typed citation locators (page/slide/table/fragment)
       — into the one <code>ConnectorDocument</code> shape <code>TaguruIngester</code> consumes, so
-      every format lands in the same batch contract as <a href="extract.html"><code>taguru
+      every format lands in the same source-file contract as <a href="extract.html"><code>taguru
       extract</code></a>'s own output (ADR
       <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0007-ingest-connectors.md">0007</a>,
       issues #347–#353).
@@ -111,7 +111,7 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
       dependency (and the corresponding Rust ecosystem immaturity, <code>Cargo.lock</code> audit
       surface, and <code>scratch</code>-image bloat) to <code>src/</code>. Every connector commit
       (#347–#353) states "no change to <code>src/</code>, the HTTP contract, or the MCP contract"
-      for this reason — the server-side batch/import contract this page's connectors feed is
+      for this reason — the server-side import contract this page's connectors feed is
       unchanged; only the <i>producer</i> is new.
     </p>
   </section>
@@ -245,7 +245,7 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
         the GCS V4 signed-URL equivalents <code>x-goog-signature</code>,
         <code>x-goog-credential</code>, <code>x-goog-date</code>, <code>x-goog-expires</code>,
         <code>x-goog-algorithm</code>, <code>x-goog-signedheaders</code>) before the
-        result becomes a source id, a checkpoint key, a batch's <code>source</code>, a log line, or
+        result becomes a source id, a checkpoint key, a source file's <code>source</code>, a log line, or
         an observability event — the same one value serves every purpose; there is no separate
         "redacted display value" to keep in sync with it.</li>
       <li><b>Auth failures are permanent, never retried.</b> Object-storage errors classify into two

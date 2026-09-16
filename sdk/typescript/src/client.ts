@@ -395,10 +395,11 @@ export class Taguru {
   }
 
   /**
-   * Apply an NDJSON batch stream (the format `export` produces). Each batch
-   * is one source's retract-then-apply, so re-importing is idempotent.
-   * `batches` is normalized to an array even for a single batch; `groups`
-   * carries one entry per `group` record the stream restored.
+   * Apply an NDJSON source stream (the format `export` produces). Each
+   * record applies one source via retract-then-apply, so re-importing is
+   * idempotent. `batches` is normalized to an array even for a single
+   * source; `groups` carries one entry per `group` record the stream
+   * restored.
    */
   async importBatches(data: string | Uint8Array): Promise<ImportResult> {
     const response = await this.send("POST", "/import", {
@@ -412,7 +413,7 @@ export class Taguru {
     return normalizeImportOutcomes(result, issues, schema_violations);
   }
 
-  /** Apply an NDJSON batch file (see `importBatches`). */
+  /** Apply an NDJSON source file (see `importBatches`). */
   async importFile(path: string): Promise<ImportResult> {
     const { readFile } = await import("node:fs/promises");
     return this.importBatches(await readFile(path));
@@ -1702,7 +1703,7 @@ export class Context {
 
   // -- export ------------------------------------------------------------------------
 
-  /** The `context` as an import batch stream (NDJSON text). */
+  /** The `context` as an import source stream (NDJSON text). */
   async export(): Promise<string> {
     return (await this.client.send("GET", `${this.path}/export`)).text;
   }
@@ -1716,7 +1717,7 @@ export class Context {
    */
   async *exportStream(): AsyncGenerator<Uint8Array, void, undefined> {
     // The one call site that reaches the network without going through
-    // `send` (ADR 0005 §3.8) — a batch export can be a client's only
+    // `send` (ADR 0005 §3.8) — a source-stream export can be a client's only
     // call, so the compatibility preflight has to run here explicitly
     // too. `streamUrl` is synchronous, so it can't hide this itself.
     await this.client.ensureContract();

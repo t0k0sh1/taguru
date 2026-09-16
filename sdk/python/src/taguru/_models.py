@@ -1042,7 +1042,7 @@ class AddAssociationsResult:
 
 @dataclass(slots=True, frozen=True)
 class ImportOutcome:
-    """Outcome of one applied batch (one source's retract-then-apply)."""
+    """Outcome of one applied source (retract-then-apply)."""
 
     context: str
     source: str
@@ -1059,7 +1059,7 @@ class ImportOutcome:
     locators_stored: int
     locators_dropped: int
     association_paragraphs_dropped: int
-    #: ``warn``-mode schema violations this batch's associations raised
+    #: ``warn``-mode schema violations this source's associations raised
     #: (ADR 0009 §8.3). Defaulted for a server predating this field.
     schema_violations: int = 0
 
@@ -1081,11 +1081,11 @@ class GroupImportOutcome:
 
 @dataclass(slots=True, frozen=True)
 class ImportResult:
-    """What ``POST /import`` accomplished: per-batch outcomes plus any
+    """What ``POST /import`` accomplished: per-source outcomes plus any
     ``group`` restores and ``schema`` installs.
 
     ``issues``/``schema_violations`` are the response envelope's
-    warn-mode carrier (ADR 0009 §8.3), stream-wide; each batch's own
+    warn-mode carrier (ADR 0009 §8.3), stream-wide; each source's own
     :attr:`ImportOutcome.schema_violations` breaks the count down
     per source, surviving ``issues``' truncation.
     """
@@ -1101,7 +1101,7 @@ class ImportResult:
 class PromoteOutcome:
     """What ``POST /contexts/{name}/promote`` accomplished (ADR 0018):
     each named source moved whole from this (scratch) ``context`` into
-    ``into``, ``/import``'s own per-batch outcome shape.
+    ``into``, ``/import``'s own per-source outcome shape.
 
     ``audit`` mirrors :meth:`AsyncContext.audit_consolidation`'s own
     untyped shape (a ``ConsolidationAudit`` server-side) — absent on a

@@ -159,7 +159,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     let message = refused["error"].as_str().unwrap();
     assert!(message.contains("storage quota"), "{message}");
     assert!(
-        message.contains("batch 2 of 2"),
+        message.contains("source file 2 of 2"),
         "the refusal names the resumable position: {message}"
     );
     // The machine-readable half of the same resumable-prefix claim

@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -216,11 +216,11 @@ docker run --rm -v taguru-data:/data ghcr.io/t0k0sh1/taguru inspect /data</code>
   <section id="bulk">
     <h2>5. Loading in bulk — <code>taguru import</code></h2>
     <p class="section-sub">
-      Initial loads and migrations skip HTTP. JSONL batch files apply straight to the data
+      Initial loads and migrations skip HTTP. JSONL source files apply straight to the data
       directory through the same WAL-staged write path the server uses.
     </p>
-    <pre><code>taguru import batches/            <span class="c"># every *.jsonl underneath, in name order</span>
-taguru import --dry-run batches/  <span class="c"># validate and report only; writes nothing</span></code></pre>
+    <pre><code>taguru import sources/            <span class="c"># every *.jsonl underneath, in name order</span>
+taguru import --dry-run sources/  <span class="c"># validate and report only; writes nothing</span></code></pre>
     <p>
       The only rule is <b>one file = one source's complete truth</b>. Applying a file means
       "retract that source, then apply the file" — so:
@@ -230,7 +230,7 @@ taguru import --dry-run batches/  <span class="c"># validate and report only; wr
       <li><b>Revisable</b>: a corrected file replaces the old facts wholesale (the same diff-sync an agent performs live).</li>
       <li><b>Retryable</b>: a file that failed midway is fixed and re-imported — the retraction is what makes the retry exact.</li>
     </ul>
-    <pre><code><span class="c"># a batch file: header first, then one operation per line</span>
+    <pre><code><span class="c"># a source file: header first, then one operation per line</span>
 {<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
@@ -240,7 +240,7 @@ taguru import --dry-run batches/  <span class="c"># validate and report only; wr
     <p>
       Validation is a separate pass from apply: one malformed line refuses the whole file with its
       line number, and nothing is written. A running server takes the same contract at
-      <code>POST /import</code> (one request = one batch file) — that is the bulk entrance with
+      <code>POST /import</code> (one request = one source file) — that is the bulk entrance with
       no downtime window.
     </p>
     <pre><code><span class="c"># -d strips newlines, and newlines are the format — use --data-binary</span>
@@ -248,21 +248,21 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer &lt;key&gt;' \
   --data-binary @docs-aomine.jsonl</code></pre>
     <p>
       The complete contract — full semantics of every line type, the table of caps, the
-      concurrency rules — is in the <a href="import.html">batch import reference</a>.
+      concurrency rules — is in the <a href="import.html">import reference</a>.
     </p>
 
-    <h3>Producing batch files from segments — <code>taguru extract</code></h3>
+    <h3>Producing source files — <code>taguru extract</code></h3>
     <p>
       <code>taguru extract</code> is an offline producer: it has an OpenAI-compatible chat model
-      read <code>.md</code>/<code>.txt</code> files, decompose them into associations under the
-      <code>/protocol</code> discipline, and writes one batch file per segment.
+      read <code>.md</code>/<code>.txt</code> segments and decompose each into associations under
+      the <code>/protocol</code> discipline. Each becomes one source file.
       The server still never holds model credentials — <code>TAGURU_EXTRACT_*</code> lives only in
       the extraction process's environment.
     </p>
     <pre><code>TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
 TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
-taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
-taguru import batches/</code></pre>
+taguru extract --context sake --description "酒蔵の知識" --out sources/ docs/
+taguru import sources/</code></pre>
     <ul>
       <li>The manifest in <code>--out</code> records "content × model × prompt version × <code>context</code>" and skips unchanged segments (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
       <li><code>--questions N</code> is doc2query: up to N retrieval questions per paragraph ride along. Their terms index into the paragraph's BM25 postings on every server, and a server with <code>TAGURU_EMBED_PASSAGES</code> also embeds them next to their paragraphs — either way, question-shaped searches land on answer-shaped text.</li>

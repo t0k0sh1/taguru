@@ -1136,7 +1136,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     let aliases_removed = audit_line("aliases removed");
     assert_eq!(aliases_removed["fields"]["context"], json!("sake"));
     assert_eq!(aliases_removed["fields"]["key"], json!("default"));
-    let imported = audit_line("import batch applied");
+    let imported = audit_line("import source applied");
     assert_eq!(imported["fields"]["context"], json!("sake"));
     assert_eq!(imported["fields"]["source"], json!("b.md"));
     assert_eq!(imported["fields"]["key"], json!("default"));

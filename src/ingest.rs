@@ -130,17 +130,17 @@ usage: taguru import [--dry-run] [--no-embed] [--json] [--config FILE]
                       [--refuse-sensitive [--redact-rules FILE]] [--url URL]
                       FILE|DIR...
 
-Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
+Applies JSONL source files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it), or to a RUNNING
-server with --url. One batch = one source's complete truth: import
-retracts the source, then applies the batch, so re-importing is
-idempotent. A file carries one batch or a whole stream of them (each
+server with --url. One source file = one source's complete truth:
+import retracts the source, then applies its file, so re-importing
+is idempotent. A file carries one source or a whole stream of them (each
 `taguru_batch` header line starts the next) — `taguru export` writes
 such streams. A `schema` line states one context's whole
-schema document (ADR 0009 §13); it installs AFTER every batch, BEFORE
-any group, so a schema record can name a context a batch of the same
+schema document (ADR 0009 §13); it installs AFTER every source, BEFORE
+any group, so a schema record can name a context a source of the same
 stream just created. A `group` line states one group's complete
-truth the same way; groups restore AFTER every batch and schema of
+truth the same way; groups restore AFTER every source and schema of
 the run (create-or-replace of the whole record), so group files
 re-apply in any order. A directory expands to its *.jsonl files,
 sorted by name. Format: docs/import.html.
@@ -153,17 +153,17 @@ sorted by name. Format: docs/import.html.
                once the request lands there)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
   --refuse-sensitive
-               refuse any batch whose passage, association subject/
+               refuse any source file whose passage, association subject/
                label/object, alias spelling, or question text matches
                the sensitive-content rules `extract --redact` masks
-               with (ADR 0038; every rule of both groups). The batch is
+               with (ADR 0038; every rule of both groups). The source file is
                named by path (batches[3].passage, batches[3]
                .associations[7].object) and rule — never by the matched
                text — and skipped; the rest of the file still applies,
-               offline and with --url alike (nothing of a refused batch
+               offline and with --url alike (nothing of a refused source file
                is sent). Import never rewrites content: the fix is to
-               re-extract with --redact, or to edit the batch. Exit 1
-               when any batch was refused
+               re-extract with --redact, or to edit the source file. Exit 1
+               when any source file was refused
   --redact-rules FILE
                with --refuse-sensitive: your own rules on top of the
                built-ins, the same file extract --redact-rules takes
@@ -174,11 +174,11 @@ sorted by name. Format: docs/import.html.
 
   --url URL    import into a RUNNING server instead of TAGURU_DATA_DIR
                directly: POST /import, one request per chunk. The
-               input is split on batch boundaries only — never
-               mid-batch — into chunks under the server's body cap
+               input is split on source boundaries only — never
+               mid-source — into chunks under the server's body cap
                (TAGURU_MAX_BODY_BYTES, 8 MiB by default), starting at
-               a 4 MiB budget and halved (never crossing a batch
-               boundary) and resent on a 413. A single batch that
+               a 4 MiB budget and halved (never crossing a source
+               boundary) and resent on a 413. A single source file that
                alone exceeds the cap is a hard error naming the
                source: raise TAGURU_MAX_BODY_BYTES on the server, or
                split that source's content upstream of import. A lost
@@ -198,7 +198,7 @@ sorted by name. Format: docs/import.html.
                apply runs). Offline, a real (non-dry-run) run is exact
                the same way; offline --dry-run cannot open the data
                directory without the lock a running import would need,
-               so its batch counts are read straight from each file
+               so its source counts are read straight from each file
                (created/retracted and the *_dropped fields all report
                0/false) and its schemas/groups arrays are always empty
                — a preview, not the server's exact one. Every exit path
@@ -206,8 +206,8 @@ sorted by name. Format: docs/import.html.
                refusing every file, the
                registry refusing to boot, and a remote transport error
                or a server-refused chunk each add a top-level 'error'
-               string beside whatever batches/groups already landed; a
-               batch refused mid-run (offline only) is named under a
+               string beside whatever sources/groups already landed; a
+               source file refused mid-run (offline only) is named under a
                failed_batches array instead of batches, since there is
                no successful outcome to report for it.
 ";

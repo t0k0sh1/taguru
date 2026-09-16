@@ -514,7 +514,7 @@ class RunRecorder:
 
         ``ImportStarted`` is the only variant this cares about: it fires
         exactly once per document, exactly after every chunk has been
-        extracted and the batch rendered, immediately before the network
+        extracted and the source file rendered, immediately before the network
         `import_batches` call (``ingest.py``'s ``ingest_text``/
         ``aingest_text``) — precisely the honest moment ``extracted`` needs,
         and the only one available without synthesizing a timestamp

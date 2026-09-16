@@ -126,7 +126,7 @@ class SourceIdRegistry:
     stripped query parameter) this run must refuse the later one for,
     rather than silently overwrite (ADR 0007 §6.1) — the same
     collision-refusal ``taguru extract``'s own ``Run.claimed`` map already
-    applies for batch file names (src/extract.rs:1273).
+    applies for source file names (src/extract.rs:1273).
 
     Scoped to one run's lifetime; a connector constructs one instance per
     enumeration pass. Deciding which diagnostic code names a refused

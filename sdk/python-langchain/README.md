@@ -64,7 +64,7 @@ without re-calling the model for chunks already completed. Changing the
 document's content, the model, or any output-shaping setting (`fact_budget`,
 `structured_output`, `questions`, ...) invalidates the whole cache rather
 than risking a silent reuse of an incompatible output. The checkpoint is
-cleared once the document's batch actually lands in `/import`, and kept if
+cleared once the source file actually lands in `/import`, and kept if
 the document ultimately fails — so a `dry_run=True` call, which never
 imports, still records checkpoints but never deletes them. Pass
 `should_stop` (a zero-argument callable, or a `threading.Event`) to stop

@@ -595,7 +595,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     assert_eq!(refused["integrity"], json!("durable_prefix"), "{refused}");
     assert_eq!(refused["durable_batches"], json!(1), "{refused}");
     let message = refused["error"].as_str().unwrap();
-    assert!(message.contains("batch 2 of 2"), "{message}");
+    assert!(message.contains("source file 2 of 2"), "{message}");
     assert!(message.contains("storage quota"), "{message}");
 
     // The first batch landed for real before the second was refused —

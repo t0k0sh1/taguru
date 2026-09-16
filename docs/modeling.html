@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -125,7 +125,8 @@
     <p class="note">
       <b>Chunk is not a server concept.</b> Taguru never reads or stores a "chunk" — it appears
       only inside <code>taguru extract</code>, the offline producer that turns segments into
-      batch files, as a bound on how much text one model call can see. Once ingest happens, the
+      files, as a bound on how much text one model call can see. Each becomes one
+      source file. Once ingest happens, the
       unit that exists on the server is the passage (a source's full text) split into paragraphs.
       A chunk boundary that survives into the graph as a <code>context</code> boundary is an accident of the
       pipeline, not a decision about meaning.
@@ -199,8 +200,8 @@
     <h3>Building it with one import stream</h3>
     <p>
       A run of <code>taguru import</code> (or one <code>POST /import</code> body) can carry
-      several batches and any number of <code>group</code> records together — <code>group</code>
-      records apply after every batch in the run, so a <code>group</code> and the <code>contexts</code> it names can travel
+      several sources and any number of <code>group</code> records together — <code>group</code>
+      records apply after every source in the run, so a <code>group</code> and the <code>contexts</code> it names can travel
       in any order. One file for the two parts of §2.1, closing with the chapter and paper <code>groups</code>:
     </p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"source"</span>: <span class="s">"bert/2.1/part-1"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
@@ -212,11 +213,11 @@
 {<span class="k">"group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/2"</span>, <span class="s">"section/bert/2.1"</span>, <span class="s">"section/bert/2.2"</span>]}
 {<span class="k">"group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"paper/bert"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/abstract"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
     <p class="note">
-      The second batch's <code>create</code> block is left out on purpose — the <code>context</code> already
-      exists from the first batch, and importing into an absent <code>context</code> without a create block is
+      The second source's <code>create</code> block is left out on purpose — the <code>context</code> already
+      exists from the first source, and importing into an absent <code>context</code> without a create block is
       refused, so this is also how the parser confirms both parts land in the same <code>context</code> rather
-      than silently minting two. Full field-by-field contract: <a href="import.html">The batch
-      contract</a>.
+      than silently minting two. Full field-by-field contract: <a href="import.html">The
+      source file contract</a>.
     </p>
   </section>
 
@@ -273,7 +274,7 @@
       structure.
     </p>
     <p class="note">
-      Bodies (a <code>recall</code> request, an import batch's <code>context</code> field) carry a
+      Bodies (a <code>recall</code> request, an import source's <code>context</code> field) carry a
       slash-bearing name as-is. Only when the name itself sits in the URL path —
       <code>PUT /contexts/{name}</code>, <code>PUT /groups/{name}</code> — does the slash need
       percent-encoding (<code>paper%2Fbert</code>), the same as any other path segment; otherwise
@@ -339,7 +340,7 @@
 
     <div class="next-links">
       <a class="nav-card" href="import.html" style="flex:1 1 16rem">
-        <span class="nc-title">Next: Batch import</span>
+        <span class="nc-title">Next: Import</span>
         <p>The complete file format — headers, passages, <code>group</code> records, caps, and the concurrency rules.</p>
       </a>
       <a class="nav-card" href="concepts.html" style="flex:1 1 16rem">

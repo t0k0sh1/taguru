@@ -560,7 +560,7 @@ fn scan_data_dir(
         let Some(marker) = parsed else {
             tracing::warn!(
                 path = %path.display(),
-                "unreadable import marker — an import batch may be half-applied, \
+                "unreadable import marker — an import may be half-applied, \
                  but which source is unrecoverable; remove the file once investigated",
             );
             continue;
@@ -569,9 +569,9 @@ fn scan_data_dir(
             tracing::warn!(
                 context = %marker.context,
                 source = %marker.source,
-                "an import batch for this source never completed — its truth may be \
+                "an import for this source never completed — its truth may be \
                  half-applied (passages without associations, or associations without \
-                 aliases); re-import the batch file or retract the source",
+                 aliases); re-import the source file or retract the source",
             );
         } else {
             let _ = remove_persisted_file(&path);

@@ -68,14 +68,14 @@ use crate::remote::Api;
 const USAGE: &str = "\
 usage: taguru export [--config FILE] [--url URL] --out DIR [CONTEXT...]
 
-Writes each context back out as a JSONL batch stream —
+Writes each context back out as a JSONL source stream —
 {out}/{context}.jsonl, the exact format `taguru import` and POST
 /import apply. A context's own schema (ADR 0009 §13) rides inside
 that same stream as one schema record — no separate file —
 when the context has one installed and its mode is not \"off\". No
 CONTEXT arguments means every context, plus every group as
 {out}/{group}.group.jsonl (one group record each; import
-restores groups after every batch and schema, so the files re-apply
+restores groups after every source and schema, so the files re-apply
 in any order). A full export owns DIR's *.jsonl files: one left by a
 previous export whose context or group no longer exists is removed,
 so importing DIR never resurrects a deleted entity. Naming CONTEXTs
@@ -1050,7 +1050,7 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     let (batches, lines) = stream_counts(&stream);
     Ok(format!(
-        "{}: context '{name}' → {batches} batch(es), {lines} line(s)",
+        "{}: context '{name}' → {batches} source(s), {lines} line(s)",
         path.display()
     ))
 }
@@ -1261,7 +1261,7 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
     crate::storage::write_atomic(&path, rendered.stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
-        "{}: context '{name}' → {} batch(es), {} association line(s), {} alias(es){}{}",
+        "{}: context '{name}' → {} source(s), {} association line(s), {} alias(es){}{}",
         path.display(),
         rendered.batches,
         rendered.association_lines,

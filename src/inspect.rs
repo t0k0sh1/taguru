@@ -916,14 +916,14 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                         marker.context.clone(),
                         format!(
                             "the import of source '{}' never completed; its truth may be \
-                             half-applied — re-import its batch file or retract the source",
+                             half-applied — re-import its source file or retract the source",
                             marker.source
                         ),
                     ));
                 } else {
                     println!(
                         "{}: WARNING — the import of source '{}' never completed; its truth \
-                         may be half-applied — re-import its batch file or retract the source",
+                         may be half-applied — re-import its source file or retract the source",
                         marker.context, marker.source
                     );
                 }
@@ -952,12 +952,12 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                     notices.push(Notice::warning(
                         "unreadable_import_marker",
                         file.to_string(),
-                        "unreadable import marker; an import batch may be half-applied, but \
+                        "unreadable import marker; an import may be half-applied, but \
                          which source is unrecoverable",
                     ));
                 } else {
                     println!(
-                        "{file}: WARNING — unreadable import marker; an import batch may be \
+                        "{file}: WARNING — unreadable import marker; an import may be \
                          half-applied, but which source is unrecoverable"
                     );
                 }

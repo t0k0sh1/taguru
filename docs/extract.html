@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html" aria-current="page">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -76,11 +76,11 @@
     <h1>Segment extraction — <code>taguru extract</code></h1>
     <p class="lede">
       The producer half of <a href="import.html"><code>taguru import</code></a>. It has a chat
-      model read segments (<code>.md</code>/<code>.txt</code>), decompose them into associations
-      under the <code>/protocol</code> ingest discipline, and writes <b>one batch file per
-      segment</b> into <code>--out</code> — the segment's path becomes the source id.
+      model read segments (<code>.md</code>/<code>.txt</code>) and decompose them into associations
+      under the <code>/protocol</code> ingest discipline. Each becomes <b>one source file</b> into
+      <code>--out</code> — its path becomes the source id.
       It applies nothing: the files are the output, and applying is the job of
-      <code>taguru import</code> (or <code>POST /import</code>). Two stages on purpose — batch
+      <code>taguru import</code> (or <code>POST /import</code>). Two stages on purpose — source
       files can be inspected, diffed, version-controlled, and re-applied, and the expensive stage
       (the model calls) is decoupled from the idempotent one.
     </p>
@@ -89,12 +89,12 @@
   <section id="cli">
     <h2>The CLI shape</h2>
     <pre><code>taguru extract --context sake --description "酒蔵の知識" \
-  --out batches/ docs/                <span class="c"># every .md/.txt under docs/, in name order</span>
-taguru import batches/               <span class="c"># offline — or POST each file to /import</span></code></pre>
+  --out sources/ docs/                <span class="c"># every .md/.txt under docs/, in name order</span>
+taguru import sources/               <span class="c"># offline — or POST each file to /import</span></code></pre>
     <p class="note">
       PDFs are not among the formats above — nor are HTML, DOCX, PPTX, or objects in S3-compatible
       storage. The standard <a href="connectors.html">ingest connectors</a> (Python SDK) read all
-      of those into the same batch contract this page describes; the
+      of those into the same source-file contract this page describes; the
       <a href="local-rag-walkthrough.html">local RAG walkthrough</a> shows one worked end to end.
     </p>
     <pre><code>TAGURU_EXTRACT_URL      OpenAI-compatible /chat/completions endpoint (required)
@@ -135,7 +135,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
 
 --dry-run           list what would extract or skip; calls nothing
 --force             re-extract segments the manifest says are unchanged
---no-passage        omit the segment body from the batch (facts only)
+--no-passage        omit the body text from the source file (facts only)
 --questions N       doc2query: also propose up to N retrieval questions
                     per paragraph (1..=8; incompatible with --no-passage)
 --fact-budget N     ask the model to keep each chunk's answer to at most N
@@ -192,7 +192,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     the redaction version, so editing it re-extracts;
                     needs --redact (ADR 0038)
 --vocabulary PATH   steer spellings toward a target context's existing
-                    vocabulary: PATH is an exported batch stream or a
+                    vocabulary: PATH is an exported source stream or a
                     directory of them — its *.jsonl files, so an extract
                     --out DIR works too (taguru export --out DIR); concept
                     names and labels are offered as preferred spellings,
@@ -212,21 +212,21 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     uncovered counts), a "run" record first; off by default,
                     ignored under --dry-run. Joins the per-segment trace
                     OUT/.extract-trace/ always writes (see below)
---source-id ID      write ID as the batch header's source instead of the
+--source-id ID      write ID as the header line's source instead of the
                     segment path — the promotion runbook's
                     session:{agent}:{id} convention; several segments each
                     get ID/{file stem}, and a collision fails (import
                     retracts-then-applies per source id). Empty or
                     whitespace-only IDs are refused, and IDs over 1024
                     bytes (the server's source-name cap) fail up front
-                    rather than at import. Changing it rewrites the batch
-                    but reuses cached chunk answers (ADR 0017)
+                    rather than at import. Changing it rewrites the source
+                    file but reuses cached chunk answers (ADR 0017)
 --date WHEN         the session's own date, written on the passage line:
                     YYYY-MM-DD (UTC midnight) or positive epoch seconds;
                     needs the passage
---tag TAG           tag the batch's source (repeatable, deduplicated),
+--tag TAG           tag the source (repeatable, deduplicated),
                     written on the passage line; needs the passage
---context NAME      the context every batch file targets
+--context NAME      the context every source file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --schema FILE       a context schema document (see below) — the same shape
                     {stem}.schema.json/PUT /contexts/{name}/schema persist and
@@ -249,10 +249,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>
       A segment handed to <code>extract</code> goes to the model as written — and, for a
       hosted endpoint, out of the machine. <code>--redact</code> is the gate for the cases a
-      regular expression can recognise: the segment is scanned before anything reads it, and
-      each match is replaced by a placeholder, so the prompt, the passage the batch quotes,
-      the checkpoint, the trace, and the attempts log all hold the placeholder and none holds
-      the text (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0038-sensitive-content-gate.md">ADR
+      regular expression can recognise: the segment is scanned before anything reads it.
+      Each match is replaced by a placeholder, so the prompt, the passage the source file
+      quotes, the checkpoint, the trace, and the attempts log all hold the placeholder and none
+      holds the text (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0038-sensitive-content-gate.md">ADR
       0038</a>). Two groups, both on when no group is named:
     </p>
     <ul>
@@ -295,10 +295,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       a <code>, N redacted</code> note on the report line, one <code>redaction</code> record
       per match at the top of the <a href="#trace">trace</a>, and a <code>, N redaction(s)</code>
       note on <code>--dry-run</code>'s plan line. The answer is scanned with the same rules
-      before the batch is written: a label or question carrying what the masked text never
-      showed fails the segment with the batch line and the rule, and a subject, object, or
-      alias that <i>is</i> a placeholder is removed as not an entity, with the usual
-      accounting. With redaction off and <code>TAGURU_EXTRACT_URL</code> pointing anywhere
+      before the source file is written. A label or question carrying what the masked text
+      never showed fails that segment. The failure names the source-file line and the rule,
+      and a subject, object, or alias that <i>is</i> a placeholder is removed as not an
+      entity, with the usual accounting. With redaction off and
+      <code>TAGURU_EXTRACT_URL</code> pointing anywhere
       but this machine, the run says so once on stderr, before the first segment is read.
     </p>
     <p id="redact-rules">
@@ -321,7 +322,7 @@ emp_id	\bEMP-\d{6}\b
 ticket	\bTCK-[0-9]{4,}\b
 customer_code	\bC[A-Z]{2}-\d{5}\b
 
-taguru extract --context ops --out batches/ --redact --redact-rules redact-rules.tsv docs/</code></pre>
+taguru extract --context ops --out sources/ --redact --redact-rules redact-rules.tsv docs/</code></pre>
   </section>
 
   <section id="boundary">
@@ -455,7 +456,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
         </tr>
         <tr>
           <td><code>render</code></td><td>per segment</td><td>—</td>
-          <td>the batch file, self-validated and atomically written</td>
+          <td>the source file, self-validated and atomically written</td>
           <td>—</td>
         </tr>
         <tr>
@@ -589,7 +590,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose spelling an <i>earlier</i> segment of the same run (or the <code>--vocabulary</code> <code>context</code>) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — a relation label that is a single character (most often a bare particle picked up as the whole relation; two or more characters survives — same anchor-nothing judgment as a single-character candidate name), a label, subject, object, or alias spelling written with an ideograph outside JIS X 0208's repertoire that the segment never writes (<code>适用法律</code> for a segment that says <code>適用法律</code> — a multilingual model's simplified-Chinese rendering of a Japanese term, which <code>query</code>, <code>resolve</code>, and the reuse vocabulary would all treat as a second label; a segment that itself uses the character, a Chinese or Korean one or a Japanese one quoting either, clears it, and nothing about the segment's language is judged — <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0039-foreign-ideograph-removal.md">ADR 0039</a>), and a subject/object that never appears in the segment text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a segment that says <code>プールの最大接続数</code> still passes; a name written entirely in a Latin-style script is covered by its whole words and word stems, never by shared letter pairs, so an English object built from words the input never uses is removed even when the chunk or its <code>context</code> block is English — ADR 0036). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. Two removal classes are the exception to "before any corrective turn", both judged per segment after the Stage 2 corrective turns so the corrective messages' item indices still match the replayed answers: an alias whose canonical names nothing any of the segment's associations contain is pruned then (ADR 0013 Stage 2), and an alias whose in-segment shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting — a correction the provider cut off at the output limit counts as leaving its issues standing (ADR 0032; see the ladder under <a href="#structured-output">structured output</a> for the one escalated resend it gets first).</li>
       <li>Invalid items removal cannot judge — wrong-typed or oversized fields, zero/non-finite/over-cap weights, unknown alias kinds, shadowing or conflicting aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below): a present-but-wrong value is content the model can actually fix.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
-      <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
+      <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the source file at apply time).</li>
       <li>Every file written is re-parsed with the import parser before it is written — <b>extract cannot produce a file import would reject</b>.</li>
     </ul>
     <p>
@@ -623,13 +624,13 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     </p>
     <p>
       <code>--vocabulary</code> (ADR 0015, #496 S3) is the cross-segment half of the same
-      idea: point it at an exported batch stream of the target <code>context</code> (<code>taguru export
+      idea. Point it at an exported source stream of the target <code>context</code> (<code>taguru export
       --out DIR</code>, or <code>GET /contexts/{name}/export</code> saved to disk — a file, or
       a directory read by the same rule as <code>taguru import DIR</code>: its
       <code>*.jsonl</code> files, sorted, non-recursive, so a previous extract's
       <code>--out</code> directory serves too, its <code>.extract-manifest.json</code> and
-      <code>.extract-trace/</code> left alone) and the <code>context</code>'s own concept names and relation labels are
-      offered as preferred spellings, with one extra instruction: use the <code>context</code>'s exact
+      <code>.extract-trace/</code> left alone), and the <code>context</code>'s own concept names and relation labels are
+      offered as preferred spellings. One extra instruction: use the <code>context</code>'s exact
       spelling <i>even when the segment spells the same entity differently</i>. That is the
       <code>cargo-nextest</code>/<code>nextest</code> twin being prevented at answer time
       instead of detected by the <a href="promotion.html">consolidation audit</a> after
@@ -653,10 +654,10 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       (subject/label/object) in the sentence, the sentence is flagged — one stderr line each
       (<code>uncovered: [paragraph N] &lt;sentence&gt;</code>), a count on the report line, an
       <code>uncovered</code> count in the diagnostics segment record. <b>Report-only</b>: the
-      batch is written whole either way, no extra model call is made, and the flag is not a
-      computation input — a rerun over an unchanged corpus skips every segment and still
-      reports, judging each from the batch it already wrote, so any past run's recall ceiling
-      is measurable for free. A gap is a lead, not a verdict (a name-dense heading can flag
+      source file is written whole either way, no extra model call is made, and the flag is
+      not a computation input. A rerun over an unchanged corpus skips every segment and still
+      reports. It judges each from the source file it already wrote, so any past run's recall
+      ceiling is measurable for free. A gap is a lead, not a verdict (a name-dense heading can flag
       without a real miss); re-extracting flagged sentences automatically is ADR 0016 §4's
       measured upgrade path.
     </p>
@@ -710,7 +711,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       model cannot correct (it can re-judge its own associations, never un-claim a previous
       segment's name). If the corrected answer is <i>still</i> invalid, or the
       model answers with something cut off, refused, or empty, the segment fails outright and
-      nothing is written — a batch is only ever the complete, valid truth, never a subset
+      nothing is written. A source file is only ever the complete, valid truth, never a subset
       quietly missing the items that didn't fit. <code>--lossy</code> (or
       <code>TAGURU_EXTRACT_LOSSY</code>) opts back into the pre-this-behavior default: invalid
       items are dropped and counted without ever costing a corrective turn, and the one-line report
@@ -870,7 +871,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       to extract from the chunk only.
     </p>
     <p>
-      Three rules keep the block from leaking into the batch. It carries <b>no <code>[N]</code>
+      Three rules keep the block from leaking into the source file. It carries <b>no <code>[N]</code>
       paragraph label</b>, so nothing in it can be the paragraph a fact is tagged with — the
       passage and every locator are exactly what they were. It is <b>the segment's own
       text</b>, so the <a href="#prompt">occurrence check</a> reads it: <code>電子署名法</code>
@@ -944,9 +945,9 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <code>TAGURU_EXTRACT_CHUNK_BYTES</code> sets the default), cut at paragraph boundaries (aliases and
       duplicate folding stay coherent across chunks — an alias in chunk 1 whose canonical first
       appears in chunk 3 still lands). A fact whose evidence straddles a chunk boundary can be
-      missed; that is why the cap leans large. Passages are never chunked: the batch carries the
-      full segment text as-is. Segments over 8 MiB are refused — the batch passage could not
-      carry them. Split the segment. Under the escalation ladder
+      missed; that is why the cap leans large. Passages are never chunked: the passage line
+      carries the full segment text as-is. Segments over 8 MiB are refused. Their passage could
+      not fit in the source file. Split the segment. Under the escalation ladder
       (<a href="#structured-output">above</a>) a length-limited or timed-out chunk can split further at run
       time, so <code>--dry-run</code>'s chunk count is a lower bound on model calls, not an
       exact one. The cap is a computation input: a segment extracted under a different
@@ -979,8 +980,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     <p>
       With <code>--questions N</code>, the same extraction call also proposes up to N realistic
       retrieval questions per paragraph — questions the paragraph answers, phrased the way a user
-      would type them, kept away from the paragraph's own wording — and the batch carries them as
-      question lines. Questions ride the same <b>server-numbered</b> paragraphs as the
+      would type them, kept away from the paragraph's own wording — and the source file carries
+      them as question lines. Questions ride the same <b>server-numbered</b> paragraphs as the
       associations, so the indexes written out match exactly what the server validates and cannot
       drift. Generation riding the extraction call is deliberate: there is no cheap
       questions-only pass, so changing N means re-extracting (the manifest records it as a compute
@@ -996,8 +997,9 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       The manifest sits above <a href="#pipeline">the pipeline</a> — it is the gate that decides
       whether a segment runs at all, not a step within it.
       Extraction being the expensive stage, <code>--out</code> carries an
-      <code>.extract-manifest.json</code>: per segment, the "content hash × model × prompt
-      version × target <code>context</code>" its batch file was computed from. Segments whose compute inputs
+      <code>.extract-manifest.json</code>: one entry per segment. It records the "content hash ×
+      model × prompt version × target <code>context</code>" its source file was computed from.
+      Segments whose compute inputs
       are unchanged are skipped, <code>--force</code> overrides, and a missing or corrupt manifest
       degrades <b>to re-extraction</b> — never to a false "unchanged". Keep the out directory
       between runs and a nightly extract-and-import pays model calls only for changed segments;
@@ -1016,7 +1018,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       instead of leaving files aimed at the old destination. Still, <b>use one out directory per
       <code>context</code></b> — the manifest has one entry per segment, so alternating two <code>contexts</code> in one
       directory re-extracts everything on every switch and the later <code>context</code>'s files overwrite the
-      earlier's. Batches from several out directories can be applied together in one import
+      earlier's. Source files from several out directories can be applied together in one import
       (<code>taguru import sake/ code/</code>) — every file's header names its own <code>context</code>, so
       "extract once per <code>context</code>, import everything at once" is the intended shape.
     </p>
@@ -1064,14 +1066,14 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       source edited, a setting changed — invalidates the whole file, the same "unreadable or
       incompatible degrades to re-extraction, never to a false reuse" posture the manifest takes.
       <code>--force</code> discards a segment's existing checkpoints outright, one level deeper
-      than bypassing the manifest skip. A segment whose batch lands successfully has its
+      than bypassing the manifest skip. A segment that finishes successfully has its
       checkpoint file deleted; a segment that ultimately fails (Stage 2 correction, merge,
       self-validation) keeps it — the chunks it did complete are still good work worth keeping for
       the next attempt, and the failure line says how many units are checkpointed and that a
       rerun <i>without</i> <code>--force</code> resumes from them, re-asking only what failed.
-      There is deliberately no "write what succeeded" mode: a batch is the source's complete,
-      valid truth or nothing (ADR 0001 §8), and the checkpoints already make the retry cost only
-      the failed part.
+      There is deliberately no "write what succeeded" mode: a source file is the source's
+      complete, valid truth or nothing (ADR 0001 §8), and the checkpoints already make the
+      retry cost only the failed part.
     </p>
     <p>
       <code>--dry-run</code> reads checkpoints too (never writes or calls anything) and folds a
@@ -1164,7 +1166,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <code>source</code>, <code>chunk_index</code>, <code>chunk_total</code>,
       <code>chunk_sha256</code> (the chunk text as sent to the model), <code>chunk_bytes</code>,
       and <code>paragraph_first</code>/<code>paragraph_last</code> (inclusive) — the range of the
-      server's own canonical paragraph numbering (the same locator a batch's <code>paragraph</code>
+      server's own canonical paragraph numbering (the same locator a source file's <code>paragraph</code>
       field, passage store, BM25 lane, and vector lane all already share) that chunk covers. This
       is a paragraph-index range, never a byte offset: chunking runs on a relabeled rendering of
       the segment, not the original bytes, so a byte offset into it would not resolve to
@@ -1194,15 +1196,16 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       never captured at all, under any setting. <code>TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES</code>
       opts into the model's final answer text on each <code>attempt</code> record (the only kind
       that carries one at all) — the full text of every prompt and answer lives in the
-      <a href="#attempts">attempts log</a> beside the batch instead — byte-capped <b>at capture</b> (the same treatment
-      <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> gives a replayed bad answer above) —
-      because a raw response can embed the source segment's own content, an uncapped default
-      would leak segment text into a file meant for troubleshooting model behavior.
+      <a href="#attempts">attempts log</a> beside the source file instead, byte-capped <b>at
+      capture</b> (the same treatment <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code>
+      gives a replayed bad answer above). A raw response can embed the segment's own text,
+      so an uncapped default would leak it into a file meant for troubleshooting model
+      behavior.
     </p>
     <p>
       The sidecar is truncated fresh on every run — it describes <i>this</i> run, never a log
       appended across runs — so a rerun the manifest skips entirely leaves it empty, and a path
-      inside <code>--out</code> risks collision with a batch file or the manifest itself. Keep it
+      inside <code>--out</code> risks collision with a source file or the manifest itself. Keep it
       outside <code>--out</code>. It is a diagnostic aid, never a source of truth: the manifest
       stays exactly what it has always been, a skip-index of successes, with no diagnostics
       mixed in. For watching this sidecar (or the SDK's equivalent event stream) live against a
@@ -1211,21 +1214,22 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
   </section>
 
   <section id="trace">
-    <h2>Trace: from any batch item back to the text and the completion that produced it</h2>
+    <h2>Trace: from any source-file item back to the text and the completion that produced it</h2>
     <p>
       See <a href="#by-step">by step</a> for which of <a href="#pipeline">the pipeline</a>'s
       steps each record kind below reports on.
-      Every written batch gets a sibling under <code>&lt;out&gt;/.extract-trace/</code>, named like
-      the batch file, always on, no flag (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0023-extraction-trace-ids.md">ADR
+      Every written source file gets a sibling under <code>&lt;out&gt;/.extract-trace/</code>, named like
+      the source file, always on, no flag (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0023-extraction-trace-ids.md">ADR
       0023</a>). Where the diagnostics sidecar describes <i>a run</i>, the trace describes
-      <i>a batch</i>: it is written atomically in the same step as the batch, replaced when the
-      segment is re-extracted, left alone when the manifest skips it, never written for a
-      segment that fails (its checkpoint keeps what matters for the resume), and never a
-      manifest input — a batch from before this file existed simply has none. It is hidden and
-      in a subdirectory so <code>taguru import DIR</code> never reads it as a batch. The batch
+      <i>a source</i>: it is written atomically in the same step as the source file.
+      It is replaced when the segment is re-extracted, left alone when the manifest skips it,
+      and never written for a segment that fails (its checkpoint keeps what matters for the
+      resume). It is never a manifest input — a source file written before this feature
+      existed simply has none. It is hidden and in a subdirectory so
+      <code>taguru import DIR</code> never reads it as a source file. The source file
       format itself is unchanged: import refuses unknown fields, so an item is identified by
-      its content, exactly as the batch makes it unique — the association triple, the alias
-      spelling within <code>concept</code>/<code>label</code>, the question's
+      its content, exactly as the source file makes it unique — the association triple, the
+      alias spelling within <code>concept</code>/<code>label</code>, the question's
       (<code>paragraph</code>, text).
     </p>
     <p>
@@ -1259,10 +1263,10 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       the completion whose answer this piece's output <i>is</i>: the accepted Stage 1 answer,
       or the Stage 2 corrective answer when one replaced it; for a reused unit, the completion
       of the run that produced it, which the checkpoint now records (<code>null</code> only for
-      a checkpoint written before 0.9.5); then one <code>item</code> per batch line in batch
-      order (<code>item</code>: <code>association</code> | <code>concept</code> |
-      <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>);
-      then one <code>steering</code> record (after <code>segment</code> — listed here in
+      a checkpoint written before 0.9.5). Then one <code>item</code> per source-file line,
+      in file order (<code>item</code>: <code>association</code> | <code>concept</code> |
+      <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>).
+      Then one <code>steering</code> record (after <code>segment</code> — listed here in
       reading order) with what taguru itself put into the prompt, as data
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0027-steering-records.md">ADR
       0027</a>): <code>candidates</code> (ADR 0014's list as offered), <code>vocabulary</code>
@@ -1275,7 +1279,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       from under <a href="#replay"><code>--replay</code></a>; absent from the record whenever
       this run computed its own); <code>chunk_index</code> is <code>null</code> — segment scope, every chunk
       sees the same lists today; per-chunk context (a future control) adds records with the
-      index set. Then one <code>loss</code> per item the model's accepted answer held that the batch does
+      index set. Then one <code>loss</code> per item the model's accepted answer held that the source file does
       not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
       0024</a>): <code>item</code> (<code>association</code> | <code>alias</code> |
       <code>question</code>), <code>reason</code> — <code>removed</code> (mechanical validation,
@@ -1305,18 +1309,19 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       owning chunk (<code>chunk_index</code>/<code>chunk_sha256</code>).
     </p>
     <p>
-      <code>taguru anchoring OUT_DIR --json report.json</code> judges the written batches
+      <code>taguru anchoring OUT_DIR --json report.json</code> judges the written source files
       against their own passage text — the anchoring rate (strict and alias-group) and locator
-      validity, hallucination's mechanical floor; batch files are all it needs, so pre-0.9.5
+      validity, hallucination's mechanical floor; source files are all it needs, so pre-0.9.5
       output qualifies (<code>taguru anchoring --help</code>). The rates alone cannot point at a
       fabricated name, so after the table every association that is not strictly anchored — or
-      cites a paragraph holding neither name — is <b>named</b> (#864): its batch line, subject,
+      cites a paragraph holding neither name — is <b>named</b> (#864): its source-file line, subject,
       label, object, cited paragraph, and the reason (<code>unanchored</code>,
-      <code>alias-only</code>, <code>invalid locator</code>), the first <code>--list N</code> per
-      segment on stdout (default 3, <code>0</code> for none) and every one under
+      <code>alias-only</code>, <code>invalid locator</code>), and every one under
       <code>unanchored</code> in the <code>--json</code> report with the three judgments as
-      booleans; a batch file that cannot be parsed is named, counted under <code>failed</code>,
-      and skipped rather than stopping the run (exit 1, report intact). <b>Read the strict rate within
+      booleans. The first <code>--list N</code> prints per segment on stdout (default 3,
+      <code>0</code> for none). A source file that cannot be parsed is named, counted under
+      <code>failed</code>, and skipped rather than stopping the run (exit 1, report intact).
+      <b>Read the strict rate within
       a segment type, never across types.</b> Strict is defined as "the subject <i>and</i> the
       object both occur, under the same folding the server resolves names with, in the cited
       paragraph (else the whole passage)" — exactly what the implementation checks. A segment
@@ -1335,20 +1340,20 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <code>group</code>, and run (loss rates by reason, paragraph coverage, correction success, attempt-state
       and ladder-move counts, label concentration, graph shape, and time/token/money cost,
       with <code>--compare</code> for run-to-run deltas); <code>--help</code> documents the
-      ledger and price inputs. A segment that failed leaves an attempts log and no trace
-      (there was no batch to trace); the tables count it under <code>failed</code>, apart
+      ledger and price inputs. A segment that failed leaves an attempts log and no trace.
+      There was no source file to trace. The tables count it under <code>failed</code>, apart
       from <code>segments</code>, with its attempts, moves, and cost in every scope's sums and its
       quality columns empty — so the cost of failing is part of the run's cost, not invisible.
       Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or
       <code>chunk_sha256</code>; piece → the sidecar's <code>attempt</code> record by
       <code>(run_id, attempt_seq)</code> when that run's sidecar was kept; any record → the
       segment by the file itself. A duplicate triple two chunks both answered is attributed
-      to the copy <code>merge</code> kept, the first — the batch holds one line, so the trace
-      holds one item. Given a piece's paragraph range and the segment's own bytes, the text
-      the model was shown follows from the server's paragraph splitter exactly as for the
+      to the copy <code>merge</code> kept, the first — the source file holds one line, so the
+      trace holds one item. Given a piece's paragraph range and the segment's own bytes, the
+      text the model was shown follows from the server's paragraph splitter exactly as for the
       sidecar's chunk record (ADR 0003 §7). A trace that cannot be written earns one stderr
-      line and never fails the segment: the batch and the manifest are the truth, the trace
-      is advisory.
+      line and never fails the segment. The source file and the manifest are the truth; the
+      trace is advisory.
     </p>
     <h3 id="attempts">The attempts log: every prompt and every answer, in full</h3>
     <p>
@@ -1371,7 +1376,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     <p>
       <b>Read it with <code>taguru inspect</code></b> (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0037-failure-output-addressability.md">ADR
-      0037</a>, #850): <code>taguru inspect &lt;out&gt;/.extract-trace/&lt;batch
+      0037</a>, #850): <code>taguru inspect &lt;out&gt;/.extract-trace/&lt;source
       stem&gt;.attempts.jsonl</code> prints one line per completion in issue order — chunk,
       piece id, the paragraphs the piece spans, stage and attempt, state, token cap, time,
       tokens — with the ladder's moves (escalate, split, demote, runaway) between them and a
@@ -1387,7 +1392,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       (a killed run) is counted and said, never a failure.
     </p>
     <p>
-      Beside the trace, <code>&lt;out&gt;/.extract-trace/&lt;batch stem&gt;.attempts.jsonl</code>
+      Beside the trace, <code>&lt;out&gt;/.extract-trace/&lt;source stem&gt;.attempts.jsonl</code>
       keeps the text of every conversation the segment had with the model, by default
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0025-attempts-log.md">ADR
       0025</a>): one <code>segment</code> record per run over the segment (<code>run_id</code>,
@@ -1463,16 +1468,17 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       <code>piece_id</code>, <code>chunk_index</code>, and <code>reason</code> in the stderr
       line's own words — so per-segment-kind frequency and cost of every retry-machinery action
       is a fold over this file. It is written incrementally (a killed run keeps every completion made),
-      <b>kept when the segment fails</b> — that is what it is for — and, on a checkpoint resume,
-      appended to rather than truncated, so it spans exactly the runs that built the batch; a
-      fresh start (<code>--force</code>, a changed segment) truncates it. Joins: the sidecar by
+      <b>kept when the segment fails</b> — that is what it is for. On a checkpoint resume it is
+      appended to rather than truncated, so it spans exactly the runs that built the source
+      file. A fresh start (<code>--force</code>, a changed segment) truncates it. Joins: the sidecar by
       <code>(run_id, attempt_seq)</code>, the trace's <code>piece</code> by <code>piece_id</code>
       and <code>attempt</code>, a <code>loss</code>'s <code>path</code> into <code>answer</code>.
       Measured on the 0.9.3 field corpus it is 5–70 KiB per segment.
       <code>TAGURU_EXTRACT_TRACE_ATTEMPTS=off</code> switches it off. The diagnostics sidecar is
       unchanged: metadata only, <code>TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES</code> still the capped
-      opt-in — the sidecar is the file to hand to someone else; the attempts log stays with the
-      data, exposing no more of the segment than the batch and checkpoint beside it already do.
+      opt-in — the sidecar is the file to hand to someone else. The attempts log stays with the
+      data — it exposes no more of the underlying text than the source file and checkpoint
+      beside it already do.
     </p>
   </section>
 
@@ -1541,8 +1547,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       mechanically validated under whichever code ran the original extraction, which for "replay
       after changing the validation rule" is exactly the answer replay must not silently reuse.
       Replaying is never a manifest or checkpoint computation input either: a replayed completion
-      is byte-identical to its recorded original, so the batch it produces is the same function of
-      the same inputs a live run would have produced.
+      is byte-identical to its recorded original, so the source file it produces is the same
+      function of the same inputs a live run would have produced.
     </p>
     <p>
       The system prompt is <b>pinned</b> verbatim from the recorded run
@@ -1607,7 +1613,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
         (the attempts log's <code>messages</code> hold piece text, not the whole segment —
         reconstructing it from the log alone is not attempted), <code>--out/.extract-trace/
         *.attempts.jsonl</code>, and the <code>--schema</code> document if one was used.</li>
-      <li>Nothing else needs to travel: the batch, the manifest, and the checkpoint directory are
+      <li>Nothing else needs to travel: the source file, the manifest, and the checkpoint directory are
         all either reproduced by the replay run itself or simply not read under
         <code>--replay</code> (<a href="#manifest">the manifest skip</a>,
         <a href="#checkpoints">the checkpoint store</a>).</li>
@@ -1629,10 +1635,10 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     <h2>Reading the records: tracing one item, and what to adjust</h2>
     <p>
       Everything above says what is written. This section is the reader's path through it
-      (#784): start from one line of a finished batch and end with the original text, the exact
-      prompt, and the model's full answer side by side — then, when a number looks wrong,
+      (#784): start from one line of a finished source file and end with the original text, the
+      exact prompt, and the model's full answer side by side — then, when a number looks wrong,
       which knob answers it. <code>jq</code> is enough; no taguru command is involved. Throughout,
-      for a batch <code>out/a.jsonl</code>:
+      for a source file <code>out/a.jsonl</code>:
     </p>
     <pre><code>t=out/.extract-trace/a.jsonl               # the trace
 l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
@@ -1683,7 +1689,7 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             corrective ask an <code>attempt</code> record carries, and <code>--lossy</code>'s
             parse-time drops appear as trace <code>loss</code> (<code>reason: "dropped"</code>).
             An <em>accepted</em> piece's parsed output is, however, held in its
-            <a href="#checkpoints">checkpoint unit</a> until the batch lands and reused on
+            <a href="#checkpoints">checkpoint unit</a> until the source file lands and reused on
             resume — not a first-class step record of its own, but not entirely absent
             either.</td></tr>
         <tr><td><code>validate</code></td>
@@ -1697,11 +1703,11 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             this record kind is shared with <code>validate</code>, disambiguated only by
             <code>rule</code>'s prose today).</td></tr>
         <tr><td><code>merge</code></td>
-          <td>trace <code>item</code>, one per batch line, in batch order; trace <code>loss</code>
+          <td>trace <code>item</code>, one per source-file line, in file order; trace <code>loss</code>
             (<code>reason: "dropped"</code>/<code>"duplicate"</code>, with
             <code>kept_piece_id</code>); the segment record's counts.</td></tr>
         <tr><td><code>render</code></td>
-          <td>the batch file itself is the persisted artifact — trace
+          <td>the source file itself is the persisted artifact — trace
             <code>segment.batch_path</code> and the manifest entry point at it. Nothing
             computes it independently of <code>merge</code>'s output plus the header fields,
             so there is no separate render-only record beyond the file.</td></tr>
@@ -1720,9 +1726,9 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
       records on disk are unchanged.
     </p>
 
-    <h3 id="walkthrough">From one batch line back to everything that produced it</h3>
+    <h3 id="walkthrough">From one source-file line back to everything that produced it</h3>
     <p>
-      <b>1. The item.</b> A batch line is identified by its content, so select the trace
+      <b>1. The item.</b> A source-file line is identified by its content, so select the trace
       <code>item</code> record with the same key — the association triple, the alias
       spelling, or the question's (<code>paragraph</code>, text):
     </p>
@@ -1776,7 +1782,7 @@ jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</co
   | {run_id, attempt_seq, stage, state, corrects,
      issues: .validation_issues}' "$l"</code></pre>
     <p>
-      <b>5. The losses.</b> What the accepted answer held that the batch does not, each with the
+      <b>5. The losses.</b> What the accepted answer held that the source file does not, each with the
       item exactly as the model wrote it (<code>raw</code>) beside the original text it was about
       (<code>text</code>) — read the pair before concluding anything about why:
     </p>
@@ -1915,8 +1921,8 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
       segment can simply <i>state false facts</i>, and
       extraction faithfully records that the segment states them. This is inherent to extraction,
       not specific to Taguru. The mitigation is structural: every fact is attributed to its
-      source, so <code>sources/retract</code> (or re-importing a corrected batch) withdraws a bad
-      segment's contribution wholesale; and a batch file is inspectable text — review before
+      source, so <code>sources/retract</code> (or re-importing a corrected source file) withdraws
+      that source's contribution wholesale; and a source file is inspectable text — review before
       loading into a trusted <code>context</code>.
     </p>
   </section>

@@ -1169,7 +1169,7 @@ impl RestoreGroupsError {
             }
             Self::NoSuchContext { group, context } => format!(
                 "group '{group}' names member context '{context}', which does not exist; \
-                 no group was applied (batches of the same stream apply first — import \
+                 no group was applied (sources of the same stream apply first — import \
                  the contexts, then the groups)"
             ),
             Self::NoSuchChild { group, child } => format!(

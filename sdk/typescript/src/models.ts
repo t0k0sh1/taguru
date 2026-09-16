@@ -1020,7 +1020,7 @@ export interface AddAssociationsResult {
   schema_violations: number;
 }
 
-/** Outcome of one applied batch (one source's retract-then-apply). */
+/** Outcome of one applied source (retract-then-apply). */
 export interface ImportOutcome {
   context: string;
   source: string;
@@ -1038,7 +1038,7 @@ export interface ImportOutcome {
   locators_dropped: number;
   association_paragraphs_dropped: number;
   /**
-   * `warn`-mode schema violations this batch's associations raised (ADR
+   * `warn`-mode schema violations this source's associations raised (ADR
    * 0009 §8.3). Absent only from a server that predates the field.
    */
   schema_violations?: number;
@@ -1057,10 +1057,10 @@ export interface GroupImportOutcome {
 }
 
 /**
- * What `POST /import` accomplished: per-batch outcomes plus any `group`
+ * What `POST /import` accomplished: per-source outcomes plus any `group`
  * restores and `schema` installs. `issues`/`schema_violations` are
  * the response envelope's warn-mode carrier (ADR 0009 §8.3), stream-wide;
- * each batch's own `ImportOutcome.schema_violations` breaks the count down
+ * each source's own `ImportOutcome.schema_violations` breaks the count down
  * per source, surviving `issues`' truncation.
  */
 export interface ImportResult {
@@ -1074,7 +1074,7 @@ export interface ImportResult {
 /**
  * What `POST /contexts/{name}/promote` accomplished (ADR 0018): each named
  * source moved whole from this (scratch) `context` into `into`, `/import`'s
- * own per-batch outcome shape.
+ * own per-source outcome shape.
  *
  * `audit` mirrors `auditConsolidation`'s own untyped shape — absent on a
  * dry run, on `audit: false`, and when the audit itself could not run

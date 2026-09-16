@@ -36,7 +36,7 @@
     <div class="side-group">
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
-      <a href="import.html">Batch import</a>
+      <a href="import.html">Import</a>
       <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -92,7 +92,7 @@
     <pre><code>taguru benchmark extract --models models.json --context bench \
   --out results/ --runs 3 corpus/</code></pre>
     <pre><code>--models FILE        model matrix (schema below)
---context NAME       the context every cell's batch files target
+--context NAME       the context every cell's source files target
 --out DIR            results directory; re-running the same --out resumes —
                     a cell already recorded complete or failed is never re-run
 --runs N             runs per model, 1-99 (default 1)
@@ -238,7 +238,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       .extract-manifest.json             #   written by extract, untouched by the harness
       .extract-checkpoints/              #   written by extract
       .extract-trace/                    #   written by extract (ADR 0023)
-      &lt;batch files&gt;                      #   raw extraction output
+      &lt;source files&gt;                     #   raw extraction output
       diagnostics.jsonl                  #   passed as --diagnostics-out
       stdout.log  stderr.log  exit_code  #   the cell's own record
   measurements.json  measurements.csv    # written by `taguru benchmark compare` (below)
@@ -362,7 +362,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     <pre><code>taguru benchmark compare [--with-text] results/</code></pre>
     <p>
       Reads a finished results directory — <code>manifest.json</code>, <code>runs/*.jsonl</code>,
-      and the written <code>cells/**</code> batches — and writes <code>measurements.json</code>,
+      and the written <code>cells/**</code> source files — and writes <code>measurements.json</code>,
       <code>measurements.csv</code>, and <a href="#differences"><code>differences.jsonl</code></a>
       into it, from one shared read of the directory. A <b>pure function of the results
       directory</b>: no model is called, no network is touched (ADR 0003's R4), so re-running it
@@ -406,11 +406,12 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     </p>
     <p>
       <code>runs/*.jsonl</code> alone cannot supply the extraction-shape metrics that need a
-      batch's full item list (the association weight split, distinct subjects/relations, alias
-      orphans, out-of-range paragraph locators) — <code>compare</code> re-reads the
-      <code>cells/**</code> batch a written segment's own <code>kind: "segment"</code> record
-      names, classifying each line leniently rather than with <code>taguru import</code>'s
-      fail-fast batch reader, since counting malformed lines requires reading past the first one.
+      source file's full item list (the association weight split, distinct subjects/relations,
+      alias orphans, out-of-range paragraph locators). Each written segment names its own
+      <code>cells/**</code> file via its own <code>kind: "segment"</code> record.
+      <code>compare</code> re-reads that file, classifying each line leniently rather than with
+      <code>taguru import</code>'s fail-fast source-file reader, since counting malformed lines
+      requires reading past the first one.
       <code>measurements.json</code>'s own <code>inputs</code> block names both sources, so the
       derivation stays auditable.
     </p>
@@ -478,10 +479,10 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
         <tr><td><code>cell.complete_rate</code></td><td>model</td><td>Share of a model's cells that completed, read from <code>manifest.json</code>.</td></tr>
         <tr><td><code>extraction.associations</code>, <code>.concepts</code>, <code>.labels</code>, <code>.questions</code>, <code>.duplicates</code>, <code>.dropped</code></td><td>cell, model, segment</td><td>Per-segment extraction volume, from <code>kind: "segment"</code>'s own counts.</td></tr>
         <tr><td><code>extraction.weight_positive</code>, <code>.weight_negative</code></td><td>cell, model, segment</td><td>Association lines with positive vs. negative <code>weight</code>.</td></tr>
-        <tr><td><code>extraction.subjects_distinct</code>, <code>.relations_distinct</code></td><td>cell, model, segment</td><td>Distinct <code>subject</code>/<code>label</code> values within a segment's own batch.</td></tr>
+        <tr><td><code>extraction.subjects_distinct</code>, <code>.relations_distinct</code></td><td>cell, model, segment</td><td>Distinct <code>subject</code>/<code>label</code> values within its own source file.</td></tr>
         <tr><td><code>extraction.paragraph_attributed_rate</code></td><td>cell, model, segment</td><td>Share of association lines carrying a paragraph locator.</td></tr>
         <tr><td><code>extraction.relation_reuse_ratio</code></td><td>cell, model, segment</td><td>Share of association lines whose label was not that segment's first use of it.</td></tr>
-        <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, segment</td><td>Batch-writer health checks: aliases with no matching canonical, locators past a segment's paragraph count, and lines matching none of the batch format's known shapes.</td></tr>
+        <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, segment</td><td>Source-file-writer health checks: aliases with no matching canonical, and lines matching none of the source file format's known shapes. Also flags locators past a segment's paragraph count.</td></tr>
         <tr><td><code>stability.run_pair_jaccard</code></td><td>model</td><td>Association-key overlap between two of a model's own runs, one sample per unordered run pair, restricted to segments both runs completed.</td></tr>
         <tr><td><code>stability.keys_distinct</code></td><td>model</td><td>Distinct association keys observed across every run a model completed at least one segment in.</td></tr>
         <tr><td><code>stability.keys_in_all_runs_ratio</code>, <code>.keys_in_single_run_ratio</code></td><td>model</td><td>Among keys whose segment completed in 2+ runs, the share present in every one of those runs vs. in exactly one.</td></tr>
@@ -498,9 +499,9 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       across its <code>N</code> runs — model scope only, since a cell is a single run and
       <code>segments</code>' own <code>model → segment → run_label</code> shape has no slot for
       a value that spans runs. Two association lines count as "the same association" once
-      normalized (case folding, Unicode NFKC) and resolved through that batch's own alias
-      declarations (<code>alias_expansion: "batch-local"</code> — only the declaring batch's
-      alias lines are consulted, the same conflict-first-wins and chain-following semantics the
+      normalized (case folding, Unicode NFKC) and resolved through that source file's own alias
+      declarations (<code>alias_expansion: "batch-local"</code> — only the declaring source
+      file's alias lines are consulted, the same conflict-first-wins and chain-following semantics the
       live graph's own alias resolution uses) into one <code>benchmark::identity</code>
       <code>AssocKey</code>. This same-ness core is deliberately independent of
       <code>crate::context</code>'s own entry normalization — it does not fold katakana to
@@ -512,9 +513,9 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       <code>measurements.json</code>'s own top-level <code>matching</code> block, shown above —
       so the artifact stays re-derivable without reading <code>benchmark::identity</code>'s
       source. A segment only ever contributes to these metrics through a run in which it
-      <i>completed</i> (<code>outcome: "written"</code> and its batch was readable); a harness or
-      model completion failure is <code>segment.written_rate</code>'s concern, not folded into
-      extraction instability here. <a href="#differences"><code>differences.jsonl</code></a>'s
+      <i>completed</i> (<code>outcome: "written"</code>). That run's source file must also have
+      been readable. A harness or model completion failure is instead
+      <code>segment.written_rate</code>'s concern, not folded into extraction instability here. <a href="#differences"><code>differences.jsonl</code></a>'s
       model-pair diff reuses this same module and records the identical <code>matching</code>
       block in its own header (ADR 0003 §9.4), so a same-ness judgment about "did two runs agree"
       and "did two models agree" is always traceable to one parameter set.
@@ -530,7 +531,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       instead — <code>attempt.length_limited_rate</code> reads the flag directly and is not
       subject to that gap. With <code>--no-passage</code>,
       <code>extraction.paragraph_attributed_rate</code> is structurally <code>0</code>, since
-      <code>taguru extract</code>'s own batch writer strips every paragraph locator before writing
+      <code>taguru extract</code>'s own source-file writer strips every paragraph locator before writing
       when there is no passage line left to locate into — this reflects the flag, not model
       behavior.
     </p>
@@ -634,7 +635,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p>
       Extraction-model choice does not only change what a graph <i>contains</i> — it changes what a
       search finds. <code>taguru benchmark search</code> (issue #260, ADR 0003 §11) builds one
-      <code>context</code> per model from a finished results directory's already-written batch files, runs one
+      <code>context</code> per model from a finished results directory's already-written source files, runs one
       shared question set against every one of them over the exact retrieval path a real client
       uses (<code>POST /contexts/{name}/sources/search</code>), and writes
       <code>results/retrieval.json</code>: per-case, per-model hit counts, lane evidence, and
@@ -655,9 +656,9 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p class="section-sub">Per-model corpora</p>
     <p>
       For the requested <code>--run</code>, every model whose cell recorded <code>outcome:
-      "complete"</code> has its <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/*.jsonl</code> batch
+      "complete"</code> has its <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/*.jsonl</code> source
       files (<code>diagnostics.jsonl</code> excluded) imported into a <code>context</code> named
-      <code>PREFIX::MODEL_ID</code>. Each batch's header line is rewritten before import — its
+      <code>PREFIX::MODEL_ID</code>. Each source file's header line is rewritten before import — its
       <code>context</code> replaced, and its <code>create.description</code> stamped with an
       ownership marker naming this run's <code>run_id</code>, the model, and <code>--run</code>'s
       own index — every other line rides through byte-for-byte, <code>source</code> included.
@@ -666,8 +667,9 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       invocation, the same across every <code>--run N</code> within it — without
       <code>run_index</code> in the marker, running <code>--run 1</code> then <code>--run 2</code>
       against the same directory would pass the ownership check unchanged and silently mix both
-      runs' segments into one corpus (import never removes a source absent from the current
-      import's own batch set). Re-running the exact same <code>--run</code> against the same
+      runs' segments into one corpus. Import never removes a source absent from the current
+      import's own set of sources, so nothing from the stale run is pruned automatically.
+      Re-running the exact same <code>--run</code> against the same
       results directory is safe: import is a per-<code>(context, source)</code> create-or-replace,
       so a second run neither duplicates associations nor loses them. Before importing into an
       existing <code>context</code>, its current description is checked against the marker this run would
@@ -687,7 +689,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p>
       One <code>eval</code> header (equality-checked — this file is hand-authored, so a
       version this build was not built for is refused rather than silently reinterpreted, the same
-      posture <a href="import.html">batch import's</a> <code>taguru_batch</code> takes), then one
+      posture <a href="import.html">import's</a> <code>taguru_batch</code> takes), then one
       case per line. Every case field this command does not know is still declared and accepted —
       never rejected as a typo — since <code>eval.jsonl</code> is the one artifact this reference
       shares with <a href="evaluate.html"><code>taguru evaluate</code></a>'s own quality gate over

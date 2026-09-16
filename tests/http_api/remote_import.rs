@@ -70,11 +70,11 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("import: 1 batch(es) applied across 1 context(s)"),
+        stdout.contains("import: 1 source(s) applied across 1 context(s)"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        stdout.contains("import: 1 source(s) refused (sensitive)"),
         "{stdout}"
     );
     assert!(
@@ -115,11 +115,11 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        stdout.contains("dry run: 1 source(s) valid, nothing applied"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        stdout.contains("import: 1 source(s) refused (sensitive)"),
         "{stdout}"
     );
     let (code, stdout, stderr) = run_cli(
@@ -144,7 +144,7 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     );
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.contains("import: 2 batch(es) applied across 1 context(s)"),
+        stdout.contains("import: 2 source(s) applied across 1 context(s)"),
         "{stdout}"
     );
     assert!(!stdout.contains("refused"), "{stdout}");
@@ -452,7 +452,7 @@ fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
         "a 600-byte cap must force more than one chunk: {stdout}"
     );
     assert!(
-        stdout.contains("6 batch(es) applied across 1 context(s)"),
+        stdout.contains("6 source(s) applied across 1 context(s)"),
         "{stdout}"
     );
 
@@ -599,7 +599,7 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     let path = file.display();
     for line in [
         format!(
-            "2 batch(es) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+            "2 source(s) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
         ),
         format!(
             "1 schema record(s) after this chunk were never sent, from {path}: context 'a' schema"
@@ -1123,7 +1123,7 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
     );
     assert!(
         stderr.contains(&format!(
-            "2 batch(es) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+            "2 source(s) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
         )),
         "{stderr}"
     );

@@ -59,9 +59,9 @@ use serde::Serialize;
 use taguru::context::normalize_entry;
 
 const USAGE: &str = "\
-usage: taguru anchoring BATCH_OR_DIR... [--vocabulary PATH] [--json FILE]
+usage: taguru anchoring FILE_OR_DIR... [--vocabulary PATH] [--json FILE]
 
-Measures, for extraction batch files (the `taguru extract --out`
+Measures, for extracted source files (the `taguru extract --out`
 output; directories expand to their *.jsonl files):
 
   anchoring rate    associations whose subject AND object occur in the
@@ -75,16 +75,16 @@ output; directories expand to their *.jsonl files):
 
 After the table, each document's associations that are NOT strictly
 anchored — or that cite a paragraph holding neither name — are named
-by batch line, subject, label, object, and cited paragraph, with the
+by line, subject, label, object, and cited paragraph, with the
 reason (`unanchored`, `alias-only`, `invalid locator`): the first
 --list N per document on stdout, every one under `unanchored` in the
---json report. A batch file that cannot be read or parsed is reported,
+--json report. A source file that cannot be read or parsed is reported,
 counted under `failed`, and skipped; the report covers the rest and
 the exit code is 1.
 
   --list N            how many named associations to print per document
                       (default 3; 0 prints none — the JSON still holds all)
-  --vocabulary PATH   batch stream file(s) (a file, or a directory's
+  --vocabulary PATH   source stream file(s) (a file, or a directory's
                       *.jsonl — the `taguru export` shape; an extract
                       --out works too) whose concept aliases
                       extend each name's alias group — the spellings
@@ -92,7 +92,7 @@ the exit code is 1.
   --json FILE         write the per-document report as JSON (the shape
                       scripts/extract_metrics.py --anchoring reads)
 
-A batch without a passage (--no-passage) cannot be judged and is
+A source file without a passage (--no-passage) cannot be judged and is
 reported as skipped.
 
 Read `strict` within one document type, not across types: a document
@@ -137,7 +137,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
     }
     if inputs.is_empty() {
-        return usage_error("at least one batch file or directory is required");
+        return usage_error("at least one source file or directory is required");
     }
     let files = match expand(&inputs) {
         Ok(files) => files,
@@ -173,7 +173,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         };
         let Some(passage) = batch.passage() else {
             eprintln!(
-                "taguru: anchoring: {}: no passage (--no-passage batch) — skipped",
+                "taguru: anchoring: {}: no passage (--no-passage file) — skipped",
                 file.display()
             );
             skipped += 1;
@@ -238,7 +238,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         );
     }
     if segments.is_empty() {
-        eprintln!("taguru: anchoring: no batch with a passage to judge");
+        eprintln!("taguru: anchoring: no source file with a passage to judge");
         return 1;
     }
 
@@ -254,7 +254,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
     if !failed.is_empty() {
         println!(
-            "({} batch file(s) could not be read or parsed — named on stderr)",
+            "({} source file(s) could not be read or parsed — named on stderr)",
             failed.len()
         );
     }
@@ -732,7 +732,7 @@ fn print_table(segments: &BTreeMap<String, SegmentReport>, totals: &Counts, skip
         rate(totals.locator_valid, totals.cited),
     );
     if skipped > 0 {
-        println!("({skipped} batch(es) without a passage skipped)");
+        println!("({skipped} source file(s) without a passage skipped)");
     }
 }
 
