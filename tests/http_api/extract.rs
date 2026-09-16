@@ -4620,7 +4620,7 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
 }
 
 /// ADR 0035 (#854): a length-limited answer that outgrew its piece
-/// fails the source after the one round — no escalated resend, no
+/// fails the segment after the one round — no escalated resend, no
 /// split — with the sizes named on stderr and the judgment in the
 /// attempts log as a `runaway` move record.
 #[test]
@@ -4802,7 +4802,7 @@ stderr: {stderr}"
 }
 
 /// A piece too small to split that still overruns the escalated
-/// budget fails the source with the named diagnosis — never a partial
+/// budget fails the segment with the named diagnosis — never a partial
 /// import, never a prefix salvage, never an unbounded loop.
 #[test]
 fn a_minimum_unit_that_still_hits_length_after_escalation_fails_the_source() {
@@ -4843,7 +4843,7 @@ fn a_minimum_unit_that_still_hits_length_after_escalation_fails_the_source() {
 
 /// `finish_reason: "content_filter"` is terminal: no corrective turn
 /// can argue with a policy refusal, so exactly one request goes out
-/// and the source fails with the named class.
+/// and the segment fails with the named class.
 #[test]
 fn refusal_is_terminal_with_no_corrective_turn() {
     let docs = batch_dir("extract-refusal-docs");
@@ -5450,7 +5450,7 @@ fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// When the corrected answer is still invalid, the source fails
+/// When the corrected answer is still invalid, the segment fails
 /// outright — no batch is written, matching the never-silent-drop
 /// ruling (ADR 0001 §8).
 #[test]

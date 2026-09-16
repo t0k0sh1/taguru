@@ -112,7 +112,7 @@ provider can return.
 By default, a business-rule-invalid item (a bad weight, a dangling alias,
 an out-of-range question, ...) never gets silently dropped and reported as
 a success: it earns one targeted, path-addressed corrective turn naming
-exactly which fields are wrong, and the source fails outright (no
+exactly which fields are wrong, and the segment fails outright (no
 `/import` call) if it's still invalid afterward. Pass `lossy: true` to
 restore the old drop-and-proceed behavior instead — the source still
 imports, and `IngestOutcome.invalid_dropped` counts what got silently

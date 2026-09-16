@@ -427,7 +427,7 @@ may be half-applied — re-import its batch file or retract the source</code></p
     </p>
     <p>
       A segment <b>removed</b> from the corpus is different: nothing in Taguru garbage-collects
-      a source that stops being extracted. The manifest only ever grows entries; it has no notion
+      a segment that stops being extracted. The manifest only ever grows entries; it has no notion
       of "no longer part of this corpus." Detecting and retiring stale membership is the runner's
       job — diff the corpus's current file list (or section list) against
       <code>iter_sources()</code>/<code>GET /contexts/{name}/sources</code>, and for anything

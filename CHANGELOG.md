@@ -7,6 +7,16 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- Terminology (#851 wave 3, #930): the unit that fails extraction is
+  the segment, and the wording now says so — `extract --help`, the
+  stderr lines at the split floor, docs/extract.html,
+  docs/long-running.html, and the LangChain SDKs' docstrings and
+  READMEs read "the segment fails" / "failing the segment" where they
+  said "source". `source` keeps its one meaning (the origin an
+  association cites). No key, flag, SDK name, or prompt changed.
+
 ## [0.9.7] - 2026-09-15
 
 A sensitive-content gate release. `extract --redact` masks secrets and

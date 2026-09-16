@@ -137,7 +137,7 @@ class IngestOutcome:
     """Under the strict default this counts only merge()'s policy trims
     (per-paragraph question-cap overflow, a volunteered question when
     none was requested) — a business-rule-invalid item is corrected or
-    fails the source before merge() ever runs (issue #180). Under
+    fails the segment before merge() ever runs (issue #180). Under
     ``lossy=True`` it is the old drop-and-proceed tally: every item
     merge() silently discarded."""
     llm_calls: int = 0
@@ -301,7 +301,7 @@ def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
     if result.kind == "length_limited":
         return (
             f"{label}: the cross-chunk correction was cut off at the output limit — "
-            "failing the source rather than importing a truncated correction"
+            "failing the segment rather than importing a truncated correction"
         )
     if result.kind == "refusal":
         return (
@@ -416,11 +416,11 @@ class TaguruIngester:
             document instead of reporting it in its outcome.
         lossy: Restore the pre-issue-#180 drop-and-proceed behavior: a
             business-rule-invalid item (bad weight, dangling alias,
-            out-of-range question, ...) is silently dropped and the source
+            out-of-range question, ...) is silently dropped and the segment
             still reports success, exactly like ``merge()`` always did.
             Default ``False`` (ADR 0001 §8's never-silent-drop default):
             an invalid item instead earns one targeted, path-addressed
-            corrective turn, and the source fails outright (no ``/import``
+            corrective turn, and the segment fails outright (no ``/import``
             call) if it is still invalid afterward. This is the one
             deliberate, opt-out-only behavior change issue #180 makes —
             see ``IngestOutcome.invalid_dropped``.
@@ -1157,7 +1157,7 @@ class TaguruIngester:
         bad turn. Bounded to exactly one extra call per offending chunk
         regardless of ``max_attempts``: a still-invalid,
         still-cross-conflicting, length-limited, refused, or empty reply
-        fails the source outright — Stage 2 never loops a second round.
+        fails the segment outright — Stage 2 never loops a second round.
         Mirrors extract.rs's ``correct_cross_output_issues``."""
         for record_index, issues in combined_cross_output_issues(
             [r.output for r in records], schema

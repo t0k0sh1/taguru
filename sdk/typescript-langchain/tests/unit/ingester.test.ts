@@ -573,7 +573,7 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
     ]);
   });
 
-  it("fails the source without import when a second answer is still invalid", async () => {
+  it("fails the segment without import when a second answer is still invalid", async () => {
     const badAnswer = JSON.stringify({ associations: [INVALID_ASSOCIATION], aliases: [] });
     const server = new FakeServer();
     await expect(make(server, [badAnswer, badAnswer]).ingestText(DOC_TEXT, {

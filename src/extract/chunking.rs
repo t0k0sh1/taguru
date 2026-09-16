@@ -8,7 +8,7 @@ use super::*;
 /// never below this floor: a pathological single-line segment (a
 /// base64 blob, minified markup) would otherwise degrade toward
 /// per-character pieces. A piece at the floor that still overruns the
-/// escalated budget fails the source instead.
+/// escalated budget fails the segment instead.
 pub(super) const MIN_SPLIT_CAP: usize = 512;
 
 /// One extracted output alongside everything issue #199's Stage 2
@@ -464,7 +464,7 @@ pub(super) struct PieceContext<'a> {
 /// budget, uncapped only under factor 0), the truncated answer
 /// discarded, never replayed, never salvaged as a prefix; on `length`
 /// again, split the piece and run each sub-piece's ladder from the
-/// top; a piece too small to split fails the source. Escalation
+/// top; a piece too small to split fails the segment. Escalation
 /// happens at most once per piece and each split halves the cap down
 /// to [`MIN_SPLIT_CAP`], so the call count is bounded by piece size
 /// and `max_attempts` — and, with the escalated resend capped, so is
@@ -487,14 +487,14 @@ pub(super) struct PieceContext<'a> {
 /// budget, so it is never retried at the same size (the client is
 /// told to fail fast on timeouts under the ladder) and never
 /// escalated — a larger output cap cannot make a slow piece faster.
-/// At the split floor it fails the source with the timeout named.
+/// At the split floor it fails the segment with the timeout named.
 ///
 /// A runaway (ADR 0035, #854) — a `length` answer that has already
 /// outgrown the piece, over `TAGURU_EXTRACT_RUNAWAY_RATIO` × its
 /// bytes — takes neither rung: output that is not tracking input
 /// converges under no budget and no split (measured in #783: every
 /// sub-piece reproduced it). Only the demotion above is still tried;
-/// with nothing left to demote the source fails immediately, the
+/// with nothing left to demote the segment fails immediately, the
 /// judgment recorded as a `runaway` move.
 ///
 /// Checked against issue #179's checkpoint store before doing any of
@@ -640,7 +640,7 @@ pub(super) fn extract_piece(
                         "the answer outgrew the piece: {answer_bytes} bytes at the output \
                          cap for a {}-byte piece, over {}× its size — the output is not \
                          tracking the input, so neither a bigger budget nor a split can \
-                         converge; failing the source rather than paying for more of it \
+                         converge; failing the segment rather than paying for more of it \
                          (TAGURU_EXTRACT_RUNAWAY_RATIO tunes the ratio, 0 disables)",
                         piece.len(),
                         context.ladder.runaway_ratio,
@@ -653,13 +653,13 @@ pub(super) fn extract_piece(
                 let floor = match outcome {
                     RoundOutcome::TimedOut(message) => format!(
                         "the completion timed out for a {}-byte piece that cannot split \
-                         further ({message}) — failing the source; raise \
+                         further ({message}) — failing the segment; raise \
                          TAGURU_EXTRACT_TIMEOUT_SECS or lower --chunk-bytes",
                         piece.len()
                     ),
                     _ => format!(
                         "the answer still ended at the output cap for a {}-byte piece that \
-                         cannot split further — failing the source rather than importing a \
+                         cannot split further — failing the segment rather than importing a \
                          truncated extraction",
                         piece.len()
                     ),

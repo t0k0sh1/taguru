@@ -299,7 +299,7 @@ chat endpoint:
                       that budget; 0 = uncapped (2)
   TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
                       times its piece's bytes is a runaway: no escalation, no
-                      split — the source fails after a demotion attempt;
+                      split — the segment fails after a demotion attempt;
                       0 = no runaway judgment (8)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
   TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
@@ -373,11 +373,11 @@ chat endpoint:
   --lossy             restore the pre-#199 behavior: a business-rule-invalid
                       item (bad weight, dangling alias, out-of-range
                       question, …) is dropped and counted instead of
-                      triggering a corrective turn or failing the source;
+                      triggering a corrective turn or failing the segment;
                       the report always marks a lossy run's drops as such.
                       Default (off): an invalid item earns one targeted
                       corrective turn; if it is still invalid afterward,
-                      the source fails and nothing is written.
+                      the segment fails and nothing is written.
   --candidates        offer the document's own names (kanji/katakana
                       compounds, ASCII identifiers — segmented
                       deterministically, no dictionary) to the model as
