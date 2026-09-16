@@ -464,7 +464,8 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
   <section id="http">
     <h2>The same contract over HTTP: <code>POST /import</code></h2>
     <p class="section-sub">
-      The request body <b>is</b> one source file, and one request states one source's complete
+      The request body <b>is</b> one source file or a source stream (several source files
+      concatenated, applied in stream order); each source file states one source's complete
       truth. A live system bulk-loads with no downtime window.
     </p>
     <pre><code><span class="c"># --data-binary, not -d: curl's -d strips newlines, and newlines are the format</span>

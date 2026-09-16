@@ -240,7 +240,7 @@ taguru import --dry-run sources/  <span class="c"># validate and report only; wr
     <p>
       Validation is a separate pass from apply: one malformed line refuses the whole file with its
       line number, and nothing is written. A running server takes the same contract at
-      <code>POST /import</code> (one request = one source file) — that is the bulk entrance with
+      <code>POST /import</code> (one request = one source file or one source stream) — that is the bulk entrance with
       no downtime window.
     </p>
     <pre><code><span class="c"># -d strips newlines, and newlines are the format — use --data-binary</span>

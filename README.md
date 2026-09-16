@@ -249,7 +249,7 @@ revised file replaces cleanly instead of double-counting weights.
 ```
 
 A **running** server takes the same contract at `POST /import` (one
-request = one source file or stream, same validation, same
+request = one source file or source stream, same validation, same
 replace-a-source semantics), so live systems bulk-load without a
 downtime window. `taguru import --url URL FILE|DIR...` is the
 shortcut ([ADR 0002](adr/0002-remote-cli-access.md) §9): the input is

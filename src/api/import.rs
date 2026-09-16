@@ -243,7 +243,7 @@ pub(super) fn import_budget_refusal(
          (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
         (
             "re-running the preview with more time or a narrower stream is exact",
-            "re-POSTing the remaining stream is exact (each source replaces its \
+            "re-POSTing the remaining stream is exact (each source file replaces its \
              predecessor)",
         ),
         started_at,
@@ -422,7 +422,7 @@ pub(super) fn restore_refusal(
             validation_error(
                 code,
                 format!(
-                    "group restore exceeded its budget with {batches_landed} source(s) durable \
+                    "group restore exceeded its budget with {batches_landed} source file(s) durable \
                      (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
                     refusal.text()
                 ),
@@ -439,7 +439,7 @@ pub(super) fn restore_refusal(
             validation_error(
                 code,
                 format!(
-                    "group records refused with every source landed ({batches_landed} durable); \
+                    "group records refused with every source file landed ({batches_landed} durable); \
                      fixing the stream and re-POSTing it whole is exact: {}",
                     refusal.text()
                 ),
@@ -495,7 +495,7 @@ pub(super) fn schema_import_refusal(
             RefusalDetail {
                 issues: vec![Issue::missing(
                     format!("context '{context}'"),
-                    "an earlier source of this stream (or a previous request) creating it, \
+                    "an earlier source file of this stream (or a previous request) creating it, \
                      since a schema record's context must already exist",
                 )],
                 issues_total: None,
@@ -538,7 +538,7 @@ pub(super) fn schema_import_refusal(
                 ErrorCode::Internal,
                 format!(
                     "schema record: context '{context}' could not be loaded — see server \
-                     logs; every source before it is durable"
+                     logs; every source file before it is durable"
                 ),
                 started_at,
             )
@@ -553,7 +553,7 @@ pub(super) fn schema_import_refusal(
                 ErrorCode::Internal,
                 format!(
                     "schema record: context '{context}' schema not persisted — see server \
-                     logs; every source before it is durable"
+                     logs; every source file before it is durable"
                 ),
                 started_at,
             )
@@ -629,7 +629,7 @@ pub(super) fn schema_import_budget_refusal(
         format!(
             "schema record {} of {total} (context '{context}') not attempted — request \
              exceeded its budget partway through a multi-record schema install \
-             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); every source and schema record \
+             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); every source file and schema record \
              before it is durable",
             index + 1,
         ),
@@ -731,7 +731,7 @@ pub(super) fn stream_refusal(
 const QUOTA_NEXT_STEP: (&str, &str) = (
     "re-running the preview against a shrunk context is exact",
     "retracting or compacting the context (or raising its quota), then \
-     re-POSTing the remaining stream is exact (each source replaces its \
+     re-POSTing the remaining stream is exact (each source file replaces its \
      predecessor)",
 );
 
@@ -1051,7 +1051,7 @@ pub async fn import_batch(
                         ("would be refused", "refused"),
                         (
                             "fixing the stream and re-running the preview is exact",
-                            "fixing the stream and re-POSTing it whole is exact (each source \
+                            "fixing the stream and re-POSTing it whole is exact (each source file \
                              replaces its predecessor)",
                         ),
                     );

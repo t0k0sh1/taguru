@@ -804,7 +804,7 @@ pub(super) fn run_remote(
                 } else {
                     eprintln!(
                         "taguru: import: {landed_chunks} chunk(s) already landed durably; \
-                         re-running the corrected stream is exact (each source replaces its \
+                         re-running the corrected stream is exact (each source file replaces its \
                          predecessor)"
                     );
                 }

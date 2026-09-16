@@ -520,7 +520,7 @@ only under `warn`.
   prefix, not a no-op — its message reports the sources before the
   stop as landed durably, and a source refused mid-apply may already
   have retracted the source it was replacing; re-sending the stream
-  is exact either way (each source replaces its predecessor). At a
+  is exact either way (each source file replaces its predecessor). At a
   quota, retractions, alias removals, `DELETE`, and compaction still
   work: shrink the context (or have the operator raise its quota)
   and retry; do not blindly re-send the refused write. "Shrink" means

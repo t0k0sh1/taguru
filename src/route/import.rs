@@ -441,7 +441,7 @@ fn rewrap_import_refusal(
         "code": code,
         "error": format!(
             "{landed} landed durably on earlier shards before this refusal (re-POSTing the \
-             whole stream is exact — each source replaces its predecessor, each schema install \
+             whole stream is exact — each source file replaces its predecessor, each schema install \
              is independent); the refusing shard says: {message}"
         ),
         // `other_landed` is true only when at least one of the two

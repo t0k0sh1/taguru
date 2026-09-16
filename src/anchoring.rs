@@ -84,7 +84,7 @@ the exit code is 1.
 
   --list N            how many named associations to print per document
                       (default 3; 0 prints none — the JSON still holds all)
-  --vocabulary PATH   source stream file(s) (a file, or a directory's
+  --vocabulary PATH   source file(s) or source stream (a file, or a directory's
                       *.jsonl — the `taguru export` shape; an extract
                       --out works too) whose concept aliases
                       extend each name's alias group — the spellings

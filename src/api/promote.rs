@@ -375,7 +375,7 @@ pub async fn promote_sources(
                             "fixing the scratch (or the destination) and re-running the \
                              preview is exact",
                             "fixing the scratch (or the destination) and re-calling \
-                             promote is exact (each source replaces its predecessor)",
+                             promote is exact (each source file replaces its predecessor)",
                         ),
                     );
                     return Err(Box::new(import_refusal(
@@ -512,7 +512,7 @@ fn render_refusal(message: String, deadline: Deadline, started_at: Instant) -> R
 const QUOTA_NEXT_STEP: (&str, &str) = (
     "re-running the preview against a shrunk destination is exact",
     "retracting or compacting the destination (or raising its quota), then \
-     re-calling promote is exact (each source replaces its predecessor)",
+     re-calling promote is exact (each source file replaces its predecessor)",
 );
 
 /// The destination-over-quota refusal, `/import`'s own batch-granular
@@ -568,7 +568,7 @@ fn budget_refusal(
          (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
         (
             "re-running the preview with more time or fewer sources is exact",
-            "re-calling promote with the same sources is exact (each source replaces its \
+            "re-calling promote with the same sources is exact (each source file replaces its \
              predecessor)",
         ),
         started_at,
