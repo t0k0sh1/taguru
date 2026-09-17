@@ -18,7 +18,10 @@ use super::*;
 // write-once artifact needs.
 #[derive(Serialize)]
 pub(crate) struct EvaluationFile {
-    pub(crate) evaluation: u64,
+    /// Always `"evaluation"` (ADR 0042).
+    #[serde(rename = "type")]
+    pub(crate) record_type: &'static str,
+    pub(crate) version: &'static str,
     pub(crate) generated_at: String,
     pub(crate) matching: MatchingBlock,
     pub(crate) inputs: InputsBlock,

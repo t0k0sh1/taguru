@@ -60,7 +60,6 @@ use crate::remote::default_base_url;
 use crate::remote::{self, Api, ApiFailure};
 use thresholds::{ThresholdReport, load_thresholds};
 
-const EVALUATION_VERSION: u64 = 1;
 /// `options.limit` unspecified — matches `benchmark search`'s own
 /// `DEFAULT_LIMIT` (`search.rs:78`).
 const DEFAULT_LIMIT: usize = 10;
@@ -395,7 +394,8 @@ fn run_evaluate(args: &[String]) -> i32 {
 
     let metrics = build_metrics(&cases, run_config.rerank.is_some());
     let evaluation = EvaluationFile {
-        evaluation: EVALUATION_VERSION,
+        record_type: "evaluation",
+        version: crate::format::FORMAT_VERSION,
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         matching: MatchingBlock::default(),
         inputs: InputsBlock {

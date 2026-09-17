@@ -91,9 +91,10 @@ fn with_citation_recall(mut case: CaseView, value: f64) -> CaseView {
     case
 }
 
-fn evaluation_view(context: &str, evaluation: u64, cases: Vec<CaseView>) -> EvaluationView {
+fn evaluation_view(context: &str, cases: Vec<CaseView>) -> EvaluationView {
     EvaluationView {
-        evaluation,
+        record_type: Some("evaluation".to_string()),
+        version: Some(crate::format::FORMAT_VERSION.to_string()),
         generated_at: "2026-07-29T00:00:00Z".to_string(),
         inputs: InputsView {
             context: context.to_string(),
@@ -224,7 +225,7 @@ fn a_ratio_metric_is_read_as_a_ratio_not_misread_as_a_distribution() {
     // through `definitions.statistic` first — not MetricValue's own
     // untagged enum — must still recover Ratio's own `value`, not a
     // `Distribution` silently parsed with `mean: None`.
-    let mut view = evaluation_view("ctx", 1, vec![]);
+    let mut view = evaluation_view("ctx", vec![]);
     view.definitions.insert(
         "citations.recall".to_string(),
         DefinitionView {
@@ -239,10 +240,10 @@ fn a_ratio_metric_is_read_as_a_ratio_not_misread_as_a_distribution() {
 
 #[test]
 fn a_metric_without_a_definitions_entry_warns_and_is_skipped() {
-    let mut base = evaluation_view("ctx", 1, vec![]);
+    let mut base = evaluation_view("ctx", vec![]);
     base.metrics
         .insert("mystery.metric".to_string(), ratio_value(1.0, 1, 1));
-    let head = evaluation_view("ctx", 1, vec![]);
+    let head = evaluation_view("ctx", vec![]);
     let mut warnings = Vec::new();
     let diffs = aggregate_diffs(&base, &head, &mut warnings);
     assert!(diffs.is_empty());
@@ -253,7 +254,7 @@ fn a_metric_without_a_definitions_entry_warns_and_is_skipped() {
 
 #[test]
 fn an_unknown_statistic_name_warns_and_is_skipped() {
-    let mut base = evaluation_view("ctx", 1, vec![]);
+    let mut base = evaluation_view("ctx", vec![]);
     base.definitions.insert(
         "weird".to_string(),
         DefinitionView {
@@ -262,7 +263,7 @@ fn an_unknown_statistic_name_warns_and_is_skipped() {
     );
     base.metrics
         .insert("weird".to_string(), serde_json::json!({"n": 1}));
-    let head = evaluation_view("ctx", 1, vec![]);
+    let head = evaluation_view("ctx", vec![]);
     let mut warnings = Vec::new();
     let diffs = aggregate_diffs(&base, &head, &mut warnings);
     assert!(diffs.is_empty());
@@ -272,7 +273,7 @@ fn an_unknown_statistic_name_warns_and_is_skipped() {
 
 #[test]
 fn aggregate_delta_is_head_minus_base() {
-    let mut base = evaluation_view("ctx", 1, vec![]);
+    let mut base = evaluation_view("ctx", vec![]);
     base.definitions.insert(
         "recall.recall_at_k".to_string(),
         DefinitionView {
@@ -281,7 +282,7 @@ fn aggregate_delta_is_head_minus_base() {
     );
     base.metrics
         .insert("recall.recall_at_k".to_string(), distribution_value(0.6, 5));
-    let mut head = evaluation_view("ctx", 1, vec![]);
+    let mut head = evaluation_view("ctx", vec![]);
     head.definitions.insert(
         "recall.recall_at_k".to_string(),
         DefinitionView {
@@ -301,8 +302,8 @@ fn aggregate_delta_is_head_minus_base() {
 
 #[test]
 fn a_context_mismatch_warns() {
-    let base = loaded("base.json", evaluation_view("ctx-a", 1, vec![]));
-    let head = loaded("head.json", evaluation_view("ctx-b", 1, vec![]));
+    let base = loaded("base.json", evaluation_view("ctx-a", vec![]));
+    let head = loaded("head.json", evaluation_view("ctx-b", vec![]));
     let mut warnings = Vec::new();
     mismatch_warnings(&base, &head, &mut warnings);
     assert!(warnings.iter().any(|w| w.contains("context differs")));
@@ -310,13 +311,13 @@ fn a_context_mismatch_warns() {
 
 #[test]
 fn a_revision_after_mismatch_warns() {
-    let mut base_view = evaluation_view("ctx", 1, vec![]);
+    let mut base_view = evaluation_view("ctx", vec![]);
     base_view.corpus.revision_after = ContextRevision {
         graph: 1,
         passages: 1,
         config: 1,
     };
-    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    let mut head_view = evaluation_view("ctx", vec![]);
     head_view.corpus.revision_after = ContextRevision {
         graph: 2,
         passages: 1,
@@ -335,10 +336,10 @@ fn a_revision_after_mismatch_warns() {
 
 #[test]
 fn an_unstable_corpus_on_either_side_warns() {
-    let mut base_view = evaluation_view("ctx", 1, vec![]);
+    let mut base_view = evaluation_view("ctx", vec![]);
     base_view.corpus.stable = false;
     let base = loaded("base.json", base_view);
-    let head = loaded("head.json", evaluation_view("ctx", 1, vec![]));
+    let head = loaded("head.json", evaluation_view("ctx", vec![]));
     let mut warnings = Vec::new();
     mismatch_warnings(&base, &head, &mut warnings);
     assert!(
@@ -350,11 +351,11 @@ fn an_unstable_corpus_on_either_side_warns() {
 
 #[test]
 fn a_thresholds_sha256_mismatch_including_one_null_side_warns() {
-    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    let mut head_view = evaluation_view("ctx", vec![]);
     head_view.thresholds = Some(ThresholdIdentityView {
         sha256: "abc123".to_string(),
     });
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![]));
+    let base = loaded("base.json", evaluation_view("ctx", vec![]));
     let head = loaded("head.json", head_view);
     let mut warnings = Vec::new();
     mismatch_warnings(&base, &head, &mut warnings);
@@ -366,27 +367,14 @@ fn a_thresholds_sha256_mismatch_including_one_null_side_warns() {
 }
 
 #[test]
-fn a_taguru_evaluation_stamp_mismatch_warns() {
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![]));
-    let head = loaded("head.json", evaluation_view("ctx", 2, vec![]));
-    let mut warnings = Vec::new();
-    mismatch_warnings(&base, &head, &mut warnings);
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("evaluation stamp differs"))
-    );
-}
-
-#[test]
 fn a_budget_mismatch_including_one_unbudgeted_side_warns() {
-    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    let mut head_view = evaluation_view("ctx", vec![]);
     head_view.inputs.budget = Some(BudgetLimits {
         max_items: 40,
         max_bytes: 65536,
         max_tokens: 4000,
     });
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![]));
+    let base = loaded("base.json", evaluation_view("ctx", vec![]));
     let head = loaded("head.json", head_view);
     let mut warnings = Vec::new();
     mismatch_warnings(&base, &head, &mut warnings);
@@ -403,9 +391,9 @@ fn a_baseline_vs_assembly_pair_under_the_same_budget_does_not_warn() {
         max_bytes: 65536,
         max_tokens: 4000,
     });
-    let mut base_view = evaluation_view("ctx", 1, vec![]);
+    let mut base_view = evaluation_view("ctx", vec![]);
     base_view.inputs.budget = budget;
-    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    let mut head_view = evaluation_view("ctx", vec![]);
     head_view.inputs.budget = budget;
     let base = loaded("base.json", base_view);
     let head = loaded("head.json", head_view);
@@ -423,13 +411,12 @@ fn a_baseline_vs_assembly_pair_under_the_same_budget_does_not_warn() {
 fn a_case_only_in_head_is_added_and_only_in_base_is_removed() {
     let base = loaded(
         "base.json",
-        evaluation_view("ctx", 1, vec![base_case("only-base")]),
+        evaluation_view("ctx", vec![base_case("only-base")]),
     );
     let head = loaded(
         "head.json",
         evaluation_view(
             "ctx",
-            1,
             vec![with_recall(base_case("only-head"), 0.5, 0.5, 0.5)],
         ),
     );
@@ -441,9 +428,9 @@ fn a_case_only_in_head_is_added_and_only_in_base_is_removed() {
 
 #[test]
 fn an_added_case_lists_its_available_metrics_as_not_comparable() {
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![]));
+    let base = loaded("base.json", evaluation_view("ctx", vec![]));
     let head_case = with_recall(base_case("new-case"), 0.7, 0.7, 0.7);
-    let head = loaded("head.json", evaluation_view("ctx", 1, vec![head_case]));
+    let head = loaded("head.json", evaluation_view("ctx", vec![head_case]));
     let report = build_report(&base, &head);
     assert_eq!(report.records.len(), 1);
     match &report.records[0] {
@@ -464,8 +451,8 @@ fn an_added_case_lists_its_available_metrics_as_not_comparable() {
 #[test]
 fn identical_case_across_both_runs_counts_as_unchanged_and_emits_no_record() {
     let case = with_recall(base_case("same"), 0.5, 0.5, 0.5);
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![case.clone()]));
-    let head = loaded("head.json", evaluation_view("ctx", 1, vec![case]));
+    let base = loaded("base.json", evaluation_view("ctx", vec![case.clone()]));
+    let head = loaded("head.json", evaluation_view("ctx", vec![case]));
     let report = build_report(&base, &head);
     assert_eq!(report.header.counts.unchanged, 1);
     assert!(report.records.is_empty());
@@ -475,19 +462,23 @@ fn identical_case_across_both_runs_counts_as_unchanged_and_emits_no_record() {
 fn changes_jsonl_lines_are_each_independently_valid_json_and_the_first_is_the_header() {
     let base = loaded(
         "base.json",
-        evaluation_view("ctx", 1, vec![with_recall(base_case("c1"), 0.5, 0.5, 0.5)]),
+        evaluation_view("ctx", vec![with_recall(base_case("c1"), 0.5, 0.5, 0.5)]),
     );
     let head = loaded(
         "head.json",
-        evaluation_view("ctx", 1, vec![with_recall(base_case("c1"), 0.9, 0.9, 0.9)]),
+        evaluation_view("ctx", vec![with_recall(base_case("c1"), 0.9, 0.9, 0.9)]),
     );
     let report = build_report(&base, &head);
     let text = render_jsonl(&report).unwrap();
     let lines: Vec<&str> = text.trim_end().lines().collect();
     assert_eq!(lines.len(), 2, "header + one improved case");
     let header: Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(header["kind"], "header");
-    assert_eq!(header["taguru_evaluation_changes"], 1);
+    assert_eq!(header["type"], "evaluation_changes");
+    assert_eq!(header["version"], crate::format::FORMAT_VERSION);
+    assert!(
+        header.get("kind").is_none(),
+        "the header names its type, not a kind"
+    );
     for line in &lines {
         let _: Value =
             serde_json::from_str(line).expect("every line must be standalone valid JSON");
@@ -497,8 +488,8 @@ fn changes_jsonl_lines_are_each_independently_valid_json_and_the_first_is_the_he
 #[test]
 fn an_unchanged_case_produces_no_per_case_line() {
     let case = with_recall(base_case("same"), 0.5, 0.5, 0.5);
-    let base = loaded("base.json", evaluation_view("ctx", 1, vec![case.clone()]));
-    let head = loaded("head.json", evaluation_view("ctx", 1, vec![case]));
+    let base = loaded("base.json", evaluation_view("ctx", vec![case.clone()]));
+    let head = loaded("head.json", evaluation_view("ctx", vec![case]));
     let report = build_report(&base, &head);
     let text = render_jsonl(&report).unwrap();
     let lines: Vec<&str> = text.trim_end().lines().collect();
@@ -511,11 +502,11 @@ fn an_unchanged_case_produces_no_per_case_line() {
 fn changes_jsonl_never_carries_corpus_body_text() {
     let base = loaded(
         "base.json",
-        evaluation_view("ctx", 1, vec![with_recall(base_case("c1"), 0.5, 0.5, 0.5)]),
+        evaluation_view("ctx", vec![with_recall(base_case("c1"), 0.5, 0.5, 0.5)]),
     );
     let head = loaded(
         "head.json",
-        evaluation_view("ctx", 1, vec![with_recall(base_case("c1"), 0.9, 0.9, 0.9)]),
+        evaluation_view("ctx", vec![with_recall(base_case("c1"), 0.9, 0.9, 0.9)]),
     );
     let report = build_report(&base, &head);
     let text = render_jsonl(&report).unwrap();
@@ -552,20 +543,35 @@ fn load_report_rejects_malformed_json() {
 }
 
 #[test]
-fn load_report_rejects_a_stamp_above_evaluation_version() {
-    let path = write_temp(
-        "stamp",
-        &format!(r#"{{"evaluation":{}}}"#, EVALUATION_VERSION + 1),
-    );
+fn load_report_rejects_another_version_and_another_type() {
+    let path = write_temp("version", r#"{"type":"evaluation","version":"2008-10-17"}"#);
     let error = load_report(&path).unwrap_err();
-    assert!(error.contains("evaluation must be within"));
+    assert!(
+        error.contains("version '2008-10-17' is not a format"),
+        "{error}"
+    );
+
+    // A report from before ADR 0042 names no `type`; a file of another
+    // kind names the wrong one. Neither is compared as a report.
+    for other in [r#"{"evaluation":1}"#, r#"{"type":"eval"}"#] {
+        let path = write_temp("not-a-report", other);
+        let error = load_report(&path).unwrap_err();
+        assert!(
+            error.contains("not an evaluation report"),
+            "{other}: {error}"
+        );
+    }
+
+    // The version column is optional: absent reads as this build's own.
+    let path = write_temp("no-version", r#"{"type":"evaluation"}"#);
+    load_report(&path).expect("an absent version is the running build's own");
 }
 
 #[test]
 fn load_report_accepts_a_well_formed_report() {
     let path = write_temp(
         "ok",
-        r#"{"evaluation":1,"generated_at":"2026-07-29T00:00:00Z",
+        r#"{"type": "evaluation","generated_at":"2026-07-29T00:00:00Z",
            "inputs":{"context":"demo"},
            "corpus":{"revision_after":{"graph":1,"passages":1,"config":1},"stable":true},
            "cases":[]}"#,
@@ -592,20 +598,4 @@ fn compare_lexicon_test() {
     expected.sort_unstable();
     actual.sort_unstable();
     assert_eq!(actual, expected);
-}
-
-/// A report written before the `taguru_` prefix came off (#933) still
-/// loads: `taguru_evaluation` reads as `evaluation`.
-#[test]
-fn load_report_accepts_the_legacy_taguru_evaluation_stamp() {
-    let path = write_temp(
-        "legacy-stamp",
-        r#"{"taguru_evaluation":1,"generated_at":"2026-07-29T00:00:00Z",
-           "inputs":{"context":"demo"},
-           "corpus":{"revision_after":{"graph":1,"passages":1,"config":1},"stable":true},
-           "cases":[]}"#,
-    );
-    let report = load_report(&path).unwrap();
-    assert_eq!(report.view.evaluation, 1);
-    assert_eq!(report.view.inputs.context, "demo");
 }

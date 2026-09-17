@@ -3267,7 +3267,7 @@ fn eval_scratch_dir(tag: &str) -> PathBuf {
     let eval_path = dir.join("eval.jsonl");
     std::fs::write(
         &eval_path,
-        "{\"eval\":1}\n{\"case_id\":\"c1\",\"query\":\"q\"}\n",
+        "{\"type\": \"eval\"}\n{\"case_id\":\"c1\",\"query\":\"q\"}\n",
     )
     .expect("eval.jsonl must be writable");
     dir
@@ -3282,7 +3282,10 @@ fn write_thresholds(dir: &std::path::Path, contents: &str) -> PathBuf {
 #[test]
 fn evaluate_rejects_a_thresholds_file_with_the_wrong_stamp() {
     let dir = eval_scratch_dir("bad-stamp");
-    let thresholds = write_thresholds(&dir, "{\"evaluate_thresholds\":2}");
+    let thresholds = write_thresholds(
+        &dir,
+        "{\"type\":\"evaluate_thresholds\",\"version\":\"2008-10-17\"}",
+    );
     let output = run(&[
         "evaluate",
         "--eval",
@@ -3294,7 +3297,10 @@ fn evaluate_rejects_a_thresholds_file_with_the_wrong_stamp() {
     ]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("evaluate_thresholds"), "{stderr}");
+    assert!(
+        stderr.contains("version '2008-10-17' is not a format"),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3303,7 +3309,7 @@ fn evaluate_rejects_a_thresholds_file_naming_an_unknown_aggregate_metric() {
     let dir = eval_scratch_dir("unknown-metric");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\
+        "{\"type\": \"evaluate_thresholds\",\
          \"aggregate\":{\"not.a.real.metric\":{\"min\":0.5}}}",
     );
     let output = run(&[
@@ -3326,7 +3332,7 @@ fn evaluate_rejects_a_thresholds_file_naming_an_unknown_case_id_override() {
     let dir = eval_scratch_dir("unknown-case-id");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\
+        "{\"type\": \"evaluate_thresholds\",\
          \"cases\":{\"overrides\":{\"no-such-case\":{\"recall.recall_at_k\":{\"min\":0.5}}}}}",
     );
     let output = run(&[
@@ -3349,7 +3355,7 @@ fn evaluate_rejects_a_thresholds_file_naming_a_non_case_scoped_metric_in_cases_d
     let dir = eval_scratch_dir("non-case-scoped");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\
+        "{\"type\": \"evaluate_thresholds\",\
          \"cases\":{\"default\":{\"latency.resolve_ms\":{\"max\":100.0}}}}",
     );
     let output = run(&[
@@ -3372,7 +3378,7 @@ fn evaluate_rejects_a_bound_with_neither_min_nor_max() {
     let dir = eval_scratch_dir("empty-bound");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\
+        "{\"type\": \"evaluate_thresholds\",\
          \"aggregate\":{\"recall.recall_at_k\":{}}}",
     );
     let output = run(&[
@@ -3393,7 +3399,7 @@ fn evaluate_rejects_a_bound_with_min_greater_than_max() {
     let dir = eval_scratch_dir("inverted-bound");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\
+        "{\"type\": \"evaluate_thresholds\",\
          \"aggregate\":{\"recall.recall_at_k\":{\"min\":0.9,\"max\":0.1}}}",
     );
     let output = run(&[
@@ -3414,7 +3420,7 @@ fn evaluate_thresholds_flag_given_twice_is_a_usage_error() {
     let dir = eval_scratch_dir("dup-thresholds");
     let thresholds = write_thresholds(
         &dir,
-        "{\"evaluate_thresholds\":1,\"aggregate\":{\"recall.recall_at_k\":{\"min\":0.5}}}",
+        "{\"type\": \"evaluate_thresholds\",\"aggregate\":{\"recall.recall_at_k\":{\"min\":0.5}}}",
     );
     let output = run(&[
         "evaluate",
