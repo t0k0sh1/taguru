@@ -81,18 +81,12 @@ Entries that change an on-disk format or a response shape say so.
   `import_batches` / `importBatches` / `BatchApplyResult` stay, and
   `batch` keeps its other meaning (many associations written in one
   call).
-- Record keys drop the `taguru_` prefix (ADR 0041, #933): `group`,
-  `schema`, `eval`, `evaluation`, `evaluate_thresholds`,
-  `consolidation`, and the six `benchmark_*` keys are what `taguru
-  export`, `taguru evaluate`, `taguru consolidation`, and `taguru
-  benchmark` now write, and what `taguru import`'s stream-level
-  records are called. For the evaluation, consolidation, and benchmark
-  files, readers still accept the old `taguru_*` spelling, so those
-  written by earlier releases load unchanged. **Not so for the import
-  stream's `group` and `schema` records**: the entry above (ADR 0042)
-  replaced them again, and neither this spelling nor the `taguru_*` one
-  is read. `taguru_communities` is unchanged (its bare noun is taken;
-  #851).
+- Record keys briefly dropped the `taguru_` prefix (ADR 0041, #933) —
+  `group: 1`, `eval: 1`, `benchmark_models: 1`, and the rest — and were
+  replaced again before any release by the `type` / `version` / `id`
+  columns of the ADR 0042 entries above, which supersede ADR 0041. No
+  release ever wrote ADR 0041's spelling, and neither it nor the
+  `taguru_*` one is read.
 - Terminology (#851 wave 3, #930): the unit that fails extraction is
   the segment, and the wording now says so — `extract --help`, the
   stderr lines at the split floor, docs/extract.html,
