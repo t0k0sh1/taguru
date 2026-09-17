@@ -704,7 +704,8 @@ fn no_verdict_word_appears_anywhere_in_the_artifact() {
     let (models_agg, pairs_agg) = aggregate(&cases);
 
     let retrieval = RetrievalFile {
-        benchmark_retrieval: BENCHMARK_RETRIEVAL_VERSION,
+        record_type: "benchmark_retrieval",
+        version: crate::format::FORMAT_VERSION,
         run_id: "r1".to_string(),
         generated_at: "2026-01-01T00:00:00Z".to_string(),
         matching: identity::Matching::default(),

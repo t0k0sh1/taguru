@@ -134,7 +134,7 @@ fn write_models_json(dir: &Path, entries: &[(&str, &str)]) -> PathBuf {
     let path = dir.join("models.json");
     std::fs::write(
         &path,
-        json!({"benchmark_models": 1, "models": models}).to_string(),
+        json!({"type": "benchmark_models", "models": models}).to_string(),
     )
     .unwrap();
     path
@@ -181,7 +181,8 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
 
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["benchmark_manifest"], 2);
+    assert_eq!(manifest["type"], "benchmark_manifest");
+    assert_eq!(manifest["version"], "2026-09-17");
     assert_eq!(manifest["harness"]["execution"], "subprocess");
     assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
@@ -205,11 +206,16 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let kinds: Vec<&str> = lines
+    // Line 1 is the file's header: it names its type and the format
+    // version, and carries no `kind` (ADR 0042). Every line after it is a
+    // `kind`-tagged record.
+    assert_eq!(lines[0]["type"], "benchmark_runs", "{}", lines[0]);
+    assert_eq!(lines[0]["version"], "2026-09-17", "{}", lines[0]);
+    assert!(lines[0].get("kind").is_none(), "{}", lines[0]);
+    let kinds: Vec<&str> = lines[1..]
         .iter()
         .map(|line| line["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds.first(), Some(&"header"));
     assert_eq!(kinds.last(), Some(&"cell"));
     assert!(kinds.contains(&"attempt"), "{kinds:?}");
     assert_eq!(
@@ -352,7 +358,7 @@ fn a_models_json_edited_after_the_fact_refuses_to_resume() {
     std::fs::write(
         &models,
         json!({
-            "benchmark_models": 1,
+            "type": "benchmark_models",
             "models": [{"id": "stub-c", "model": "different-model", "url": format!("{url}/v1/chat/completions")}]
         })
         .to_string(),

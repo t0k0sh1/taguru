@@ -45,7 +45,7 @@ fn write_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = json!({
-        "benchmark_manifest": 2,
+        "type": "benchmark_manifest",
         "run_id": "run-search-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -150,7 +150,7 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
     };
 
     let manifest = json!({
-        "benchmark_manifest": 2,
+        "type": "benchmark_manifest",
         "run_id": "run-search-two-run",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -221,7 +221,8 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     let retrieval: Value =
         serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
             .unwrap();
-    assert_eq!(retrieval["benchmark_retrieval"], 3);
+    assert_eq!(retrieval["type"], "benchmark_retrieval");
+    assert_eq!(retrieval["version"], "2026-09-17");
     assert_eq!(retrieval["run_id"], "run-search-1");
     assert_eq!(retrieval["corpus"]["m1"]["outcome"], "built", "{retrieval}");
     assert_eq!(retrieval["corpus"]["m2"]["outcome"], "built", "{retrieval}");

@@ -41,19 +41,6 @@ use serde::Serialize;
 
 use super::identity;
 
-// Bumped from 1: `pair_id` changed shape from `"{a}__{b}"` to a
-// length-prefixed `"{len}:{a}__{b}"` to close a collision between
-// differently-split underscored model ids — a reader keyed on the old
-// format would otherwise silently fail to match a pair record it
-// should have found.
-//
-// 3 (#851/#904): the `kind: "document_coverage"` record is now
-// `kind: "segment_coverage"` — a repurposed value under ADR 0003 §10,
-// not an added field. No reader parses `differences.jsonl` back into
-// this type (`DifferenceRecord` is `Serialize`-only), so the bump is a
-// documented stamp rather than something any code gates on today.
-const BENCHMARK_DIFFERENCES_VERSION: u64 = 3;
-
 /// `locator.text`'s cap (ADR 0003 §9.4 names no number; this module
 /// picks one so a single pathological paragraph cannot inflate the
 /// artifact unboundedly). Floored to the nearest `char` boundary at or
@@ -75,8 +62,9 @@ struct PairInfo {
 
 #[derive(Serialize)]
 struct DifferencesHeader {
-    kind: &'static str,
-    benchmark_differences: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     run_id: String,
     pairs: Vec<PairInfo>,
     matching: identity::Matching,
@@ -528,8 +516,8 @@ pub(super) fn compute_differences(
     }
 
     let header = DifferencesHeader {
-        kind: "header",
-        benchmark_differences: BENCHMARK_DIFFERENCES_VERSION,
+        record_type: "benchmark_differences",
+        version: crate::format::FORMAT_VERSION,
         run_id: manifest.run_id.clone(),
         pairs: pairs.clone(),
         matching,

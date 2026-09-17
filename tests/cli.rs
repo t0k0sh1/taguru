@@ -1292,7 +1292,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
 
     let runs_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-1",
+            "type": "benchmark_runs", "run_id": "run-1",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1333,7 +1333,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
     std::fs::write(dir.join("runs/m.run01.jsonl"), runs_text).unwrap();
 
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -1341,9 +1341,9 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {},
-        "documents": [
+        "segments": [
             {
-                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
                 "sha256": "sha-brewery", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
             },
         ],
@@ -1423,7 +1423,8 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
 
     let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
     let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
-    assert_eq!(measurements["benchmark_measurements"], 2);
+    assert_eq!(measurements["type"], "benchmark_measurements");
+    assert_eq!(measurements["version"], "2026-09-17");
     assert_eq!(measurements["percentile_method"], "nearest-rank");
     assert!(measurements["cells"]["m.run01"].is_object());
     assert!(measurements["models"]["m"].is_object());
@@ -1551,7 +1552,7 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
     fn cell_lines(cell_id: &str, model_id: &str, batch_path: &str) -> Vec<serde_json::Value> {
         vec![
             serde_json::json!({
-                "kind": "header", "benchmark_runs": 1, "run_id": "run-diff-cli",
+                "type": "benchmark_runs", "run_id": "run-diff-cli",
                 "cell_id": cell_id, "model_id": model_id, "model_name": format!("{model_id}-model"),
                 "run_index": 1, "prompt_version": 1,
             }),
@@ -1587,7 +1588,7 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
     }
 
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-diff-cli",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -1595,9 +1596,9 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {},
-        "documents": [
+        "segments": [
             {
-                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
                 "sha256": "sha-brewery", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
             },
         ],
@@ -1663,8 +1664,8 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
     );
 
     let lines = read_differences_lines(&dir);
-    assert_eq!(lines[0]["kind"], "header");
-    assert_eq!(lines[0]["benchmark_differences"], 3);
+    assert_eq!(lines[0]["type"], "benchmark_differences");
+    assert_eq!(lines[0]["version"], "2026-09-17");
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],
@@ -1725,9 +1726,9 @@ fn benchmark_compare_with_text_embeds_paragraph_text() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
-    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    manifest["segments"][0]["sha256"] = serde_json::json!(real_sha);
     std::fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -1767,7 +1768,7 @@ fn benchmark_compare_with_text_refuses_corpus_drift() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
     // sha256 stays the fixture's placeholder — deliberately not
     // matching the corpus file written above.
