@@ -70,7 +70,8 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
         .map(|line| serde_json::from_str(line).expect("every line parses"))
         .collect();
     let header = &lines[0];
-    assert_eq!(header["taguru_communities"], 1);
+    assert_eq!(header["type"], "communities");
+    assert_eq!(header["version"], "2026-09-17");
     assert_eq!(header["algorithm"], "louvain-cc/1");
     assert_eq!(header["revision"]["graph"].as_u64(), Some(revision));
     assert_eq!(header["concept_count"], 8);
@@ -122,7 +123,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
     server.ok("PUT", "/contexts/sci::communities", None);
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sci",
         "revision": revision,
@@ -207,7 +208,7 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
     let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
     server.ok("PUT", "/contexts/sci::communities", None);
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sci",
         "revision": revision,
@@ -516,6 +517,103 @@ fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
     );
 }
 
+/// A manifest that parses but is not one this build reads (ADR 0042):
+/// the shape earlier releases stored names no `type`; another kind of
+/// record names the wrong one; another format revision, or a null one,
+/// is not this build's. Each answers 409 and says to rebuild — never a
+/// search served off a record whose shape was guessed at.
+#[test]
+fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
+    let server = Server::start("communities-manifest-format");
+    seed_two_cliques(&server, "sci");
+    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let body = |stamp: Value| {
+        let mut manifest = json!({
+            "algorithm": "louvain-cc/1",
+            "source_context": "sci",
+            "revision": revision,
+            "levels": 1,
+            "communities": [
+                {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
+            ],
+        });
+        for (key, value) in stamp.as_object().unwrap() {
+            manifest[key] = value.clone();
+        }
+        manifest
+    };
+    // Seed the artifact once; every case after it rewrites the manifest.
+    seed_manifest_artifact(
+        &server,
+        "sci::communities",
+        &body(json!({"type": "communities_manifest"})),
+    );
+    for (stamp, expected) in [
+        (json!({"taguru_communities": 1}), "no `type` column"),
+        (
+            json!({"type": "consolidation_manifest"}),
+            "type 'consolidation_manifest' is not 'communities_manifest'",
+        ),
+        (
+            json!({"type": "communities_manifest", "version": "2008-10-17"}),
+            "version '2008-10-17' is not a format",
+        ),
+    ] {
+        overwrite_manifest(
+            &server,
+            "sci::communities",
+            &body(stamp.clone()).to_string(),
+        );
+        let (status, refused) = server.call(
+            "POST",
+            "/contexts/sci/communities/search",
+            Some(json!({"query": "夏目漱石"})),
+        );
+        assert_eq!(status, 409, "{stamp}: {refused}");
+        assert_eq!(refused["code"], json!("conflict"), "{refused}");
+        let message = refused["error"].as_str().unwrap();
+        assert!(
+            message.contains("is not a manifest this build reads") && message.contains(expected),
+            "{stamp}: {message}"
+        );
+        assert!(message.contains("taguru communities"), "{message}");
+    }
+
+    // An explicit null version is a value, not the omission the column
+    // allows: the record does not even parse.
+    overwrite_manifest(
+        &server,
+        "sci::communities",
+        &body(json!({"type": "communities_manifest", "version": null})).to_string(),
+    );
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not parse"),
+        "{refused}"
+    );
+
+    // Naming the type and no version is this build's own: served.
+    overwrite_manifest(
+        &server,
+        "sci::communities",
+        &body(json!({"type": "communities_manifest"})).to_string(),
+    );
+    let (status, served) = server.call(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    assert_eq!(status, 200, "{served}");
+}
+
 /// A manifest whose `source_context` names a DIFFERENT context than
 /// the one the search was made against — the artifact answers for
 /// somebody else's graph, so serving it would silently mislabel it.
@@ -525,7 +623,7 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
     seed_two_cliques(&server, "sci");
     let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "elsewhere",
         "revision": revision,
@@ -587,7 +685,7 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     );
     let revision = admin("GET", "/contexts/sci", None).1["revision"].clone();
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sci",
         "revision": revision,
@@ -636,7 +734,7 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
     seed_two_cliques(&server, "sci");
     let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sci",
         "revision": revision,
@@ -703,7 +801,7 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
     // The manifest's own `communities` array is empty — L0-0 is
     // searchable (passage + contains edges below) but unlisted.
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sci",
         "revision": revision,
@@ -884,6 +982,30 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
         run_communities(&["--context", "corp", &server.base], &extract_env);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("does not parse"), "{stderr}");
+    assert!(
+        stderr.contains("delete the artifact context to rebuild"),
+        "{stderr}"
+    );
+
+    // The manifest an earlier release stored parses as JSON but names no
+    // `type` (ADR 0042): refused by that, with the same way out.
+    overwrite_manifest(
+        &server,
+        "corp::communities",
+        &json!({
+            "taguru_communities": 1, "algorithm": "louvain-cc/1", "source_context": "corp",
+            "revision": {"graph": 1, "passages": 0, "config": 0}, "levels": 1, "communities": [],
+        })
+        .to_string(),
+    );
+    let (code, _stdout, stderr) =
+        run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("is not a manifest this build reads")
+            && stderr.contains("no `type` column"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("delete the artifact context to rebuild"),
         "{stderr}"

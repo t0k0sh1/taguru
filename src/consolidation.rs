@@ -59,10 +59,11 @@ exit codes: 0 judgments up to date (or dry-run report) · 1 failed ·
 2 usage error
 ";
 
-/// The judgment artifact's format stamp — mismatch-checked like
-/// `taguru_communities` (equality; hand-written artifacts do not
-/// exist, so a different number is a different program).
-const CONSOLIDATION_FORMAT: u64 = 1;
+/// The `type` of the judgment artifact's manifest (ADR 0042). Judged
+/// with the format `version` beside it — hand-written artifacts do not
+/// exist, so another kind or another revision is a different program's
+/// record.
+const MANIFEST_TYPE: &str = "consolidation_manifest";
 
 /// The manifest's reserved source id inside the judgment `context`.
 const MANIFEST_SOURCE: &str = "consolidation:manifest";
@@ -387,25 +388,12 @@ fn stored_judgments(
         Some(text) => {
             let manifest: Value = serde_json::from_str(text)
                 .map_err(|error| format!("the stored manifest did not parse: {error}"))?;
-            // The bare key wins when present: a malformed `consolidation`
-            // is refused, never hidden behind a legacy `taguru_consolidation`
-            // riding beside it (ADR 0041 §3.2).
-            let stamp = match manifest.get("consolidation") {
-                Some(value) => value.as_u64(),
-                None => manifest.get("taguru_consolidation").and_then(Value::as_u64),
-            };
-            match stamp {
-                Some(CONSOLIDATION_FORMAT) => {}
-                Some(other) => {
-                    return Err(format!(
-                        "judgment artifact format {other} is not this build's \
-                         {CONSOLIDATION_FORMAT} — refusing to diff against it"
-                    ));
-                }
-                None => {
-                    return Err("the stored manifest carries no consolidation stamp".to_string());
-                }
-            }
+            judge_manifest(&manifest).map_err(|error| {
+                format!(
+                    "the stored manifest is not one this build reads ({error}) — refusing \
+                     to diff against it; delete the judgment context to start over"
+                )
+            })?;
             manifest["detector"].as_str().map(str::to_string)
         }
         None => None,
@@ -513,10 +501,24 @@ fn judgment_batch(
 /// batch always precedes it in the same run (`fresh.is_empty()`
 /// returns before any import), so the artifact `context` exists by the
 /// time this lands.
+/// Judges a stored manifest's `type` and `version` (ADR 0042). A
+/// `version` that is present must be a string — `null` and numbers are
+/// values, not the omission the column allows — and must be this
+/// build's own; an absent one reads as this build's.
+fn judge_manifest(manifest: &Value) -> Result<(), String> {
+    crate::format::check_type(manifest.get("type").and_then(Value::as_str), MANIFEST_TYPE)?;
+    match manifest.get("version") {
+        None => crate::format::check_version(None),
+        Some(Value::String(version)) => crate::format::check_version(Some(version)),
+        Some(other) => Err(format!("version {other} is not a string")),
+    }
+}
+
 fn manifest_batch(artifact: &str, context: &str) -> String {
     let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact, None);
     let manifest = json!({
-        "consolidation": CONSOLIDATION_FORMAT,
+        "type": MANIFEST_TYPE,
+        "version": crate::format::FORMAT_VERSION,
         "detector": CONSOLIDATION_DETECTOR,
         "context": context,
     });
@@ -596,7 +598,8 @@ mod tests {
         );
         let passage: Value = serde_json::from_str(manifest.lines().nth(1).unwrap()).unwrap();
         let stored: Value = serde_json::from_str(passage["passage"].as_str().unwrap()).unwrap();
-        assert_eq!(stored["consolidation"], 1);
+        assert_eq!(stored["type"], "consolidation_manifest");
+        assert_eq!(stored["version"], crate::format::FORMAT_VERSION);
         assert_eq!(stored["detector"], CONSOLIDATION_DETECTOR);
     }
 }

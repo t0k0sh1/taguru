@@ -73,7 +73,7 @@ fn version_is_bare_json_and_matches_the_protocol_trailer() {
     assert_eq!(body["http_contract"]["supported"], json!([1]));
     assert_eq!(body["mcp_contract"]["current"], json!(1));
     assert_eq!(body["batch_formats"], json!(["2026-09-17"]));
-    assert_eq!(body["communities_formats"], json!([1]));
+    assert_eq!(body["communities_formats"], json!(["2026-09-17"]));
     assert!(
         body["image_formats"]
             .as_array()

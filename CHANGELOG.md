@@ -9,6 +9,21 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — a `::communities` or `::consolidation` artifact built by
+  an earlier release has to be rebuilt** (ADR 0042, #937 step 4). The
+  derivation records stored inside those contexts, and the header line
+  of `GET /contexts/{name}/communities`, name their `type` and the
+  format `version` like every other record: `{"type": "communities",
+  "version": "2026-09-17", "context": …}` opens the analysis stream
+  (`taguru_communities` is gone — the `type` column is what frees the
+  name its own `communities` count already held), the stored manifests
+  are `{"type": "communities_manifest", …}` and `{"type":
+  "consolidation_manifest", …}`. A manifest stored before this release
+  names no `type`, so `search_communities` answers 409 for that context
+  and `taguru communities` / `taguru consolidation` refuse to diff
+  against it: delete the artifact context and run the command again.
+  The source context is untouched. `GET /version` reports the date under
+  `communities_formats`.
 - **Breaking — a benchmark results directory started by an earlier
   release can no longer be resumed, compared, or searched, and a
   models file written for one is no longer read** (ADR 0042, #937 step

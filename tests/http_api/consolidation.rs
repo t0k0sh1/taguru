@@ -322,7 +322,8 @@ fn the_cli_judges_incrementally_by_fingerprint() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(manifest["consolidation"], json!(1));
+    assert_eq!(manifest["type"], json!("consolidation_manifest"));
+    assert_eq!(manifest["version"], json!("2026-09-17"));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
 
     // Second run over the unchanged graph: zero LLM calls.
@@ -595,7 +596,8 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     // stderr says why.
     overwrite_manifest(
         &server,
-        &json!({"consolidation": 1, "detector": "consolidation/0", "context": "sake"}).to_string(),
+        &json!({"type": "consolidation_manifest", "detector": "consolidation/0", "context": "sake"})
+            .to_string(),
     );
     let (code, stdout, stderr) =
         run_consolidation(&["--context", "sake", &server.base], &extract_env);
@@ -632,11 +634,64 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     );
     assert_eq!(*calls.lock().unwrap(), 10);
 
-    // A manifest stamped before the `taguru_` prefix came off (#933)
-    // reads as current: nothing re-judged, nothing refused.
+    // A manifest that is not one this build reads is refused, and the
+    // refusal judges nothing and rewrites nothing (ADR 0042): another
+    // format revision, another kind of record, a null version, and the
+    // two shapes earlier releases stored — which name no `type` at all.
+    for (stored_manifest, expected) in [
+        (
+            json!({"type": "consolidation_manifest", "version": "2008-10-17",
+                   "detector": "consolidation/1", "context": "sake"}),
+            "version '2008-10-17' is not a format",
+        ),
+        (
+            json!({"type": "communities_manifest", "detector": "consolidation/1", "context": "sake"}),
+            "type 'communities_manifest' is not 'consolidation_manifest'",
+        ),
+        (
+            json!({"type": "consolidation_manifest", "version": null,
+                   "detector": "consolidation/1", "context": "sake"}),
+            "version null is not a string",
+        ),
+        (
+            json!({"consolidation": 1, "detector": "consolidation/1", "context": "sake"}),
+            "no `type` column",
+        ),
+        (
+            json!({"taguru_consolidation": 1, "detector": "consolidation/1", "context": "sake"}),
+            "no `type` column",
+        ),
+    ] {
+        let text = stored_manifest.to_string();
+        overwrite_manifest(&server, &text);
+        let (code, _stdout, stderr) =
+            run_consolidation(&["--context", "sake", &server.base], &extract_env);
+        assert_eq!(code, 1, "{text}: {stderr}");
+        assert!(
+            stderr.contains("the stored manifest is not one this build reads")
+                && stderr.contains(expected),
+            "{text}: {stderr}"
+        );
+        assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+        let stored = server.ok(
+            "POST",
+            "/contexts/sake::consolidation/sources/lookup",
+            Some(json!({"sources": ["consolidation:manifest"]})),
+        );
+        assert_eq!(
+            stored["passages"]["consolidation:manifest"]
+                .as_str()
+                .unwrap(),
+            text,
+            "a refusal must not rewrite the manifest it refused"
+        );
+    }
+
+    // The version column is optional on read: a manifest that names its
+    // type and no version is this build's own, and everything is reused.
     overwrite_manifest(
         &server,
-        &json!({"taguru_consolidation": 1, "detector": "consolidation/1", "context": "sake"})
+        &json!({"type": "consolidation_manifest", "detector": "consolidation/1", "context": "sake"})
             .to_string(),
     );
     let (code, stdout, stderr) =
@@ -647,65 +702,4 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         "{stdout}"
     );
     assert_eq!(*calls.lock().unwrap(), 10);
-
-    // A malformed bare stamp is not rescued by a legacy stamp riding
-    // beside it: the key that is present is the one judged (ADR 0041).
-    overwrite_manifest(
-        &server,
-        &json!({
-            "consolidation": "bad",
-            "taguru_consolidation": 1,
-            "detector": "consolidation/1",
-            "context": "sake"
-        })
-        .to_string(),
-    );
-    let (code, _stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("carries no consolidation stamp"),
-        "{stderr}"
-    );
-    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
-
-    // A format stamp from another program: refused by number.
-    overwrite_manifest(
-        &server,
-        &json!({"consolidation": 2, "detector": "consolidation/1", "context": "sake"}).to_string(),
-    );
-    let (code, _stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("judgment artifact format 2 is not this build's 1"),
-        "{stderr}"
-    );
-    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
-    let stored = server.ok(
-        "POST",
-        "/contexts/sake::consolidation/sources/lookup",
-        Some(json!({"sources": ["consolidation:manifest"]})),
-    );
-    assert!(
-        stored["passages"]["consolidation:manifest"]
-            .as_str()
-            .unwrap()
-            .contains("\"consolidation\":2"),
-        "a refusal must not rewrite the manifest it refused: {stored}"
-    );
-
-    // No stamp at all: refused by name.
-    overwrite_manifest(
-        &server,
-        &json!({"detector": "consolidation/1", "context": "sake"}).to_string(),
-    );
-    let (code, _stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("carries no consolidation stamp"),
-        "{stderr}"
-    );
-    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
 }

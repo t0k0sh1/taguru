@@ -221,7 +221,7 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             // equality — so this dimension is the full range, not just
             // the current value.
             "image_formats": (1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>(),
-            "communities_formats": [crate::api::communities::COMMUNITIES_FORMAT],
+            "communities_formats": [crate::format::FORMAT_VERSION],
         })
     });
     &FACTS
