@@ -135,11 +135,11 @@ not be running — the directory lock enforces it), or to a RUNNING
 server with --url. One source file = one source's complete truth:
 import retracts the source, then applies its file, so re-importing
 is idempotent. A file carries one source or a whole stream of them (each
-`taguru_batch` header line starts the next) — `taguru export` writes
-such streams. A `schema` line states one context's whole
-schema document (ADR 0009 §13); it installs AFTER every source, BEFORE
-any group, so a schema record can name a context a source of the same
-stream just created. A `group` line states one group's complete
+header line, the one whose `type` is `source`, starts the next) —
+`taguru export` writes such streams. A `schema` line states one
+context's whole schema document (ADR 0009 §13); it installs AFTER every
+source, BEFORE any group, so a schema record can name a context a source
+of the same stream just created. A `group` line states one group's complete
 truth the same way; groups restore AFTER every source and schema of
 the run (create-or-replace of the whole record), so group files
 re-apply in any order. A directory expands to its *.jsonl files,
@@ -211,16 +211,6 @@ sorted by name. Format: docs/import.html.
                failed_batches array instead of batches, since there is
                no successful outcome to report for it.
 ";
-
-/// The one format version this build reads and docs/import.html
-/// describes. `pub(crate)` so `GET /version` (ADR 0005 §3, §6) can
-/// report it under `batch_formats`.
-pub(crate) const BATCH_VERSION: u64 = 1;
-
-/// The `group` record's own version stamp — separate from
-/// [`BATCH_VERSION`] so either shape can rev without dragging the
-/// other along. Export serializes it; parse refuses any other value.
-pub(crate) const GROUP_VERSION: u64 = 1;
 
 /// Passage cap, mirroring the HTTP default: over the API a passage
 /// rides under `TAGURU_MAX_BODY_BYTES` (8 MiB), and a file must not

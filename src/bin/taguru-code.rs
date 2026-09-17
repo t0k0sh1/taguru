@@ -44,6 +44,8 @@ mod embedding;
 mod env;
 #[path = "../export.rs"]
 mod export;
+#[path = "../format.rs"]
+mod format;
 #[path = "../groups.rs"]
 mod groups;
 #[path = "../hash.rs"]

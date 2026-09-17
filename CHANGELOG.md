@@ -9,6 +9,22 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — source files, exports, and group files written by an
+  earlier release are no longer read** (ADR 0042, #937 step 1). A
+  record now states three facts in three columns: `type` (what it is),
+  `version` (the file format's revision, as a date), and `id` (which
+  one). The source file header is `{"type": "source", "version":
+  "2026-09-17", "id": "docs/a.md", "context": "sake"}` — `taguru_batch`
+  is gone and the header's `source` is `id`; a `group` record is
+  `{"type": "group", "id": "kura", …}` (`name` is `id`); a `schema`
+  record is `{"type": "schema", "context": "sake", …}`. `version` may
+  be omitted, and then means the running build's own revision;
+  everything taguru writes carries it, and any other date is refused
+  by name. There is no transition alias: re-extract, or export again
+  with this build (the snapshot and WAL formats did not change). `GET
+  /version` reports the date under `batch_formats`. The schema
+  document itself — `PUT /contexts/{name}/schema` and the data
+  directory's `{stem}.schema.json` — is unchanged in this step.
 - Wording (#851 wave 5, #935): the JSONL file `taguru extract` writes
   for one source, and a stream of them, are called a source file and a
   source stream — `batch` no longer names them in `--help`, CLI output
@@ -25,10 +41,13 @@ Entries that change an on-disk format or a response shape say so.
   `consolidation`, and the six `benchmark_*` keys are what `taguru
   export`, `taguru evaluate`, `taguru consolidation`, and `taguru
   benchmark` now write, and what `taguru import`'s stream-level
-  records are called. Readers still accept the old `taguru_*`
-  spelling, so files and streams written by earlier releases load
-  unchanged. `taguru_batch` and `taguru_communities` are unchanged (their
-  bare nouns are taken; #851).
+  records are called. For the evaluation, consolidation, and benchmark
+  files, readers still accept the old `taguru_*` spelling, so those
+  written by earlier releases load unchanged. **Not so for the import
+  stream's `group` and `schema` records**: the entry above (ADR 0042)
+  replaced them again, and neither this spelling nor the `taguru_*` one
+  is read. `taguru_communities` is unchanged (its bare noun is taken;
+  #851).
 - Terminology (#851 wave 3, #930): the unit that fails extraction is
   the segment, and the wording now says so — `extract --help`, the
   stderr lines at the split floor, docs/extract.html,

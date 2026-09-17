@@ -186,6 +186,6 @@ test("optionsDigest differs on value change", async () => {
 
 test("CONNECTOR_DOCUMENT_VERSION constant is one", () => {
   // Checked for equality (not a range) — a protocol-breaking change bumps
-  // this, never loosens the check (ADR 0007 §5, mirrors BATCH_VERSION).
+  // this, never loosens the check (ADR 0007 §5, mirrors taguru's format version).
   expect(CONNECTOR_DOCUMENT_VERSION).toBe(1);
 });

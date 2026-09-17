@@ -33,9 +33,9 @@ from typing import Final, Literal, TypeVar, cast, get_args
 from taguru import Locator
 
 CONNECTOR_DOCUMENT_VERSION: Final = 1
-"""Checked for equality, like ``taguru``'s own ``BATCH_VERSION``/
-``GROUP_VERSION`` (src/ingest.rs) — a protocol-breaking change bumps this,
-never loosens the check to a range."""
+"""Checked for equality, like ``taguru``'s own file-format ``version``
+(src/format.rs) — a protocol-breaking change bumps this, never loosens
+the check to a range."""
 
 # Mirrors the caps src/api.rs enforces server-side (MAX_NAME_BYTES,
 # MAX_LOCATOR_KIND_BYTES, MAX_LOCATOR_VALUE_BYTES, MAX_SECTION_BYTES,

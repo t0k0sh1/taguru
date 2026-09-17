@@ -48,19 +48,19 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\"}\n\
          {\"paragraph\": 0, \"section\": \"概要\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
           \"weight\": 1.0, \"paragraph\": 1}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"酒蔵\", \"source\": \"c.md\", \
+         {\"type\": \"source\", \"context\": \"酒蔵\", \"id\": \"c.md\", \
           \"create\": {\"description\": \"蔵元台帳\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+         {\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\", \"酒蔵\"]}\n",
     )
     .expect("fixture must be writable");
@@ -441,7 +441,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // WRONG context.
             (
                 "HTTP/1.1 200 OK",
-                "{\"taguru_batch\":1,\"context\":\"other\",\"source\":\"a.md\",\
+                "{\"type\": \"source\",\"context\":\"other\",\"id\":\"a.md\",\
                  \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
                     .to_string(),
             ),
@@ -458,7 +458,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // group.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"group":1,"name":"h","description":"x","contexts":["sake"]}"#.to_string(),
+                r#"{"type": "group", "id":"h","description":"x","contexts":["sake"]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -521,7 +521,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /contexts/sake/export: a real batch stream.
             (
                 "HTTP/1.1 200 OK",
-                "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\",\
+                "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"a.md\",\
                  \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
                     .to_string(),
             ),
@@ -736,7 +736,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups/h/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"group":1,"name":"h","description":"x","contexts":[]}"#.to_string(),
+                r#"{"type": "group", "id":"h","description":"x","contexts":[]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {

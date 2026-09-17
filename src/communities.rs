@@ -488,21 +488,15 @@ fn render_batches(
     let mut first = true;
     for community in &analysis.communities {
         let source = format!("{COMMUNITY_SOURCE_PREFIX}{}", community.id);
-        let mut header = json!({
-            "taguru_batch": 1,
-            "context": derived,
-            "source": source,
-        });
-        if first {
-            // Applied only if the artifact context does not exist yet.
-            header["create"] = json!({
-                "description": format!(
-                    "Community analysis of '{name}' (taguru communities)"
-                ),
-            });
-            first = false;
-        }
-        let mut lines = vec![render(&header)?];
+        // Applied only if the artifact context does not exist yet.
+        let description =
+            first.then(|| format!("Community analysis of '{name}' (taguru communities)"));
+        first = false;
+        let mut lines = vec![crate::format::source_header_line(
+            &source,
+            derived,
+            description.as_deref(),
+        )];
         let summary = summaries
             .get(community.id.as_str())
             .ok_or_else(|| format!("no summary for community {}", community.id))?;
@@ -534,11 +528,7 @@ fn render_batches(
         serde_json::to_string(manifest).map_err(|error| format!("manifest: {error}"))?;
     batches.push(
         [
-            render(&json!({
-                "taguru_batch": 1,
-                "context": derived,
-                "source": MANIFEST_SOURCE,
-            }))?,
+            crate::format::source_header_line(MANIFEST_SOURCE, derived, None),
             render(&json!({"passage": manifest_text}))?,
         ]
         .join("\n"),

@@ -1411,7 +1411,7 @@ mod tests {
     #[test]
     fn bridge_call_sends_ndjson_strings_raw_and_json_bodies_encoded() {
         let endpoint = ScriptedEndpoint::start(200, "{}");
-        let stream = "{\"taguru_batch\": 1}\n{\"passage\": \"x\"}\n";
+        let stream = "{\"type\": \"source\"}\n{\"passage\": \"x\"}\n";
         endpoint
             .bridge(None)
             .call("POST", "/import", Some(Value::String(stream.to_string())))

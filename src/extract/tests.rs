@@ -1725,7 +1725,7 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
     from_extraction.absorb_extraction(&written);
 
     let batch = crate::ingest::parse_batch(Cursor::new(concat!(
-        r#"{"taguru_batch":1,"context":"sake","source":"a"}"#,
+        r#"{"type": "source","context":"sake","id":"a"}"#,
         "\n",
         r#"{"subject":"青嶺酒造","label":"杜氏","object":"高瀬","weight":1.0}"#,
         "\n",
@@ -2450,7 +2450,7 @@ fn load_vocabulary_accepts_one_sided_streams() {
     fs::write(
         dir.join("concepts-only.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            r#"{"type": "source","context":"ops","id":"s1"}"#,
             "\n",
             r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
             "\n",
@@ -2464,7 +2464,7 @@ fn load_vocabulary_accepts_one_sided_streams() {
     fs::write(
         dir.join("labels-only.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s2"}"#,
+            r#"{"type": "source","context":"ops","id":"s2"}"#,
             "\n",
             r#"{"alias":"担当","canonical":"管理者","kind":"label"}"#,
             "\n",
@@ -2491,7 +2491,7 @@ fn load_vocabulary_reads_only_jsonl_files_from_a_directory() {
     fs::write(
         dir.join("a.md-0123.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"a.md"}"#,
+            r#"{"type": "source","context":"ops","id":"a.md"}"#,
             "\n",
             r#"{"subject":"CI","label":"runner","object":"nextest","weight":1.0}"#,
             "\n",
@@ -2536,7 +2536,7 @@ fn vocabulary_digest_matches_the_load_and_tracks_content() {
     fs::write(
         &path,
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            r#"{"type": "source","context":"ops","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"使用","object":"nextest","weight":1.0}"#,
             "\n",
@@ -2548,7 +2548,7 @@ fn vocabulary_digest_matches_the_load_and_tracks_content() {
     fs::write(
         &path,
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            r#"{"type": "source","context":"ops","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"使用","object":"cargo-nextest","weight":1.0}"#,
             "\n",
@@ -2572,13 +2572,13 @@ fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            r#"{"type": "source","context":"ops","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
             "\n",
             r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
             "\n",
-            r#"{"taguru_batch":1,"context":"ops","source":"s2"}"#,
+            r#"{"type": "source","context":"ops","id":"s2"}"#,
             "\n",
             r#"{"subject":"リリース署名鍵","label":"管理者","object":"山科","weight":1.0}"#,
             "\n",
@@ -2611,7 +2611,11 @@ fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     let split = dir.join("split");
     fs::create_dir_all(&split).unwrap();
     let text = fs::read_to_string(dir.join("export.jsonl")).unwrap();
-    let cut = text.match_indices("{\"taguru_batch\"").nth(1).unwrap().0;
+    let cut = text
+        .match_indices("{\"type\": \"source\"")
+        .nth(1)
+        .unwrap()
+        .0;
     fs::write(split.join("a.jsonl"), &text[..cut]).unwrap();
     fs::write(split.join("b.jsonl"), &text[cut..]).unwrap();
     let from_dir = load_vocabulary(&split).unwrap();
@@ -2620,7 +2624,7 @@ fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     // No names at all is a hard error — the --schema posture.
     fs::write(
         dir.join("empty.jsonl"),
-        concat!(r#"{"taguru_batch":1,"context":"ops","source":"s3"}"#, "\n"),
+        concat!(r#"{"type": "source","context":"ops","id":"s3"}"#, "\n"),
     )
     .unwrap();
     assert!(load_vocabulary(&dir.join("empty.jsonl")).is_err());
@@ -4770,7 +4774,7 @@ fn the_passage_line_carries_date_and_tags_exactly_when_given() {
         &["ops".to_string(), "リリース".to_string()],
     );
     let header: serde_json::Value = serde_json::from_str(tagged.lines().next().unwrap()).unwrap();
-    assert_eq!(header["source"], "session:claude:abc");
+    assert_eq!(header["id"], "session:claude:abc");
     let passage: serde_json::Value = serde_json::from_str(tagged.lines().nth(1).unwrap()).unwrap();
     assert_eq!(passage["date"], 1785974400u64);
     assert_eq!(passage["tags"], serde_json::json!(["ops", "リリース"]));
@@ -7970,7 +7974,7 @@ fn load_vocabulary_harvests_each_names_strongest_relations() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"law","source":"s1"}"#,
+            r#"{"type": "source","context":"law","id":"s1"}"#,
             "\n",
             r#"{"subject":"電子署名法","label":"定める","object":"電子署名","weight":1.0}"#,
             "\n",
@@ -8023,7 +8027,7 @@ fn load_vocabulary_harvests_each_names_strongest_relations() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"taguru_batch":1,"context":"law","source":"s1"}"#,
+            r#"{"type": "source","context":"law","id":"s1"}"#,
             "\n",
             r#"{"subject":"電子署名法","label":"廃止","object":"電子署名","weight":1.0}"#,
             "\n",

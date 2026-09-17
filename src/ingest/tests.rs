@@ -13,29 +13,29 @@ fn parse(text: &str) -> Result<Batch, String> {
     parse_batch(std::io::Cursor::new(text))
 }
 
-const HEADER: &str = r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1"}"#;
+const HEADER: &str = r#"{"type": "source", "context": "sake", "id": "doc-1"}"#;
 
 #[test]
 fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
     let body = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n",
         "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
         "\n",
-        "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}\n",
-        "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}\n",
         "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
     )
     .as_bytes();
     let ranges = split_batches(body);
     assert_eq!(ranges.len(), 2);
     let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
-    assert!(first.starts_with("{\"taguru_batch\": 1, \"context\": \"sake\""));
+    assert!(first.starts_with("{\"type\": \"source\", \"context\": \"sake\""));
     // The batch's ops (and the blank line) ride along; the group
     // record between the batches belongs to neither.
     assert!(first.contains("likes"));
     assert!(!first.contains("\"group\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
-    assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
+    assert!(second.starts_with("{\"type\": \"source\", \"context\": \"beer\""));
     assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
 }
 
@@ -45,10 +45,10 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
 #[test]
 fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     let body = format!(
-        "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}}\n\
+        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}}\n\
          {{\"assoc\": [\"a\", \"likes\", \"b\"]}}\n\
          {SCHEMA_LINE}\n\
-         {{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}}\n\
+         {{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}}\n\
          {{\"assoc\": [\"c\", \"likes\", \"d\"]}}"
     );
     let body = body.as_bytes();
@@ -58,7 +58,7 @@ fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     assert!(first.contains("likes"));
     assert!(!first.contains("\"schema\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
-    assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
+    assert!(second.starts_with("{\"type\": \"source\", \"context\": \"beer\""));
 }
 
 #[test]
@@ -100,9 +100,21 @@ fn the_first_line_must_be_a_header_of_a_readable_version() {
             .unwrap_err();
     assert!(error.contains("not a source file header"), "{error}");
 
-    let error =
-        parse("{\"taguru_batch\": 2, \"context\": \"c\", \"source\": \"s\"}\n").unwrap_err();
-    assert!(error.contains("taguru_batch 2"), "{error}");
+    let error = parse(
+        "{\"type\": \"source\", \"version\": \"2008-10-17\", \"context\": \"c\", \"id\": \"s\"}\n",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("source file header: version '2008-10-17' is not a format"),
+        "{error}"
+    );
+    // The current date, and no date at all, both read.
+    parse(&format!(
+        "{{\"type\": \"source\", \"version\": \"{}\", \"context\": \"c\", \"id\": \"s\"}}\n",
+        crate::format::FORMAT_VERSION
+    ))
+    .unwrap();
+    parse("{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\"}\n").unwrap();
 
     assert!(parse("\n\n").unwrap_err().contains("empty file"));
 }
@@ -124,7 +136,7 @@ fn a_stream_of_batches_parses_with_per_batch_state() {
         "{HEADER}\n\
          {{\"passage\": \"第1段落。\"}}\n\
          {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
-         {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
+         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
     )))
     .unwrap()
@@ -162,7 +174,7 @@ fn a_batch_boundary_runs_the_finish_validations() {
     let error = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
          {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
-         {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n\
+         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n\
          {{\"passage\": \"本文。\"}}\n"
     )))
     .unwrap_err();
@@ -173,7 +185,7 @@ fn a_batch_boundary_runs_the_finish_validations() {
 fn parse_batch_refuses_a_multi_batch_stream() {
     let error = parse(&format!(
         "{HEADER}\n\
-         {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}}\n"
+         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n"
     ))
     .unwrap_err();
     assert!(error.contains("exactly one"), "{error}");
@@ -238,20 +250,14 @@ fn empty_question_and_section_text_is_refused() {
 }
 
 /// An empty `context` name would `file_stem` to a bare `.ctx` the
-/// server's directory scan never rediscovers; an empty source name
+/// server's directory scan never rediscovers; an empty source `id`
 /// has no identity to retract a re-import against. Both are refused
 /// at the header, each naming its own field.
 #[test]
 fn an_empty_context_or_source_name_in_the_header_is_refused() {
     for (field, header) in [
-        (
-            "context",
-            r#"{"taguru_batch": 1, "context": "", "source": "s"}"#,
-        ),
-        (
-            "source",
-            r#"{"taguru_batch": 1, "context": "c", "source": ""}"#,
-        ),
+        ("context", r#"{"type": "source", "context": "", "id": "s"}"#),
+        ("id", r#"{"type": "source", "context": "c", "id": ""}"#),
     ] {
         let error = parse(header).unwrap_err();
         assert!(
@@ -266,9 +272,9 @@ fn group_records_ride_a_stream_and_stand_alone() {
     let stream = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
-         {{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵\", \
+         {{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵\", \
            \"contexts\": [\"sake\", \"sake\"], \"groups\": [\"kid\"]}}\n\
-         {{\"group\": 1, \"name\": \"kid\"}}\n"
+         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
@@ -287,7 +293,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
     // one has no batch to join.
     let error = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
-         {{\"group\": 1, \"name\": \"kura\"}}\n\
+         {{\"type\": \"group\", \"id\": \"kura\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
     )))
     .unwrap_err();
@@ -298,7 +304,10 @@ fn group_records_ride_a_stream_and_stand_alone() {
 
     // A groups-only stream is a legitimate restore; an empty one is
     // still a mistake.
-    let alone = parse_stream(std::io::Cursor::new("{\"group\": 1, \"name\": \"kura\"}\n")).unwrap();
+    let alone = parse_stream(std::io::Cursor::new(
+        "{\"type\": \"group\", \"id\": \"kura\"}\n",
+    ))
+    .unwrap();
     assert!(alone.batches.is_empty());
     assert_eq!(alone.groups.len(), 1);
     assert!(
@@ -311,21 +320,24 @@ fn group_records_ride_a_stream_and_stand_alone() {
 #[test]
 fn group_records_validate_their_shape_with_line_numbers() {
     let case = |line: &str| parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
-    assert!(case("{\"group\": 2, \"name\": \"g\"}").contains("group 2"));
-    assert!(case("{\"group\": 1, \"name\": \"\"}").contains("must not be empty"));
-    assert!(case("{\"group\": 1, \"name\": \"g\", \"nope\": 1}").contains("unknown field"));
+    assert!(
+        case("{\"type\": \"group\", \"version\": \"2008-10-17\", \"id\": \"g\"}")
+            .contains("group record: version '2008-10-17' is not a format")
+    );
+    assert!(case("{\"type\": \"group\", \"id\": \"\"}").contains("must not be empty"));
+    assert!(case("{\"type\": \"group\", \"id\": \"g\", \"nope\": 1}").contains("unknown field"));
     let long = "x".repeat(65);
-    assert!(case(&format!("{{\"group\": 1, \"name\": \"{long}\"}}")).contains("65 bytes"));
+    assert!(case(&format!("{{\"type\": \"group\", \"id\": \"{long}\"}}")).contains("65 bytes"));
     assert!(
         case(&format!(
-            "{{\"group\": 1, \"name\": \"g\", \"contexts\": [\"{long}\"]}}"
+            "{{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"{long}\"]}}"
         ))
         .contains("65 bytes")
     );
 
     // Restating one group refuses the whole stream, by line.
     let error = parse_stream(std::io::Cursor::new(
-        "{\"group\": 1, \"name\": \"g\"}\n{\"group\": 1, \"name\": \"g\"}\n",
+        "{\"type\": \"group\", \"id\": \"g\"}\n{\"type\": \"group\", \"id\": \"g\"}\n",
     ))
     .unwrap_err();
     assert!(
@@ -339,7 +351,7 @@ fn group_records_validate_their_shape_with_line_numbers() {
         .collect::<Vec<_>>()
         .join(", ");
     let error = case(&format!(
-        "{{\"group\": 1, \"name\": \"g\", \"contexts\": [{over_set}]}}"
+        "{{\"type\": \"group\", \"id\": \"g\", \"contexts\": [{over_set}]}}"
     ));
     assert!(error.contains("split into nested child groups"), "{error}");
 }
@@ -349,14 +361,14 @@ fn group_records_validate_their_shape_with_line_numbers() {
 #[test]
 fn parse_batch_refuses_group_records() {
     let error = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
-         {\"group\": 1, \"name\": \"kura\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+         {\"type\": \"group\", \"id\": \"kura\"}\n",
     )
     .unwrap_err();
     assert!(error.contains("exactly one source was expected"), "{error}");
 }
 
-const SCHEMA_LINE: &str = r#"{"schema": 1, "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
+const SCHEMA_LINE: &str = r#"{"type": "schema", "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
 
 /// `schema` records ride a stream and stand alone — the
 /// schema twin of [`group_records_ride_a_stream_and_stand_alone`]
@@ -370,7 +382,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {SCHEMA_LINE}\n\
-         {{\"group\": 1, \"name\": \"kid\"}}\n"
+         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
@@ -415,14 +427,14 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // parse_group's exact wording shape (ADR 0009 §13 bullet 4).
     assert!(
         case(
-            r#"{"schema": 2, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"type": "schema", "version": "2008-10-17", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
-        .contains("schema 2 is not a version this taguru reads (it reads 1)")
+        .contains("schema record: version '2008-10-17' is not a format")
     );
 
     assert!(
         case(
-            r#"{"schema": 1, "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"type": "schema", "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
         .contains("must not be empty")
     );
@@ -433,18 +445,20 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     let long = "x".repeat(65);
     assert!(
         case(&format!(
-            r#"{{"schema": 1, "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+            r#"{{"type": "schema", "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
         ))
         .contains("65 bytes")
     );
 
     // Every field is required — no struct-level default, matching
     // SchemaDocument's own at-rest posture.
-    assert!(case(r#"{"schema": 1, "context": "sake", "mode": "off"}"#).contains("missing field"));
+    assert!(
+        case(r#"{"type": "schema", "context": "sake", "mode": "off"}"#).contains("missing field")
+    );
 
     assert!(
         case(
-            r#"{"schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
+            r#"{"type": "schema", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
         )
         .contains("unknown field")
     );
@@ -453,7 +467,7 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // (here: the relation named the reserved type label) surfaces
     // with the line number, not just the bare violation text.
     let error = case(
-        r#"{"schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
+        r#"{"type": "schema", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
     );
     assert!(
         error.contains("line 1") && error.contains("reserved"),
@@ -550,9 +564,9 @@ fn a_line_exactly_at_the_byte_cap_is_accepted() {
 #[test]
 fn split_batches_keeps_unparseable_lines_inside_the_enclosing_range() {
     let body = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n",
         "not json at all\n",
-        "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
+        "{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}\n",
         "{\"assoc\": 1\n",
     )
     .as_bytes();
@@ -583,7 +597,7 @@ fn apply_batch_threads_the_deadline_into_association_writes() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
     let batch = parse(&format!(
         "{}\n{}\n",
-        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1", "create": {"description": "d"}}"#,
+        r#"{"type": "source", "context": "sake", "id": "doc-1", "create": {"description": "d"}}"#,
         r#"{"subject": "a", "label": "b", "object": "c", "weight": 1.0}"#,
     ))
     .unwrap();
@@ -982,7 +996,7 @@ fn weights_and_name_sizes_are_capped_like_the_api() {
     );
 
     let error = parse(&format!(
-        "{{\"taguru_batch\": 1, \"context\": \"{}\", \"source\": \"s\"}}\n",
+        "{{\"type\": \"source\", \"context\": \"{}\", \"id\": \"s\"}}\n",
         "c".repeat(MAX_CONTEXT_NAME_BYTES + 1)
     ))
     .unwrap_err();
@@ -1030,7 +1044,7 @@ fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let mut batch = parse(
-        "{\"taguru_batch\": 1, \"context\": \"perm\", \"source\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"perm\", \"id\": \"doc-1\", \"create\": {}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1070,7 +1084,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
 
     // A completed batch leaves no marker: its truth is fully on disk.
     let happy = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1085,7 +1099,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     // alias to a canonical nothing interned — the same rejection
     // `add_alias` would raise for real, just caught here first.)
     let torn = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
     .unwrap();
@@ -1101,7 +1115,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     // there was never a tear to repair, just a rejected batch
     // that nothing depended on.
     let fixed = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
     )
@@ -1152,7 +1166,7 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
     let stale = crate::registry::import_marker_path(&dir, "sake", "doc-1");
     fs::write(&stale, "{\"context\": \"sake\", \"source\": \"doc-1\"}").unwrap();
     let batch = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1186,7 +1200,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
         let seeded = parse(
-            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
              {\"passage\": \"杜氏は高瀬。\"}\n\
              {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
         )
@@ -1194,7 +1208,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
         let reimport = parse(
-            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
              {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬2\", \"weight\": 1.0}\n",
         )
         .unwrap();
@@ -1256,14 +1270,14 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let seeded = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
          {\"passage\": \"杜氏は高瀬。\"}\n",
     )
     .unwrap();
     apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
     let reimport = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
          {\"passage\": \"杜氏は高瀬二代目。\"}\n",
     )
     .unwrap();
@@ -1301,7 +1315,7 @@ fn a_predicted_alias_rejection_creates_nothing_and_applies_nothing() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let torn = parse(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
@@ -1371,7 +1385,7 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
         let batch = parse(
-            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
+            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
              {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
              {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
              {\"alias\": \"青嶺\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
@@ -1573,13 +1587,13 @@ fn chunk_body_guarantees_a_trailing_newline_per_unit() {
 #[test]
 fn a_leading_bom_is_stripped_before_split_batches_runs() {
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
-    bytes.extend_from_slice(b"{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s\"}\n");
+    bytes.extend_from_slice(b"{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\"}\n");
     assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
     bytes.drain(0..3);
     let ranges = split_batches(&bytes);
     assert_eq!(ranges.len(), 1);
     let first = std::str::from_utf8(&bytes[ranges[0].clone()]).unwrap();
-    assert!(first.starts_with("{\"taguru_batch\""), "{first}");
+    assert!(first.starts_with("{\"type\": \"source\""), "{first}");
     assert!(!first.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
 }
 
@@ -1746,7 +1760,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{batches}"
     );
-    let schema = "{\"schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+    let schema = "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {}, \"relations\": {}}";
     let schemas = parse_stream(format!("{schema}\n{schema}\n").as_bytes()).unwrap_err();
     assert!(
@@ -1756,7 +1770,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{schemas}"
     );
-    let group = "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}";
+    let group = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"sake\"]}";
     let groups = parse_stream(format!("{group}\n{group}\n").as_bytes()).unwrap_err();
     assert!(
         groups.starts_with(
@@ -1987,49 +2001,58 @@ fn the_oversized_unit_message_names_unit_size_and_budget() {
     );
 }
 
-/// Streams written before the `taguru_` prefix came off the record
-/// keys (#933) still parse: `taguru_schema` and `taguru_group` are read
-/// as `schema` and `group`, and the stream-level boundary they mark is
-/// the same one.
+/// ADR 0042 §3.5: the spellings earlier releases wrote are not read —
+/// no alias, no fallback. A `taguru_batch` header is just a line with no
+/// `type`, so it is refused as "not a header"; the old `group` / `schema`
+/// version keys name no record type either, so with no source open they
+/// are refused the same way rather than applied as something else.
 #[test]
-fn legacy_taguru_prefixed_schema_and_group_records_still_parse() {
-    let stream = parse_stream(std::io::Cursor::new(format!(
-        "{{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
-           \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {HEADER}\n\
-         {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
-         {{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}}\n"
-    )))
-    .unwrap();
-    assert_eq!(
-        stream.schemas.len(),
-        1,
-        "the prefixed schema record must be read"
-    );
-    assert_eq!(stream.batches.len(), 1);
-    assert_eq!(stream.groups.len(), 1);
-    assert_eq!(stream.groups[0].0, "kura");
+fn the_pre_adr_0042_spellings_are_refused_not_read() {
+    for old in [
+        r#"{"taguru_batch": 1, "context": "c", "source": "s"}"#,
+        r#"{"group": 1, "name": "kura"}"#,
+        r#"{"taguru_group": 1, "name": "kura"}"#,
+        r#"{"schema": 1, "context": "c", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
+    ] {
+        let error = parse_stream(std::io::Cursor::new(format!("{old}\n"))).unwrap_err();
+        assert!(
+            error.contains("line 1") && error.contains("not a source file header"),
+            "{old}: {error}"
+        );
+    }
 
-    // The prefixed group line closes the batch before it exactly like
-    // the bare one does.
-    let error = parse_stream(std::io::Cursor::new(format!(
-        "{HEADER}\n\
-         {{\"taguru_group\": 1, \"name\": \"kura\"}}\n\
-         {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
-    )))
-    .unwrap_err();
-    assert!(
-        error.contains("line 3") && error.contains("not a source file header"),
-        "{error}"
-    );
-
-    // The version check still applies through the old key.
+    // A header that names its type but keeps the old identity column is
+    // refused by the unknown column, not quietly read.
     let error = parse_stream(std::io::Cursor::new(
-        "{\"taguru_group\": 2, \"name\": \"kura\"}\n",
+        "{\"type\": \"source\", \"context\": \"c\", \"source\": \"s\"}\n",
     ))
     .unwrap_err();
-    assert!(
-        error.contains("group 2 is not a version this taguru reads"),
-        "{error}"
-    );
+    assert!(error.contains("unknown field `source`"), "{error}");
+    let error = parse_stream(std::io::Cursor::new(
+        "{\"type\": \"group\", \"name\": \"kura\"}\n",
+    ))
+    .unwrap_err();
+    assert!(error.contains("unknown field `name`"), "{error}");
+}
+
+/// The `version` column is optional on every stream-level record, and
+/// when present must be this build's own date — on the header, the
+/// `group` record, and the `schema` record alike.
+#[test]
+fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
+    let version = crate::format::FORMAT_VERSION;
+    let stream = parse_stream(std::io::Cursor::new(format!(
+        "{{\"type\": \"schema\", \"version\": \"{version}\", \"context\": \"sake\", \"mode\": \"warn\", \
+           \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
+         {{\"type\": \"source\", \"version\": \"{version}\", \"id\": \"a.md\", \"context\": \"sake\"}}\n\
+         {{\"type\": \"source\", \"id\": \"b.md\", \"context\": \"sake\"}}\n\
+         {{\"type\": \"group\", \"version\": \"{version}\", \"id\": \"kura\"}}\n\
+         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
+    )))
+    .unwrap();
+    assert_eq!(stream.schemas.len(), 1);
+    assert_eq!(stream.batches.len(), 2);
+    assert_eq!(stream.batches[0].source, "a.md");
+    assert_eq!(stream.batches[1].source, "b.md");
+    assert_eq!(stream.groups.len(), 2);
 }

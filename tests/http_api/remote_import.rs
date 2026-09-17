@@ -47,10 +47,10 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     std::fs::write(
         &file,
         format!(
-            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
              {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
              {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
-             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"leaky.md\"}}\n\
+             {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"leaky.md\"}}\n\
              {{\"subject\": \"高瀬\", \"label\": \"連絡先\", \"object\": \"{mail}\", \"weight\": 1.0}}\n\
              {{\"passage\": \"高瀬の連絡先は {mail}。\"}}\n"
         ),
@@ -185,7 +185,7 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     let broken = batches.join("broken.jsonl");
     std::fs::write(
         &broken,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\nnot json\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\nnot json\n",
     )
     .expect("fixture must be writable");
     let (code, stdout, stderr) = run_cli(
@@ -226,13 +226,13 @@ fn a_full_remote_import_matches_the_local_import_of_the_same_stream() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\", \"stored_at\": 1700000000}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
           \"weight\": 1.0, \"paragraph\": 1}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
     )
     .expect("fixture must be writable");
@@ -293,7 +293,7 @@ fn a_remote_dry_run_previews_every_chunk_and_writes_nothing() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
@@ -332,7 +332,7 @@ fn remote_json_matches_the_local_jsons_own_shape() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
@@ -383,7 +383,7 @@ fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
@@ -431,7 +431,7 @@ fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
     let mut content = String::new();
     for i in 0..6 {
         content.push_str(&format!(
-            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s{i}.md\", \
+            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s{i}.md\", \
              \"create\": {{\"description\": \"d\"}}}}\n\
              {{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n"
         ));
@@ -480,7 +480,7 @@ fn a_lone_batch_the_server_still_413s_is_a_hard_error_naming_both_remedies() {
     std::fs::write(
         &file,
         format!(
-            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"big.md\", \
+            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"big.md\", \
              \"create\": {{\"description\": \"d\"}}}}\n{{\"passage\": \"{passage}\"}}\n"
         ),
     )
@@ -513,16 +513,16 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let group_file = batches.join("00-group.jsonl");
     std::fs::write(
         &group_file,
-        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"beer\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"beer\"]}\n",
     )
     .expect("fixture must be writable");
     let batch_file = batches.join("01-batches.jsonl");
     std::fs::write(
         &batch_file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"b.md\", \
+         {\"type\": \"source\", \"context\": \"beer\", \"id\": \"b.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
     )
@@ -562,20 +562,20 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
+         {\"type\": \"source\", \"context\": \"missing\", \"id\": \"bad.md\"}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
+         {\"type\": \"source\", \"context\": \"c\", \"id\": \"c.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"e\", \"source\": \"e.md\", \
+         {\"type\": \"source\", \"context\": \"e\", \"id\": \"e.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
-         {\"schema\": 1, \"context\": \"a\", \"mode\": \"warn\", \
+         {\"type\": \"schema\", \"context\": \"a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-         {\"group\": 1, \"name\": \"g\", \"contexts\": [\"a\"]}\n",
+         {\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"a\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -632,12 +632,12 @@ fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field()
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
+         {\"type\": \"source\", \"context\": \"missing\", \"id\": \"bad.md\"}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
+         {\"type\": \"source\", \"context\": \"c\", \"id\": \"c.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
@@ -695,7 +695,7 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
     )
     .expect("fixture must be writable");
     let (code, _stdout, stderr) = run_cli(
@@ -726,7 +726,7 @@ fn a_malformed_or_non_http_url_is_a_usage_error_not_a_transport_failure() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
     )
     .expect("fixture must be writable");
 
@@ -755,7 +755,7 @@ fn no_embed_combined_with_url_is_a_usage_error_before_any_request() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
     )
     .expect("fixture must be writable");
     let (code, _stdout, stderr) = run_cli(
@@ -788,7 +788,7 @@ fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n",
     )
     .expect("fixture must be writable");
@@ -851,7 +851,7 @@ fn a_mismatched_server_version_prints_the_skew_warning_once() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
     )
     .expect("fixture must be writable");
     let (_code, _stdout, stderr) =
@@ -992,10 +992,10 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"b\", \"source\": \"b.md\", \
+         {\"type\": \"source\", \"context\": \"b\", \"id\": \"b.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
     )
@@ -1045,10 +1045,10 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
     let seed = batches.join("seed.jsonl");
     std::fs::write(
         &seed,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"schema:type\", \"object\": \"Brewery\", \"weight\": 1.0}\n\
-         {\"schema\": 1, \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
+         {\"type\": \"schema\", \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
          \"types\": {\"Brewery\": {\"is_a\": []}, \"Person\": {\"is_a\": []}}, \
          \"relations\": {\"杜氏\": {\"domain\": [\"Brewery\"], \"range\": [\"Person\"]}}}\n",
     )
@@ -1056,7 +1056,7 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
     let violating = batches.join("violating.jsonl");
     std::fs::write(
         &violating,
-        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"b.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"b.md\"}\n\
          {\"subject\": \"高瀬\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
          {\"subject\": \"高瀬\", \"label\": \"杜氏\", \"object\": \"個人A\", \"weight\": 1.0}\n",
     )
@@ -1099,7 +1099,7 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
     let mut stream = String::new();
     for context in ["a", "b", "c", "d"] {
         stream.push_str(&format!(
-            "{{\"taguru_batch\": 1, \"context\": \"{context}\", \"source\": \"{context}.md\", \
+            "{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"{context}.md\", \
              \"create\": {{\"description\": \"d\"}}}}\n\
              {{\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n"
         ));

@@ -765,7 +765,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("prior.jsonl"),
-            "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"prior.md\"}\n\
+            "{\"type\": \"source\",\"context\":\"c\",\"id\":\"prior.md\"}\n\
              {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
              {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
         )
@@ -1053,7 +1053,7 @@ mod tests {
         let file = dir.join("b.jsonl");
         std::fs::write(
             &file,
-            "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"b.md\"}\n\
+            "{\"type\": \"source\",\"context\":\"c\",\"id\":\"b.md\"}\n\
              {\"passage\":\"本文\"}\n\
              {\"subject\":\"a\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n\
              {\"alias\":\"x\",\"canonical\":\"a\",\"kind\":\"concept\"}\n\

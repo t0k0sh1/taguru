@@ -244,7 +244,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
             .expect("sake.jsonl must be among the restored exports"),
     )
     .unwrap();
-    assert!(sake_stream.contains("\"schema\":1"), "{sake_stream}");
+    assert!(sake_stream.contains("\"type\":\"schema\""), "{sake_stream}");
 
     // The grant store rode along, owner-only like the server writes it.
     let grants = restored.join("oauth.json");

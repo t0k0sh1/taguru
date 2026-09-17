@@ -348,7 +348,7 @@ fn analyze_batch(text: &str, paragraph_count: usize) -> BatchStats {
             invalid_lines += 1;
             continue;
         };
-        if obj.contains_key("taguru_batch") {
+        if obj.get("type").and_then(Value::as_str) == Some("source") {
             continue; // header
         }
         if obj.contains_key("passage") {

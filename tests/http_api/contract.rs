@@ -536,7 +536,7 @@ fn add_associations_warn_mode_response_shape() {
 #[test]
 fn import_reports_locator_bookkeeping() {
     let server = Server::start("contract-import");
-    let batch = "{\"taguru_batch\": 1, \"context\": \"corpus-f\", \"source\": \"doc.md\", \
+    let batch = "{\"type\": \"source\", \"context\": \"corpus-f\", \"id\": \"doc.md\", \
                  \"create\": {\"description\": \"wire-contract import corpus\"}}\n\
                  {\"passage\": \"導入。\\n\\n本編。\"}\n\
                  {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
@@ -571,11 +571,11 @@ fn import_reports_locator_bookkeeping() {
 #[test]
 fn import_refusal_pins_the_durable_prefix_fields() {
     let server = Server::start("contract-import-refusal");
-    let stream = "{\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-1\", \
+    let stream = "{\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-1\", \
                    \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                   \"weight\": 1.0}\n\
-                  {\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
@@ -598,11 +598,11 @@ fn import_refusal_pins_the_durable_prefix_fields() {
 #[test]
 fn import_with_schema_reports_the_schema_outcome() {
     let server = Server::start("contract-import-schema");
-    let stream = "{\"taguru_batch\": 1, \"context\": \"corpus-g\", \"source\": \"doc.md\", \
+    let stream = "{\"type\": \"source\", \"context\": \"corpus-g\", \"id\": \"doc.md\", \
                   \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                   \"weight\": 1.0}\n\
-                  {\"schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \
+                  {\"type\": \"schema\", \"context\": \"corpus-g\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \
                   \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \
                   \"range\": [\"Concept\"]}}}\n";

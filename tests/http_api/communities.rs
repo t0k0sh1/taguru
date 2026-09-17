@@ -734,7 +734,7 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
 fn overwrite_manifest(server: &Server, derived: &str, manifest_text: &str) {
     let batch = format!(
         "{}\n{}\n",
-        json!({"taguru_batch": 1, "context": derived, "source": "communities:manifest"}),
+        json!({"type": "source", "context": derived, "id": "communities:manifest"}),
         json!({"passage": manifest_text}),
     );
     let (status, body) = server.call_raw(

@@ -84,7 +84,9 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     ctx = client.context(fresh_name)
     ctx.add_aliases(concepts={"Aomine": "青嶺酒造"})
     stream = ctx.export()
-    assert stream.count('"taguru_batch"') >= 1
+    assert stream.count('"type":"source"') >= 1
+    # Everything taguru writes carries the format version (ADR 0042).
+    assert '"version":"2026-09-17"' in stream
 
     restored_name = f"{fresh_name}-restored"
     result = client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))
@@ -122,7 +124,7 @@ def test_export_stream_and_file(client: Taguru, fresh_name: str, tmp_path) -> No
 
 def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
     batch = (
-        f'{{"taguru_batch": 1, "context": "{fresh_name}", "source": "f.md", '
+        f'{{"type": "source", "context": "{fresh_name}", "id": "f.md", '
         f'"create": {{"description": "from file"}}}}\n'
         '{"passage": "ファイルからの本文。"}\n'
         '{"subject": "a", "label": "b", "object": "c", "weight": 1.0}\n'

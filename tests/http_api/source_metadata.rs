@@ -208,7 +208,7 @@ fn metadata_survives_a_restart_and_an_export_import_round_trip() {
     // The batch format validates tags with the same vocabulary as the
     // HTTP store: an empty tag refuses the batch, naming the line.
     let bad = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"bad.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"bad.md\"}\n",
         "{\"passage\": \"本文。\", \"tags\": [\"\"]}\n",
     );
     let (status, refusal) = post_import(&restored, bad, None);

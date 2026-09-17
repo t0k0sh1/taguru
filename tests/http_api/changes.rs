@@ -118,7 +118,7 @@ fn an_import_feeds_the_same_events_as_its_component_writes() {
     server.ok("PUT", "/contexts/sake", None);
     let cursor = tail_cursor(&server, "sake");
 
-    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc.md\"}\n\
+    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc.md\"}\n\
                  {\"passage\": \"本文。\"}\n\
                  {\"subject\": \"a\", \"label\": \"r\", \"object\": \"b\", \"weight\": 1.0}\n\
                  {\"subject\": \"a\", \"label\": \"r\", \"object\": \"c\", \"weight\": 1.0}\n";

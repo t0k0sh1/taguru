@@ -242,7 +242,7 @@ source, then applies its file — so re-importing is idempotent and a
 revised file replaces cleanly instead of double-counting weights.
 
 ```jsonl
-{"taguru_batch": 1, "context": "sake", "source": "docs/aomine.md", "create": {"description": "酒蔵の知識"}}
+{"type": "source", "id": "docs/aomine.md", "context": "sake", "create": {"description": "酒蔵の知識"}}
 {"passage": "青嶺酒造は1907年創業。杜氏は高瀬。"}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
 {"alias": "Aomine Brewery", "canonical": "青嶺酒造", "kind": "concept"}

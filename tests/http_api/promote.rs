@@ -699,10 +699,10 @@ fn a_cross_context_stream_does_not_let_sibling_vocabulary_vouch() {
     let server = Server::start("promote-preview-contexts");
     // alpha interns Foo; beta's alias names Foo without interning it.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\", ",
+        "{\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", ",
         "\"create\": {\"description\": \"a\"}}\n",
         "{\"subject\": \"Foo\", \"label\": \"関連\", \"object\": \"Bar\", \"weight\": 1.0}\n",
-        "{\"taguru_batch\": 1, \"context\": \"beta\", \"source\": \"b.md\", ",
+        "{\"type\": \"source\", \"context\": \"beta\", \"id\": \"b.md\", ",
         "\"create\": {\"description\": \"b\"}}\n",
         "{\"subject\": \"X\", \"label\": \"関連\", \"object\": \"Y\", \"weight\": 1.0}\n",
         "{\"alias\": \"ふー\", \"canonical\": \"Foo\", \"kind\": \"concept\"}\n",

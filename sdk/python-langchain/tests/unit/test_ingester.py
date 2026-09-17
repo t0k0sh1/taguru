@@ -209,9 +209,9 @@ def test_ingest_text_builds_the_batch_and_imports(
     # The wire batch: header, verbatim passage, question, 2 facts, alias.
     assert len(fake_server.imported) == 1
     lines = [json.loads(line) for line in fake_server.imported[0].strip().split("\n")]
-    assert lines[0]["taguru_batch"] == 1
+    assert lines[0]["type"] == "source"
     assert lines[0]["context"] == "sake"
-    assert lines[0]["source"] == "docs/aomine.md"
+    assert lines[0]["id"] == "docs/aomine.md"
     assert "create" not in lines[0]
     assert lines[1] == {"passage": DOC_TEXT}  # verbatim, unchunked, unlabeled
     assert lines[2] == {"paragraph": 1, "question": "杜氏は誰?"}
@@ -345,7 +345,7 @@ def test_dry_run_renders_but_never_sends(
     ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md", dry_run=True)
     assert outcome.ok
-    assert outcome.ndjson is not None and '"taguru_batch"' in outcome.ndjson
+    assert outcome.ndjson is not None and '"type":"source"' in outcome.ndjson
     assert fake_server.imported == []
     assert outcome.associations == 0  # nothing applied
 

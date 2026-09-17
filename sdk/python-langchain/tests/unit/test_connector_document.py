@@ -194,5 +194,5 @@ def test_options_digest_differs_on_value_change() -> None:
 
 def test_connector_document_version_constant_is_one() -> None:
     # Checked for equality (not a range) — a protocol-breaking change bumps
-    # this, never loosens the check (ADR 0007 §5, mirrors BATCH_VERSION).
+    # this, never loosens the check (ADR 0007 §5, mirrors taguru's format version).
     assert CONNECTOR_DOCUMENT_VERSION == 1

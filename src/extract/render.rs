@@ -15,15 +15,11 @@ pub(super) fn render_batch(
     date: Option<u64>,
     tags: &[String],
 ) -> String {
-    let mut header = serde_json::json!({
-        "taguru_batch": 1,
-        "context": context,
-        "source": source,
-    });
-    if let Some(text) = description {
-        header["create"] = serde_json::json!({ "description": text });
-    }
-    let mut lines = vec![header.to_string()];
+    let mut lines = vec![crate::format::source_header_line(
+        source,
+        context,
+        description,
+    )];
     if let Some(text) = passage {
         // #466 S1 (ADR 0017): the runbook's source metadata rides the
         // passage line, exactly where the import wire format carries it

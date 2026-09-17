@@ -479,8 +479,8 @@ fn stub_dismiss(calls: Arc<Mutex<usize>>) -> String {
 fn overwrite_manifest(server: &Server, manifest_text: &str) {
     let batch = format!(
         "{}\n{}\n",
-        json!({"taguru_batch": 1, "context": "sake::consolidation",
-               "source": "consolidation:manifest"}),
+        json!({"type": "source", "context": "sake::consolidation",
+               "id": "consolidation:manifest"}),
         json!({"passage": manifest_text}),
     );
     let (status, body) = server.call_raw(

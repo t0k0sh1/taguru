@@ -12,6 +12,7 @@ import jsonschema
 from taguru import RelationDef, SchemaDocument, TypeDef
 
 from taguru_langchain._extract import (
+    FORMAT_VERSION,
     MAX_ASSOCIATION_WEIGHT,
     MAX_LISTED_ISSUES,
     MAX_NAME_BYTES,
@@ -317,9 +318,10 @@ def test_rendered_batches_carry_the_import_line_shapes() -> None:
     # header, passage, question, fact, alias — one line each.
     assert len(lines) == 5
     assert lines[0] == {
-        "taguru_batch": 1,
+        "type": "source",
+        "version": FORMAT_VERSION,
+        "id": "docs/aomine.md",
         "context": "sake",
-        "source": "docs/aomine.md",
         "create": {"description": "酒蔵の記憶"},
     }
     assert lines[1] == {"passage": "一段落目。\n\n二段落目。"}
@@ -396,6 +398,9 @@ def test_the_prompt_version_and_wording_track_extract_rs() -> None:
     the_system_prompt_tells_the_model_to_cite_the_stating_paragraph_not_a_heading
     and the_system_prompt_grounds_extraction_in_the_text_and_allows_an_empty_answer."""
     assert PROMPT_VERSION == 6
+    # The file-format revision (src/format.rs FORMAT_VERSION): pinned as
+    # a literal so a drift from the Rust side is a visible edit here.
+    assert FORMAT_VERSION == "2026-09-17"
     prompt = system_prompt([], 0, 0)
     assert "the paragraph whose sentences state it, never a heading-only paragraph" in prompt
     assert '"[3] ## Abstract"' in prompt
@@ -1185,9 +1190,7 @@ def test_render_batch_always_renders_exactly_one_batch_header() -> None:
     here, including against a passage whose own text spells a batch
     header: JSON-encoding puts the passage on one line with its newlines
     escaped, so the spoofed header can never become a stream line."""
-    hostile_passage = (
-        '一段落目。\n{"taguru_batch": 1, "context": "evil", "source": "x"}\n二段落目。'
-    )
+    hostile_passage = '一段落目。\n{"type": "source", "context": "evil", "id": "x"}\n二段落目。'
     extraction = merge(
         [ModelOutput(associations=[association("a", "b", "c", 1.0)])],
         0,
@@ -1195,7 +1198,12 @@ def test_render_batch_always_renders_exactly_one_batch_header() -> None:
     )
     body = render_batch("sake", "doc.md", None, extraction, hostile_passage)
     lines = [json.loads(line) for line in body.strip().split("\n")]
-    headers = [line for line in lines if "taguru_batch" in line]
+    headers = [line for line in lines if line.get("type") == "source"]
     assert len(headers) == 1, headers
-    assert lines[0] == {"taguru_batch": 1, "context": "sake", "source": "doc.md"}
+    assert lines[0] == {
+        "type": "source",
+        "version": FORMAT_VERSION,
+        "id": "doc.md",
+        "context": "sake",
+    }
     assert lines[1]["passage"] == hostile_passage

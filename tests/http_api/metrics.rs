@@ -22,7 +22,7 @@ fn schema_document(mode: &str) -> serde_json::Value {
 /// disjoint from `杜氏`'s declared `domain: [Brewery]`.
 fn domain_violation_batch(context: &str, source: &str) -> String {
     format!(
-        "{{\"taguru_batch\": 1, \"context\": \"{context}\", \"source\": \"{source}\"}}\n\
+        "{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"{source}\"}}\n\
          {{\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \
          \"weight\": 1.0}}\n\
          {{\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": \

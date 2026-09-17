@@ -144,10 +144,10 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     );
 
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"free\", \"source\": \"a.md\", ",
+        "{\"type\": \"source\", \"context\": \"free\", \"id\": \"a.md\", ",
         "\"create\": {\"description\": \"uncapped\"}}\n",
         "{\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
-        "{\"taguru_batch\": 1, \"context\": \"capped\", \"source\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"capped\", \"id\": \"b.md\"}\n",
         "{\"subject\": \"蔵\", \"label\": \"産地\", \"object\": \"灘\", \"weight\": 1.0}\n",
     );
     let (status, previewed) = post_import_dry_run(&server, stream, None);
@@ -190,8 +190,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     // A header-only batch is a pure source retraction — the
     // import-shaped way down in size — so it passes the pre-check at
     // the very ceiling that refused the growth batch above.
-    let retract_stream =
-        "{\"taguru_batch\": 1, \"context\": \"capped\", \"source\": \"keep.md\"}\n";
+    let retract_stream = "{\"type\": \"source\", \"context\": \"capped\", \"id\": \"keep.md\"}\n";
     let (status, retracted) = post_import(&server, retract_stream, None);
     assert_eq!(status, 200, "{retracted}");
 }

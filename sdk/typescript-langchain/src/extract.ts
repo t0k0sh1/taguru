@@ -34,6 +34,10 @@ import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
 // (checkpoints.ts) — the same division fact_budget (a computation input)
 // and PROMPT_VERSION (the prompt's wording) already draw.
 export const PROMPT_VERSION = 6;
+// The file-format revision every record this module writes is stamped
+// with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
+// record's `version` column beside its `type`.
+export const FORMAT_VERSION = "2026-09-17";
 export const CHUNK_BYTES = 24 * 1024;
 export const VOCABULARY_CAP = 200;
 export const MAX_NAME_BYTES = 1024;
@@ -1851,7 +1855,12 @@ export function renderBatch(
   sections: readonly SectionSpec[] = [],
   locators: readonly LocatorSpec[] = [],
 ): string {
-  const header: Record<string, unknown> = { taguru_batch: 1, context, source };
+  const header: Record<string, unknown> = {
+    type: "source",
+    version: FORMAT_VERSION,
+    id: source,
+    context,
+  };
   if (description !== null) {
     header["create"] = { description };
   }

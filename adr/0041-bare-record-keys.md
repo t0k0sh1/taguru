@@ -8,7 +8,7 @@
   contract fixtures that carry an import stream), ADR 0009 §13 (the
   schema record in the import stream), ADR 0040 (the previous
   terminology wave)
-- **Supersedes**: nothing. / **Superseded by**: —
+- **Supersedes**: nothing. / **Superseded by**: ADR 0042
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.
