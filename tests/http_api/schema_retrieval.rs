@@ -12,7 +12,7 @@ use crate::support::*;
 
 fn schema_document(mode: &str) -> Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": mode,
         "closed_labels": false,
         "types": {

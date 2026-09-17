@@ -2052,7 +2052,8 @@ mod tests {
 
     fn warn_schema_document() -> crate::schema::SchemaDocument {
         crate::schema::SchemaDocument {
-            schema: crate::schema::SCHEMA_VERSION,
+            record_type: crate::schema::SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             mode: crate::schema::SchemaMode::Warn,
             closed_labels: false,
             types: [("醸造所".to_string(), crate::schema::TypeDef::default())]

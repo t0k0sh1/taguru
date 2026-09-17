@@ -64,7 +64,7 @@ fn every_write_entrance_feeds_the_expected_event() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "warn", "closed_labels": false,
+            "type": "schema", "mode": "warn", "closed_labels": false,
             "types": {}, "relations": {}
         })),
     );
@@ -104,7 +104,7 @@ fn every_write_entrance_feeds_the_expected_event() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "warn", "closed_labels": false,
+            "type": "schema", "mode": "warn", "closed_labels": false,
             "types": {}, "relations": {}
         })),
     );

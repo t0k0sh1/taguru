@@ -515,7 +515,8 @@ fn apply_schema_record_refuses_a_context_that_does_not_exist() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let installed = schema::install(schema::SchemaDocument {
-        schema: schema::SCHEMA_VERSION,
+        record_type: schema::SchemaType::Schema,
+        version: Some(crate::format::FORMAT_VERSION.to_string()),
         mode: schema::SchemaMode::Off,
         closed_labels: false,
         types: BTreeMap::new(),

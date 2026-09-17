@@ -594,7 +594,8 @@ def test_a_fetched_schema_is_folded_into_the_system_prompt(
     live schema into the prompt with the same best-effort posture as
     _fetch_vocabulary — here the schema-present case."""
     fake_server.schema_document = {
-        "schema": 1,
+        "type": "schema",
+        "version": "2026-09-17",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
@@ -613,7 +614,8 @@ async def test_a_fetched_schema_is_folded_into_the_system_prompt_async(
 ) -> None:
     """Async twin: same best-effort schema fetch on the aingest_text path."""
     fake_server.schema_document = {
-        "schema": 1,
+        "type": "schema",
+        "version": "2026-09-17",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}},

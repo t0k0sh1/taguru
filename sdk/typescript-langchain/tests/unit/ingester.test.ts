@@ -383,7 +383,8 @@ describe("TaguruIngester", () => {
   it("folds a fetched schema into the system prompt (ADR 0009 §11.4)", async () => {
     const server = new FakeServer();
     server.schemaDocument = {
-      schema: 1,
+      type: "schema",
+      version: "2026-09-17",
       mode: "warn",
       closed_labels: false,
       types: { Brewery: { is_a: [] }, Person: { is_a: [] } },

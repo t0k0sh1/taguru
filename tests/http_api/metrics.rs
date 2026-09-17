@@ -10,7 +10,7 @@ use crate::support::*;
 /// `schema_import.rs` already covers.
 fn schema_document(mode: &str) -> serde_json::Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": mode,
         "closed_labels": false,
         "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},

@@ -16,7 +16,8 @@ from taguru import NotFoundError, RelationDef, SchemaAudit, SchemaDocument, Type
 from .conftest import err_response, ok_response, sync_client
 
 SCHEMA_DOCUMENT: dict[str, Any] = {
-    "schema": 1,
+    "type": "schema",
+    "version": "2026-09-17",
     "mode": "strict",
     "closed_labels": False,
     "types": {
@@ -35,7 +36,8 @@ def test_get_schema_decodes_into_reexported_models() -> None:
     document = client.context("aomine").get_schema()
 
     assert isinstance(document, SchemaDocument)
-    assert document.schema == 1
+    assert document.type == "schema"
+    assert document.version == "2026-09-17"
     assert document.mode == "strict"
     assert document.closed_labels is False
 
@@ -113,6 +115,15 @@ def test_put_schema_sends_the_document_and_decodes_the_installed_one() -> None:
     assert seen["body"] == SCHEMA_DOCUMENT
     assert reinstalled.mode == "strict"
 
+    # An unset ``version`` is omitted from the body — never sent as null,
+    # which the server refuses (absent means the server's own revision).
+    unversioned = SchemaDocument(
+        type="schema", mode="off", closed_labels=False, types={}, relations={}
+    )
+    client.context("aomine").put_schema(unversioned)
+    assert "version" not in seen["body"]
+    assert seen["body"]["type"] == "schema"
+
 
 def test_audit_and_validate_schema_decode_the_shared_audit_shape() -> None:
     seen: dict[str, Any] = {}
@@ -143,3 +154,12 @@ def test_audit_and_validate_schema_decode_the_shared_audit_shape() -> None:
     assert seen["path"] == "/contexts/aomine/schema/validate"
     assert seen["body"] == {"document": SCHEMA_DOCUMENT, "limit": 10, "after": cursor}
     assert validated.total == 1
+
+    # The proposed document follows ``put_schema``'s rule: an unset
+    # ``version`` is omitted, never sent as null.
+    unversioned = SchemaDocument(
+        type="schema", mode="off", closed_labels=False, types={}, relations={}
+    )
+    client.context("aomine").validate_schema(unversioned)
+    assert "version" not in seen["body"]["document"]
+    assert seen["body"]["document"]["type"] == "schema"

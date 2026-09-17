@@ -1142,7 +1142,11 @@ class AsyncContext:
         Installing changes what ``strict`` refuses from this point on;
         dry-run a candidate with ``validate_schema`` before flipping.
         """
-        body = asdict(document) if isinstance(document, SchemaDocument) else dict(document)
+        # An unset ``version`` is omitted, never sent as null: absent means
+        # the server's own revision, while null is refused.
+        body = (
+            drop_none(asdict(document)) if isinstance(document, SchemaDocument) else dict(document)
+        )
         result = await self._client._request_json("PUT", self._path + "/schema", json_body=body)
         return decode(SchemaDocument, result)  # type: ignore[no-any-return]
 
@@ -1175,7 +1179,9 @@ class AsyncContext:
         ``strict`` flip (ADR 0009 §10). Works identically whether the
         ``context`` already has a schema or none at all.
         """
-        doc = asdict(document) if isinstance(document, SchemaDocument) else dict(document)
+        doc = (
+            drop_none(asdict(document)) if isinstance(document, SchemaDocument) else dict(document)
+        )
         body = drop_none({"document": doc, "limit": limit, "after": after})
         result = await self._post("/schema/validate", body)
         return decode(SchemaAudit, result)  # type: ignore[no-any-return]

@@ -71,7 +71,8 @@ const testSchema = (
   mode: string,
   closedLabels = false,
 ): SchemaDocument => ({
-  schema: 1,
+  type: "schema",
+  version: "2026-09-17",
   mode: mode as SchemaDocument["mode"],
   closed_labels: closedLabels,
   types: Object.fromEntries(

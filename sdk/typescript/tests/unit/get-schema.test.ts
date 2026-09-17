@@ -11,7 +11,8 @@ import type { SchemaAudit, SchemaDocument } from "../../src/models.js";
 import { type StubRequest, errBody, okBody, stubClient } from "./stub.js";
 
 const SCHEMA_DOCUMENT: SchemaDocument = {
-  schema: 1,
+  type: "schema",
+  version: "2026-09-17",
   mode: "strict",
   closed_labels: false,
   types: {
@@ -29,7 +30,8 @@ describe("getSchema", () => {
     const client = stubClient(() => okBody(SCHEMA_DOCUMENT));
     const document = await client.context("aomine").getSchema();
 
-    expect(document.schema).toBe(1);
+    expect(document.type).toBe("schema");
+    expect(document.version).toBe("2026-09-17");
     expect(document.mode).toBe("strict");
     expect(document.closed_labels).toBe(false);
     expect(Object.keys(document.types).sort()).toEqual(["Brewery", "Organization", "Person"]);

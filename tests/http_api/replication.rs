@@ -140,7 +140,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"醸造所": {}},
@@ -950,7 +950,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"醸造所": {}},
@@ -1042,7 +1042,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         "POST",
         "/contexts/sake/schema/validate",
         Some(json!({"document": {
-            "schema": 1, "mode": "strict", "closed_labels": false,
+            "type": "schema", "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {}
         }})),
     );
@@ -1072,7 +1072,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
             "PUT",
             "/contexts/sake/schema",
             Some(json!({
-                "schema": 1, "mode": "off", "closed_labels": false,
+                "type": "schema", "mode": "off", "closed_labels": false,
                 "types": {}, "relations": {}
             })),
         ),

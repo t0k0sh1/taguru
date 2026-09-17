@@ -95,7 +95,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
             "POST",
             "/contexts/sake/schema/validate",
             Some(json!({"document": {
-                "schema": 1, "mode": "off", "closed_labels": false,
+                "type": "schema", "mode": "off", "closed_labels": false,
                 "types": {}, "relations": {}
             }})),
             "rtok"
@@ -134,7 +134,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     // associations write above.
     assert_eq!(call("GET", "/contexts/sake/schema", None, "rtok").0, 404);
     let schema_document = json!({
-        "schema": 1, "mode": "off", "closed_labels": false,
+        "type": "schema", "mode": "off", "closed_labels": false,
         "types": {}, "relations": {}
     });
     assert_eq!(

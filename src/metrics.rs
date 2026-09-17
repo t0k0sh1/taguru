@@ -1109,7 +1109,7 @@ mod tests {
             body["communities_formats"],
             serde_json::json!(["2026-09-17"])
         );
-        assert_eq!(body["schema_formats"], serde_json::json!([1]));
+        assert_eq!(body["schema_formats"], serde_json::json!(["2026-09-17"]));
     }
 
     /// The readiness probe treats a maintenance sweep as a deliberate

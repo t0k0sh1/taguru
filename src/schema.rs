@@ -42,19 +42,21 @@ use crate::storage::write_atomic;
 mod check;
 pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, expanded_type_sets, schema_issues};
 
-/// This binary's only readable document shape. Independent of
-/// `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION` — [`GroupRecord`]'s
-/// own doc gives the justification verbatim: separate "so either shape
-/// can rev without dragging the other along." Unlike those siblings,
-/// this bumps on every shape change, additive or breaking: the struct
-/// below is `deny_unknown_fields` AT REST as well as on the wire, so an
-/// older binary silently dropping a field it doesn't recognize —
-/// indistinguishable from under-enforcing `strict` — never happens
-/// quietly; it is instead an unread `schema` stamp or a parse refusal,
-/// both hard boot failures (see the module doc).
-///
-/// [`GroupRecord`]: crate::groups::GroupRecord
-pub(crate) const SCHEMA_VERSION: u64 = 1;
+/// The one value a schema document's `type` column accepts (ADR 0042):
+/// the document says what it is in a column named for that, and its
+/// `version` column — [`crate::format::FORMAT_VERSION`], the date every
+/// taguru record shares — says which revision of the shape it is. The
+/// struct below is `deny_unknown_fields` AT REST as well as on the
+/// wire, so an older binary silently dropping a field it doesn't
+/// recognize — indistinguishable from under-enforcing `strict` — never
+/// happens quietly; it is instead an unread `version` or a parse
+/// refusal, both hard boot failures (see the module doc).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SchemaType {
+    #[default]
+    #[serde(rename = "schema")]
+    Schema,
+}
 
 /// The reserved relation label type assertions ride under (ADR 0009
 /// §6.3) — an ordinary association carrying `{subject, "schema:type",
@@ -173,7 +175,20 @@ pub(crate) struct RelationDef {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SchemaDocument {
-    pub(crate) schema: u64,
+    /// Always `"schema"`. Required like every other top-level field:
+    /// a body that does not say what it is is not read as one.
+    #[serde(rename = "type")]
+    pub(crate) record_type: SchemaType,
+    /// The format revision. The one optional column: absent means the
+    /// running build's own ([`crate::format::check_version`]), and
+    /// [`install`] then states it, so a stored or served document
+    /// always carries it.
+    #[serde(
+        default,
+        deserialize_with = "crate::format::version_column",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) version: Option<String>,
     pub(crate) mode: SchemaMode,
     pub(crate) closed_labels: bool,
     pub(crate) types: BTreeMap<String, TypeDef>,
@@ -186,7 +201,8 @@ pub(crate) struct SchemaDocument {
 /// hash-map iteration order.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SchemaViolation {
-    UnknownVersion(u64),
+    /// [`crate::format::check_version`]'s refusal, verbatim.
+    UnknownVersion(String),
     TooManyTypes(usize),
     TooManyRelations(usize),
     /// A relation definition literally named [`SCHEMA_TYPE_LABEL`] — ADR
@@ -214,11 +230,7 @@ pub(crate) enum SchemaViolation {
 impl std::fmt::Display for SchemaViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownVersion(version) => write!(
-                f,
-                "schema version {version} is not {SCHEMA_VERSION}, the only version this \
-                 binary reads"
-            ),
+            Self::UnknownVersion(refusal) => write!(f, "schema document: {refusal}"),
             Self::TooManyTypes(count) => {
                 write!(f, "{count} types is over the {MAX_SCHEMA_TYPES}-type cap")
             }
@@ -316,10 +328,12 @@ impl InstalledSchema {
 /// will enforce." Every check here can only be reached with a
 /// hand-edited data directory: nothing this server writes (once a
 /// `PUT` route exists) can produce a document this refuses.
-pub(crate) fn install(document: SchemaDocument) -> Result<InstalledSchema, SchemaViolation> {
-    if document.schema != SCHEMA_VERSION {
-        return Err(SchemaViolation::UnknownVersion(document.schema));
-    }
+pub(crate) fn install(mut document: SchemaDocument) -> Result<InstalledSchema, SchemaViolation> {
+    crate::format::check_version(document.version.as_deref())
+        .map_err(SchemaViolation::UnknownVersion)?;
+    // An omitted `version` meant this build's own; what is installed —
+    // and so persisted, digested, and served — states it.
+    document.version = Some(crate::format::FORMAT_VERSION.to_string());
     if document.types.len() > MAX_SCHEMA_TYPES {
         return Err(SchemaViolation::TooManyTypes(document.types.len()));
     }
@@ -627,7 +641,8 @@ mod tests {
 
     fn valid() -> SchemaDocument {
         SchemaDocument {
-            schema: SCHEMA_VERSION,
+            record_type: SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             mode: SchemaMode::Strict,
             closed_labels: false,
             types: BTreeMap::from([
@@ -675,10 +690,58 @@ mod tests {
     #[test]
     fn an_unread_version_refuses() {
         let mut document = valid();
-        document.schema = SCHEMA_VERSION + 1;
+        document.version = Some("2020-01-01".to_string());
+        let refusal = install(document).unwrap_err();
+        assert!(matches!(refusal, SchemaViolation::UnknownVersion(_)));
         assert_eq!(
-            install(document),
-            Err(SchemaViolation::UnknownVersion(SCHEMA_VERSION + 1))
+            refusal.to_string(),
+            format!(
+                "schema document: version '2020-01-01' is not a format this taguru reads \
+                 (it reads '{}'; omit `version` to mean the running build's own)",
+                crate::format::FORMAT_VERSION
+            )
+        );
+    }
+
+    /// An omitted `version` means the running build's own — and what
+    /// installs states it, so the persisted bytes (and their digest)
+    /// never depend on whether the caller spelled it out.
+    #[test]
+    fn an_omitted_version_installs_as_the_current_one() {
+        let mut document = valid();
+        document.version = None;
+        let installed = install(document).unwrap();
+        assert_eq!(
+            installed.document().version.as_deref(),
+            Some(crate::format::FORMAT_VERSION)
+        );
+        assert_eq!(installed.document(), &valid());
+    }
+
+    /// The document says what it is: `type` is required and only
+    /// `"schema"` is read; the pre-ADR-0042 `schema: 1` stamp is an
+    /// unknown field; `version: null` is not an omission.
+    #[test]
+    fn the_type_column_is_required_and_the_old_stamp_refuses() {
+        let parse = |text: &str| serde_json::from_str::<SchemaDocument>(text);
+        let rest = r#""mode":"off","closed_labels":false,"types":{},"relations":{}"#;
+        let typed = parse(&format!(r#"{{"type":"schema",{rest}}}"#)).unwrap();
+        assert_eq!(typed.version, None);
+        assert!(parse(&format!(r#"{{{rest}}}"#)).is_err());
+        assert!(parse(&format!(r#"{{"type":"group",{rest}}}"#)).is_err());
+        assert!(parse(&format!(r#"{{"schema":1,{rest}}}"#)).is_err());
+        assert!(parse(&format!(r#"{{"type":"schema","schema":1,{rest}}}"#)).is_err());
+        assert!(parse(&format!(r#"{{"type":"schema","version":null,{rest}}}"#)).is_err());
+    }
+
+    /// Column order on disk: `type`, then `version`, then the body.
+    #[test]
+    fn the_stored_bytes_lead_with_type_then_version() {
+        let text = String::from_utf8(document_bytes(&valid()).unwrap()).unwrap();
+        let compact: String = text.split_whitespace().collect();
+        assert!(
+            compact.starts_with(r#"{"type":"schema","version":"2026-09-17","mode":"strict""#),
+            "{compact}"
         );
     }
 
@@ -704,13 +767,13 @@ mod tests {
 
     #[test]
     fn an_unknown_field_at_rest_refuses_to_parse() {
-        let bytes = br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{},"extra":true}"#;
+        let bytes = br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{},"extra":true}"#;
         assert!(serde_json::from_slice::<SchemaDocument>(bytes).is_err());
     }
 
     #[test]
     fn a_missing_top_level_field_refuses_to_parse() {
-        let bytes = br#"{"schema":1,"mode":"off","types":{},"relations":{}}"#;
+        let bytes = br#"{"type":"schema","mode":"off","types":{},"relations":{}}"#;
         assert!(serde_json::from_slice::<SchemaDocument>(bytes).is_err());
     }
 
@@ -974,14 +1037,14 @@ mod tests {
 
     /// `load_schema`'s last failure path: the file reads, its digest
     /// matches, and it parses — but `install` refuses it (a hand-edited
-    /// file naming an unread `schema` version, here). No quarantine:
+    /// file naming an unread `version`, here). No quarantine:
     /// the bytes are not mangled, so there is nothing to set aside.
     #[test]
     fn a_parseable_but_invalid_document_refuses_without_quarantine() {
         let dir = scratch_dir("schema-invalid");
         fs::create_dir_all(&dir).unwrap();
         let bytes =
-            br#"{"schema":99,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","version":"2099-01-01","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         fs::write(schema_path(&dir, "sake"), bytes).unwrap();
         let digest = sha256_hex(bytes);
 

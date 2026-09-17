@@ -216,7 +216,7 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"Brewery": {"is_a": []}},

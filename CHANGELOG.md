@@ -9,6 +9,23 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — a data directory holding a schema installed by an
+  earlier release does not boot, and the schema document's shape
+  changed for every caller** (ADR 0043, #937). The document — the body
+  of `PUT /contexts/{name}/schema`, MCP's `put_schema` /
+  `validate_schema` arguments, and `{stem}.schema.json` at rest — opens
+  with `"type": "schema"` and carries the shared format `version`:
+  `{"type": "schema", "version": "2026-09-17", "mode": …}`. `version`
+  may be left off (it then means the running server's own) and whatever
+  installs is stored and served with it stated; `"schema": 1` is no
+  longer read anywhere. No conversion exists. To carry an installed
+  schema across, rewrite `{stem}.schema.json` to open with
+  `"type": "schema"` in place of `"schema": 1` and set `schema_digest`
+  in `{stem}.meta.json` to the sha256 of the rewritten file — or save
+  the document with `GET` before upgrading and `PUT` it again after.
+  `GET /version` reports the date under `schema_formats`; both SDKs'
+  `SchemaDocument` replace `schema` with `type` and an optional
+  `version`.
 - **Breaking — a `::communities` or `::consolidation` artifact built by
   an earlier release has to be rebuilt** (ADR 0042, #937 step 4). The
   derivation records stored inside those contexts, and the header line

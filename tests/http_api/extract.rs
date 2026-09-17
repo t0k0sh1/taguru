@@ -3430,7 +3430,7 @@ fn extract_schema_flag_folds_the_type_and_relation_block_into_the_system_prompt(
     std::fs::write(
         &schema_path,
         json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {
@@ -3544,13 +3544,14 @@ fn extract_schema_flag_fails_the_run_at_startup_when_schema_install_refuses_the_
     let doc = docs.join("a.md");
     std::fs::write(&doc, "small document").unwrap();
     let schema_path = docs.join("future.schema.json");
-    // Valid JSON — the parse itself succeeds — but an unknown `schema`
-    // version, which only schema::install's own check refuses, distinct
+    // Valid JSON — the parse itself succeeds — but an unread `version`,
+    // which only schema::install's own check refuses, distinct
     // from the JSON-parse-failure case above.
     std::fs::write(
         &schema_path,
         json!({
-            "schema": 999,
+            "type": "schema",
+            "version": "2099-01-01",
             "mode": "off",
             "closed_labels": false,
             "types": {},
@@ -8953,7 +8954,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     std::fs::write(
         &empty_schema,
         json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {},
@@ -8992,7 +8993,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     std::fs::write(
         &full_schema,
         json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"Brewery": {"is_a": []}},

@@ -528,7 +528,8 @@ mod tests {
 
     fn valid_schema_document() -> schema::SchemaDocument {
         schema::SchemaDocument {
-            schema: schema::SCHEMA_VERSION,
+            record_type: schema::SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             mode: schema::SchemaMode::Strict,
             closed_labels: false,
             types: BTreeMap::from([("Brewery".to_string(), schema::TypeDef::default())]),

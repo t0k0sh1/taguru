@@ -2992,7 +2992,8 @@ fn test_schema(
     closed_labels: bool,
 ) -> crate::schema::InstalledSchema {
     let document = crate::schema::SchemaDocument {
-        schema: crate::schema::SCHEMA_VERSION,
+        record_type: crate::schema::SchemaType::Schema,
+        version: Some(crate::format::FORMAT_VERSION.to_string()),
         mode,
         closed_labels,
         types: types
@@ -3029,14 +3030,16 @@ fn schema_digests_are_stable_across_key_order_and_whitespace() {
     // naming the identical document must fingerprint identically, so a
     // hand-edited or re-serialized schema file never spuriously
     // re-extracts every segment in the corpus.
+    // One spells `version` out and the other omits it: `install` states
+    // the omitted one, so that difference never reaches the digest either.
     let ordered = r#"{
-        "schema": 1,
+        "type": "schema",
         "mode": "warn",
         "closed_labels": false,
         "types": {"Brewery": {"is_a": ["Organization"]}, "Organization": {"is_a": []}},
         "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Organization"]}}
     }"#;
-    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"schema":1}"#;
+    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"version":"2026-09-17","type":"schema"}"#;
 
     let a: crate::schema::SchemaDocument = serde_json::from_str(ordered).unwrap();
     let b: crate::schema::SchemaDocument = serde_json::from_str(reordered_and_compact).unwrap();

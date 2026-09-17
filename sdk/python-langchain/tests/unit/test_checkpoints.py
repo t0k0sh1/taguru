@@ -292,7 +292,8 @@ def test_a_changed_schema_invalidates_checkpoints_even_though_content_is_unchang
     assert _unit_count(store, source) == 1
 
     fake_server.schema_document = {
-        "schema": 1,
+        "type": "schema",
+        "version": "2026-09-17",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}},

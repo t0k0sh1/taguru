@@ -21,7 +21,7 @@ use crate::support::*;
 /// `warn`/`strict`.
 fn off_document() -> serde_json::Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": "off",
         "closed_labels": false,
         "types": {},
