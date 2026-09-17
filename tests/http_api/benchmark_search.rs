@@ -99,7 +99,7 @@ fn write_eval_file(dir: &Path) -> PathBuf {
     let path = dir.join("eval.jsonl");
     std::fs::write(
         &path,
-        "{\"eval\":1,\"name\":\"sake retrieval cases\"}\n\
+        "{\"type\": \"eval\",\"name\":\"sake retrieval cases\"}\n\
          {\"case_id\":\"brand-origin-001\",\"query\":\"青嶺\",\
          \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":3}],\
          \"expected_concepts\":[\"青嶺酒造\"],\"options\":{\"limit\":10}}\n",

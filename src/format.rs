@@ -64,6 +64,19 @@ pub(crate) fn source_header_line(
     .expect("a struct of strings always serializes")
 }
 
+/// Deserializes a record's `version` column: a string when the column
+/// is there, and only an ABSENT column reads as `None`. An explicit
+/// `null` is not an omission — it is a value, and the wrong one — so it
+/// is refused like any other non-string, where a bare `Option<String>`
+/// would fold it into "absent" and let it pass as the running build's
+/// revision. Pair with `#[serde(default)]` so absence still parses.
+pub(crate) fn version_column<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <String as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 /// The `type` column of a stream-level record, read off the parsed
 /// line before its full shape is judged. `None` for a line with no
 /// `type` string — an operation line, or something that is not an
@@ -109,6 +122,28 @@ mod tests {
             source_header_line("docs/a.md", "sake", Some("酒蔵")),
             r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context":"sake","create":{"description":"酒蔵"}}"#
         );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Versioned {
+        #[serde(default, deserialize_with = "version_column")]
+        version: Option<String>,
+    }
+
+    #[test]
+    fn only_an_absent_version_column_reads_as_none() {
+        let parse = |text: &str| serde_json::from_str::<Versioned>(text);
+        assert_eq!(parse("{}").unwrap().version, None);
+        assert_eq!(
+            parse(r#"{"version":"2026-09-17"}"#)
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("2026-09-17")
+        );
+        // An explicit null is a value, not an omission; so is a number.
+        assert!(parse(r#"{"version":null}"#).is_err());
+        assert!(parse(r#"{"version":1}"#).is_err());
     }
 
     #[test]

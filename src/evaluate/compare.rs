@@ -28,11 +28,10 @@
 //! improved metric too.
 //!
 //! **Mismatches warn, never refuse** (ADR 0002 §10): a different
-//! `context`, `corpus.revision_after`, threshold-file identity
+//! `context`, `corpus.revision_after`, or threshold-file identity
 //! (`thresholds.sha256`, persisted in each `evaluation.json` — this
-//! module never reads the original thresholds file), or
-//! `evaluation` stamp between `BASE` and `HEAD` all land in
-//! `warnings`, printed to stderr and echoed in the header, without
+//! module never reads the original thresholds file) between `BASE` and
+//! `HEAD` all land in `warnings`, printed to stderr and echoed in the header, without
 //! changing the exit code.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,10 +48,8 @@ use crate::measure::{Count, Distribution, MetricValue, Ratio};
 use crate::registry::ContextRevision;
 use crate::storage;
 
-use super::EVALUATION_VERSION;
 use super::thresholds::COMPARISON_METRICS;
 
-const CHANGES_VERSION: u64 = 1;
 const DEFAULT_OUT: &str = "changes.jsonl";
 /// A per-case metric delta at or below this magnitude is `unchanged`,
 /// not a floating-point artifact of the same underlying value —
@@ -74,9 +71,9 @@ and HEAD — kind improved/regressed/added/removed — classified on
 recall@k/MRR/nDCG, concept/label/association coverage, and citation
 recall/locator validity (latency is excluded: too noisy run-to-run to
 drive a verdict). unchanged cases are counted in the header only. A
-mismatched context, corpus revision, threshold-file identity, or
-evaluation stamp between the two files is a warning, never a
-refusal. A human-readable terminal summary accompanies the file.
+mismatched context, corpus revision, or threshold-file identity
+between the two files is a warning, never a refusal; a file that is
+not an evaluation report of this build's format revision is refused. A human-readable terminal summary accompanies the file.
 
   BASE.json   an evaluation.json from an earlier run
   HEAD.json   an evaluation.json from a later run
@@ -191,8 +188,12 @@ fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct EvaluationView {
-    #[serde(alias = "taguru_evaluation")]
-    evaluation: u64,
+    /// The report's `type` column. `None` only when the file has none —
+    /// [`load_report`] refuses that, and any value but `"evaluation"`.
+    #[serde(rename = "type")]
+    record_type: Option<String>,
+    #[serde(deserialize_with = "crate::format::version_column")]
+    version: Option<String>,
     generated_at: String,
     inputs: InputsView,
     corpus: CorpusView,
@@ -295,13 +296,14 @@ fn load_report(path: &Path) -> Result<LoadedReport, String> {
         fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
     let view: EvaluationView = serde_json::from_str(&text)
         .map_err(|error| format!("{}: malformed evaluation.json: {error}", path.display()))?;
-    if !(1..=EVALUATION_VERSION).contains(&view.evaluation) {
+    if view.record_type.as_deref() != Some("evaluation") {
         return Err(format!(
-            "{}: evaluation must be within 1..={EVALUATION_VERSION}, got {}",
-            path.display(),
-            view.evaluation
+            "{}: not an evaluation report (its `type` must be \"evaluation\")",
+            path.display()
         ));
     }
+    crate::format::check_version(view.version.as_deref())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(LoadedReport {
         path: path.display().to_string(),
         view,
@@ -596,8 +598,8 @@ fn build_report(base: &LoadedReport, head: &LoadedReport) -> ChangesReport {
     let metrics = aggregate_diffs(&base.view, &head.view, &mut warnings);
 
     let header = ChangesHeader {
-        kind: "header",
-        taguru_evaluation_changes: CHANGES_VERSION,
+        record_type: "evaluation_changes",
+        version: crate::format::FORMAT_VERSION,
         generated_at: iso8601_utc(now_unix_secs()),
         base: report_identity(base),
         head: report_identity(head),
@@ -621,7 +623,6 @@ fn report_identity(loaded: &LoadedReport) -> ReportIdentity {
     ReportIdentity {
         path: loaded.path.clone(),
         context: loaded.view.inputs.context.clone(),
-        evaluation: loaded.view.evaluation,
         generated_at: loaded.view.generated_at.clone(),
         corpus_revision_after: loaded.view.corpus.revision_after,
         corpus_stable: loaded.view.corpus.stable,
@@ -661,12 +662,6 @@ fn mismatch_warnings(base: &LoadedReport, head: &LoadedReport, warnings: &mut Ve
             "thresholds file identity differs: BASE {} vs HEAD {}",
             base_sha.map_or("none", |sha| &sha[..12.min(sha.len())]),
             head_sha.map_or("none", |sha| &sha[..12.min(sha.len())]),
-        ));
-    }
-    if base.view.evaluation != head.view.evaluation {
-        warnings.push(format!(
-            "evaluation stamp differs: BASE {} vs HEAD {}",
-            base.view.evaluation, head.view.evaluation
         ));
     }
     // #308 (ADR 0006 §14): comparing two runs whose --max-items/
@@ -755,7 +750,6 @@ enum ChangeRecord {
 struct ReportIdentity {
     path: String,
     context: String,
-    evaluation: u64,
     generated_at: String,
     corpus_revision_after: ContextRevision,
     corpus_stable: bool,
@@ -783,8 +777,9 @@ struct AggregateDiffRecord {
 
 #[derive(Debug, Clone, Serialize)]
 struct ChangesHeader {
-    kind: &'static str,
-    taguru_evaluation_changes: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     generated_at: String,
     base: ReportIdentity,
     head: ReportIdentity,

@@ -9,6 +9,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — eval sets, thresholds files, and evaluation reports
+  written for an earlier release are no longer read** (ADR 0042, #937
+  step 2). Each names its kind in a `type` column and the file format's
+  revision in an optional `version` date, as the import stream's records
+  do: `{"type": "eval", "name": …}` on line 1 of `eval.jsonl`,
+  `{"type": "evaluate_thresholds", "aggregate": …}`, `{"type":
+  "evaluation", "version": "2026-09-17", …}` for `evaluation.json`, and
+  `{"type": "evaluation_changes", "version": …}` as `changes.jsonl`'s
+  header (which no longer carries `kind: "header"`). The two files a
+  person writes may leave `version` out. `taguru evaluate compare`
+  reads only this build's revision, so a `BASE` report saved by an
+  earlier release has to be produced again; the header's `base` / `head`
+  no longer echo an `evaluation` stamp, and the stamp-mismatch warning
+  is gone with it.
 - **Breaking — source files, exports, and group files written by an
   earlier release are no longer read** (ADR 0042, #937 step 1). A
   record now states three facts in three columns: `type` (what it is),

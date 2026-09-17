@@ -398,7 +398,7 @@
 
   <section id="dataset">
     <h2>eval.jsonl: the dataset shared with benchmark search</h2>
-    <pre><code>{"eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+    <pre><code>{"type":"eval","name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
  "expected_concepts":["青嶺酒造"],
@@ -406,9 +406,10 @@
    "quote":"1897年に創業"}],
  "options":{"limit":10}}</code></pre>
     <p>
-      One <code>eval</code> header (equality-checked — this file is hand-authored, so a
-      version this build was not built for is refused rather than silently reinterpreted), then
-      one case per line. This is the exact dataset
+      One header whose <code>type</code> is <code>"eval"</code>, then one case per line. The
+      header's <code>version</code> — the file format's revision, a date — is optional: this file
+      is hand-authored, so leaving it out means the running build's own revision, and a date this
+      build was not built for is refused by name rather than silently reinterpreted. This is the exact dataset
       <a href="benchmark.html#search"><code>taguru benchmark search</code></a> reads — the one
       artifact the two verbs share, and nothing else. <code>evaluate</code> loads it in
       <b>interpret</b> mode: every field this page documents is typed and validated, and a
@@ -503,7 +504,8 @@
   <section id="evaluation-json">
     <h2>evaluation.json</h2>
     <pre><code>{
-  "evaluation": 1,
+  "type": "evaluation",
+  "version": "2026-09-17",
   "generated_at": "2026-07-28T10:05:12Z",
   "matching": { "normalization": "taguru::context::normalize_entry",
       "normalized": ["expected_concepts", "expected_labels"],
@@ -547,7 +549,7 @@
     <p class="note">
       <code>inputs.mode</code>/<code>.budget</code>/<code>.rerank</code> and the per-case
       <code>evidence</code>/<code>budget</code>/<code>diversity_sources</code> blocks (#308, ADR
-      0006 §14) are additive — <code>evaluation</code> stays <code>1</code>.
+      0006 §14) are additive: they were added without revising the file format.
       <code>inputs.budget</code> is absent in <code>baseline</code> mode unless a
       <code>--max-*</code> flag was given; <code>inputs.rerank</code> is absent unless
       <code>--rerank MODEL</code> was. A case's own <code>evidence</code> block is present only
@@ -557,9 +559,11 @@
       corpus body text, ADR 0004 §11).
     </p>
     <p>
-      Stamp <code>evaluation: 1</code>, <b>range acceptance</b> — taguru writes this file
-      and its own <code>compare</code> mode re-reads it, so within an accepted range a later
-      revision may only add a field, never remove or repurpose one. Every field is
+      <code>type</code> is <code>"evaluation"</code>, and <code>version</code> is the file
+      format's revision as a date — taguru writes both, and its own <code>compare</code> mode
+      re-reads them: a file whose <code>type</code> is anything else is not compared as a report,
+      and the only <code>version</code> read is this build's own (a report saved by an earlier
+      release has to be produced again before it can serve as a <code>BASE</code>). Every other field is
       <code>#[serde(default)]</code>. A metric's concrete shape — <code>Distribution</code>,
       <code>Ratio</code>, or <code>Count</code> — is read by first loading
       <code>definitions[metric].statistic</code> and deserializing that metric's value into the
@@ -621,17 +625,17 @@
   <section id="thresholds">
     <h2>The thresholds file and the exit-3 gate</h2>
     <pre><code>{
-  "evaluate_thresholds": 1,
+  "type": "evaluate_thresholds",
   "aggregate": { "recall.recall_at_k": { "min": 0.8 }, "citations.recall": { "min": 0.9 } },
   "cases": { "default": {}, "overrides": { "known-miss-003": { "citations.recall": { "min": 0.0 } } } },
   "allow_unstable_corpus": false
 }</code></pre>
     <p>
-      <code>--thresholds FILE</code> is a checked-in, user-authored JSON file — stamp
-      <code>evaluate_thresholds: 1</code>, <b>equality-checked</b> (the same posture
-      <code>eval.jsonl</code>'s own header takes, not <code>evaluation.json</code>'s range
-      acceptance, because a human authors this file by hand), and
-      <code>deny_unknown_fields</code>. Three top-level keys:
+      <code>--thresholds FILE</code> is a checked-in, user-authored JSON file —
+      <code>type</code> must be <code>"evaluate_thresholds"</code>, <code>version</code> is
+      optional exactly as in <code>eval.jsonl</code>'s header (absent means the running build's
+      own revision; any other date is refused), and the file is
+      <code>deny_unknown_fields</code>. Three more top-level keys:
     </p>
     <div class="tbl">
       <table>
@@ -684,9 +688,9 @@
       <code>changes.jsonl</code> could not be written · <code>2</code> usage error, an unreadable
       file, or malformed/out-of-range JSON.
     </p>
-    <pre><code>{"kind":"header","taguru_evaluation_changes":1,"generated_at":"...",
- "base":{"path":"base.json","context":"sake","evaluation":1,"...":"..."},
- "head":{"path":"head.json","context":"sake","evaluation":1,"...":"..."},
+    <pre><code>{"type":"evaluation_changes","version":"2026-09-17","generated_at":"...",
+ "base":{"path":"base.json","context":"sake","...":"..."},
+ "head":{"path":"head.json","context":"sake","...":"..."},
  "counts":{"improved":2,"regressed":1,"added":0,"removed":0,"unchanged":9,
    "cases_base":12,"cases_head":12},
  "metrics":[{"metric":"recall.recall_at_k","statistic":"distribution",
@@ -705,7 +709,7 @@
       is classified <b><code>regressed</code></b>, quality-gate-first, and the record still lists
       both directions. <code>added</code>/<code>removed</code> cases carry one-sided metrics
       (<code>direction: "not_comparable"</code>). A mismatched <code>context</code>, corpus
-      revision, threshold-file identity, or <code>evaluation</code> stamp between the two
+      revision, or threshold-file identity between the two
       files is a <b>warning, never a refusal</b> — and so is a mismatched <code>inputs.budget</code>
       between the two runs (#308, ADR 0006 §14): comparing citation recall or source diversity
       across different budgets is exactly the dishonest comparison an equal-budget evaluation

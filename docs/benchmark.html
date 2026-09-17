@@ -682,14 +682,14 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       after a corpus was built once.
     </p>
     <p class="section-sub">eval.jsonl: the dataset shared with <a href="evaluate.html">the evaluate quality gate</a></p>
-    <pre><code>{"eval":1,"name":"sake retrieval cases","default_target":{"context":"sake"}}
+    <pre><code>{"type":"eval","name":"sake retrieval cases","default_target":{"context":"sake"}}
 {"case_id":"brand-origin-001","query":"青嶺はどこの蔵の酒か","cues":["青嶺"],
  "expected_sources":[{"source":"corpus/brewery.md","paragraphs":[0],"relevance":3}],
  "expected_concepts":["青嶺酒造"],"options":{"limit":10}}</code></pre>
     <p>
-      One <code>eval</code> header (equality-checked — this file is hand-authored, so a
-      version this build was not built for is refused rather than silently reinterpreted, the same
-      posture <a href="import.html">import's</a> <code>version</code> column takes), then one
+      One header whose <code>type</code> is <code>"eval"</code> (its optional
+      <code>version</code> reads exactly as <a href="import.html">import's</a> does: absent means
+      the running build's own revision, any other date is refused), then one
       case per line. Every case field this command does not know is still declared and accepted —
       never rejected as a typo — since <code>eval.jsonl</code> is the one artifact this reference
       shares with <a href="evaluate.html"><code>taguru evaluate</code></a>'s own quality gate over
