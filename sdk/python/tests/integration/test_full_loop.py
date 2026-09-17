@@ -472,7 +472,7 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     client.contexts.create(derived)
     revision = client.contexts.get(fresh_name).revision
     manifest = {
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": fresh_name,
         "revision": {
@@ -529,7 +529,8 @@ def test_analyze_communities_returns_ndjson_with_a_header_line(
     lines = body.splitlines()
     assert lines
     header = json.loads(lines[0])
-    assert header["taguru_communities"] == 1
+    assert header["type"] == "communities"
+    assert header["version"] == "2026-09-17"
     assert header["context"] == fresh_name
 
     client.contexts.delete(fresh_name)

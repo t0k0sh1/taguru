@@ -72,12 +72,20 @@ const MEMBERS_PER_HIT: usize = 12;
 
 /// The derivation record — the passage text of [`MANIFEST_SOURCE`],
 /// written by `taguru communities`, read back by `search` for the
-/// staleness verdict and per-hit community facts. The version key
-/// follows the batch/group convention (`taguru_batch`,
-/// `group`).
+/// staleness verdict and per-hit community facts. It names its `type`
+/// ([`MANIFEST_TYPE`]) and the format `version` like every record
+/// (ADR 0042); [`CommunitiesManifest::judge`] is the one check both
+/// readers run.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CommunitiesManifest {
-    pub taguru_communities: u64,
+    #[serde(rename = "type", default)]
+    pub record_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::format::version_column",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub version: Option<String>,
     pub algorithm: String,
     /// The `context` the artifact was derived from — `search` refuses a
     /// `derived` override pointing at another `context`'s artifact.
@@ -101,9 +109,29 @@ pub(crate) struct ManifestCommunity {
     pub parent: Option<String>,
 }
 
-/// Wire version of the manifest and of the analysis stream's header
-/// line.
-pub(crate) const COMMUNITIES_FORMAT: u64 = 1;
+/// The `type` of the stored derivation record.
+pub(crate) const MANIFEST_TYPE: &str = "communities_manifest";
+
+/// The `type` of the analysis stream's header line.
+pub(crate) const ANALYSIS_TYPE: &str = "communities";
+
+impl CommunitiesManifest {
+    /// The `type` and `version` a manifest this build writes carries.
+    pub(crate) fn stamp() -> (Option<String>, Option<String>) {
+        (
+            Some(MANIFEST_TYPE.to_string()),
+            Some(crate::format::FORMAT_VERSION.to_string()),
+        )
+    }
+
+    /// Refuses a record that parsed but is not a manifest of this
+    /// build's format — another `type`, none at all (everything stored
+    /// before ADR 0042), or another `version`.
+    pub(crate) fn judge(&self) -> Result<(), String> {
+        crate::format::check_type(self.record_type.as_deref(), MANIFEST_TYPE)?;
+        crate::format::check_version(self.version.as_deref())
+    }
+}
 
 /// `GET /contexts/{name}/communities` — the analysis stream. The body
 /// is JSON Lines, not the JSON envelope (the export's rule): a header
@@ -160,7 +188,9 @@ fn render_analysis(
 ) -> Option<String> {
     #[derive(Serialize)]
     struct Header<'a> {
-        taguru_communities: u64,
+        #[serde(rename = "type")]
+        record_type: &'static str,
+        version: &'static str,
         context: &'a str,
         algorithm: &'a str,
         revision: ContextRevision,
@@ -170,7 +200,8 @@ fn render_analysis(
         communities: usize,
     }
     let mut body = serde_json::to_string(&Header {
-        taguru_communities: COMMUNITIES_FORMAT,
+        record_type: ANALYSIS_TYPE,
+        version: crate::format::FORMAT_VERSION,
         context: name,
         algorithm: analysis.algorithm,
         revision,
@@ -399,7 +430,20 @@ pub(crate) fn community_hits(
                         started_at,
                     ));
                 }
-                Ok(manifest) => manifest,
+                Ok(manifest) => match manifest.judge() {
+                    Ok(()) => manifest,
+                    Err(judgment) => {
+                        return Err(error(
+                            ErrorCode::Conflict,
+                            format!(
+                                "the '{MANIFEST_SOURCE}' record in '{derived}' is not a \
+                                 manifest this build reads ({judgment}) — rebuild the \
+                                 artifact with `taguru communities`"
+                            ),
+                            started_at,
+                        ));
+                    }
+                },
             },
         },
     };

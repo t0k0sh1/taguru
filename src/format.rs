@@ -64,6 +64,23 @@ pub(crate) fn source_header_line(
     .expect("a struct of strings always serializes")
 }
 
+/// Judges a record's `type` column against the one kind its reader
+/// accepts. `None` — the column is absent, as in every record written
+/// before ADR 0042 — is refused like any wrong value: a reader never
+/// guesses what an untyped record is.
+pub(crate) fn check_type(found: Option<&str>, expected: &str) -> Result<(), String> {
+    match found {
+        Some(kind) if kind == expected => Ok(()),
+        Some(kind) => Err(format!(
+            "type '{kind}' is not '{expected}', the only record this reads"
+        )),
+        None => Err(format!(
+            "no `type` column where '{expected}' was expected (a record written before \
+             this format names none)"
+        )),
+    }
+}
+
 /// Deserializes a record's `version` column: a string when the column
 /// is there, and only an ABSENT column reads as `None`. An explicit
 /// `null` is not an omission — it is a value, and the wrong one — so it
@@ -122,6 +139,20 @@ mod tests {
             source_header_line("docs/a.md", "sake", Some("酒蔵")),
             r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context":"sake","create":{"description":"酒蔵"}}"#
         );
+    }
+
+    #[test]
+    fn a_type_is_accepted_only_when_it_is_the_expected_one() {
+        assert_eq!(check_type(Some("communities"), "communities"), Ok(()));
+        let wrong = check_type(Some("group"), "communities").unwrap_err();
+        assert!(
+            wrong.contains("'group'") && wrong.contains("'communities'"),
+            "{wrong}"
+        );
+        let absent = check_type(None, "communities").unwrap_err();
+        assert!(absent.contains("no `type` column"), "{absent}");
+        // Equality, never a prefix.
+        assert!(check_type(Some("communities_manifest"), "communities").is_err());
     }
 
     #[derive(serde::Deserialize)]

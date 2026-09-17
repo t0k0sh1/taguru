@@ -372,7 +372,7 @@ describe("sources and citations", () => {
     await client.contexts.create(derived);
     const revision = (await client.contexts.get(name)).revision;
     const manifest = {
-      taguru_communities: 1,
+      type: "communities_manifest",
       algorithm: "louvain-cc/1",
       source_context: name,
       revision,
@@ -440,7 +440,8 @@ describe("sources and citations", () => {
     const lines = body.split("\n").filter((line) => line.length > 0);
     expect(lines.length).toBeGreaterThan(0);
     const header = JSON.parse(lines[0]!);
-    expect(header.taguru_communities).toBe(1);
+    expect(header.type).toBe("communities");
+    expect(header.version).toBe("2026-09-17");
     expect(header.context).toBe(name);
     await client.contexts.delete(name);
   });

@@ -32,8 +32,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::communities::{
-    COMMUNITIES_FORMAT, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest,
-    INCLUDES_LABEL, MANIFEST_SOURCE, ManifestCommunity, derived_context_name,
+    ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest, INCLUDES_LABEL,
+    MANIFEST_SOURCE, ManifestCommunity, derived_context_name,
 };
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
@@ -359,8 +359,10 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
     }
 
     // The import stream: one batch per community, the manifest LAST.
+    let (record_type, version) = CommunitiesManifest::stamp();
     let manifest = CommunitiesManifest {
-        taguru_communities: COMMUNITIES_FORMAT,
+        record_type,
+        version,
         algorithm: analysis.header.algorithm.clone(),
         source_context: name.to_string(),
         revision: analysis.header.revision,
@@ -550,12 +552,19 @@ fn read_manifest(api: &Api, derived: &str) -> Result<Option<CommunitiesManifest>
     let Some(text) = result["passages"][MANIFEST_SOURCE].as_str() else {
         return Ok(None);
     };
-    serde_json::from_str(text).map(Some).map_err(|error| {
+    let manifest: CommunitiesManifest = serde_json::from_str(text).map_err(|error| {
         format!(
             "the previous '{MANIFEST_SOURCE}' record in '{derived}' does not parse \
                  ({error}) — delete the artifact context to rebuild from scratch"
         )
-    })
+    })?;
+    manifest.judge().map_err(|error| {
+        format!(
+            "the previous '{MANIFEST_SOURCE}' record in '{derived}' is not a manifest this \
+             build reads ({error}) — delete the artifact context to rebuild from scratch"
+        )
+    })?;
+    Ok(Some(manifest))
 }
 
 /// A `group`'s transitive member `contexts`, child `groups` included —
@@ -663,7 +672,10 @@ struct Analysis {
 
 #[derive(Deserialize)]
 struct AnalysisHeader {
-    taguru_communities: u64,
+    #[serde(rename = "type", default)]
+    record_type: Option<String>,
+    #[serde(default, deserialize_with = "crate::format::version_column")]
+    version: Option<String>,
     algorithm: String,
     revision: ContextRevision,
     concept_count: usize,
@@ -710,12 +722,17 @@ fn parse_analysis(stream: &str) -> Result<Analysis, String> {
         Some(line) => serde_json::from_str(line)
             .map_err(|error| format!("analysis header unreadable: {error}"))?,
     };
-    if header.taguru_communities != COMMUNITIES_FORMAT {
-        return Err(format!(
-            "analysis format {} is newer than this taguru understands ({}) — upgrade the CLI",
-            header.taguru_communities, COMMUNITIES_FORMAT,
-        ));
-    }
+    // The server and this CLI are separate builds over `--url`: a header
+    // of another kind or another format revision means one of them needs
+    // upgrading, and guessing at the stream's shape is not an option.
+    crate::format::check_type(header.record_type.as_deref(), ANALYSIS_TYPE)
+        .and_then(|()| crate::format::check_version(header.version.as_deref()))
+        .map_err(|error| {
+            format!(
+                "analysis header: {error} — the server and this taguru are different \
+                 releases; upgrade the older one"
+            )
+        })?;
     let communities: Vec<AnalysisCommunity> = lines
         .map(|line| {
             serde_json::from_str(line).map_err(|error| format!("analysis line unreadable: {error}"))
@@ -772,7 +789,7 @@ mod tests {
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
-        let header = r#"{"taguru_communities":1,"context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}"#;
 
         let parsed = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
@@ -780,8 +797,37 @@ mod tests {
         assert_eq!(parsed.communities.len(), 1);
         assert!(parse_analysis(header).is_err());
 
-        let newer = header.replace("\"taguru_communities\":1", "\"taguru_communities\":2");
-        assert!(parse_analysis(&format!("{newer}\n{line}\n")).is_err());
+        // Another format revision, another kind of record, the header
+        // earlier servers sent, and a null version are all refused: the
+        // server and this CLI must be the same release.
+        let other_version =
+            header.replace("\"version\":\"2026-09-17\"", "\"version\":\"2008-10-17\"");
+        let error = parse_analysis(&format!("{other_version}\n{line}\n"))
+            .err()
+            .expect("another format revision must be refused");
+        assert!(
+            error.contains("version '2008-10-17' is not a format") && error.contains("upgrade"),
+            "{error}"
+        );
+        for broken in [
+            header.replace(
+                "\"type\":\"communities\"",
+                "\"type\":\"communities_manifest\"",
+            ),
+            header.replace(
+                "\"type\":\"communities\",\"version\":\"2026-09-17\"",
+                "\"taguru_communities\":1",
+            ),
+            header.replace("\"version\":\"2026-09-17\"", "\"version\":null"),
+        ] {
+            assert!(
+                parse_analysis(&format!("{broken}\n{line}\n")).is_err(),
+                "{broken}"
+            );
+        }
+        // The version column is optional on read: absent is this build's own.
+        let unversioned = header.replace(",\"version\":\"2026-09-17\"", "");
+        parse_analysis(&format!("{unversioned}\n{line}\n")).expect("an absent version reads");
     }
 
     #[test]
@@ -814,12 +860,14 @@ mod tests {
     /// runaway positive strength is capped at 1e6.
     #[test]
     fn a_zero_strength_member_lands_at_the_singleton_weight() {
-        let header = r#"{"taguru_communities":1,"context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
         let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
         let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);
+        let (record_type, version) = CommunitiesManifest::stamp();
         let manifest = CommunitiesManifest {
-            taguru_communities: COMMUNITIES_FORMAT,
+            record_type,
+            version,
             algorithm: "louvain-cc/1".to_string(),
             source_context: "c".to_string(),
             revision: ContextRevision::default(),

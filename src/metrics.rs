@@ -1105,7 +1105,10 @@ mod tests {
             body["image_formats"],
             serde_json::json!((1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>())
         );
-        assert_eq!(body["communities_formats"], serde_json::json!([1]));
+        assert_eq!(
+            body["communities_formats"],
+            serde_json::json!(["2026-09-17"])
+        );
         assert_eq!(body["schema_formats"], serde_json::json!([1]));
     }
 

@@ -665,7 +665,7 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     let revision = server.ok("GET", "/contexts/sake", None)["revision"].clone();
     server.ok("PUT", "/contexts/sake::communities", None);
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "sake",
         "revision": revision,

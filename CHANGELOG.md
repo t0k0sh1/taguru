@@ -9,6 +9,21 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — a `::communities` or `::consolidation` artifact built by
+  an earlier release has to be rebuilt** (ADR 0042, #937 step 4). The
+  derivation records stored inside those contexts, and the header line
+  of `GET /contexts/{name}/communities`, name their `type` and the
+  format `version` like every other record: `{"type": "communities",
+  "version": "2026-09-17", "context": …}` opens the analysis stream
+  (`taguru_communities` is gone — the `type` column is what frees the
+  name its own `communities` count already held), the stored manifests
+  are `{"type": "communities_manifest", …}` and `{"type":
+  "consolidation_manifest", …}`. A manifest stored before this release
+  names no `type`, so `search_communities` answers 409 for that context
+  and `taguru communities` / `taguru consolidation` refuse to diff
+  against it: delete the artifact context and run the command again.
+  The source context is untouched. `GET /version` reports the date under
+  `communities_formats`.
 - **Breaking — a benchmark results directory started by an earlier
   release can no longer be resumed, compared, or searched, and a
   models file written for one is no longer read** (ADR 0042, #937 step
@@ -66,18 +81,12 @@ Entries that change an on-disk format or a response shape say so.
   `import_batches` / `importBatches` / `BatchApplyResult` stay, and
   `batch` keeps its other meaning (many associations written in one
   call).
-- Record keys drop the `taguru_` prefix (ADR 0041, #933): `group`,
-  `schema`, `eval`, `evaluation`, `evaluate_thresholds`,
-  `consolidation`, and the six `benchmark_*` keys are what `taguru
-  export`, `taguru evaluate`, `taguru consolidation`, and `taguru
-  benchmark` now write, and what `taguru import`'s stream-level
-  records are called. For the evaluation, consolidation, and benchmark
-  files, readers still accept the old `taguru_*` spelling, so those
-  written by earlier releases load unchanged. **Not so for the import
-  stream's `group` and `schema` records**: the entry above (ADR 0042)
-  replaced them again, and neither this spelling nor the `taguru_*` one
-  is read. `taguru_communities` is unchanged (its bare noun is taken;
-  #851).
+- Record keys briefly dropped the `taguru_` prefix (ADR 0041, #933) —
+  `group: 1`, `eval: 1`, `benchmark_models: 1`, and the rest — and were
+  replaced again before any release by the `type` / `version` / `id`
+  columns of the ADR 0042 entries above, which supersede ADR 0041. No
+  release ever wrote ADR 0041's spelling, and neither it nor the
+  `taguru_*` one is read.
 - Terminology (#851 wave 3, #930): the unit that fails extraction is
   the segment, and the wording now says so — `extract --help`, the
   stderr lines at the split floor, docs/extract.html,

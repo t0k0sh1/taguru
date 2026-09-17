@@ -414,7 +414,7 @@ fn communities_search_community_page() {
     let revision = server.ok("GET", "/contexts/corpus-d", None)["revision"].clone();
     server.ok("PUT", "/contexts/corpus-d::communities", None);
     let manifest = json!({
-        "taguru_communities": 1,
+        "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
         "source_context": "corpus-d",
         "revision": revision,
