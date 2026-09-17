@@ -549,7 +549,7 @@
     <p class="note">
       <code>inputs.mode</code>/<code>.budget</code>/<code>.rerank</code> and the per-case
       <code>evidence</code>/<code>budget</code>/<code>diversity_sources</code> blocks (#308, ADR
-      0006 §14) are additive — <code>evaluation</code> stays <code>1</code>.
+      0006 §14) are additive: they were added without revising the file format.
       <code>inputs.budget</code> is absent in <code>baseline</code> mode unless a
       <code>--max-*</code> flag was given; <code>inputs.rerank</code> is absent unless
       <code>--rerank MODEL</code> was. A case's own <code>evidence</code> block is present only

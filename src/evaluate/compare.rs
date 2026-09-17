@@ -192,6 +192,7 @@ struct EvaluationView {
     /// [`load_report`] refuses that, and any value but `"evaluation"`.
     #[serde(rename = "type")]
     record_type: Option<String>,
+    #[serde(deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     generated_at: String,
     inputs: InputsView,

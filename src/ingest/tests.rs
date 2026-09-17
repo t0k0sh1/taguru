@@ -2056,3 +2056,21 @@ fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
     assert_eq!(stream.batches[1].source, "b.md");
     assert_eq!(stream.groups.len(), 2);
 }
+
+/// An explicit `"version": null` is not the omission ADR 0042 §3.2
+/// allows: it is refused on every stream-level record, where a bare
+/// `Option` would have read it as "the running build's own".
+#[test]
+fn an_explicit_null_version_is_refused_not_read_as_absent() {
+    for line in [
+        r#"{"type": "source", "version": null, "id": "s", "context": "c"}"#,
+        r#"{"type": "group", "version": null, "id": "kura"}"#,
+        r#"{"type": "schema", "version": null, "context": "c", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
+    ] {
+        let error = parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
+        assert!(
+            error.contains("line 1") && error.contains("null"),
+            "{line}: {error}"
+        );
+    }
+}

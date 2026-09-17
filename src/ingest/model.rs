@@ -240,7 +240,7 @@ struct Header {
     /// the field exists so `deny_unknown_fields` accepts the column.
     #[serde(rename = "type")]
     _record_type: SourceTag,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     id: String,
     context: String,
@@ -267,7 +267,7 @@ struct CreateBlock {
 struct GroupLine {
     #[serde(rename = "type")]
     _record_type: GroupTag,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     id: String,
     #[serde(default)]
@@ -330,7 +330,7 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
 struct SchemaLine {
     #[serde(rename = "type")]
     _record_type: SchemaTag,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     context: String,
     mode: schema::SchemaMode,

@@ -65,7 +65,7 @@ struct WireHeader {
     /// accepts the column and serde refuses any other value.
     #[serde(rename = "type")]
     _record_type: EvalTag,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     #[serde(default)]
     name: Option<String>,
@@ -597,6 +597,14 @@ mod tests {
             ),
         );
         load_eval_file(&path, Extensions::Interpret).unwrap();
+
+        // An explicit null is a value, not the omission the header allows.
+        let path = write_temp(
+            "version-null",
+            &format!("{{\"type\":\"eval\",\"version\":null}}\n{CASE}\n"),
+        );
+        let error = load_eval_file(&path, Extensions::Interpret).unwrap_err();
+        assert!(error.contains("not a valid eval header"), "{error}");
 
         // The spelling earlier releases wrote is not a header (ADR 0042).
         let path = write_temp("old-header", &format!("{{\"eval\":1}}\n{CASE}\n"));

@@ -562,6 +562,11 @@ fn load_report_rejects_another_version_and_another_type() {
         );
     }
 
+    // An explicit null is a value, not an omission.
+    let path = write_temp("null-version", r#"{"type":"evaluation","version":null}"#);
+    let error = load_report(&path).unwrap_err();
+    assert!(error.contains("malformed evaluation.json"), "{error}");
+
     // The version column is optional: absent reads as this build's own.
     let path = write_temp("no-version", r#"{"type":"evaluation"}"#);
     load_report(&path).expect("an absent version is the running build's own");

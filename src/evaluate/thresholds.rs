@@ -84,7 +84,7 @@ struct ThresholdsFile {
     /// other value, so a file of another kind never loads as bounds.
     #[serde(rename = "type")]
     _record_type: ThresholdsTag,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     #[serde(default)]
     aggregate: BTreeMap<String, Bound>,
@@ -499,7 +499,13 @@ mod tests {
 
         // A file of another kind — or one from before ADR 0042 — is not
         // bounds, whatever else it carries.
-        for other in ["{\"type\":\"eval\"}", "{\"evaluate_thresholds\":1}", "{}"] {
+        for other in [
+            "{\"type\":\"eval\"}",
+            "{\"evaluate_thresholds\":1}",
+            "{}",
+            // An explicit null is a value, not the omission the file allows.
+            "{\"type\":\"evaluate_thresholds\",\"version\":null}",
+        ] {
             let path = write_temp("not-thresholds", other);
             assert!(
                 load_thresholds(&path, &build_definitions(), &BTreeSet::new()).is_err(),
