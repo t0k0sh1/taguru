@@ -828,9 +828,15 @@ describe("groups and cross-context search", () => {
     await client.groups.create(group, { description: "蔵元一式", contexts: [sake, tea] });
 
     const line = await client.groups.export(group);
-    const record = JSON.parse(line) as { group: number; name: string; contexts: string[] };
-    expect(typeof record.group).toBe("number");
-    expect(record.name).toBe(group);
+    const record = JSON.parse(line) as {
+      type: string;
+      version: string;
+      id: string;
+      contexts: string[];
+    };
+    expect(record.type).toBe("group");
+    expect(record.version).toBe("2026-09-17");
+    expect(record.id).toBe(group);
     expect(record.contexts).toEqual([sake, tea].sort());
 
     // The record is the group's complete truth: import restores it whole.

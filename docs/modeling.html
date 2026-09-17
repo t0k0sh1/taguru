@@ -213,6 +213,10 @@
 {<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/2"</span>, <span class="s">"section/bert/2.1"</span>, <span class="s">"section/bert/2.2"</span>]}
 {<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"paper/bert"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/abstract"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
     <p class="note">
+      The <code>contexts</code> and the <code>chapter/bert/3</code> <code>group</code> that these two records name
+      but this file does not create come from the paper's other files in the same
+      <code>taguru import</code> run: <code>groups</code> restore after every source and every other record of
+      the run, and a member still missing at that point refuses the record by name.
       The second source's <code>create</code> block is left out on purpose — the <code>context</code> already
       exists from the first source, and importing into an absent <code>context</code> without a create block is
       refused, so this is also how the parser confirms both parts land in the same <code>context</code> rather

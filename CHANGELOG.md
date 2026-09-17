@@ -41,10 +41,13 @@ Entries that change an on-disk format or a response shape say so.
   `consolidation`, and the six `benchmark_*` keys are what `taguru
   export`, `taguru evaluate`, `taguru consolidation`, and `taguru
   benchmark` now write, and what `taguru import`'s stream-level
-  records are called. Readers still accept the old `taguru_*`
-  spelling, so files and streams written by earlier releases load
-  unchanged. `taguru_batch` and `taguru_communities` are unchanged (their
-  bare nouns are taken; #851).
+  records are called. For the evaluation, consolidation, and benchmark
+  files, readers still accept the old `taguru_*` spelling, so those
+  written by earlier releases load unchanged. **Not so for the import
+  stream's `group` and `schema` records**: the entry above (ADR 0042)
+  replaced them again, and neither this spelling nor the `taguru_*` one
+  is read. `taguru_communities` is unchanged (its bare noun is taken;
+  #851).
 - Terminology (#851 wave 3, #930): the unit that fails extraction is
   the segment, and the wording now says so — `extract --help`, the
   stderr lines at the split floor, docs/extract.html,

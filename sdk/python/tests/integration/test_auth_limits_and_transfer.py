@@ -85,6 +85,8 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     ctx.add_aliases(concepts={"Aomine": "青嶺酒造"})
     stream = ctx.export()
     assert stream.count('"type":"source"') >= 1
+    # Everything taguru writes carries the format version (ADR 0042).
+    assert '"version":"2026-09-17"' in stream
 
     restored_name = f"{fresh_name}-restored"
     result = client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))

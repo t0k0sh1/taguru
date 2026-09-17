@@ -156,8 +156,9 @@ def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None
 
     line = client.groups.export(group)
     record = json.loads(line)
-    assert isinstance(record["group"], int)
-    assert record["name"] == group
+    assert record["type"] == "group"
+    assert record["version"] == "2026-09-17"
+    assert record["id"] == group
     assert record["contexts"] == sorted([sake, tea])
 
     # The record is the group's complete truth: import restores it whole.
