@@ -781,18 +781,26 @@ mod args_tests {
 //
 // ADR 0003 §8: a per-model record names provider identity and capability
 // only, never a task setting — the fairness invariant is enforced by
-// construction: no such field exists to parse. `benchmark_models`
-// is equality-checked (ADR 0003 §10): this file is authored by hand, not
-// written and re-read by taguru itself, so a shape it wasn't built for is
-// refused rather than defaulted.
+// construction: no such field exists to parse. The file's `type` is
+// `"benchmark_models"` and its `version` is optional (ADR 0042): it is
+// authored by hand, so an absent `version` reads as the running build's
+// revision and any other date is refused rather than defaulted.
 
-const MODELS_VERSION: u64 = 1;
 const MAX_MODEL_ID_BYTES: usize = 64;
+
+/// The one value a models file's `type` column accepts (ADR 0042).
+#[derive(Deserialize)]
+enum ModelsTag {
+    #[serde(rename = "benchmark_models")]
+    BenchmarkModels,
+}
 
 #[derive(Deserialize)]
 struct ModelsFile {
-    #[serde(alias = "taguru_benchmark_models")]
-    benchmark_models: u64,
+    #[serde(rename = "type")]
+    _record_type: ModelsTag,
+    #[serde(default, deserialize_with = "crate::format::version_column")]
+    version: Option<String>,
     #[serde(default)]
     defaults: ModelDefaults,
     #[serde(default)]
@@ -860,13 +868,8 @@ fn load_models_file(path: &Path) -> Result<LoadedModelsFile, String> {
         fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let parsed: ModelsFile =
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-    if parsed.benchmark_models != MODELS_VERSION {
-        return Err(format!(
-            "{}: benchmark_models must be {MODELS_VERSION}, got {}",
-            path.display(),
-            parsed.benchmark_models
-        ));
-    }
+    crate::format::check_version(parsed.version.as_deref())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     if parsed.models.is_empty() {
         return Err(format!(
             "{}: 'models' must list at least one entry",
@@ -1045,13 +1048,16 @@ fn validate_api_key_env_name(path: &Path, model_id: &str, name: &str) -> Result<
 
 #[derive(Serialize)]
 struct ModelsLock<'a> {
-    benchmark_models: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     models: &'a [ResolvedModel],
 }
 
 fn write_models_lock(path: &Path, models: &[ResolvedModel]) -> io::Result<()> {
     let lock = ModelsLock {
-        benchmark_models: MODELS_VERSION,
+        record_type: "benchmark_models",
+        version: crate::format::FORMAT_VERSION,
         models,
     };
     let text = serde_json::to_string_pretty(&lock).expect("a models lock serializes");
@@ -1076,11 +1082,38 @@ mod models_json_tests {
     fn a_wrong_version_is_refused_by_equality_not_range() {
         let path = write_temp(
             "version",
-            r#"{"benchmark_models":2,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"type":"benchmark_models","version":"2008-10-17","models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
         );
         let error = load_models_file(&path).unwrap_err();
-        assert!(error.contains("benchmark_models"), "{error}");
+        assert!(
+            error.contains("version '2008-10-17' is not a format"),
+            "{error}"
+        );
         let _ = fs::remove_file(&path);
+
+        // The current date reads, as does the file that names none (every
+        // other test in this module).
+        let path = write_temp(
+            "version-current",
+            &format!(
+                r#"{{"type":"benchmark_models","version":"{}","models":[{{"id":"m","model":"x","url":"http://h/v1/chat/completions"}}]}}"#,
+                crate::format::FORMAT_VERSION
+            ),
+        );
+        load_models_file(&path).expect("the current version must load");
+        let _ = fs::remove_file(&path);
+
+        // A file of another kind, the pre-ADR-0042 stamp, and an explicit
+        // null version are all refused.
+        for other in [
+            r#"{"type":"eval","models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"benchmark_models":1,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"type":"benchmark_models","version":null,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+        ] {
+            let path = write_temp("not-models", other);
+            assert!(load_models_file(&path).is_err(), "{other}");
+            let _ = fs::remove_file(&path);
+        }
     }
 
     #[test]
@@ -1094,7 +1127,7 @@ mod models_json_tests {
 
         let path = write_temp(
             "dup",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions"},
                 {"id":"m","model":"y","url":"http://h/v1/chat/completions"}
             ]}"#,
@@ -1104,33 +1137,11 @@ mod models_json_tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// A models file written before the `taguru_` prefix came off
-    /// (#933) still loads through the old key; the equality check
-    /// applies to it unchanged.
-    #[test]
-    fn accepts_the_legacy_taguru_benchmark_models_stamp() {
-        let path = write_temp(
-            "legacy-stamp",
-            r#"{"taguru_benchmark_models":1,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
-        );
-        let models = load_models_file(&path).expect("the old key must still load");
-        assert_eq!(models.1.len(), 1);
-        let _ = fs::remove_file(&path);
-
-        let path = write_temp(
-            "legacy-stamp-version",
-            r#"{"taguru_benchmark_models":2,"models":[{"id":"m","model":"x","url":"http://h/v1/chat/completions"}]}"#,
-        );
-        let error = load_models_file(&path).unwrap_err();
-        assert!(error.contains("benchmark_models"), "{error}");
-        let _ = fs::remove_file(&path);
-    }
-
     #[test]
     fn a_url_carrying_inline_userinfo_is_refused() {
         let path = write_temp(
             "userinfo",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"x","url":"http://user:pass@h/v1/chat/completions"}
             ]}"#,
         );
@@ -1143,7 +1154,7 @@ mod models_json_tests {
     fn an_api_key_env_that_looks_like_a_key_value_is_refused() {
         let path = write_temp(
             "keyshaped",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","api_key_env":"sk-abc123"}
             ]}"#,
         );
@@ -1161,7 +1172,7 @@ mod models_json_tests {
         unsafe { std::env::remove_var("TAGURU_BENCH_TEST_UNSET_KEY") };
         let path = write_temp(
             "unsetkey",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","api_key_env":"TAGURU_BENCH_TEST_UNSET_KEY"}
             ]}"#,
         );
@@ -1174,7 +1185,7 @@ mod models_json_tests {
     fn an_unrecognized_structured_output_value_is_refused() {
         let path = write_temp(
             "badstructured",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","structured_output":"json_schema"}
             ]}"#,
         );
@@ -1187,7 +1198,7 @@ mod models_json_tests {
     fn an_empty_model_name_is_refused() {
         let path = write_temp(
             "emptymodel",
-            r#"{"benchmark_models":1,"models":[
+            r#"{"type": "benchmark_models","models":[
                 {"id":"m","model":"","url":"http://h/v1/chat/completions"}
             ]}"#,
         );
@@ -1200,7 +1211,7 @@ mod models_json_tests {
     fn validation_errors_and_warnings_name_the_actual_configured_path_not_a_fixed_literal() {
         let path = write_temp(
             "custompath",
-            r#"{"benchmark_models":1,"models":[{"id":"Bad","model":"x","url":"http://h/v1/chat/completions"}]}"#,
+            r#"{"type": "benchmark_models","models":[{"id":"Bad","model":"x","url":"http://h/v1/chat/completions"}]}"#,
         );
         let error = load_models_file(&path).unwrap_err();
         assert!(
@@ -1215,7 +1226,7 @@ mod models_json_tests {
     fn defaults_fold_into_entries_that_omit_the_field() {
         let path = write_temp(
             "defaults",
-            r#"{"benchmark_models":1,
+            r#"{"type": "benchmark_models",
                 "defaults":{"timeout_secs":123,"structured_output":"auto"},
                 "models":[
                     {"id":"a","model":"x","url":"http://h/v1/chat/completions"},
@@ -1235,7 +1246,7 @@ mod models_json_tests {
     fn an_unknown_key_earns_a_warning_not_a_hard_error() {
         let path = write_temp(
             "typo",
-            r#"{"benchmark_models":1,"modles":"typo","models":[
+            r#"{"type": "benchmark_models","modles":"typo","models":[
                 {"id":"m","model":"x","url":"http://h/v1/chat/completions","nte":"typo"}
             ]}"#,
         );
@@ -1305,11 +1316,6 @@ struct ChunkInfo {
 /// against this dictionary by exact string match.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 struct SegmentInfo {
-    /// `document_id` is the pre-#851/#904 name — still read via
-    /// `serde(alias)` so a `manifest.json` written before the rename
-    /// doesn't fail to join against `runs/*.jsonl`'s `source` field;
-    /// `save` always writes `segment_id`.
-    #[serde(alias = "document_id")]
     segment_id: String,
     path: String,
     bytes: usize,
@@ -2034,24 +2040,11 @@ mod probe_model_tests {
 
 // ============================== manifest.json ==============================
 //
-// ADR 0003 §10: range-acceptance (IMAGE_VERSION posture) — taguru both
-// writes and re-reads this file, so `#[serde(default)]` everywhere lets
-// an older shape still load, and a revision may only add a field.
-
-/// 2 (#851/#904): `documents`/`documents_root`/`document_order` are now
-/// written as `segments`/`segments_root`/`segment_order`, and each
-/// segment's own `document_id` is now `segment_id` — repurposed keys
-/// under ADR 0003 §10, not added fields, so the stamp bumps even
-/// though `#[serde(alias)]` keeps an old manifest loading either way
-/// (see `SegmentInfo`, `HarnessBlock`).
-const BENCHMARK_MANIFEST_VERSION: u64 = 2;
-/// 2 (#851/#904): the per-cell `document`(`phase: start`/`end`) record
-/// this stamps every runs file with is now written as `kind: "segment"`
-/// — a repurposed value under ADR 0003 §10, not an added field, so the
-/// stamp bumps even though no reader currently gates on it (readers
-/// accept both spellings instead; see `seed_counts_from_existing_runs_file`
-/// and `compare::segment_id_field`).
-const BENCHMARK_RUNS_VERSION: u64 = 2;
+// taguru both writes and re-reads this file (resume, compare, search).
+// ADR 0042: it names its `type` and the `version` date, and only this
+// build's revision is read — a results directory from an earlier release
+// is run again, not resumed. `#[serde(default)]` everywhere still lets a
+// manifest interrupted before a block was filled in load.
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 struct HarnessBlock {
@@ -2059,13 +2052,9 @@ struct HarnessBlock {
     execution: String,
     #[serde(default)]
     runs_per_model: usize,
-    /// `documents_root` is the pre-#851/#904 name — still read via
-    /// `serde(alias)`; `save` always writes `segments_root`.
-    #[serde(default, alias = "documents_root")]
+    #[serde(default)]
     segments_root: String,
-    /// `document_order` is the pre-#851/#904 name — still read via
-    /// `serde(alias)`; `save` always writes `segment_order`.
-    #[serde(default, alias = "document_order")]
+    #[serde(default)]
     segment_order: Vec<String>,
     #[serde(default)]
     config_path: String,
@@ -2214,9 +2203,17 @@ struct ManifestCell {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct BenchManifest {
-    #[serde(default)]
-    #[serde(alias = "taguru_benchmark_manifest")]
-    benchmark_manifest: u64,
+    /// `"benchmark_manifest"` on everything this build writes;
+    /// [`load_bench_manifest`] refuses a file that says anything else,
+    /// or nothing (ADR 0042).
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    record_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::format::version_column",
+        skip_serializing_if = "Option::is_none"
+    )]
+    version: Option<String>,
     #[serde(default)]
     run_id: String,
     #[serde(default)]
@@ -2233,7 +2230,7 @@ struct BenchManifest {
     extraction_settings: ExtractionSettings,
     /// `documents` is the pre-#851/#904 name — still read via
     /// `serde(alias)`; `save` always writes `segments`.
-    #[serde(default, alias = "documents")]
+    #[serde(default)]
     segments: Vec<SegmentInfo>,
     #[serde(default)]
     models: Vec<ManifestModel>,
@@ -2248,14 +2245,14 @@ fn load_bench_manifest(path: &Path) -> Result<BenchManifest, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let manifest: BenchManifest =
         serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    if !(1..=BENCHMARK_MANIFEST_VERSION).contains(&manifest.benchmark_manifest) {
+    if manifest.record_type.as_deref() != Some("benchmark_manifest") {
         return Err(format!(
-            "{}: benchmark_manifest {} is not supported by this build (accepts \
-             1..={BENCHMARK_MANIFEST_VERSION})",
-            path.display(),
-            manifest.benchmark_manifest
+            "{}: not a benchmark manifest (its `type` must be \"benchmark_manifest\")",
+            path.display()
         ));
     }
+    crate::format::check_version(manifest.version.as_deref())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(manifest)
 }
 
@@ -2330,31 +2327,44 @@ mod manifest_tests {
     use super::*;
 
     #[test]
-    fn a_version_outside_the_accepted_range_is_refused() {
+    fn another_version_or_another_type_is_refused() {
         let path = std::env::temp_dir().join(format!(
             "taguru-benchmark-manifest-version-{}-{}",
             std::process::id(),
             line!()
         ));
-        fs::write(&path, r#"{"benchmark_manifest":3}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"type":"benchmark_manifest","version":"2008-10-17"}"#,
+        )
+        .unwrap();
         let error = load_bench_manifest(&path).unwrap_err();
-        assert!(error.contains("benchmark_manifest"), "{error}");
-        let _ = fs::remove_file(&path);
-    }
+        assert!(
+            error.contains("version '2008-10-17' is not a format"),
+            "{error}"
+        );
 
-    /// A manifest written before the `taguru_` prefix came off (#933)
-    /// still loads through the old key.
-    #[test]
-    fn accepts_the_legacy_taguru_benchmark_manifest_stamp() {
-        let path = std::env::temp_dir().join(format!(
-            "taguru-benchmark-manifest-legacy-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::write(&path, r#"{"taguru_benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
-        let manifest = load_bench_manifest(&path).expect("the old key must still load");
-        assert_eq!(manifest.benchmark_manifest, 1);
-        assert_eq!(manifest.run_id, "abc");
+        // A manifest from before ADR 0042 names no `type`; a file of
+        // another kind names the wrong one; a null version is a value.
+        for other in [
+            r#"{"benchmark_manifest":2,"run_id":"abc"}"#,
+            r#"{"type":"benchmark_runs"}"#,
+            r#"{"type":"benchmark_manifest","version":null}"#,
+        ] {
+            fs::write(&path, other).unwrap();
+            assert!(load_bench_manifest(&path).is_err(), "{other}");
+        }
+
+        // The current date reads.
+        fs::write(
+            &path,
+            format!(
+                r#"{{"type":"benchmark_manifest","version":"{}"}}"#,
+                crate::format::FORMAT_VERSION
+            ),
+        )
+        .unwrap();
+        load_bench_manifest(&path).expect("the current version must load");
         let _ = fs::remove_file(&path);
     }
 
@@ -2365,36 +2375,10 @@ mod manifest_tests {
             std::process::id(),
             line!()
         ));
-        fs::write(&path, r#"{"benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
+        fs::write(&path, r#"{"type": "benchmark_manifest","run_id":"abc"}"#).unwrap();
         let manifest = load_bench_manifest(&path).expect("must load with defaults");
         assert_eq!(manifest.run_id, "abc");
         assert!(manifest.segments.is_empty());
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_pre_851_manifest_loads_its_document_named_fields_as_segments() {
-        let path = std::env::temp_dir().join(format!(
-            "taguru-benchmark-manifest-pre-851-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::write(
-            &path,
-            r#"{"benchmark_manifest":1,"run_id":"abc",
-                "harness":{"documents_root":"corpus","document_order":["corpus/a.md"]},
-                "documents":[{"document_id":"a","path":"corpus/a.md","bytes":1,"sha256":"s",
-                "paragraph_count":1,"chunk_total":1,"chunks":[]}]}"#,
-        )
-        .unwrap();
-        let manifest = load_bench_manifest(&path).expect("must load via serde(alias)");
-        assert_eq!(manifest.harness.segments_root, "corpus");
-        assert_eq!(
-            manifest.harness.segment_order,
-            vec!["corpus/a.md".to_string()]
-        );
-        assert_eq!(manifest.segments.len(), 1);
-        assert_eq!(manifest.segments[0].segment_id, "a");
         let _ = fs::remove_file(&path);
     }
 
@@ -3067,8 +3051,8 @@ fn run_cell(
         None
     } else {
         Some(serde_json::json!({
-            "kind": "header",
-            "benchmark_runs": BENCHMARK_RUNS_VERSION,
+            "type": "benchmark_runs",
+            "version": crate::format::FORMAT_VERSION,
             "run_id": run_id,
             "cell_id": cell_id,
             "model_id": model.id,
@@ -3685,7 +3669,8 @@ fn run_extract(args: &[String]) -> i32 {
             return 1;
         }
         let manifest = BenchManifest {
-            benchmark_manifest: BENCHMARK_MANIFEST_VERSION,
+            record_type: Some("benchmark_manifest".to_string()),
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             run_id: generate_run_id(),
             started_at: iso8601_utc(now_unix_secs()),
             finished_at: None,

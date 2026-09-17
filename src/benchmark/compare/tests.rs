@@ -737,7 +737,7 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
 
     let runs_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-1",
+            "type": "benchmark_runs", "run_id": "run-1",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -799,7 +799,7 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
     fs::write(dir.join("runs/m.run01.jsonl"), runs_text).unwrap();
 
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -807,13 +807,13 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {},
-        "documents": [
+        "segments": [
             {
-                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
                 "sha256": "sha-brewery", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
             },
             {
-                "document_id": "sake", "path": "corpus/sake.md", "bytes": 50,
+                "segment_id": "sake", "path": "corpus/sake.md", "bytes": 50,
                 "sha256": "sha-sake", "paragraph_count": 3, "chunk_total": 1, "chunks": [],
             },
         ],
@@ -977,7 +977,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
 
     let run01_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-multi",
+            "type": "benchmark_runs", "run_id": "run-multi",
             "cell_id": "m.run01", "model_id": "m", "model_name": "m-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1019,7 +1019,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
 
     let run02_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-multi",
+            "type": "benchmark_runs", "run_id": "run-multi",
             "cell_id": "m.run02", "model_id": "m", "model_name": "m-model",
             "run_index": 2, "prompt_version": 1,
         }),
@@ -1053,7 +1053,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-multi",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:10:00Z",
@@ -1061,13 +1061,13 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {},
-        "documents": [
+        "segments": [
             {
-                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
+                "segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 100,
                 "sha256": "sha-brewery", "paragraph_count": 10, "chunk_total": 1, "chunks": [],
             },
             {
-                "document_id": "sake", "path": "corpus/sake.md", "bytes": 50,
+                "segment_id": "sake", "path": "corpus/sake.md", "bytes": 50,
                 "sha256": "sha-sake", "paragraph_count": 5, "chunk_total": 1, "chunks": [],
             },
         ],
@@ -1217,7 +1217,8 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     let dir = synthetic_results_dir("smoke");
     let measurements = compute_measurements(&dir).expect("computes");
 
-    assert_eq!(measurements.benchmark_measurements, 2);
+    assert_eq!(measurements.record_type, "benchmark_measurements");
+    assert_eq!(measurements.version, crate::format::FORMAT_VERSION);
     assert_eq!(measurements.run_id, "run-1");
     assert_eq!(measurements.percentile_method, "nearest-rank");
     assert_eq!(
@@ -1467,7 +1468,7 @@ fn stability_metrics_are_deterministic_across_two_runs() {
 fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
     let dir = temp_dir("missing-runs-file");
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-1",
         "cells": [
             {"cell_id": "m.run01", "model_id": "m", "run_index": 1,
@@ -1617,7 +1618,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let alpha_run01_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
+            "type": "benchmark_runs", "run_id": "run-diff",
             "cell_id": "alpha.run01", "model_id": "alpha", "model_name": "alpha-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1655,7 +1656,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let alpha_run02_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
+            "type": "benchmark_runs", "run_id": "run-diff",
             "cell_id": "alpha.run02", "model_id": "alpha", "model_name": "alpha-model",
             "run_index": 2, "prompt_version": 1,
         }),
@@ -1685,7 +1686,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     let beta_run01_lines = [
         serde_json::json!({
-            "kind": "header", "benchmark_runs": 1, "run_id": "run-diff",
+            "type": "benchmark_runs", "run_id": "run-diff",
             "cell_id": "beta.run01", "model_id": "beta", "model_name": "beta-model",
             "run_index": 1, "prompt_version": 1,
         }),
@@ -1714,7 +1715,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = serde_json::json!({
-        "benchmark_manifest": 1,
+        "type": "benchmark_manifest",
         "run_id": "run-diff",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:10:00Z",
@@ -1722,9 +1723,9 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {},
-        "documents": [
+        "segments": [
             {
-                "document_id": "brewery", "path": "corpus/brewery.md", "bytes": 500,
+                "segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 500,
                 "sha256": "sha-brewery", "paragraph_count": 10, "chunk_total": 2,
                 "chunks": [
                     {"chunk_index": 0, "chunk_sha256": "sha-chunk0", "chunk_bytes": 200,
@@ -1734,7 +1735,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
                 ],
             },
             {
-                "document_id": "sake", "path": "corpus/sake.md", "bytes": 50,
+                "segment_id": "sake", "path": "corpus/sake.md", "bytes": 50,
                 "sha256": "sha-sake", "paragraph_count": 3, "chunk_total": 1, "chunks": [],
             },
         ],
@@ -1816,8 +1817,12 @@ fn differences_header_matches_the_adr_shape() {
     let dir = synthetic_two_model_results_dir("differences-header");
     let lines = compute_differences_lines(&dir, false).expect("computes");
     let header = &lines[0];
-    assert_eq!(header["kind"], "header");
-    assert_eq!(header["benchmark_differences"], 3);
+    assert_eq!(header["type"], "benchmark_differences");
+    assert_eq!(header["version"], crate::format::FORMAT_VERSION);
+    assert!(
+        header.get("kind").is_none(),
+        "the header names its type, not a kind"
+    );
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
     assert_eq!(
@@ -2176,9 +2181,9 @@ fn with_text_embeds_the_exact_paragraph_bytes() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
-    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    manifest["segments"][0]["sha256"] = serde_json::json!(real_sha);
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -2220,9 +2225,9 @@ fn with_text_truncates_at_the_cap_on_a_char_boundary() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
-    manifest["documents"][0]["sha256"] = serde_json::json!(real_sha);
+    manifest["segments"][0]["sha256"] = serde_json::json!(real_sha);
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -2254,7 +2259,7 @@ fn with_text_refuses_a_segment_sha256_drift() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/brewery.md").to_string_lossy());
     fs::write(
         &manifest_path,
@@ -2274,7 +2279,7 @@ fn with_text_refuses_an_unreadable_corpus_file() {
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["documents"][0]["path"] =
+    manifest["segments"][0]["path"] =
         serde_json::json!(dir.join("corpus/does-not-exist.md").to_string_lossy());
     fs::write(
         &manifest_path,

@@ -161,7 +161,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   <section id="models-json">
     <h2>models.json: the model matrix</h2>
     <pre><code>{
-  "benchmark_models": 1,
+  "type": "benchmark_models",
   "defaults": {
     "timeout_secs": 300,
     "structured_output": "auto"
@@ -188,10 +188,10 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   ]
 }</code></pre>
     <p>
-      <code>benchmark_models</code> must equal <code>1</code> exactly — unlike
-      <code>manifest.json</code> below, this file is authored by hand, not written and re-read by
-      taguru itself, so a shape this build was not built for is refused rather than silently
-      defaulted. <code>id</code> matches <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>, must be unique,
+      <code>type</code> must be <code>"benchmark_models"</code>. <code>version</code> — the file
+      format's revision, a date — is optional: this file is authored by hand, so leaving it out
+      means the running build's own revision, and a date this build was not built for is refused by
+      name rather than silently defaulted. <code>id</code> matches <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>, must be unique,
       and is the only value used as a path component (model names carry <code>:</code>/<code>/</code>
       that are not portable, e.g. <code>qwen2.5:7b</code>). <code>defaults</code> supplies any key
       an entry omits; the resolved record (defaults folded in) is what <code>models.lock.json</code>
@@ -278,21 +278,23 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       model, so repeating it per cell would be N×M copies of one fact.
     </p>
     <p>
-      <code>benchmark_manifest</code> accepts any version from <code>1</code> through the
-      current one — unlike <code>models.json</code>, this file is written <i>and later re-read</i>
-      by taguru itself (on resume), and compatibility across the tool's own evolution is the point
-      of keeping one on disk.
+      <code>manifest.json</code> carries <code>"type": "benchmark_manifest"</code> and the
+      <code>version</code> date taguru always writes. It is re-read on resume and by
+      <code>compare</code> / <code>search</code>, and only this build's revision is read: a results
+      directory started by an earlier release cannot be resumed, compared, or searched, and has to
+      be run again.
     </p>
   </section>
 
   <section id="runs">
     <h2>runs/&lt;model_id&gt;.run&lt;NN&gt;.jsonl</h2>
     <p>
-      One file per cell — the cell is the unit of execution, failure, and resume. Every line is a
-      tagged JSON object; <code>kind</code> discriminates:
+      One file per cell — the cell is the unit of execution, failure, and resume. Line 1 is the
+      file's header — <code>"type": "benchmark_runs"</code>, the <code>version</code> date,
+      <code>run_id</code>, and the cell's identity. Every line after it is a tagged JSON object;
+      <code>kind</code> discriminates:
     </p>
     <ul>
-      <li><code>header</code> — line 1 only: version stamp, <code>run_id</code>, cell identity.</li>
       <li><code>segment</code> — two per segment attempted: <code>phase: "start"</code> (identity
         only, written the moment the segment's first record is seen) and
         <code>phase: "end"</code> (counts once it finishes — <code>outcome: "written"</code> from
@@ -375,7 +377,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     </p>
     <p class="section-sub">measurements.json</p>
     <pre><code>{
-  "benchmark_measurements": 2,
+  "type": "benchmark_measurements",
+  "version": "2026-09-17",
   "run_id": "...",
   "generated_at": "2026-07-26T10:05:12Z",
   "percentile_method": "nearest-rank",
@@ -554,7 +557,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       <code>b</code>, bound to a <code>model_id</code> — never <code>baseline</code>/
       <code>candidate</code> — and an absent side serializes <code>null</code>, never a count.
     </p>
-    <pre><code>{"kind":"header","benchmark_differences":3,"run_id":"...",
+    <pre><code>{"type":"benchmark_differences","version":"2026-09-17","run_id":"...",
  "pairs":[{"pair_id":"hosted-120b__qwen25-7b-q4","a":"hosted-120b","b":"qwen25-7b-q4"}],
  "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
    "alias_expansion":"batch-local","weight_tolerance":0.0},
@@ -713,7 +716,8 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     </p>
     <p class="section-sub">retrieval.json</p>
     <pre><code>{
-  "benchmark_retrieval": 3,
+  "type": "benchmark_retrieval",
+  "version": "2026-09-17",
   "run_id": "...", "generated_at": "2026-07-26T10:05:12Z",
   "matching": { "module": "benchmark::identity", "case_fold": true,
       "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
@@ -740,9 +744,8 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
   "pairs": { "hosted-120b__qwen25-7b-q4": { "overlap.jaccard": { "n": 12, "...": "..." }, "...": "..." } }
 }</code></pre>
     <p>
-      <code>benchmark_retrieval</code> accepts any version from <code>1</code> through the
-      current one, like <code>manifest.json</code> — this is taguru's own written-and-re-readable
-      artifact, not a hand-authored input. No CSV is written; a static
+      <code>retrieval.json</code> names its <code>type</code> and the <code>version</code> date like
+      <code>manifest.json</code> — this is taguru's own written artifact, not a hand-authored input. No CSV is written; a static
       <code>report.html</code> (issue #261, optional) is where visualization belongs.
     </p>
     <p class="section-sub">recall@k and MRR: the one thing shared with <a href="evaluate.html">the evaluate quality gate</a></p>

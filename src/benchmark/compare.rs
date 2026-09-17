@@ -33,14 +33,6 @@ use super::identity;
 #[path = "compare/differences.rs"]
 mod differences;
 
-// 2 (#851/#904): the `documents` section is now `segments`, and every
-// `document.*`/`run.documents_written` metric name is now
-// `segment.*`/`run.segments_written` — repurposed keys under ADR 0003
-// §10, not added fields. `MeasurementsFile` is `Serialize`-only (no
-// reader parses measurements.json back into this type), so the bump
-// is a documented stamp rather than something any code gates on today.
-const BENCHMARK_MEASUREMENTS_VERSION: u64 = 2;
-
 /// `segment_id` is the current field name (#851/#904); `document_id` is
 /// what every runs file written before the rename carries. Centralized
 /// so the two read sites treat both alike instead of one silently
@@ -206,7 +198,9 @@ struct InputsBlock {
 
 #[derive(Debug, Clone, Serialize)]
 struct MeasurementsFile {
-    benchmark_measurements: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     run_id: String,
     generated_at: String,
     percentile_method: &'static str,
@@ -804,7 +798,8 @@ fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) ->
     let definitions = build_definitions(&loaded.observed_finish_reasons);
 
     MeasurementsFile {
-        benchmark_measurements: BENCHMARK_MEASUREMENTS_VERSION,
+        record_type: "benchmark_measurements",
+        version: crate::format::FORMAT_VERSION,
         run_id: manifest.run_id.clone(),
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         percentile_method: "nearest-rank",

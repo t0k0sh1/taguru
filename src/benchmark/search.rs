@@ -74,19 +74,6 @@ use crate::remote::{Api, ApiFailure};
 use super::identity;
 use super::{BenchManifest, ManifestModel, SegmentInfo, load_bench_manifest};
 
-// Bumped from 1: the `pairs` map's keys changed shape from
-// `"{a}__{b}"` to a length-prefixed `"{len}:{a}__{b}"` to close a
-// collision between differently-split underscored model ids — see
-// `compare::differences::BENCHMARK_DIFFERENCES_VERSION`, bumped for
-// the same reason.
-//
-// 3 (#851/#904): `CorpusBlock`'s `documents_imported`/`documents_failed`
-// are now `segments_imported`/`segments_failed` — a repurposed key
-// under ADR 0003 §10, not an added field. `RetrievalFile` is
-// `Serialize`-only (no reader parses `retrieval.json` back into this
-// type), so the bump is a documented stamp rather than something any
-// code gates on today.
-const BENCHMARK_RETRIEVAL_VERSION: u64 = 3;
 const DEFAULT_LIMIT: usize = 10;
 /// Mirrors the server's own `MAX_MATCH_LIMIT` (src/api.rs) — a
 /// `--limit`/`options.limit` above this could never be honored anyway.
@@ -310,7 +297,8 @@ pub(super) fn run_search(args: &[String]) -> i32 {
     let (models_agg, pairs_agg) = aggregate(&cases);
 
     let retrieval = RetrievalFile {
-        benchmark_retrieval: BENCHMARK_RETRIEVAL_VERSION,
+        record_type: "benchmark_retrieval",
+        version: crate::format::FORMAT_VERSION,
         run_id: manifest.run_id.clone(),
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
         matching,
@@ -1523,7 +1511,9 @@ fn write_retrieval(dir: &Path, retrieval: &RetrievalFile) -> Result<(), String> 
 
 #[derive(Debug, Clone, Serialize)]
 struct RetrievalFile {
-    benchmark_retrieval: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     run_id: String,
     generated_at: String,
     matching: identity::Matching,

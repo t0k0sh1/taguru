@@ -9,6 +9,22 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — a benchmark results directory started by an earlier
+  release can no longer be resumed, compared, or searched, and a
+  models file written for one is no longer read** (ADR 0042, #937 step
+  3). The six benchmark files name their kind in a `type` column and the
+  file format's revision in a `version` date: `{"type":
+  "benchmark_models", "models": […]}` (hand-written — `version` may be
+  left out), and `benchmark_manifest`, `benchmark_runs`,
+  `benchmark_measurements`, `benchmark_differences`,
+  `benchmark_retrieval`, each always written with `"version":
+  "2026-09-17"`. The integer stamps (1–3) and `manifest.json`'s `1..=N`
+  range acceptance are gone: only this build's revision is read. The
+  header line of `runs/*.jsonl` and of `differences.jsonl` no longer
+  carries `kind: "header"` — it names its `type` instead. With old
+  manifests refused outright, the pre-#904 field names they were still
+  read under (`documents`, `document_id`, `documents_root`,
+  `document_order`) are no longer accepted either.
 - **Breaking — eval sets, thresholds files, and evaluation reports
   written for an earlier release are no longer read** (ADR 0042, #937
   step 2). Each names its kind in a `type` column and the file format's
