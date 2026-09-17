@@ -27,9 +27,9 @@
 import type { Locator, Open } from "taguru";
 
 /**
- * Checked for equality, like `taguru`'s own `BATCH_VERSION`/
- * `GROUP_VERSION` (src/ingest.rs) — a protocol-breaking change bumps
- * this, never loosens the check to a range.
+ * Checked for equality, like `taguru`'s own file-format `version`
+ * (src/format.rs) — a protocol-breaking change bumps this, never
+ * loosens the check to a range.
  */
 export const CONNECTOR_DOCUMENT_VERSION = 1;
 

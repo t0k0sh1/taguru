@@ -25,10 +25,6 @@ use crate::code::grammar::SymbolNode;
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_SECTION_BYTES: usize = 512;
 
-/// `taguru_batch` header version this builder renders
-/// (`src/ingest.rs` BATCH_VERSION).
-const BATCH_VERSION: u64 = 1;
-
 /// Version of the fact model this builder produces. The sync state
 /// records it beside its content fingerprints: a fingerprint says
 /// "this file's bytes produced the facts already stored", which stops
@@ -182,15 +178,11 @@ pub(crate) fn build(path: &str, symbols: &[SymbolNode]) -> FileFacts {
 /// the header's create block so the first sync can mint the `context`.
 pub(crate) fn render_batch(context: &str, facts: &FileFacts, create: Option<&str>) -> String {
     let mut lines = Vec::new();
-    let mut header = serde_json::json!({
-        "taguru_batch": BATCH_VERSION,
-        "context": context,
-        "source": facts.source,
-    });
-    if let Some(description) = create {
-        header["create"] = serde_json::json!({ "description": description });
-    }
-    lines.push(header.to_string());
+    lines.push(crate::format::source_header_line(
+        &facts.source,
+        context,
+        create,
+    ));
     if !facts.passage.is_empty() {
         lines.push(serde_json::json!({ "passage": facts.passage }).to_string());
     }
@@ -503,9 +495,9 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
 
-        assert_eq!(lines[0]["taguru_batch"], 1);
+        assert_eq!(lines[0]["type"], "source");
         assert_eq!(lines[0]["context"], "code");
-        assert_eq!(lines[0]["source"], "src/ingest/model.rs");
+        assert_eq!(lines[0]["id"], "src/ingest/model.rs");
         assert_eq!(lines[0]["create"]["description"], "code map");
         assert!(lines[1]["passage"].is_string());
         assert_eq!(lines[2]["section"], "fn parse_batch");

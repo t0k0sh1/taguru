@@ -220,7 +220,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
   <section id="format">
     <h2>The file format</h2>
     <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>schema</code> and <code>group</code> records — see below.)</p>
-    <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
+    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>, <span class="k">"date"</span>: <span class="nu">1700000000</span>, <span class="k">"tags"</span>: [<span class="s">"会社概要"</span>]}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"locator"</span>: {<span class="k">"kind"</span>: <span class="s">"page"</span>, <span class="k">"value"</span>: <span class="s">"12"</span>}}
@@ -232,8 +232,12 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 
     <h3>Header</h3>
     <p>
-      <code>taguru_batch</code> must be <code>1</code> (the only version this build reads).
-      <code>context</code> and <code>source</code> are required. <code>create</code> is optional
+      <code>type</code> must be <code>"source"</code> — it is how a line says it opens a source
+      file. <code>id</code> (the source's id) and <code>context</code> are required.
+      <code>version</code> is optional: it names the file format's revision as a date
+      (<code>"2026-09-17"</code> is the one this build reads and writes), a file that omits it is
+      read as the running build's own revision, and any other date is refused by name. Everything
+      taguru writes carries it; a hand-written file may leave it out. <code>create</code> is optional
       and carries the same fields as <code>PUT /contexts/{name}</code> (<code>description</code>,
       <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
       the <code>context</code> <b>does not exist yet</b>. Importing into an absent <code>context</code> without a create
@@ -336,10 +340,12 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <a href="schema.html">The <code>context</code> schema</a>.
     </p>
     <p>
-      <code>{"schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
-      — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13), the same shape
-      <code>PUT /contexts/{name}/schema</code> installs. Unlike a <code>group</code> record, every field is
-      required — there is no default for an absent one, matching the document's own at-rest
+      <code>{"type": "schema", "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
+      — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13): the <code>mode</code>,
+      <code>closed_labels</code>, <code>types</code>, and <code>relations</code>
+      <code>PUT /contexts/{name}/schema</code> installs, under the record's own <code>type</code> and
+      the <code>context</code> it installs onto. Unlike a <code>group</code> record, every field but the
+      optional <code>version</code> is required — there is no default for an absent one, matching the document's own at-rest
       shape: a missing field is a parse refusal, never a silently-defaulted one. A schema record
       stands alone between sources (it closes the source before it, the same as a <code>group</code> record —
       operation lines after one need a fresh header), and <code>taguru export</code> emits one as
@@ -372,10 +378,10 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 
     <h3><code>group</code> records</h3>
     <p>
-      <code>{"group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
+      <code>{"type": "group", "id": "…", "description": "…", "contexts": […], "groups": […]}</code>
       — one line states one <b><code>group</code>'s</b> complete truth, the way a source file states a source's:
       applying it is a create-or-replace of the whole record, never a delta, so re-importing
-      stays idempotent. Only <code>name</code> is required; absent fields read as empty. A <code>group</code>
+      stays idempotent. Only <code>type</code> and <code>id</code> are required; absent fields read as empty. A <code>group</code>
       record stands alone between sources (it closes the source before it — operation lines after
       one need a fresh header), and <code>taguru export</code> writes each <code>group</code> as its own
       <code>{group}.group.jsonl</code> beside the <code>context</code> streams.
@@ -518,8 +524,8 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     <ul>
       <li>
         The input is split on <b>source boundaries only</b>, never mid-source: a source runs from its
-        <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/
-        <code>schema</code>/<code>group</code> line or EOF, the exact rule
+        <code>"type": "source"</code> header line to the next <code>source</code>/
+        <code>schema</code>/<code>group</code> record or EOF, the exact rule
         <code>taguru router</code>'s own cross-shard import splitting already uses. Whole source files
         are packed into each request up to a byte budget starting at 4&nbsp;MiB (half the
         8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom for a server
@@ -583,7 +589,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     <h2>Source streams and <code>taguru export</code> (backup / restore)</h2>
     <p class="section-sub">
       One file (one request body) may carry one source <b>or several concatenated ones</b> — each
-      <code>taguru_batch</code> header line closes the previous source and opens the next.
+      <code>"type": "source"</code> header line closes the previous source and opens the next.
       Per-source validation, retract-then-apply, and (<code>context</code>, source) uniqueness are identical to
       the single-file case.
     </p>

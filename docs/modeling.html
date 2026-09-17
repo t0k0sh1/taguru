@@ -204,14 +204,14 @@
       records apply after every source in the run, so a <code>group</code> and the <code>contexts</code> it names can travel
       in any order. One file for the two parts of §2.1, closing with the chapter and paper <code>groups</code>:
     </p>
-    <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"source"</span>: <span class="s">"bert/2.1/part-1"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
+    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/part-1"</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"We pre-train BERT using two unsupervised tasks…"</span>}
 {<span class="k">"subject"</span>: <span class="s">"BERT"</span>, <span class="k">"label"</span>: <span class="s">"pre-training task"</span>, <span class="k">"object"</span>: <span class="s">"masked LM"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
-{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"source"</span>: <span class="s">"bert/2.1/part-2"</span>}
+{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/part-2"</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>}
 {<span class="k">"passage"</span>: <span class="s">"…the second task jointly pre-trains text-pair representations."</span>}
 {<span class="k">"subject"</span>: <span class="s">"BERT"</span>, <span class="k">"label"</span>: <span class="s">"pre-training task"</span>, <span class="k">"object"</span>: <span class="s">"next sentence prediction"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
-{<span class="k">"group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/2"</span>, <span class="s">"section/bert/2.1"</span>, <span class="s">"section/bert/2.2"</span>]}
-{<span class="k">"group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"paper/bert"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/abstract"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
+{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/2"</span>, <span class="s">"section/bert/2.1"</span>, <span class="s">"section/bert/2.2"</span>]}
+{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"paper/bert"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/abstract"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
     <p class="note">
       The second source's <code>create</code> block is left out on purpose — the <code>context</code> already
       exists from the first source, and importing into an absent <code>context</code> without a create block is

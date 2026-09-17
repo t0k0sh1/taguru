@@ -494,18 +494,10 @@ fn judgment_batch(
         "judgment": judgment,
         "evidence": candidate.payload,
     });
-    let mut header = json!({
-        "taguru_batch": 1,
-        "context": artifact,
-        "source": source,
+    let description = create.then(|| {
+        format!("Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete")
     });
-    if create {
-        header["create"] = json!({
-            "description": format!(
-                "Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete"
-            ),
-        });
-    }
+    let header = crate::format::source_header_line(&source, artifact, description.as_deref());
     let association = json!({
         "subject": candidate.headline,
         "label": judgment["verdict"],
@@ -522,11 +514,7 @@ fn judgment_batch(
 /// returns before any import), so the artifact `context` exists by the
 /// time this lands.
 fn manifest_batch(artifact: &str, context: &str) -> String {
-    let header = json!({
-        "taguru_batch": 1,
-        "context": artifact,
-        "source": MANIFEST_SOURCE,
-    });
+    let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact, None);
     let manifest = json!({
         "consolidation": CONSOLIDATION_FORMAT,
         "detector": CONSOLIDATION_DETECTOR,
@@ -580,8 +568,8 @@ mod tests {
         let lines: Vec<&str> = batch.lines().collect();
         assert_eq!(lines.len(), 3, "header + association + passage");
         let header: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(header["taguru_batch"], 1);
-        assert_eq!(header["source"], "judgment:00ff");
+        assert_eq!(header["type"], "source");
+        assert_eq!(header["id"], "judgment:00ff");
         assert!(
             header["create"]["description"].is_string(),
             "the run's first batch carries the create block: {header}"

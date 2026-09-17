@@ -1349,7 +1349,7 @@ mod tests {
 
     fn schema_line(context: &str) -> String {
         format!(
-            "{{\"schema\": 1, \"context\": \"{context}\", \"mode\": \"warn\", \
+            "{{\"type\": \"schema\", \"context\": \"{context}\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
              \"relations\": {{}}}}\n"
         )
@@ -1437,7 +1437,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_loop_counts_a_landed_batch_of_the_same_stream_in_durable_batches() {
         let state = scratch_state("schema-loop-budget-with-batch");
-        let body = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        let body = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n"
             .to_string()
             + &schema_line("sake");
@@ -1474,7 +1474,7 @@ mod tests {
 
     fn one_batch(context: &str) -> crate::ingest::Batch {
         let stream = crate::ingest::parse_stream(
-            format!("{{\"taguru_batch\": 1, \"context\": \"{context}\", \"source\": \"a.md\"}}\n")
+            format!("{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"a.md\"}}\n")
                 .as_bytes(),
         )
         .unwrap();

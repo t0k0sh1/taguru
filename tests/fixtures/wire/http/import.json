@@ -2,7 +2,7 @@
   "contract": "http_contract",
   "method": "POST",
   "operation": "import",
-  "request": "{\"taguru_batch\": 1, \"context\": \"corpus-f\", \"source\": \"doc.md\", \"create\": {\"description\": \"wire-contract import corpus\"}}\n{\"passage\": \"導入。\\n\\n本編。\"}\n{\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n",
+  "request": "{\"type\": \"source\", \"context\": \"corpus-f\", \"id\": \"doc.md\", \"create\": {\"description\": \"wire-contract import corpus\"}}\n{\"passage\": \"導入。\\n\\n本編。\"}\n{\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n",
   "response": {
     "result": {
       "batches": [

@@ -209,7 +209,7 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             "http_contract": {"current": HTTP_CONTRACT, "supported": [HTTP_CONTRACT]},
             "mcp_contract": {"current": MCP_CONTRACT, "supported": [MCP_CONTRACT]},
             "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
-            "batch_formats": [crate::ingest::BATCH_VERSION],
+            "batch_formats": [crate::format::FORMAT_VERSION],
             // Equality-checked like `batch_formats`, not range-accepted
             // like `image_formats` below — ADR 0009 §5.3 bumps
             // `SCHEMA_VERSION` on every shape change, additive or
@@ -3072,9 +3072,9 @@ mod tests {
     async fn import_budget_refusal_carries_the_durable_prefix_fields() {
         let stream = crate::ingest::parse_stream(
             concat!(
-                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", ",
+                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", ",
                 "\"create\": {\"description\": \"d\"}}\n",
-                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n",
+                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n",
             )
             .as_bytes(),
         )

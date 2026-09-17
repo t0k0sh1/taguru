@@ -150,9 +150,11 @@ pub(crate) struct Rendered {
 
 #[derive(Serialize)]
 struct HeaderLine<'a> {
-    taguru_batch: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
+    id: &'a str,
     context: &'a str,
-    source: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     create: Option<CreateLine<'a>>,
 }
@@ -232,7 +234,9 @@ struct AliasLine<'a> {
 /// go missing, not only ones that show up uninvited).
 #[derive(Serialize)]
 struct SchemaLine<'a> {
-    schema: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
     context: &'a str,
     mode: crate::schema::SchemaMode,
     closed_labels: bool,
@@ -252,7 +256,8 @@ pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocum
     push_line(
         &mut line,
         &SchemaLine {
-            schema: crate::schema::SCHEMA_VERSION,
+            record_type: "schema",
+            version: crate::format::FORMAT_VERSION,
             context,
             mode: document.mode,
             closed_labels: document.closed_labels,
@@ -268,8 +273,10 @@ pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocum
 /// round trip is exact.
 #[derive(Serialize)]
 struct GroupLine<'a> {
-    group: u64,
-    name: &'a str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    version: &'static str,
+    id: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
@@ -286,8 +293,9 @@ pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
     push_line(
         &mut line,
         &GroupLine {
-            group: crate::ingest::GROUP_VERSION,
-            name,
+            record_type: "group",
+            version: crate::format::FORMAT_VERSION,
+            id: name,
             description: &record.description,
             contexts: &record.contexts,
             groups: &record.groups,
@@ -542,9 +550,10 @@ pub(crate) fn render(
         push_line(
             &mut stream,
             &HeaderLine {
-                taguru_batch: 1,
+                record_type: "source",
+                version: crate::format::FORMAT_VERSION,
+                id: EMPTY_SOURCE,
                 context,
-                source: EMPTY_SOURCE,
                 create: Some(create),
             },
         );
@@ -556,9 +565,10 @@ pub(crate) fn render(
             push_line(
                 &mut stream,
                 &HeaderLine {
-                    taguru_batch: 1,
+                    record_type: "source",
+                    version: crate::format::FORMAT_VERSION,
+                    id: source,
                     context,
-                    source,
                     create: (index == 0).then_some(create),
                 },
             );
@@ -1112,7 +1122,7 @@ fn stream_counts(stream: &str) -> (usize, usize) {
         }
         lines += 1;
         if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(line)
-            && object.contains_key("taguru_batch")
+            && object.get("type").and_then(Value::as_str) == Some("source")
         {
             batches += 1;
         }
@@ -2025,14 +2035,17 @@ mod tests {
         let line = render_group("kura", &record);
         assert_eq!(
             line,
-            "{\"group\":1,\"name\":\"kura\",\"description\":\"蔵まとめ\",\
-             \"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
+            "{\"type\":\"group\",\"version\":\"2026-09-17\",\"id\":\"kura\",\
+             \"description\":\"蔵まとめ\",\"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
         assert_eq!(stream.groups, vec![("kura".to_string(), record)]);
 
         let bare = render_group("kid", &GroupRecord::default());
-        assert_eq!(bare, "{\"group\":1,\"name\":\"kid\"}\n");
+        assert_eq!(
+            bare,
+            "{\"type\":\"group\",\"version\":\"2026-09-17\",\"id\":\"kid\"}\n"
+        );
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
         assert_eq!(stream.groups[0].1, GroupRecord::default());
     }
@@ -2068,7 +2081,7 @@ mod tests {
         let line = render_schema("sake", &document);
         assert_eq!(
             line,
-            "{\"schema\":1,\"context\":\"sake\",\"mode\":\"warn\",\
+            "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context\":\"sake\",\"mode\":\"warn\",\
              \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
              \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
         );
@@ -2121,7 +2134,9 @@ mod tests {
         let rendered = render("sake", &warn_schema, Deadline::unbounded()).unwrap();
         let first_line = rendered.stream.lines().next().unwrap();
         assert!(
-            first_line.starts_with("{\"schema\":1,\"context\":\"sake\""),
+            first_line.starts_with(
+                "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context\":\"sake\""
+            ),
             "the schema record must ride first — {}",
             rendered.stream
         );
@@ -2133,9 +2148,9 @@ mod tests {
     #[test]
     fn stream_counts_reads_batches_and_lines_back_out_of_a_stream() {
         let stream = concat!(
-            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\"}\n",
+            "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"a.md\"}\n",
             "{\"subject\":\"s\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n",
-            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"b.md\"}\n",
+            "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"b.md\"}\n",
             "{\"subject\":\"s2\",\"label\":\"l2\",\"object\":\"o2\",\"weight\":2.0}\n",
             "{\"alias\":\"a\",\"canonical\":\"b\",\"kind\":\"concept\"}\n",
         );
@@ -2144,7 +2159,7 @@ mod tests {
 
     #[test]
     fn stream_counts_ignores_blank_lines_and_non_object_lines() {
-        let stream = "\n{\"taguru_batch\":1}\n\n\"just a string\"\n";
+        let stream = "\n{\"type\": \"source\"}\n\n\"just a string\"\n";
         assert_eq!(stream_counts(stream), (1, 2));
     }
 

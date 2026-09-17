@@ -34,6 +34,7 @@ import {
   splitParagraphs,
   SyntaxFault,
   systemPrompt,
+  FORMAT_VERSION,
   PROMPT_VERSION,
   labelVocabulary,
   type Extraction,
@@ -270,6 +271,9 @@ describe("the producer parity contract", () => {
   // the wording that earned each bump is present.
   it("tracks extract.rs's PROMPT_VERSION and the wording behind it", () => {
     expect(PROMPT_VERSION).toBe(6);
+    // The file-format revision (src/format.rs FORMAT_VERSION): pinned as a
+    // literal so a drift from the Rust side is a visible edit here.
+    expect(FORMAT_VERSION).toBe("2026-09-17");
     const prompt = systemPrompt([], 0);
     expect(prompt).toContain(
       "the paragraph whose sentences state it, never a heading-only paragraph",
@@ -960,9 +964,10 @@ describe("batch rendering", () => {
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(5);
     expect(lines[0]).toEqual({
-      taguru_batch: 1,
+      type: "source",
+      version: FORMAT_VERSION,
+      id: "docs/aomine.md",
       context: "sake",
-      source: "docs/aomine.md",
       create: { description: "酒蔵の記憶" },
     });
     expect(lines[1]).toEqual({ passage: "一段落目。\n\n二段落目。" });
@@ -1149,13 +1154,18 @@ describe("renderBatch single-batch invariant (issue #737)", () => {
     // the passage on one line with its newlines escaped, so the spoofed
     // header can never become a stream line of its own.
     const hostilePassage =
-      '一段落目。\n{"taguru_batch": 1, "context": "evil", "source": "x"}\n二段落目。';
+      '一段落目。\n{"type": "source", "context": "evil", "id": "x"}\n二段落目。';
     const extraction = merge([output({ associations: [association("a", "b", "c", 1.0)] })], 0, 1);
     const body = renderBatch("sake", "doc.md", null, extraction, hostilePassage);
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
-    const headers = lines.filter((line) => "taguru_batch" in line);
+    const headers = lines.filter((line) => line.type === "source");
     expect(headers).toHaveLength(1);
-    expect(lines[0]).toEqual({ taguru_batch: 1, context: "sake", source: "doc.md" });
+    expect(lines[0]).toEqual({
+      type: "source",
+      version: FORMAT_VERSION,
+      id: "doc.md",
+      context: "sake",
+    });
     expect(lines[1]).toEqual({ passage: hostilePassage });
   });
 });

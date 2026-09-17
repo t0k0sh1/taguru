@@ -44,6 +44,10 @@ from taguru import LocatorSpec, SchemaDocument, SectionSpec, TypeDef
 # (checkpoints.py) — the same division --fact-budget (a computation input)
 # and PROMPT_VERSION (the prompt's wording) already draw.
 PROMPT_VERSION = 6
+# The file-format revision every record this module writes is stamped
+# with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
+# record's ``version`` column beside its ``type``.
+FORMAT_VERSION = "2026-09-17"
 # Prompt-input chunk cap (bytes); the stored passage is never chunked.
 CHUNK_BYTES = 24 * 1024
 # How many existing relation labels the prompt offers for reuse.
@@ -1612,7 +1616,12 @@ def render_batch(
     silently dropped rather than emitted, the same posture already taken
     for association paragraph pointers a few lines below.
     """
-    header: dict[str, Any] = {"taguru_batch": 1, "context": context, "source": source}
+    header: dict[str, Any] = {
+        "type": "source",
+        "version": FORMAT_VERSION,
+        "id": source,
+        "context": context,
+    }
     if description is not None:
         header["create"] = {"description": description}
     lines = [_line(header)]

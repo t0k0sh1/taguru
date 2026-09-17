@@ -2,7 +2,7 @@
   "contract": "http_contract",
   "method": "POST",
   "operation": "import_with_schema",
-  "request": "{\"taguru_batch\": 1, \"context\": \"corpus-g\", \"source\": \"doc.md\", \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \"range\": [\"Concept\"]}}}\n",
+  "request": "{\"type\": \"source\", \"context\": \"corpus-g\", \"id\": \"doc.md\", \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"type\": \"schema\", \"context\": \"corpus-g\", \"mode\": \"warn\", \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \"range\": [\"Concept\"]}}}\n",
   "response": {
     "result": {
       "batches": [

@@ -219,7 +219,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
 #[test]
 fn citation_resolves_the_section_governing_its_paragraph() {
     let server = Server::start("citation-section");
-    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-sections\", \
+    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-sections\", \
                  \"create\": {\"description\": \"d\"}}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
                  {\"paragraph\": 1, \"section\": \"沿革\"}\n";

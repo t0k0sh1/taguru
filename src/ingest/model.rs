@@ -213,12 +213,37 @@ impl Batch {
     }
 }
 
+/// The three stream-level record types, each spelled once as the only
+/// value its record's `type` column accepts.
+#[derive(Deserialize)]
+enum SourceTag {
+    #[serde(rename = "source")]
+    Source,
+}
+
+#[derive(Deserialize)]
+enum GroupTag {
+    #[serde(rename = "group")]
+    Group,
+}
+
+#[derive(Deserialize)]
+enum SchemaTag {
+    #[serde(rename = "schema")]
+    Schema,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Header {
-    taguru_batch: u64,
+    /// Always `"source"` — [`parse_stream`] dispatched on it already;
+    /// the field exists so `deny_unknown_fields` accepts the column.
+    #[serde(rename = "type")]
+    _record_type: SourceTag,
+    #[serde(default)]
+    version: Option<String>,
+    id: String,
     context: String,
-    source: String,
     #[serde(default)]
     create: Option<CreateBlock>,
 }
@@ -240,9 +265,11 @@ struct CreateBlock {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GroupLine {
-    #[serde(alias = "taguru_group")]
-    group: u64,
-    name: String,
+    #[serde(rename = "type")]
+    _record_type: GroupTag,
+    #[serde(default)]
+    version: Option<String>,
+    id: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -258,15 +285,10 @@ struct GroupLine {
 fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, GroupRecord), String> {
     let line: GroupLine = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a group record: {error}"))?;
-    if line.group != GROUP_VERSION {
-        return Err(format!(
-            "line {number}: group {} is not a version this taguru reads (it reads \
-             {GROUP_VERSION})",
-            line.group
-        ));
-    }
-    check_size(number, "name", &line.name, MAX_CONTEXT_NAME_BYTES)?;
-    check_nonempty(number, "name", &line.name)?;
+    crate::format::check_version(line.version.as_deref())
+        .map_err(|error| format!("line {number}: group record: {error}"))?;
+    check_size(number, "id", &line.id, MAX_CONTEXT_NAME_BYTES)?;
+    check_nonempty(number, "id", &line.id)?;
     check_size(
         number,
         "description",
@@ -295,7 +317,7 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
             ));
         }
     }
-    Ok((line.name, record))
+    Ok((line.id, record))
 }
 
 /// The `schema` record line: one `context`'s whole schema
@@ -306,8 +328,10 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaLine {
-    #[serde(alias = "taguru_schema")]
-    schema: u64,
+    #[serde(rename = "type")]
+    _record_type: SchemaTag,
+    #[serde(default)]
+    version: Option<String>,
     context: String,
     mode: schema::SchemaMode,
     closed_labels: bool,
@@ -329,18 +353,12 @@ fn parse_schema(
 ) -> Result<(String, schema::InstalledSchema), String> {
     let line: SchemaLine = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a schema record: {error}"))?;
-    if line.schema != schema::SCHEMA_VERSION {
-        return Err(format!(
-            "line {number}: schema {} is not a version this taguru reads (it reads \
-             {})",
-            line.schema,
-            schema::SCHEMA_VERSION
-        ));
-    }
+    crate::format::check_version(line.version.as_deref())
+        .map_err(|error| format!("line {number}: schema record: {error}"))?;
     check_size(number, "context", &line.context, MAX_CONTEXT_NAME_BYTES)?;
     check_nonempty(number, "context", &line.context)?;
     let document = schema::SchemaDocument {
-        schema: line.schema,
+        schema: schema::SCHEMA_VERSION,
         mode: line.mode,
         closed_labels: line.closed_labels,
         types: line.types,
@@ -514,14 +532,10 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         }
         let value: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("line {number}: not JSON: {error}"))?;
-        let has_key = |key: &str| {
-            value
-                .as_object()
-                .is_some_and(|object| object.contains_key(key))
-        };
-        let is_header = has_key("taguru_batch");
-        let is_schema = has_key("schema") || has_key("taguru_schema");
-        let is_group = has_key("group") || has_key("taguru_group");
+        let record_type = crate::format::record_type(&value);
+        let is_header = record_type == Some("source");
+        let is_schema = record_type == Some("schema");
+        let is_group = record_type == Some("group");
         if is_header || is_schema || is_group {
             // Any stream-level record closes the batch before it — one
             // boundary step, however many marker kinds exist.
@@ -568,8 +582,8 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
             match &mut current {
                 None => {
                     return Err(format!(
-                        "line {number}: not a source file header (no taguru_batch field) where \
-                         one was expected"
+                        "line {number}: not a source file header (no `\"type\": \"source\"`) \
+                         where one was expected"
                     ));
                 }
                 Some(batch) => parse_op(
@@ -632,19 +646,12 @@ pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        if object.contains_key("taguru_batch")
-            || object.contains_key("schema")
-            || object.contains_key("taguru_schema")
-            || object.contains_key("group")
-            || object.contains_key("taguru_group")
-        {
+        let record_type = crate::format::record_type(&value);
+        if matches!(record_type, Some("source" | "schema" | "group")) {
             if let Some(batch_start) = current_start.take() {
                 ranges.push(batch_start..start);
             }
-            if object.contains_key("taguru_batch") {
+            if record_type == Some("source") {
                 current_start = Some(start);
             }
         }
@@ -712,17 +719,12 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
 fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String> {
     let header: Header = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a source file header: {error}"))?;
-    if header.taguru_batch != BATCH_VERSION {
-        return Err(format!(
-            "line {number}: taguru_batch {} is not a version this taguru reads (it reads \
-             {BATCH_VERSION})",
-            header.taguru_batch
-        ));
-    }
+    crate::format::check_version(header.version.as_deref())
+        .map_err(|error| format!("line {number}: source file header: {error}"))?;
     check_size(number, "context", &header.context, MAX_CONTEXT_NAME_BYTES)?;
     check_nonempty(number, "context", &header.context)?;
-    check_size(number, "source", &header.source, MAX_NAME_BYTES)?;
-    check_nonempty(number, "source", &header.source)?;
+    check_size(number, "id", &header.id, MAX_NAME_BYTES)?;
+    check_nonempty(number, "id", &header.id)?;
     if let Some(create) = &header.create {
         check_size(
             number,
@@ -733,7 +735,7 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
     }
     Ok(Batch {
         context: header.context,
-        source: header.source,
+        source: header.id,
         create: header.create.map(|block| ContextMeta {
             description: block.description,
             pinned: block.pinned,

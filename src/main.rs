@@ -23,6 +23,7 @@ mod evalset;
 mod evaluate;
 mod export;
 mod extract;
+mod format;
 mod groups;
 mod hash;
 mod hydrate;

@@ -543,10 +543,10 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
 #[test]
 fn mcp_import_tool_reports_durable_prefix_on_a_mid_stream_rejection() {
     let server = Server::start("mcp-import-durable-prefix");
-    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \
+    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
                    \"create\": {\"description\": \"d\"}}\n\
                   {\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}\n\
-                  {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, reply) = server.call(
         "POST",

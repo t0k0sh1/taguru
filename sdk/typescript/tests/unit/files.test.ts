@@ -12,7 +12,7 @@ function fetchThatFailsMidStream(errorMessage: string): typeof fetch {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode('{"taguru_batch": 1, "context": "sake"}\n'));
+        controller.enqueue(encoder.encode('{"type": "source", "context": "sake"}\n'));
         controller.error(new Error(errorMessage));
       },
     });
@@ -44,7 +44,7 @@ describe("exportToFile", () => {
 
   it("writes the full export atomically on success", async () => {
     const target = join(dir, "export.ndjson");
-    const body = '{"taguru_batch": 1, "context": "sake"}\n{"subject": "s", "label": "l", "object": "o"}\n';
+    const body = '{"type": "source", "context": "sake"}\n{"subject": "s", "label": "l", "object": "o"}\n';
     const client = new Taguru({
       base_url: "http://test",
       api_key: "",

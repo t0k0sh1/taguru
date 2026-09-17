@@ -105,7 +105,7 @@ def test_raw_text_routes_bypass_envelope() -> None:
 
 
 def test_export_returns_raw_ndjson() -> None:
-    ndjson = '{"taguru_batch":1,"context":"sake","source":"a"}\n{"passage":"text"}\n'
+    ndjson = '{"type": "source","context":"sake","id":"a"}\n{"passage":"text"}\n'
     client = sync_client(lambda _req: httpx.Response(200, text=ndjson))
     assert client.context("sake").export() == ndjson
 
@@ -274,7 +274,7 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(lambda _req: ok_response(outcome))
-    result = client.import_batches('{"taguru_batch":1}')
+    result = client.import_batches('{"type": "source"}')
     assert len(result.batches) == 1
     assert result.batches[0].context == "sake"
     # The new locator counters (#346) must survive normalization, not just
@@ -284,7 +284,7 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     assert result.groups == []
 
     client = sync_client(lambda _req: ok_response({"batches": [outcome, outcome]}))
-    result = client.import_batches('{"taguru_batch":1}')
+    result = client.import_batches('{"type": "source"}')
     assert [o.source for o in result.batches] == ["a", "a"]
 
 
@@ -307,7 +307,7 @@ async def test_async_import_batches_decodes_locator_counts() -> None:
         "association_paragraphs_dropped": 0,
     }
     client = async_client(lambda _req: ok_response(outcome))
-    result = await client.import_batches('{"taguru_batch":1}')
+    result = await client.import_batches('{"type": "source"}')
     assert result.batches[0].locators_stored == 2
     assert result.batches[0].locators_dropped == 5
 
@@ -338,7 +338,7 @@ def test_import_carries_group_restore_outcomes() -> None:
             }
         )
     )
-    result = client.import_batches('{"taguru_batch":1}')
+    result = client.import_batches('{"type": "source"}')
     assert len(result.batches) == 1
     assert result.groups == [
         GroupImportOutcome(name="brewers", outcome="created", contexts=2, groups=0)
@@ -348,7 +348,7 @@ def test_import_carries_group_restore_outcomes() -> None:
 async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
     """The file read must run in a worker thread, or a slow disk stalls the loop."""
     path = tmp_path / "batch.jsonl"
-    path.write_text('{"taguru_batch":1}\n', encoding="utf-8")
+    path.write_text('{"type": "source"}\n', encoding="utf-8")
     outcome = {
         "context": "sake",
         "source": "a",

@@ -600,7 +600,7 @@ async def test_async_client_full_smoke(server, fresh_name: str) -> None:
         names = [e.name async for e in aclient.contexts.iter()]
         assert fresh_name in names
         exported = await ctx.export()
-        assert '"taguru_batch"' in exported
+        assert '"type":"source"' in exported
         await aclient.contexts.delete(fresh_name)
 
 

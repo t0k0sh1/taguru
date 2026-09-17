@@ -1284,7 +1284,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
 
     std::fs::write(
         dir.join("cells/m/run01/brewery.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
     )
@@ -1535,14 +1535,14 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
 
     std::fs::write(
         dir.join("cells/m1/run01/brewery.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("cells/m2/run01/brewery.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":-1.0,\"paragraph\":0}\n",
     )
@@ -1887,7 +1887,7 @@ fn the_mcp_bridge_applies_a_multi_line_import_stream_through_a_live_server() {
         .spawn()
         .expect("bridge must spawn");
 
-    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-bridge\", \
+    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-bridge\", \
                  \"create\": {\"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
     let request = serde_json::json!({
@@ -2131,7 +2131,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     std::fs::create_dir_all(dir.join("batches")).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("batches/a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\"}\n\
          {\"paragraph\": 0, \"section\": \"概要\"}\n\
@@ -2142,7 +2142,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("batches/b.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
     )
     .expect("fixture must be writable");
@@ -2150,7 +2150,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     // batch of the run, so the file order never matters.
     std::fs::write(
         dir.join("batches/kura.jsonl"),
-        "{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2193,7 +2193,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let group_stream = std::fs::read_to_string(exports.join("kura.group.jsonl"))
         .expect("the group record must exist");
     assert!(
-        group_stream.contains("\"group\":1") && group_stream.contains("蔵まとめ"),
+        group_stream.contains("\"type\":\"group\"") && group_stream.contains("蔵まとめ"),
         "{group_stream}"
     );
 
@@ -2278,7 +2278,7 @@ fn export_refuses_an_empty_data_directory_and_an_uncreatable_out() {
     // Seed one context so the run gets to --out creation, then block it.
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
@@ -2326,15 +2326,15 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"old\", \"source\": \"b.md\", \
+         {\"type\": \"source\", \"context\": \"old\", \"id\": \"b.md\", \
          \"create\": {\"description\": \"o\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"group\": 1, \"name\": \"kura\", \"description\": \"k\", \
+         {\"type\": \"group\", \"id\": \"kura\", \"description\": \"k\", \
          \"contexts\": [\"sake\"]}\n\
-         {\"group\": 1, \"name\": \"dead\", \"description\": \"x\", \
+         {\"type\": \"group\", \"id\": \"dead\", \"description\": \"x\", \
          \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2429,7 +2429,7 @@ fn export_counts_an_unknown_context_as_a_failure() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
@@ -2477,14 +2477,14 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("kura.jsonl"),
-        "{\"group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2541,11 +2541,11 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     // first.jsonl claims three sources in one stream — all novel.
     std::fs::write(
         dir.join("first.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s2\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s2\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s3\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s3\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2553,11 +2553,11 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     // own — one refused FILE, but three separate ownership conflicts.
     std::fs::write(
         dir.join("second.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1b\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s2\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s2\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2b\", \"weight\": 1.0}\n\
-         {\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s3\"}\n\
+         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s3\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3b\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2867,7 +2867,7 @@ fn compact_rewrites_a_data_directory_offline() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
@@ -2875,7 +2875,7 @@ fn compact_rewrites_a_data_directory_offline() {
     // A revision that drops the fact leaves dead records behind…
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2917,14 +2917,14 @@ fn compact_dry_run_reports_dead_weight_without_rewriting() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2986,14 +2986,14 @@ fn compact_json_emits_a_single_parseable_document_dry_run_and_real() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -3060,13 +3060,13 @@ fn compact_parallel_output_matches_the_sequential_run_byte_for_byte() {
         // something actually sorts it.
         std::fs::write(
             dir.join("a.jsonl"),
-            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\", \
+            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\", \
+             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\", \
+             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n",
         )
@@ -3075,11 +3075,11 @@ fn compact_parallel_output_matches_the_sequential_run_byte_for_byte() {
         // the first, leaving dead edges for compact to reclaim.
         std::fs::write(
             dir.join("b.jsonl"),
-            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\"}\n\
+            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");
@@ -3158,7 +3158,7 @@ fn compact_counts_an_unknown_context_as_a_failure_on_every_local_path() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
@@ -3214,7 +3214,7 @@ fn compact_accepts_a_single_config_flag() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
@@ -4041,7 +4041,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let batch = dir.join("a.jsonl");
     std::fs::write(
         &batch,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
           \"create\": {\"description\": \"酒\"}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
@@ -4052,8 +4052,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     // judging the set would be exactly the defect this pins.
     std::fs::write(
         &group,
-        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
-         {\"group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
+         {\"type\": \"group\", \"id\": \"valid\", \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4102,7 +4102,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"taguru_batch\": 1, \"context\": \"ghost\", \"source\": \"g.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context\": \"ghost\", \"id\": \"g.md\", \"create\": {}}\n",
     )
     .expect("fixture must be writable");
     let healed = run_with_env(
@@ -4151,14 +4151,14 @@ fn a_failing_files_apply_does_not_stop_the_files_after_it() {
     let broken = dir.join("a.jsonl");
     std::fs::write(
         &broken,
-        "{\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"missing\", \"id\": \"a.md\"}\n\
          {\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     let healthy = dir.join("b.jsonl");
     std::fs::write(
         &healthy,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\", \"create\": {}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -4257,9 +4257,9 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let dir = common::scratch_dir("cli-import-restated-records");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let first = dir.join("first.jsonl");
-    let records = "{\"schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+    let records = "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
                    \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-                   {\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+                   {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n";
     std::fs::write(&first, records).expect("fixture must be writable");
     let second = dir.join("second.jsonl");
     std::fs::write(&second, records).expect("fixture must be writable");
@@ -4306,7 +4306,7 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let batch = dir.join("a.jsonl");
     std::fs::write(
         &batch,
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
           \"create\": {\"description\": \"酒\"}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
@@ -4314,13 +4314,13 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let valid = dir.join("valid.jsonl");
     std::fs::write(
         &valid,
-        "{\"group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"group\", \"id\": \"valid\", \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");

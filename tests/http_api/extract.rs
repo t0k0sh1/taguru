@@ -1390,7 +1390,7 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
             .unwrap_or_else(|| panic!("a batch file for {file}"));
         let body = std::fs::read_to_string(&batch_file).unwrap();
         let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
-        assert_eq!(header["source"], expected_source, "{body}");
+        assert_eq!(header["id"], expected_source, "{body}");
         let passage: Value = serde_json::from_str(body.lines().nth(1).unwrap()).unwrap();
         assert_eq!(passage["date"], 1785974400u64, "{body}");
         assert_eq!(passage["tags"], json!(["ops", "リリース"]), "{body}");
@@ -1448,7 +1448,7 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
         .find(|body| {
             serde_json::from_str::<Value>(body.lines().next().unwrap_or(""))
                 .ok()
-                .is_some_and(|header| header["source"] == "session:claude:abc")
+                .is_some_and(|header| header["id"] == "session:claude:abc")
         })
         .expect("a single document takes the --source-id verbatim into its batch header");
 
@@ -1592,7 +1592,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s0"}"#,
+            r#"{"type": "source","context":"ops","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
             "\n",
@@ -1649,7 +1649,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"taguru_batch":1,"context":"ops","source":"s0"}"#,
+            r#"{"type": "source","context":"ops","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"cargo-nextest","weight":1.0}"#,
             "\n",
@@ -2330,7 +2330,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"taguru_batch":1,"context":"c","source":"minutes-1.md"}"#,
+            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":2.0}"#,
             "\n",
@@ -2426,7 +2426,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"taguru_batch":1,"context":"c","source":"minutes-1.md"}"#,
+            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":1.0}"#,
             "\n",
@@ -9190,7 +9190,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     // is 0.9.3-shaped input too: no trace beside it.
     std::fs::write(
         out.join("b.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"b.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"b.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\\n\\n蔵は山にある。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"所在\",\"object\":\"山\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
@@ -9310,21 +9310,21 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     // CONTEXT alias, one passage-less batch (skipped, counted).
     std::fs::write(
         dir.join("c.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"c.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"c.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("nopassage.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"n.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"n.md\"}\n\
          {\"subject\":\"a\",\"label\":\"l\",\"object\":\"b\",\"weight\":1.0}\n",
     )
     .unwrap();
     let vocabulary = dir.join("vocabulary.jsonl");
     std::fs::write(
         &vocabulary,
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"prior.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"prior.md\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
     )
@@ -10936,14 +10936,14 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
     let out = batch_dir("extract-anchoring-failed");
     std::fs::write(
         out.join("good.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"good.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"good.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"ラーメン\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         out.join("broken.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"c\"}\n",
+        "{\"type\": \"source\",\"context\":\"c\"}\n",
     )
     .unwrap();
     let report_path = out.join("anchoring.json");

@@ -401,14 +401,13 @@ fn flush_and_export_ride_the_mcp_transport() {
     let exported = tool(2, "export_context", json!({"context": "sake"}));
     assert!(exported.get("isError").is_none(), "{exported}");
     let text = exported["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("taguru_batch"), "{text}");
+    assert!(text.contains("\"type\":\"source\""), "{text}");
     assert!(text.contains("青嶺酒造"), "{text}");
 
     let group = tool(3, "export_group", json!({"name": "kura"}));
     assert!(group.get("isError").is_none(), "{group}");
     let text = group["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("\"group\""), "{text}");
-    assert!(!text.contains("\"taguru_group\""), "{text}");
+    assert!(text.contains("\"type\":\"group\""), "{text}");
     assert!(text.contains("\"kura\""), "{text}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
@@ -576,7 +575,7 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
 #[test]
 fn the_mcp_import_tool_applies_a_multi_line_stream() {
     let server = Server::start("mcp-import");
-    let stream = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-mcp\", \
+    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-mcp\", \
                  \"create\": {\"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
@@ -602,7 +601,7 @@ fn the_mcp_import_tool_applies_a_multi_line_stream() {
 
     // dry_run previews without writing: the context this batch would
     // create does not exist afterward.
-    let preview_stream = "{\"taguru_batch\": 1, \"context\": \"bunko\", \"source\": \"s\", \
+    let preview_stream = "{\"type\": \"source\", \"context\": \"bunko\", \"id\": \"s\", \
                           \"create\": {\"description\": \"d\"}}\n";
     let (status, preview_answer) = server.call(
         "POST",

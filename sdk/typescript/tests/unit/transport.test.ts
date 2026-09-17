@@ -77,7 +77,7 @@ describe("envelope and raw-body handling", () => {
   });
 
   it("export returns raw NDJSON", async () => {
-    const ndjson = '{"taguru_batch":1}\n{"passage":"text"}\n';
+    const ndjson = '{"type": "source"}\n{"passage":"text"}\n';
     const client = stubClient(() => ({ status: 200, body: ndjson }));
     await expect(client.context("sake").export()).resolves.toBe(ndjson);
   });

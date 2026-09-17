@@ -242,7 +242,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     // Import carries its contexts in the body; the grant is checked
     // batch by batch before anything applies. (Import itself is an
     // admin verb, so even the granted context refuses for a writer.)
-    let batch = "{\"taguru_batch\": 1, \"context\": \"bunko\", \"source\": \"s\"}\n";
+    let batch = "{\"type\": \"source\", \"context\": \"bunko\", \"id\": \"s\"}\n";
     let (status, _) = post_import(&server, batch, Some("stok"));
     assert_eq!(status, 403);
     let (status, scoped_admin) = post_import(&server, batch, Some("atok"));
@@ -267,14 +267,14 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         json!("nothing_written"),
         "{out_of_grant}"
     );
-    let sake_batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s\"}\n";
+    let sake_batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s\"}\n";
     let (status, in_grant) = post_import(&server, sake_batch, Some("ctok"));
     assert_eq!(status, 200, "{in_grant}");
 
     // A schema record's context is judged by the same grant, one step
     // earlier than groups (schemas install before groups restore) —
     // and with the same nothing-written integrity claim.
-    let schema_record = "{\"schema\": 1, \"context\": \"bunko\", \"mode\": \"warn\", \
+    let schema_record = "{\"type\": \"schema\", \"context\": \"bunko\", \"mode\": \"warn\", \
                          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
     let (status, schema_refused) = post_import(&server, schema_record, Some("ctok"));
     assert_eq!(status, 403, "{schema_refused}");
@@ -1053,7 +1053,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         .post(format!("{base}/import"))
         .header("Authorization", "Bearer opskey")
         .send(
-            "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n\
+            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
              {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
         )
         .unwrap_or_else(|error| panic!("import: {error}"))

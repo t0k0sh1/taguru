@@ -166,7 +166,7 @@ describe("TaguruIngester", () => {
 
     expect(server.imported).toHaveLength(1);
     const lines = server.imported[0]!.trim().split("\n").map((line) => JSON.parse(line));
-    expect(lines[0].taguru_batch).toBe(1);
+    expect(lines[0].type).toBe("source");
     expect(lines[0].create).toBeUndefined();
     expect(lines[1]).toEqual({ passage: DOC_TEXT }); // verbatim, unchunked
     expect(lines[2]).toEqual({ paragraph: 1, question: "杜氏は誰?" });
@@ -246,7 +246,7 @@ describe("TaguruIngester", () => {
       dry_run: true,
     });
     expect(outcome.ok).toBe(true);
-    expect(outcome.ndjson).toContain('"taguru_batch"');
+    expect(outcome.ndjson).toContain('"type":"source"');
     expect(server.imported).toEqual([]);
     expect(outcome.associations).toBe(0);
   });

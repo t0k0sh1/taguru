@@ -89,26 +89,26 @@ fn seed(server: &Server) {
     // forwards the filter through its scatter-gather re-serialization;
     // both texts share 麹 for the rank-interleaved passage merge.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-a\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-a\"}\n",
         "{\"passage\": \"麹と水で仕込む。\\n\\n辛口の酒は麹の使い方で決まる。\", \
           \"stored_at\": 1700000000, \"tags\": [\"仕込み\"]}\n",
         "{\"subject\": \"青嶺\", \"label\": \"銘柄である\", \"object\": \"酒\", \"weight\": 2.0}\n",
         "{\"subject\": \"辛口\", \"label\": \"特徴\", \"object\": \"酒\", \"weight\": 1.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"taguru_batch\": 1, \"context\": \"glossary\", \"source\": \"doc-b\"}\n",
+        "{\"type\": \"source\", \"context\": \"glossary\", \"id\": \"doc-b\"}\n",
         "{\"passage\": \"麹（こうじ）は蒸した米に麹菌を生やしたもの。\", \"stored_at\": 1700000001}\n",
         "{\"subject\": \"辛口\", \"label\": \"意味する\", \"object\": \"甘くない\", \"weight\": 2.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"taguru_batch\": 1, \"context\": \"breweries\", \"source\": \"doc-c\"}\n",
+        "{\"type\": \"source\", \"context\": \"breweries\", \"id\": \"doc-c\"}\n",
         "{\"subject\": \"青嶺酒造\", \"label\": \"造る\", \"object\": \"青嶺\", \"weight\": -2.5}\n",
         // A schema record (ADR 0009 §13, #384): sake lives on shard A —
         // this proves the router's OWN routing table for schema
         // records (never broadcast, unlike groups) sends it to the
         // right shard rather than reusing whatever shard a nearby
         // batch chunk happened to land on.
-        "{\"schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
           \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"group\": 1, \"name\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
+        "{\"type\": \"group\", \"id\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
@@ -518,9 +518,9 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     // the record must NOT have been applied when the refusal comes
     // back from the group projection on another shard.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"scoped-doc\"}\n",
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"scoped-doc\"}\n",
         "{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}\n",
-        "{\"group\": 1, \"name\": \"overreach\", \"contexts\": [\"sake\", \"glossary\"]}\n",
+        "{\"type\": \"group\", \"id\": \"overreach\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
     let (status, body) = post_import(&router, stream, Some("hush"));
     assert_eq!(status, 403, "{body}");
@@ -681,9 +681,9 @@ fn schema_outcomes_answer_in_stream_order_not_shard_number_order() {
     router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
 
     let stream = concat!(
-        "{\"schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"schema\": 1, \"context\": \"ctx_b\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ctx_b\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -720,9 +720,9 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
     // record's context does not exist on its own shard.
 
     let stream = concat!(
-        "{\"schema\": 1, \"context\": \"ctx_ok\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ctx_ok\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -787,7 +787,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     // A record NO shard holds answers "created" — every projection is
     // created, and a created projection carrying members must not slip
     // into the "replaced" arm (this pins the branch order too).
-    let stream = "{\"group\": 1, \"name\": \"g0\", \"contexts\": [\"ctx_a\"]}\n";
+    let stream = "{\"type\": \"group\", \"id\": \"g0\", \"contexts\": [\"ctx_a\"]}\n";
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -803,7 +803,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     // The same membership shard A already holds: A answers
     // "unchanged", B "created" with an empty projection — nothing in
     // the union changed.
-    let stream = "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\"]}\n";
+    let stream = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\"]}\n";
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -814,7 +814,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
 
     // The record gains ctx_b: shard B's projection now carries a
     // member, so the union's row really changed.
-    let stream = "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ctx_b\"]}\n";
+    let stream = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ctx_b\"]}\n";
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -838,7 +838,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     router.ok("PUT", "/contexts/ctx_c", Some(json!({})));
     router.ok("PUT", "/contexts/ctx_d", Some(json!({})));
     shard_c.ok("PUT", "/groups/g2", Some(json!({"contexts": ["ctx_c"]})));
-    let stream = "{\"group\": 1, \"name\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
+    let stream = "{\"type\": \"group\", \"id\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -935,9 +935,9 @@ fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
     // stream-level parsing accepts it, so only the owning shard's own
     // dry run can refuse it.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"taguru_batch\": 1, \"context\": \"ctx_b\", \"source\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"ctx_b\", \"id\": \"b.md\"}\n",
         "{\"subject\": \"p\", \"label\": \"q\", \"object\": \"r\", \"weight\": 1.0}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -976,7 +976,7 @@ fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
         &[],
     );
 
-    let schema_only = "{\"schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+    let schema_only = "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
     let (status, body) = post_import(&router, schema_only, None);
     assert_eq!(status, 404, "{body}");
@@ -986,7 +986,7 @@ fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
         "no batch and no schema landed before this refusal: {body}"
     );
 
-    let group_only = "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ghost\"]}\n";
+    let group_only = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ghost\"]}\n";
     let (status, body) = post_import(&router, group_only, None);
     assert_eq!(status, 404, "{body}");
     assert_ne!(
@@ -1016,11 +1016,11 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
     // run — and the rewrap must name BOTH landed counts, the
     // both-nonzero arm of its landed message.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1049,9 +1049,9 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
     );
     router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1079,9 +1079,9 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
     );
     router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
     let stream = concat!(
-        "{\"schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1115,9 +1115,9 @@ fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
     // preflight (scope checks only) and refuses on the real run —
     // AFTER the stub shard's batch chunk landed.
     let stream = concat!(
-        "{\"taguru_batch\": 1, \"context\": \"stubbed\", \"source\": \"doc\"}\n",
+        "{\"type\": \"source\", \"context\": \"stubbed\", \"id\": \"doc\"}\n",
         "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
-        "{\"schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);

@@ -432,7 +432,7 @@ may be half-applied — re-import its source file or retract the source</code></
       job — diff the corpus's current file list (or section list) against
       <code>iter_sources()</code>/<code>GET /contexts/{name}/sources</code>, and for anything
       present in Taguru but absent from the corpus, emit a header-only <b>pure retraction</b>
-      source file (a <code>taguru_batch</code> header with no operation lines) naming that source — see
+      source file (a <code>"type": "source"</code> header with no operation lines) naming that source — see
       <a href="import.html#one-file-one-source">"one file = one source's complete truth"</a>.
     </p>
   </section>

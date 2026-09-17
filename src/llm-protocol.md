@@ -528,7 +528,7 @@ only under `warn`.
   counts as growth even when it would net smaller, because its true
   size is only knowable after it applies. To slim a source at the
   ceiling: retract it first (over `/import`, a header-only source file —
-  just `taguru_batch`/`context`/`source` — is exactly that
+  just `type`/`id`/`context` — is exactly that
   retraction), then re-send the smaller version.
 - `501` `/embeddings/refresh` without a provider configured
   (server-side TAGURU_EMBED_*). `502` embedding provider failure
@@ -614,7 +614,7 @@ only under `warn`.
     "http_contract": {"current": 1, "supported": [1]},
     "mcp_contract": {"current": 1, "supported": [1]},
     "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
-    "batch_formats": [1],
+    "batch_formats": ["2026-09-17"],
     "image_formats": [1, 2, 3, 4, 5, 6],
     "communities_formats": [1]
   }
@@ -636,8 +636,9 @@ only under `warn`.
   and never on an absent or unreadable `/version` (a server predating
   this endpoint is treated as speaking `http_contract: 1`, not refused
   outright).
-- The source file format (`taguru_batch: 1`) and the image format are
-  versioned independently of the API: old source files stay readable,
-  and images migrate forward on load. Rolling a server BINARY back
+- The source file format (its `version` column, a date) and the image
+  format are versioned independently of the API: a source file naming a
+  revision this build does not read is refused, one naming none is read
+  as this build's own, and images migrate forward on load. Rolling a server BINARY back
   past an image-format bump needs the data rolled back with it — the
   release notes flag format bumps.

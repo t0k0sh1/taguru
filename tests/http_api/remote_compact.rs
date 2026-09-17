@@ -33,14 +33,14 @@ fn seed_dead_edge(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -400,24 +400,24 @@ fn remote_parallel_output_matches_the_sequential_remote_run() {
         // that actually sorts it.
         std::fs::write(
             dir.join("a.jsonl"),
-            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\", \
+            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\", \
+             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\", \
+             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\", \
              \"create\": {\"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");
         std::fs::write(
             dir.join("b.jsonl"),
-            "{\"taguru_batch\": 1, \"context\": \"charlie\", \"source\": \"a.md\"}\n\
+            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"taguru_batch\": 1, \"context\": \"bravo\", \"source\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");

@@ -799,7 +799,7 @@ def self_test() -> int:
             encoding="utf-8",
         )
         (out / "h.jsonl").write_text(
-            '{"taguru_batch":1,"context":"c","source":"h.md"}\n', encoding="utf-8"
+            '{"type": "source","context":"c","id":"h.md"}\n', encoding="utf-8"
         )
         # An attempts log with no segment record is neither: skipped.
         (trace_dir / "g.attempts.jsonl").write_text(

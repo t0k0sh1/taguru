@@ -31,14 +31,14 @@ fn write_results_dir(tag: &str) -> PathBuf {
 
     std::fs::write(
         dir.join("cells/m1/run01/brewery.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"青嶺は青嶺酒造が造る銘柄です。\"}\n\
          {\"subject\":\"青嶺\",\"label\":\"醸造元\",\"object\":\"青嶺酒造\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("cells/m2/run01/history.jsonl"),
-        "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"corpus/history.md\"}\n\
+        "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"corpus/history.md\"}\n\
          {\"passage\":\"青嶺という言葉の歴史は古い。\"}\n\
          {\"subject\":\"青嶺\",\"label\":\"由来\",\"object\":\"不明\",\"weight\":1.0,\"paragraph\":0}\n",
     )
@@ -127,7 +127,7 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
         std::fs::create_dir_all(dir.join(format!("cells/{model}/{run}"))).unwrap();
         std::fs::write(
             dir.join(format!("cells/{model}/{run}/brewery.jsonl")),
-            "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"corpus/brewery.md\"}\n\
+            "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"corpus/brewery.md\"}\n\
              {\"passage\":\"青嶺は青嶺酒造が造る銘柄です。\"}\n\
              {\"subject\":\"青嶺\",\"label\":\"醸造元\",\"object\":\"青嶺酒造\",\"weight\":1.0,\"paragraph\":0}\n",
         )

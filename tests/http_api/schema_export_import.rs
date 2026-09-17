@@ -14,7 +14,7 @@ use crate::support::*;
 
 fn schema_line(context: &str, mode: &str) -> String {
     format!(
-        "{{\"schema\": 1, \"context\": \"{context}\", \"mode\": \"{mode}\", \
+        "{{\"type\": \"schema\", \"context\": \"{context}\", \"mode\": \"{mode}\", \
          \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
          \"relations\": {{\"杜氏\": {{\"domain\": [\"Brewery\"], \"range\": []}}}}}}\n"
     )
@@ -31,10 +31,10 @@ fn schema_line(context: &str, mode: &str) -> String {
 fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_it() {
     let server = Server::start("schema-stream-install");
     let stream = format!(
-        "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
           \"create\": {{\"description\": \"d\"}}}}\n\
          {schema_record}\
-         {{\"group\": 1, \"name\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
+         {{\"type\": \"group\", \"id\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
         schema_record = schema_line("sake", "warn"),
     );
     let (status, outcome) = post_import(&server, &stream, None);
@@ -66,7 +66,7 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
     server.ok("PUT", "/contexts/plain", Some(json!({})));
     let (status, plain) = post_import(
         &server,
-        "{\"taguru_batch\": 1, \"context\": \"plain\", \"source\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context\": \"plain\", \"id\": \"b.md\"}\n",
         None,
     );
     assert_eq!(status, 200, "{plain}");
@@ -102,7 +102,7 @@ fn a_scoped_key_without_a_grant_on_the_schema_records_context_refuses_with_nothi
     assert_eq!(put("/contexts/sake").0, 200);
     assert_eq!(put("/contexts/bunko").0, 200);
     let stream = format!(
-        "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}}\n\
+        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
         schema_record = schema_line("bunko", "warn"),
@@ -144,7 +144,7 @@ fn a_scoped_key_without_a_grant_on_the_schema_records_context_refuses_with_nothi
 fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_durable() {
     let server = Server::start("schema-stream-no-context");
     let stream = format!(
-        "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
           \"create\": {{\"description\": \"d\"}}}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
@@ -238,9 +238,9 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
     );
     assert_eq!(code, 0, "{stderr}");
     let stream = std::fs::read_to_string(out.join("sake.jsonl")).expect("sake.jsonl must exist");
-    assert!(stream.contains("\"schema\":1"), "{stream}");
     assert!(
-        stream.find("schema").unwrap() < stream.find("taguru_batch").unwrap_or(usize::MAX),
+        stream.find("\"type\":\"schema\"").unwrap()
+            < stream.find("\"type\":\"source\"").unwrap_or(usize::MAX),
         "the schema record must ride first — {stream}"
     );
 

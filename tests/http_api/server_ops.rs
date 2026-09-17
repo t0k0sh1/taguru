@@ -72,7 +72,7 @@ fn version_is_bare_json_and_matches_the_protocol_trailer() {
     assert_eq!(body["http_contract"]["current"], json!(1));
     assert_eq!(body["http_contract"]["supported"], json!([1]));
     assert_eq!(body["mcp_contract"]["current"], json!(1));
-    assert_eq!(body["batch_formats"], json!([1]));
+    assert_eq!(body["batch_formats"], json!(["2026-09-17"]));
     assert_eq!(body["communities_formats"], json!([1]));
     assert!(
         body["image_formats"]
@@ -130,14 +130,14 @@ fn a_tight_timeout_cuts_a_multi_batch_import_short_instead_of_running_it_to_comp
     let server = Server::start_with_env("timeout-import", &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")]);
     let mut stream = String::new();
     stream.push_str(
-        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-0\", \
+        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-0\", \
          \"create\": {\"description\": \"d\"}}\n",
     );
     stream
         .push_str("{\"subject\": \"s0\", \"label\": \"l\", \"object\": \"o0\", \"weight\": 1.0}\n");
     for i in 1..BATCH_COUNT {
         stream.push_str(&format!(
-            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-{i}\"}}\n"
+            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-{i}\"}}\n"
         ));
         stream.push_str(&format!(
             "{{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o{i}\", \"weight\": 1.0}}\n"
