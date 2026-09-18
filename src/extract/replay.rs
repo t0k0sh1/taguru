@@ -227,8 +227,8 @@ impl ReplayIndex {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
-                match value["kind"].as_str() {
-                    Some("segment") | Some("document") => {
+                match value["type"].as_str() {
+                    Some("segment") => {
                         current_run_id = value["run_id"].as_str().map(str::to_string);
                     }
                     Some("system") => {

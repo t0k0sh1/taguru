@@ -10,17 +10,19 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// ============================== #851/#904 document -> segment reader tolerance ==============================
+// ============================== segment_id ==============================
 
+/// `segment_id` is the one name read; the pre-#904 `document_id` is not
+/// a fallback (ADR 0042 §3.5: earlier spellings are not read).
 #[test]
-fn segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one() {
+fn segment_id_field_reads_segment_id_only() {
     assert_eq!(
         segment_id_field(&serde_json::json!({"segment_id": "a", "document_id": "b"})),
         "a"
     );
     assert_eq!(
         segment_id_field(&serde_json::json!({"document_id": "b"})),
-        "b"
+        ""
     );
     assert_eq!(segment_id_field(&serde_json::json!({})), "");
 }
@@ -712,16 +714,7 @@ fn parse_args_recognizes_with_text() {
 /// to exercise every metric family without a real `taguru extract`
 /// child process.
 fn synthetic_results_dir(tag: &str) -> PathBuf {
-    synthetic_results_dir_with_kind(tag, "document")
-}
-
-/// [`synthetic_results_dir`], with the runs file's per-segment record
-/// `kind` parameterized so #851/#904's `document` -> `segment` reader
-/// tolerance can be exercised against the exact same fixture shape
-/// (`compare::segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one`
-/// covers the field-name half of that fallback in isolation; this
-/// covers the `kind` half end to end).
-fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
+    let kind = "segment";
     let dir = temp_dir(tag);
     fs::create_dir_all(dir.join("runs")).unwrap();
     fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
@@ -742,51 +735,51 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
             "run_index": 1, "prompt_version": 1,
         }),
         serde_json::json!({
-            "kind": kind, "ts": 100.0, "cell_id": "m.run01",
-            "document_id": "brewery", "source": "corpus/brewery.md",
+            "type": kind, "ts": 100.0, "cell_id": "m.run01",
+            "segment_id": "brewery", "source": "corpus/brewery.md",
             "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
-            "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
+            "type": "attempt", "source": "corpus/brewery.md", "stage": "item",
             "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": "stop_valid",
             "length_limited": false, "elapsed_seconds": 4.0,
             "provider_metadata": {"finish_reason": "stop", "input_tokens": 1000,
                 "output_tokens": 200, "total_tokens": 1200},
             "parse_error": null, "validation_issues": null,
             "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "brewery", "segment_sha256": "sha-brewery",
+            "segment_id": "brewery", "segment_sha256": "sha-brewery",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": kind, "ts": 110.0, "cell_id": "m.run01",
-            "document_id": "brewery", "source": "corpus/brewery.md",
+            "type": kind, "ts": 110.0, "cell_id": "m.run01",
+            "segment_id": "brewery", "source": "corpus/brewery.md",
             "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 2, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
         serde_json::json!({
-            "kind": kind, "ts": 111.0, "cell_id": "m.run01",
-            "document_id": "sake", "source": "corpus/sake.md",
+            "type": kind, "ts": 111.0, "cell_id": "m.run01",
+            "segment_id": "sake", "source": "corpus/sake.md",
             "segment_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
-            "kind": "attempt", "source": "corpus/sake.md", "stage": "item",
+            "type": "attempt", "source": "corpus/sake.md", "stage": "item",
             "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": "timeout",
             "length_limited": false, "elapsed_seconds": 30.0,
             "provider_metadata": null, "parse_error": "timed out", "validation_issues": null,
             "ts": 141.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "sake", "segment_sha256": "sha-sake",
+            "segment_id": "sake", "segment_sha256": "sha-sake",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": kind, "ts": 142.0, "cell_id": "m.run01",
-            "document_id": "sake", "source": "corpus/sake.md",
+            "type": kind, "ts": 142.0, "cell_id": "m.run01",
+            "segment_id": "sake", "source": "corpus/sake.md",
             "segment_sha256": "sha-sake", "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
         }),
         serde_json::json!({
-            "kind": "cell", "ts": 143.0, "cell_id": "m.run01", "outcome": "complete",
+            "type": "cell", "ts": 143.0, "cell_id": "m.run01", "outcome": "complete",
             "documents_written": 1, "attempts_total": 2, "exit_code": 0,
         }),
     ];
@@ -920,7 +913,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         state: &str,
     ) -> Value {
         serde_json::json!({
-            "kind": "attempt", "source": format!("corpus/{document_id}.md"), "stage": "item",
+            "type": "attempt", "source": format!("corpus/{document_id}.md"), "stage": "item",
             "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": state,
             "length_limited": false, "elapsed_seconds": elapsed_seconds,
             "provider_metadata": if state == "stop_valid" {
@@ -932,14 +925,14 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
             "parse_error": if state == "stop_valid" { Value::Null } else { Value::String("timed out".into()) },
             "validation_issues": null,
             "ts": 0.0, "cell_id": cell_id, "model_id": "m", "run_index": run_index,
-            "document_id": document_id, "segment_sha256": segment_sha256,
+            "segment_id": document_id, "segment_sha256": segment_sha256,
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         })
     }
     fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
-            "kind": "document", "ts": 0.0, "cell_id": cell_id,
-            "document_id": document_id, "source": source,
+            "type": "segment", "ts": 0.0, "cell_id": cell_id,
+            "segment_id": document_id, "source": source,
             "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
@@ -953,8 +946,8 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
-            "kind": "document", "ts": 1.0, "cell_id": cell_id,
-            "document_id": document_id, "source": source,
+            "type": "segment", "ts": 1.0, "cell_id": cell_id,
+            "segment_id": document_id, "source": source,
             "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": associations, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
@@ -967,8 +960,8 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         segment_sha256: &str,
     ) -> Value {
         serde_json::json!({
-            "kind": "document", "ts": 1.0, "cell_id": cell_id,
-            "document_id": document_id, "source": source,
+            "type": "segment", "ts": 1.0, "cell_id": cell_id,
+            "segment_id": document_id, "source": source,
             "segment_sha256": segment_sha256, "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
@@ -1002,7 +995,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
             "cells/m/run01/sake.jsonl",
         ),
         serde_json::json!({
-            "kind": "cell", "ts": 6.0, "cell_id": "m.run01", "outcome": "complete",
+            "type": "cell", "ts": 6.0, "cell_id": "m.run01", "outcome": "complete",
             "documents_written": 2, "attempts_total": 2, "exit_code": 0,
         }),
     ];
@@ -1037,7 +1030,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         attempt("m.run02", 2, "sake", "sha-sake", 7.0, "timeout"),
         doc_end_failed("m.run02", "sake", "corpus/sake.md", "sha-sake"),
         serde_json::json!({
-            "kind": "cell", "ts": 8.0, "cell_id": "m.run02", "outcome": "complete",
+            "type": "cell", "ts": 8.0, "cell_id": "m.run02", "outcome": "complete",
             "documents_written": 1, "attempts_total": 2, "exit_code": 0,
         }),
     ];
@@ -1289,41 +1282,6 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// #851/#904 parity: a results directory whose runs file was written
-/// under the post-rename `kind: "segment"` record must compute the
-/// exact same metrics as [`compute_measurements_over_a_synthetic_results_directory`]'s
-/// pre-rename `kind: "document"` fixture — the write-side rename must
-/// not be observable from `compare`'s output, only from the raw bytes
-/// on disk.
-#[test]
-fn compute_measurements_is_identical_for_the_segment_kind_and_the_document_kind() {
-    let document_dir = synthetic_results_dir_with_kind("kind-parity-document", "document");
-    let segment_dir = synthetic_results_dir_with_kind("kind-parity-segment", "segment");
-
-    let document_measurements = compute_measurements(&document_dir).expect("computes");
-    let segment_measurements = compute_measurements(&segment_dir).expect("computes");
-
-    // `inputs.runs` embeds the results directory's own path (the tag),
-    // which deliberately differs between the two fixtures so they
-    // don't share a temp dir, and `generated_at` is a real-time
-    // timestamp independent of the fixture — normalize both away
-    // before comparing the rest of the artifact byte-for-byte.
-    let normalize = |mut json: serde_json::Value| {
-        json["inputs"]["runs"] = serde_json::Value::Null;
-        json["generated_at"] = serde_json::Value::Null;
-        json
-    };
-    let document_json = normalize(serde_json::to_value(&document_measurements).unwrap());
-    let segment_json = normalize(serde_json::to_value(&segment_measurements).unwrap());
-    assert_eq!(
-        document_json, segment_json,
-        "kind: \"segment\" must compute byte-identical measurements to kind: \"document\""
-    );
-
-    let _ = fs::remove_dir_all(&document_dir);
-    let _ = fs::remove_dir_all(&segment_dir);
-}
-
 #[test]
 fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
     let dir = synthetic_results_dir("duplicate-end");
@@ -1334,8 +1292,8 @@ fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
     let mut runs = fs::read_to_string(&runs_path).unwrap();
     runs.push_str(
         &serde_json::json!({
-            "kind": "document", "ts": 120.0, "cell_id": "m.run01",
-            "document_id": "brewery", "source": "corpus/brewery.md",
+            "type": "segment", "ts": 120.0, "cell_id": "m.run01",
+            "segment_id": "brewery", "source": "corpus/brewery.md",
             "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 5, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
@@ -1595,8 +1553,8 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
 
     fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
-            "kind": "document", "ts": 0.0, "cell_id": cell_id,
-            "document_id": document_id, "source": source,
+            "type": "segment", "ts": 0.0, "cell_id": cell_id,
+            "segment_id": document_id, "source": source,
             "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
@@ -1608,8 +1566,8 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
-            "kind": "document", "ts": 1.0, "cell_id": cell_id,
-            "document_id": document_id, "source": source,
+            "type": "segment", "ts": 1.0, "cell_id": cell_id,
+            "segment_id": document_id, "source": source,
             "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
@@ -1639,7 +1597,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
             "cells/alpha/run01/sake.jsonl",
         ),
         serde_json::json!({
-            "kind": "cell", "ts": 2.0, "cell_id": "alpha.run01", "outcome": "complete",
+            "type": "cell", "ts": 2.0, "cell_id": "alpha.run01", "outcome": "complete",
             "documents_written": 2, "attempts_total": 0, "exit_code": 0,
         }),
     ];
@@ -1669,7 +1627,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
             "cells/alpha/run02/brewery.jsonl",
         ),
         serde_json::json!({
-            "kind": "cell", "ts": 2.0, "cell_id": "alpha.run02", "outcome": "complete",
+            "type": "cell", "ts": 2.0, "cell_id": "alpha.run02", "outcome": "complete",
             "documents_written": 1, "attempts_total": 0, "exit_code": 0,
         }),
     ];
@@ -1699,7 +1657,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
             "cells/beta/run01/brewery.jsonl",
         ),
         serde_json::json!({
-            "kind": "cell", "ts": 2.0, "cell_id": "beta.run01", "outcome": "complete",
+            "type": "cell", "ts": 2.0, "cell_id": "beta.run01", "outcome": "complete",
             "documents_written": 1, "attempts_total": 0, "exit_code": 0,
         }),
     ];
@@ -1808,7 +1766,7 @@ fn compute_differences_lines(dir: &Path, with_text: bool) -> Result<Vec<Value>, 
 fn records_of_kind<'a>(lines: &'a [Value], kind: &str) -> Vec<&'a Value> {
     lines
         .iter()
-        .filter(|v| v["kind"] == kind)
+        .filter(|v| v["type"] == kind)
         .collect::<Vec<_>>()
 }
 
@@ -1820,8 +1778,8 @@ fn differences_header_matches_the_adr_shape() {
     assert_eq!(header["type"], "benchmark_differences");
     assert_eq!(header["version"], crate::format::FORMAT_VERSION);
     assert!(
-        header.get("kind").is_none(),
-        "the header names its type, not a kind"
+        header.get("type") == Some(&Value::from("benchmark_differences")),
+        "the header names its type"
     );
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
@@ -2111,14 +2069,14 @@ fn differences_lexicon_test_bans_the_adr_0003_9_4_vocabulary_everywhere() {
     for (i, line) in lines.iter().enumerate() {
         assert_no_banned_keys(line, &format!("differences.jsonl[{i}]"));
         for banned in BANNED_KEYS {
-            let kind = line["kind"].as_str().unwrap_or("");
+            let kind = line["type"].as_str().unwrap_or("");
             assert!(
                 !kind.to_lowercase().contains(banned),
                 "banned key fragment '{banned}' found in kind '{kind}'"
             );
         }
         for banned in &extended_lexicon {
-            let kind = line["kind"].as_str().unwrap_or("");
+            let kind = line["type"].as_str().unwrap_or("");
             assert!(
                 !kind.to_lowercase().contains(*banned),
                 "banned ADR §9.4 lexicon fragment '{banned}' found in kind '{kind}'"

@@ -1117,12 +1117,12 @@ taguru extract --context ops --out sources/ --redact --redact-rules redact-rules
       additive.
     </p>
     <p>
-      The sidecar is a tagged stream: a <code>kind</code> field discriminates
+      The sidecar is a tagged stream: a <code>type</code> field discriminates
       <code>"run"</code> (the first line — <code>run_id</code>, the identity of this invocation;
       ADR 0023), <code>"chunk"</code>, <code>"attempt"</code>, and <code>"segment"</code>
       records, described below. A consumer written before <code>"chunk"</code>/
       <code>"segment"</code>/<code>"run"</code> existed keeps working unmodified as long as it
-      filters on <code>kind == "attempt"</code> — the same discriminator it already needed to
+      filters on <code>type == "attempt"</code> — the same discriminator it already needed to
       read the sidecar at all — since an <code>attempt</code> record's own shape has only ever
       gained fields.
     </p>
@@ -1233,7 +1233,7 @@ taguru extract --context ops --out sources/ --redact --redact-rules redact-rules
       (<code>paragraph</code>, text).
     </p>
     <p>
-      The file is a tagged JSONL stream like the sidecar (<code>kind</code>; skip kinds you do
+      The file is a tagged JSONL stream like the sidecar (<code>type</code>; skip types you do
       not know), in this order: one <code>segment</code> (<code>run_id</code>,
       <code>source</code>, <code>segment_sha256</code> — the manifest's hash of the text,
       <code>batch_path</code>, <code>chunk_total</code>); under <a href="#redact"><code>--redact</code></a>,
@@ -1387,7 +1387,7 @@ taguru extract --context ops --out sources/ --redact --redact-rules redact-rules
       corrective ask of a retry, and the answer, unescaped between <code>---</code> fences —
       so "which paragraphs did the failed piece hold, and what came back" is two commands,
       not a script over the JSONL. <code>--json</code> renders the same rows as one segment
-      (<code>{target, kind: "attempts", segment, runs, settings, filter, attempts, moves,
+      (<code>{target, type: "attempts", segment, runs, settings, filter, attempts, moves,
       unreadable_lines, matched}</code>; the texts ride only under a filter). A torn last line
       (a killed run) is counted and said, never a failure.
     </p>
@@ -1455,7 +1455,7 @@ taguru extract --context ops --out sources/ --redact --redact-rules redact-rules
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/scripts/extract_metrics.py">
       <code>scripts/extract_metrics.py</code></a> already does).
       Nothing is capped. The ladder's own actions land beside the attempts as
-      <code>kind: "move"</code> records
+      <code>type: "move"</code> records
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0029-ladder-move-records.md">ADR
       0029</a>): <code>move</code> is <code>escalate</code> (ADR 0019, and ADR 0032's
       Stage 2 resend — the reason names the cross-chunk correction;
@@ -1732,9 +1732,9 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
       <code>item</code> record with the same key — the association triple, the alias
       spelling, or the question's (<code>paragraph</code>, text):
     </p>
-    <pre><code>jq -c 'select(.kind=="item" and .subject=="酵母"
+    <pre><code>jq -c 'select(.type=="item" and .subject=="酵母"
   and .label=="作る" and .object=="アルコール")' "$t"
-# → {"kind":"item","item":"association",…,"piece_id":"3f2a…"}</code></pre>
+# → {"type":"item","item":"association",…,"piece_id":"3f2a…"}</code></pre>
     <p>
       (An alias selects on <code>(.item=="concept" or .item=="label") and .alias==…
       and .canonical==…</code> — a concept alias and a label alias are separate
@@ -1745,7 +1745,7 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
       <b>2. The piece.</b> <code>piece_id</code> names the text the item came from:
     </p>
     <pre><code>p=3f2a…   # from step 1
-jq -c --arg p "$p" 'select(.kind=="piece" and .piece_id==$p)' "$t"
+jq -c --arg p "$p" 'select(.type=="piece" and .piece_id==$p)' "$t"
 # → chunk_index, piece_bytes, paragraph_first/last, reused,
 #   attempt: {run_id, attempt_seq}</code></pre>
     <p>
@@ -1760,9 +1760,9 @@ jq -c --arg p "$p" 'select(.kind=="piece" and .piece_id==$p)' "$t"
       <code>run_id</code> and <code>attempt_seq</code>: a resumed segment's log spans several
       runs, and <code>attempt_seq</code> restarts per run, so alone it is ambiguous:
     </p>
-    <pre><code>jq -c --arg p "$p" 'select(.kind=="attempt" and .piece_id==$p)
+    <pre><code>jq -c --arg p "$p" 'select(.type=="attempt" and .piece_id==$p)
   | {run_id, attempt_seq, state, messages, answer}' "$l"
-jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</code></pre>
+jq -r 'select(.type=="system") | .content' "$l"   # the system turn, by hash</code></pre>
     <p>
       The user turn inside <code>messages</code> is the exact text the model was shown — the
       original passage needs no separate lookup — and <code>answer</code> is the reply in
@@ -1778,7 +1778,7 @@ jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</co
       <code>messages</code> turn, the reply is its <code>answer</code>, and adoption is the piece
       record from step 2 naming (or not naming) it:
     </p>
-    <pre><code>jq -c 'select(.kind=="attempt")
+    <pre><code>jq -c 'select(.type=="attempt")
   | {run_id, attempt_seq, stage, state, corrects,
      issues: .validation_issues}' "$l"</code></pre>
     <p>
@@ -1786,16 +1786,16 @@ jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</co
       item exactly as the model wrote it (<code>raw</code>) beside the original text it was about
       (<code>text</code>) — read the pair before concluding anything about why:
     </p>
-    <pre><code>jq -c --arg p "$p" 'select(.kind=="loss" and .piece_id==$p)
+    <pre><code>jq -c --arg p "$p" 'select(.type=="loss" and .piece_id==$p)
   | {reason, rule, raw, paragraph, text}' "$t"</code></pre>
     <p>
       <b>6. The segment's side.</b> The reverse direction — what the output does
       <i>not</i> reflect — is the <code>paragraph</code> records (uncited paragraphs carry
       their text) and, under <code>--coverage</code>, the <code>uncovered</code> sentences:
     </p>
-    <pre><code>jq -c 'select(.kind=="paragraph" and .covered==false)
+    <pre><code>jq -c 'select(.type=="paragraph" and .covered==false)
   | {paragraph, bytes, text}' "$t"
-jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
+jq -c 'select(.type=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
     <p>
       What taguru itself contributed to the prompt is the trace's single
       <code>steering</code> record (candidates, reuse vocabulary with counts, <code>context</code> names,

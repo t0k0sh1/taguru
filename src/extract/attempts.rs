@@ -46,7 +46,7 @@ pub(super) struct AttemptLog {
     writer: Mutex<std::io::BufWriter<fs::File>>,
     path: PathBuf,
     warned: AtomicBool,
-    /// System prompts already written as `kind: "system"` records, by
+    /// System prompts already written as `type: "system"` records, by
     /// sha256 — the prompt is fixed per document, so it is written
     /// once and every attempt names it by hash (ADR 0025 §3.3).
     systems: Mutex<HashSet<String>>,
@@ -79,7 +79,7 @@ impl AttemptLog {
             systems: Mutex::new(HashSet::new()),
         };
         log.write_record(&AttemptsSegmentRecord {
-            kind: "segment",
+            record_type: "segment",
             run_id,
             source,
             segment_sha256,
@@ -109,7 +109,7 @@ impl AttemptLog {
                 };
                 if first {
                     self.write_record(&SystemRecord {
-                        kind: "system",
+                        record_type: "system",
                         sha256: &sha256,
                         bytes: content.len(),
                         content,
@@ -130,7 +130,7 @@ impl AttemptLog {
         }
         let response = attempt.response;
         self.write_record(&AttemptFullRecord {
-            kind: "attempt",
+            record_type: "attempt",
             run_id: &attempt.attempt_ref.run_id,
             attempt_seq: attempt.attempt_ref.attempt_seq,
             corrects: attempt.corrects,
@@ -199,7 +199,8 @@ pub(super) fn first_failure(warned: &AtomicBool) -> bool {
 /// The log's first line per run over this segment.
 #[derive(serde::Serialize)]
 struct AttemptsSegmentRecord<'a> {
-    kind: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
     run_id: &'a str,
     source: &'a str,
     segment_sha256: &'a str,
@@ -220,7 +221,8 @@ struct AttemptsSegmentRecord<'a> {
 /// verdict.
 #[derive(serde::Serialize)]
 pub(super) struct SettingsRecord<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) prompt_version: u32,
     pub(super) model: &'a str,
     pub(super) questions_n: usize,
@@ -245,7 +247,8 @@ pub(super) struct SettingsRecord<'a> {
 /// `--replay` is `auto` or `strict`.
 #[derive(serde::Serialize)]
 pub(super) struct ReplayRecord<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) mode: &'static str,
     pub(super) replay_from: &'a str,
 }
@@ -261,7 +264,8 @@ pub(super) struct ReplayRecord<'a> {
 /// reached).
 #[derive(serde::Serialize)]
 pub(super) struct ReplaySummaryRecord {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) replayed: u64,
     pub(super) live: u64,
 }
@@ -270,7 +274,8 @@ pub(super) struct ReplaySummaryRecord {
 /// attempt of this document sends it.
 #[derive(serde::Serialize)]
 struct SystemRecord<'a> {
-    kind: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
     sha256: &'a str,
     bytes: usize,
     content: &'a str,
@@ -292,7 +297,8 @@ struct Turn<'a> {
 /// `(run_id, attempt_seq)` and read alike.
 #[derive(serde::Serialize)]
 struct AttemptFullRecord<'a> {
-    kind: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
     run_id: &'a str,
     attempt_seq: u64,
     /// ADR 0028: the attempt this corrective attempt replays and asks
@@ -347,7 +353,8 @@ struct AttemptFullRecord<'a> {
 /// why, joinable by `piece_id` and, run-wide, by `run_id`.
 #[derive(serde::Serialize)]
 pub(super) struct MoveRecord<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     #[serde(rename = "move")]
     pub(super) action: &'static str,
     pub(super) run_id: &'a str,
@@ -391,7 +398,7 @@ impl<'a> MoveRecord<'a> {
         reason: &'a str,
     ) -> Self {
         Self {
-            kind: "move",
+            record_type: "move",
             action,
             run_id,
             piece_id,

@@ -292,7 +292,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       One file per cell — the cell is the unit of execution, failure, and resume. Line 1 is the
       file's header — <code>"type": "benchmark_runs"</code>, the <code>version</code> date,
       <code>run_id</code>, and the cell's identity. Every line after it is a tagged JSON object;
-      <code>kind</code> discriminates:
+      <code>type</code> discriminates:
     </p>
     <ul>
       <li><code>segment</code> — two per segment attempted: <code>phase: "start"</code> (identity
@@ -302,7 +302,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
         <code>outcome: "failed"</code> with every count <code>null</code> when the cell concludes
         with that segment still open). A <code>start</code> with no matching <code>end</code>
         marks a segment abandoned mid-cell — the same signal one level down from
-        <code>kind: "cell"</code>'s own absence.</li>
+        <code>type: "cell"</code>'s own absence.</li>
       <li><code>chunk</code> — one per chunk, <code>extract</code>'s own provenance record
         (<a href="extract.html#diagnostics">chunk_sha256, paragraph_first/paragraph_last</a>)
         carried through with a harness envelope added.</li>
@@ -313,7 +313,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
         <code>segment_id</code>); and, denormalized from the segment dictionary,
         <code>segment_sha256</code>/<code>chunk_sha256</code>/<code>paragraph_first</code>/
         <code>paragraph_last</code> — so any single line is dereferenceable without a
-        cross-<code>kind</code> join. <code>ts</code> is the harness's own observation time (the
+        cross-<code>type</code> join. <code>ts</code> is the harness's own observation time (the
         sidecar carries no wall clock); an attempt's true duration is
         <code>elapsed_seconds</code>.</li>
       <li><code>cell</code> — the last line, written only when the cell concludes cleanly (exit
@@ -411,7 +411,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       <code>runs/*.jsonl</code> alone cannot supply the extraction-shape metrics that need a
       source file's full item list (the association weight split, distinct subjects/relations,
       alias orphans, out-of-range paragraph locators). Each written segment names its own
-      <code>cells/**</code> file via its own <code>kind: "segment"</code> record.
+      <code>cells/**</code> file via its own <code>type: "segment"</code> record.
       <code>compare</code> re-reads that file, classifying each line leniently rather than with
       <code>taguru import</code>'s fail-fast source-file reader, since counting malformed lines
       requires reading past the first one.
@@ -548,7 +548,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       disagreed on polarity, paragraph attribution, or an alias's resolved canonical. There is no
       gold data anywhere in this pipeline, so <code>differences.jsonl</code> makes no correctness
       judgment — it reports <i>differences</i>, never errors, omissions, or which side is right.
-      A mechanical lexicon test asserts no emitted key name or <code>kind</code> value ever
+      A mechanical lexicon test asserts no emitted key name or <code>type</code> value ever
       matches <code>miss</code>/<code>error</code>/<code>wrong</code>/<code>incorrect</code>/
       <code>fail</code>/<code>omit</code>/<code>expected</code>/<code>gold</code>/
       <code>truth</code>/<code>false positive</code>/<code>recall</code>/<code>precision</code>/
@@ -562,7 +562,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
  "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
    "alias_expansion":"batch-local","weight_tolerance":0.0},
  "text_included":false}
-{"kind":"association_shared","pair_id":"hosted-120b__qwen25-7b-q4",
+{"type":"association_shared","pair_id":"hosted-120b__qwen25-7b-q4",
  "present_in":["hosted-120b","qwen25-7b-q4"],
  "key":{"subject":"beer co","label":"brews","object":"lager"},
  "sides":{"a":{"runs":[1,2,3],"n_present":3},"b":{"runs":[1,2],"n_present":2}},
@@ -577,10 +577,10 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       is byte-identical to <a href="#compare"><code>measurements.json</code>'s own</a> — the same
       same-ness judgment underlies both.
     </p>
-    <p class="section-sub">Record kinds</p>
+    <p class="section-sub">Record types</p>
     <div class="tbl">
       <table>
-      <thead><tr><th>kind</th><th>Fires when</th></tr></thead>
+      <thead><tr><th>type</th><th>Fires when</th></tr></thead>
       <tbody>
         <tr><td><code>segment_coverage</code></td><td>Once per (pair, segment) either side attempted. Marks whether a segment is eligible for the record kinds below at all — a segment only one side ever completed a run for is excluded from every one of them, since a harness or model completion failure is <code>segment.written_rate</code>'s fact, not an extraction difference.</td></tr>
         <tr><td><code>association_shared</code></td><td>An association key both sides observed in at least one completed run, for a segment both sides completed.</td></tr>

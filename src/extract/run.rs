@@ -252,7 +252,7 @@ impl Run {
         resolved_system: &'a ResolvedSystem,
     ) -> TraceSteering<'a> {
         TraceSteering {
-            kind: "steering",
+            record_type: "steering",
             chunk_index: None,
             candidates,
             system_sha256: &resolved_system.sha256,
@@ -710,7 +710,7 @@ impl Run {
         // never a manifest/checkpoint computation input.
         if let Some(log) = attempt_log.as_ref() {
             log.write_record(&SettingsRecord {
-                kind: "settings",
+                record_type: "settings",
                 prompt_version: PROMPT_VERSION,
                 model: &self.model_name,
                 questions_n: self.questions,
@@ -730,7 +730,7 @@ impl Run {
             // right after `settings`.
             if self.replaying {
                 log.write_record(&ReplayRecord {
-                    kind: "replay",
+                    record_type: "replay",
                     mode: self.replay_mode.name(),
                     replay_from: &self.replay_from.display().to_string(),
                 });
@@ -1070,7 +1070,7 @@ impl Run {
             );
             if let Some(log) = attempt_log.as_ref() {
                 log.write_record(&ReplaySummaryRecord {
-                    kind: "replay_summary",
+                    record_type: "replay_summary",
                     replayed,
                     live,
                 });

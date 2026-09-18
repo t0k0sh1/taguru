@@ -107,7 +107,7 @@ def load_segments(out_dirs: list[Path]) -> list[dict]:
             if not name.endswith(".jsonl") or name.endswith(".attempts.jsonl"):
                 continue
             trace = read_jsonl(trace_path)
-            header = next((r for r in trace if r.get("kind") in ("segment", "document")), None)
+            header = next((r for r in trace if r.get("type") == "segment"), None)
             if header is None:
                 print(f"warning: {trace_path} has no segment record; skipped", file=sys.stderr)
                 continue
@@ -132,7 +132,7 @@ def load_segments(out_dirs: list[Path]) -> list[dict]:
             if stem in traced:
                 continue
             attempts_log = read_jsonl(attempts_path)
-            header = next((r for r in attempts_log if r.get("kind") in ("segment", "document")), None)
+            header = next((r for r in attempts_log if r.get("type") == "segment"), None)
             if header is None:
                 print(
                     f"warning: {attempts_path} has no trace and no segment record; skipped",
@@ -202,7 +202,7 @@ def absorb_segment(bucket: dict, segment: dict) -> None:
     else:
         bucket["segments"] += 1
     for record in segment["trace"]:
-        kind = record.get("kind")
+        kind = record.get("type")
         if kind == "item":
             bucket["kept"][record["item"]] += 1
             if record["item"] == "association":
@@ -224,10 +224,10 @@ def absorb_segment(bucket: dict, segment: dict) -> None:
             )
     by_id = {}
     for record in segment["attempts_log"]:
-        if record.get("kind") == "attempt":
+        if record.get("type") == "attempt":
             by_id[(record["run_id"], record["attempt_seq"])] = record
     for record in segment["attempts_log"]:
-        kind = record.get("kind")
+        kind = record.get("type")
         if kind == "move":
             bucket["moves"][record["move"]] += 1
         elif kind == "attempt":
@@ -671,42 +671,42 @@ def self_test() -> int:
         trace_dir.mkdir(parents=True)
         run_id = "0" * 16
         trace = [
-            {"kind": "document", "run_id": run_id, "source": "a.md", "segment_sha256": "d" * 64,
+            {"type": "segment", "run_id": run_id, "source": "a.md", "segment_sha256": "d" * 64,
              "batch_path": "out/a.jsonl", "chunk_total": 1},
-            {"kind": "steering", "chunk_index": None, "candidates": [],
+            {"type": "steering", "chunk_index": None, "candidates": [],
              "vocabulary": [{"label": "rel", "count": 2}], "context_names": [], "schema": None},
-            {"kind": "chunk", "chunk_index": 0, "chunk_total": 1, "chunk_sha256": "c" * 64,
+            {"type": "chunk", "chunk_index": 0, "chunk_total": 1, "chunk_sha256": "c" * 64,
              "chunk_bytes": 2048, "paragraph_first": 0, "paragraph_last": 1},
-            {"kind": "piece", "piece_id": "c" * 64, "chunk_index": 0, "chunk_sha256": "c" * 64,
+            {"type": "piece", "piece_id": "c" * 64, "chunk_index": 0, "chunk_sha256": "c" * 64,
              "piece_bytes": 2048, "paragraph_first": 0, "paragraph_last": 1, "reused": False,
              "attempt": {"run_id": run_id, "attempt_seq": 2}},
-            {"kind": "item", "item": "association", "subject": "A", "label": "rel",
+            {"type": "item", "item": "association", "subject": "A", "label": "rel",
              "object": "B", "piece_id": "c" * 64},
-            {"kind": "item", "item": "association", "subject": "A", "label": "rel",
+            {"type": "item", "item": "association", "subject": "A", "label": "rel",
              "object": "C", "piece_id": "c" * 64},
-            {"kind": "item", "item": "association", "subject": "D", "label": "uses",
+            {"type": "item", "item": "association", "subject": "D", "label": "uses",
              "object": "E", "piece_id": "c" * 64},
-            {"kind": "loss", "item": "association", "reason": "removed", "rule": "r",
+            {"type": "loss", "item": "association", "reason": "removed", "rule": "r",
              "path": "associations[3]", "raw": {}, "piece_id": "c" * 64,
              "attempt": {"run_id": run_id, "attempt_seq": 2}, "paragraph": 0, "text": "t"},
-            {"kind": "paragraph", "paragraph": 0, "bytes": 1000, "items": 2, "covered": True},
-            {"kind": "paragraph", "paragraph": 1, "bytes": 3000, "items": 0, "covered": False,
+            {"type": "paragraph", "paragraph": 0, "bytes": 1000, "items": 2, "covered": True},
+            {"type": "paragraph", "paragraph": 1, "bytes": 3000, "items": 0, "covered": False,
              "text": "t"},
         ]
         attempts = [
-            {"kind": "document", "run_id": run_id, "source": "a.md",
+            {"type": "segment", "run_id": run_id, "source": "a.md",
              "segment_sha256": "d" * 64, "resumed": False},
-            {"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
-            {"kind": "attempt", "run_id": run_id, "attempt_seq": 1, "piece_id": "c" * 64,
+            {"type": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
+            {"type": "attempt", "run_id": run_id, "attempt_seq": 1, "piece_id": "c" * 64,
              "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
              "max_attempts": 2, "state": "stop_malformed", "length_limited": False,
              "transport_retries": 2, "elapsed_seconds": 2.0, "requested_max_tokens": None,
              "finish_reason": "stop", "input_tokens": 100, "output_tokens": 50,
              "messages": [], "answer": "bad", "parse_error": "e",
              "validation_issues": ["i1", "i2"], "removed_items": None},
-            {"kind": "move", "move": "escalate", "run_id": run_id, "piece_id": "c" * 64,
+            {"type": "move", "move": "escalate", "run_id": run_id, "piece_id": "c" * 64,
              "chunk_index": 0, "reason": "cap", "from_max_tokens": 512, "to_max_tokens": 1024},
-            {"kind": "attempt", "run_id": run_id, "attempt_seq": 2, "piece_id": "c" * 64,
+            {"type": "attempt", "run_id": run_id, "attempt_seq": 2, "piece_id": "c" * 64,
              "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 2,
              "max_attempts": 2, "state": "stop_valid", "length_limited": False,
              "transport_retries": 0, "elapsed_seconds": 3.0, "requested_max_tokens": None,
@@ -718,7 +718,7 @@ def self_test() -> int:
             # A later --replay run's re-emitted record for attempt 2 —
             # huge fake seconds/tokens that must never reach the cost
             # rollup, proving replayed_from is what excludes it (#823).
-            {"kind": "attempt", "run_id": "1" * 16, "attempt_seq": 1, "piece_id": "c" * 64,
+            {"type": "attempt", "run_id": "1" * 16, "attempt_seq": 1, "piece_id": "c" * 64,
              "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
              "max_attempts": 2, "state": "stop_valid", "length_limited": False,
              "transport_retries": 9, "elapsed_seconds": 1000.0, "requested_max_tokens": None,
@@ -730,7 +730,7 @@ def self_test() -> int:
             # §3.3's timeout/transport shape) — must be excluded the
             # same way a replayed success is, not just counted with
             # zeroed-out tokens.
-            {"kind": "attempt", "run_id": "1" * 16, "attempt_seq": 2, "piece_id": "d" * 64,
+            {"type": "attempt", "run_id": "1" * 16, "attempt_seq": 2, "piece_id": "d" * 64,
              "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
              "max_attempts": 2, "state": "timeout", "length_limited": False,
              "transport_retries": 9, "elapsed_seconds": 1000.0, "requested_max_tokens": None,
@@ -749,26 +749,26 @@ def self_test() -> int:
         # Two length-limited rounds, a split, then the run gave up —
         # every second and token of it must reach the run's sums.
         failed_attempts = [
-            {"kind": "document", "run_id": "2" * 16, "source": "f.md",
+            {"type": "segment", "run_id": "2" * 16, "source": "f.md",
              "segment_sha256": "f" * 64, "resumed": False},
-            {"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
-            {"kind": "attempt", "run_id": "2" * 16, "attempt_seq": 1, "piece_id": "e" * 64,
+            {"type": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
+            {"type": "attempt", "run_id": "2" * 16, "attempt_seq": 1, "piece_id": "e" * 64,
              "source": "f.md", "chunk_index": 0, "stage": "item", "attempt": 1,
              "max_attempts": 2, "state": "length_limited", "length_limited": True,
              "transport_retries": 1, "elapsed_seconds": 10.0, "requested_max_tokens": 300,
              "finish_reason": "length", "input_tokens": 400, "output_tokens": 300,
              "messages": [], "answer": "cut", "parse_error": "e",
              "validation_issues": None, "removed_items": None},
-            {"kind": "move", "move": "escalate", "run_id": "2" * 16, "piece_id": "e" * 64,
+            {"type": "move", "move": "escalate", "run_id": "2" * 16, "piece_id": "e" * 64,
              "chunk_index": 0, "reason": "cap", "from_max_tokens": 300, "to_max_tokens": 600},
-            {"kind": "attempt", "run_id": "2" * 16, "attempt_seq": 2, "piece_id": "e" * 64,
+            {"type": "attempt", "run_id": "2" * 16, "attempt_seq": 2, "piece_id": "e" * 64,
              "source": "f.md", "chunk_index": 0, "stage": "item", "attempt": 1,
              "max_attempts": 2, "state": "length_limited", "length_limited": True,
              "transport_retries": 0, "elapsed_seconds": 20.0, "requested_max_tokens": 600,
              "finish_reason": "length", "input_tokens": 400, "output_tokens": 600,
              "messages": [], "answer": "cut", "parse_error": "e",
              "validation_issues": None, "removed_items": None},
-            {"kind": "move", "move": "split", "run_id": "2" * 16, "piece_id": "e" * 64,
+            {"type": "move", "move": "split", "run_id": "2" * 16, "piece_id": "e" * 64,
              "chunk_index": 0, "reason": "cap", "piece_bytes": 4096, "split_cap": 2048,
              "sub_pieces": 2},
         ]
@@ -783,9 +783,9 @@ def self_test() -> int:
             "".join(
                 json.dumps(r) + "\n"
                 for r in [
-                    {"kind": "document", "run_id": "3" * 16, "source": "h.md",
+                    {"type": "segment", "run_id": "3" * 16, "source": "h.md",
                      "segment_sha256": "h" * 64, "resumed": False},
-                    {"kind": "attempt", "run_id": "3" * 16, "attempt_seq": 1,
+                    {"type": "attempt", "run_id": "3" * 16, "attempt_seq": 1,
                      "piece_id": "b" * 64, "source": "h.md", "chunk_index": 0,
                      "stage": "item", "attempt": 1, "max_attempts": 2,
                      "state": "stop_valid", "length_limited": False,
@@ -803,7 +803,7 @@ def self_test() -> int:
         )
         # An attempts log with no segment record is neither: skipped.
         (trace_dir / "g.attempts.jsonl").write_text(
-            json.dumps({"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"})
+            json.dumps({"type": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"})
             + "\n",
             encoding="utf-8",
         )

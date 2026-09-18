@@ -4,10 +4,10 @@
 use super::*;
 
 /// The `--diagnostics-out`/`TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar
-/// (issue #200, ADR 0001 §10): a tagged stream of records — `kind`
+/// (issue #200, ADR 0001 §10): a tagged stream of records — `type`
 /// discriminates `chunk` (once per chunk, before its first attempt),
 /// `attempt` (one per LLM attempt, the original and still the only
-/// `kind` most consumers need), and `segment` (once per segment
+/// `type` most consumers need), and `segment` (once per segment
 /// written) — opt-in, metadata-only by default (issue #262, ADR 0003
 /// §7). `File::create` truncates on open — the sidecar describes THIS
 /// run, never a prior one appended to, so a skipped-everything rerun
@@ -32,7 +32,7 @@ pub(super) struct DiagnosticsSink {
 }
 
 impl DiagnosticsSink {
-    /// Opens (truncating) and writes the `kind: "run"` record first
+    /// Opens (truncating) and writes the `type: "run"` record first
     /// (ADR 0023 §3.3): `run_id` is what joins this run's `attempt`
     /// records to the per-segment trace files it wrote.
     pub(super) fn open(
@@ -48,7 +48,7 @@ impl DiagnosticsSink {
             warned: AtomicBool::new(false),
         };
         sink.write_record(&RunRecord {
-            kind: "run",
+            record_type: "run",
             run_id: run_id.to_string(),
         });
         Ok(sink)
@@ -69,7 +69,7 @@ impl DiagnosticsSink {
             .response
             .and_then(|response| self.capture_raw(&response.content));
         let record = AttemptRecord {
-            kind: "attempt",
+            record_type: "attempt",
             transport_retries: attempt.transport_retries,
             run_id: attempt.attempt_ref.run_id.clone(),
             attempt_seq: attempt.attempt_ref.attempt_seq,
@@ -94,7 +94,7 @@ impl DiagnosticsSink {
         self.write_record(&record);
     }
 
-    /// One `kind: "chunk"` record, before that chunk's first attempt
+    /// One `type: "chunk"` record, before that chunk's first attempt
     /// (issue #262, ADR 0003 §7): `source`/`chunk_index`/`chunk_total`
     /// identify it the same way an `attempt` record does, and
     /// `chunk_sha256`/`paragraph_first`/`paragraph_last` are exactly
@@ -107,7 +107,7 @@ impl DiagnosticsSink {
         descriptor: &ChunkDescriptor,
     ) {
         self.write_record(&ChunkRecord {
-            kind: "chunk",
+            record_type: "chunk",
             source: source.to_string(),
             chunk_index,
             chunk_total,
@@ -118,7 +118,7 @@ impl DiagnosticsSink {
         });
     }
 
-    /// One `kind: "segment"` record, built at the same call site as
+    /// One `type: "segment"` record, built at the same call site as
     /// [`Run::report`] from the same `Extraction` value already in
     /// scope there (issue #262, ADR 0003 §7) — a structured version of
     /// what `report` only ever prints as one human-readable line.
@@ -127,7 +127,7 @@ impl DiagnosticsSink {
     /// `BTreeMap`s are already in scope at no extra cost. Written only
     /// once a segment lands successfully — a segment that fails
     /// never reaches this call site, so its absence here marks exactly
-    /// that, the same "absence marks incomplete" convention `kind:
+    /// that, the same "absence marks incomplete" convention `type:
     /// "cell"` uses at the harness's cell scope (ADR 0003 §9.2).
     pub(super) fn emit_segment(
         &self,
@@ -138,7 +138,7 @@ impl DiagnosticsSink {
         out_path: &Path,
     ) {
         self.write_record(&SegmentRecord {
-            kind: "segment",
+            record_type: "segment",
             source: source.to_string(),
             associations: extraction.associations.len(),
             concepts: extraction.concepts.len(),
@@ -155,7 +155,7 @@ impl DiagnosticsSink {
     /// Serializes and appends one record, shared by [`Self::emit`],
     /// [`Self::emit_chunk`], and [`Self::emit_segment`] — the
     /// serialize-then-append-then-warn-once mechanics are identical
-    /// across all three `kind`s; only the record shape differs.
+    /// across all three `type`s; only the record shape differs.
     pub(super) fn write_record(&self, record: &impl serde::Serialize) {
         let mut line = match serde_json::to_string(record) {
             Ok(line) => line,
@@ -276,7 +276,8 @@ pub(super) struct DiagnosticsAttempt<'a> {
 /// (ADR 0001 §10).
 #[derive(serde::Serialize)]
 pub(super) struct AttemptRecord {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     /// ADR 0023: always present — `(run_id, attempt_seq)` is the key a
     /// trace file's `piece.attempt` joins on, `piece_id` the key its
     /// items join on.
@@ -328,7 +329,8 @@ pub(super) fn removed_item_texts(removed: &[Removal]) -> Option<Vec<String>> {
 /// itself, so no sidecar of this version lacks it.
 #[derive(serde::Serialize)]
 pub(super) struct RunRecord {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) run_id: String,
 }
 
@@ -342,7 +344,7 @@ pub(super) struct ProviderMetadataRecord {
     pub(super) total_tokens: Option<u64>,
 }
 
-/// One `kind: "chunk"` JSONL line (issue #262, ADR 0003 §7): the
+/// One `type: "chunk"` JSONL line (issue #262, ADR 0003 §7): the
 /// provenance a benchmark harness or any other `--diagnostics-out`
 /// consumer needs to point an attempt back at the original segment —
 /// `paragraph_first`/`paragraph_last` are a `crate::paragraph::split`
@@ -352,7 +354,8 @@ pub(super) struct ProviderMetadataRecord {
 /// already carries.
 #[derive(serde::Serialize)]
 pub(super) struct ChunkRecord {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) source: String,
     pub(super) chunk_index: usize,
     pub(super) chunk_total: usize,
@@ -362,12 +365,13 @@ pub(super) struct ChunkRecord {
     pub(super) paragraph_last: u32,
 }
 
-/// One `kind: "segment"` JSONL line (issue #262, ADR 0003 §7): the
+/// One `type: "segment"` JSONL line (issue #262, ADR 0003 §7): the
 /// structured counterpart of [`Run::report`]'s single human-readable
 /// line, written once a segment lands successfully.
 #[derive(serde::Serialize)]
 pub(super) struct SegmentRecord {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) source: String,
     pub(super) associations: usize,
     pub(super) concepts: usize,

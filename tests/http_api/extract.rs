@@ -300,7 +300,7 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
 
 /// Parses a `--diagnostics-out` sidecar into its records, in file
 /// order — one JSON object per line (issue #200). The sidecar is a
-/// tagged stream since issue #262 (`kind`: `chunk`/`attempt`/
+/// tagged stream since issue #262 (`type`: `chunk`/`attempt`/
 /// `document`); most callers want [`read_attempt_records`] instead.
 fn read_diagnostics(path: &std::path::Path) -> Vec<Value> {
     let text = std::fs::read_to_string(path)
@@ -314,14 +314,14 @@ fn read_diagnostics(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-/// The `kind == "attempt"` records of a sidecar, in file order — the
-/// issue #200 tests predate issue #262's `chunk`/`document` kinds and
+/// The `type == "attempt"` records of a sidecar, in file order — the
+/// issue #200 tests predate issue #262's `chunk`/`segment` types and
 /// reason about attempts alone, exactly as `--diagnostics-out` wrote
 /// them before this issue.
 fn read_attempt_records(path: &std::path::Path) -> Vec<Value> {
     read_diagnostics(path)
         .into_iter()
-        .filter(|record| record["kind"] == "attempt")
+        .filter(|record| record["type"] == "attempt")
         .collect()
 }
 
@@ -1164,7 +1164,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     );
     let document = read_diagnostics(&diagnostics)
         .into_iter()
-        .find(|record| record["kind"] == "segment")
+        .find(|record| record["type"] == "segment")
         .expect("a document record");
     assert_eq!(document["uncovered"], 1);
     requests.join().unwrap();
@@ -1187,7 +1187,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let coverage: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "paragraph").collect();
+    let coverage: Vec<&Value> = trace.iter().filter(|r| r["type"] == "paragraph").collect();
     assert_eq!(coverage.len(), 2, "{coverage:?}");
     assert_eq!(coverage[0]["paragraph"], 0);
     assert_eq!(coverage[0]["covered"], true);
@@ -1195,7 +1195,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     assert!(coverage[0].get("text").is_none());
     assert_eq!(coverage[0]["bytes"], "バックアップはS3へ保存する。".len());
     assert_eq!(coverage[1]["covered"], true, "paragraph 1 is cited too");
-    let gaps: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "uncovered").collect();
+    let gaps: Vec<&Value> = trace.iter().filter(|r| r["type"] == "uncovered").collect();
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     assert_eq!(gaps[0]["paragraph"], 1);
     assert_eq!(gaps[0]["sentence"], "- 頻度: 日次");
@@ -1204,7 +1204,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
         "- 頻度: 日次
 - 保持期間: 30日"
     );
-    let chunk = trace.iter().find(|r| r["kind"] == "chunk").unwrap();
+    let chunk = trace.iter().find(|r| r["type"] == "chunk").unwrap();
     assert_eq!(gaps[0]["chunk_index"], chunk["chunk_index"]);
     assert_eq!(gaps[0]["chunk_sha256"], chunk["chunk_sha256"]);
 
@@ -1859,7 +1859,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     // The trace: one `structure` record per unit, one `chunk_context`
     // per chunk right after its `chunk`, citing units by index.
     let (_, trace) = read_trace(&out);
-    let structure: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "structure").collect();
+    let structure: Vec<&Value> = trace.iter().filter(|r| r["type"] == "structure").collect();
     assert_eq!(structure.len(), 2, "{structure:?}");
     assert_eq!(structure[0]["unit"], 0);
     assert_eq!(structure[0]["level"], 1);
@@ -1869,14 +1869,14 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert_eq!(structure[1]["heading"], "Beta");
     assert_eq!(structure[1]["paragraph_first"], 2);
     assert_eq!(structure[1]["paragraph_last"], 3);
-    let kinds: Vec<&str> = trace.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+    let kinds: Vec<&str> = trace.iter().map(|r| r["type"].as_str().unwrap()).collect();
     let chunk_at = kinds.iter().position(|k| *k == "chunk").unwrap();
     assert_eq!(kinds[chunk_at + 1], "chunk_context");
     assert_eq!(kinds[chunk_at + 2], "chunk");
     assert_eq!(kinds[chunk_at + 3], "chunk_context");
     let contexts: Vec<&Value> = trace
         .iter()
-        .filter(|r| r["kind"] == "chunk_context")
+        .filter(|r| r["type"] == "chunk_context")
         .collect();
     assert_eq!(contexts[0]["chunk_index"], 0);
     assert_eq!(contexts[0]["position"], json!([0]));
@@ -1936,7 +1936,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert!(
         !trace
             .iter()
-            .any(|r| r["kind"] == "structure" || r["kind"] == "chunk_context")
+            .any(|r| r["type"] == "structure" || r["type"] == "chunk_context")
     );
 
     // The env default, and a mode outside the list.
@@ -2136,7 +2136,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     let records = read_attempts_log(&out);
     let stages: Vec<&str> = records
         .iter()
-        .filter(|r| r["kind"] == "attempt")
+        .filter(|r| r["type"] == "attempt")
         .map(|r| r["stage"].as_str().unwrap())
         .collect();
     assert_eq!(
@@ -2145,7 +2145,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         "{stages:?}"
     );
     let (_, trace) = read_trace(&out);
-    let overview: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "overview").collect();
+    let overview: Vec<&Value> = trace.iter().filter(|r| r["type"] == "overview").collect();
     assert_eq!(overview.len(), 2, "{overview:?}");
     assert_eq!(overview[0]["chunk_index"], 0);
     assert_eq!(overview[0]["units"][0]["unit"], 0);
@@ -2153,7 +2153,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     assert_eq!(overview[0]["cast"][0]["name"], "Tool");
     let contexts: Vec<&Value> = trace
         .iter()
-        .filter(|r| r["kind"] == "chunk_context")
+        .filter(|r| r["type"] == "chunk_context")
         .collect();
     assert_eq!(contexts[1]["cast"], json!(["Tool", "Ghost"]));
     assert_eq!(contexts[1]["synopsis"], json!([0]));
@@ -2261,14 +2261,14 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     let records = read_attempts_log(&out);
     let overview_states: Vec<&str> = records
         .iter()
-        .filter(|r| r["kind"] == "attempt" && r["stage"] == "overview")
+        .filter(|r| r["type"] == "attempt" && r["stage"] == "overview")
         .map(|r| r["state"].as_str().unwrap())
         .collect();
     assert_eq!(
         overview_states,
         ["length_limited", "length_limited", "stop_valid"]
     );
-    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    let moves: Vec<&Value> = records.iter().filter(|r| r["type"] == "move").collect();
     assert_eq!(moves[0]["move"], "escalate");
     assert!(moves[0]["reason"].as_str().unwrap().contains("overview"));
     let overview_calls_before = requests
@@ -2399,7 +2399,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     assert!(stdout.contains("1 association(s)"), "{stdout}");
     assert!(!stdout.contains("removed"), "{stdout}");
     let (_, trace) = read_trace(&out);
-    let context = trace.iter().find(|r| r["kind"] == "chunk_context").unwrap();
+    let context = trace.iter().find(|r| r["type"] == "chunk_context").unwrap();
     assert_eq!(context["known"], json!(["委員会"]));
 
     // The manifest value carries the relations' digest: the same
@@ -2793,15 +2793,15 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
     // The trace: three `redaction` records right after `document`, the
     // pre-existing one flagged, none with the text.
     let (_, records) = read_trace(&out);
-    assert_eq!(records[0]["kind"], "segment");
+    assert_eq!(records[0]["type"], "segment");
     let redactions: Vec<&Value> = records
         .iter()
-        .filter(|record| record["kind"] == "redaction")
+        .filter(|record| record["type"] == "redaction")
         .collect();
     assert_eq!(redactions.len(), 3, "{records:?}");
-    assert_eq!(records[1]["kind"], "redaction");
-    assert_eq!(records[3]["kind"], "redaction");
-    assert_eq!(records[4]["kind"], "steering");
+    assert_eq!(records[1]["type"], "redaction");
+    assert_eq!(records[3]["type"], "redaction");
+    assert_eq!(records[4]["type"], "steering");
     assert_eq!(redactions[0]["rule"], "email");
     assert_eq!(redactions[0]["paragraph"], 0);
     assert!(
@@ -3086,7 +3086,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     let (_, records) = read_trace(&out);
     let rules_named: Vec<&str> = records
         .iter()
-        .filter(|record| record["kind"] == "redaction")
+        .filter(|record| record["type"] == "redaction")
         .map(|record| record["rule"].as_str().unwrap())
         .collect();
     // Text order: the employee id comes before the address.
@@ -4301,7 +4301,7 @@ fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
     let records = read_attempts_log(&out);
     let split = records
         .iter()
-        .find(|r| r["kind"] == "move" && r["move"] == "split")
+        .find(|r| r["type"] == "move" && r["move"] == "split")
         .unwrap_or_else(|| panic!("{records:?}"));
     assert!(
         split["reason"].as_str().unwrap().contains("timed out"),
@@ -4312,7 +4312,7 @@ fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
     // fail-fast under the ladder returned the first timeout.
     let timeout = records
         .iter()
-        .find(|r| r["kind"] == "attempt" && r["state"] == "timeout")
+        .find(|r| r["type"] == "attempt" && r["state"] == "timeout")
         .unwrap_or_else(|| panic!("{records:?}"));
     assert_eq!(timeout["transport_retries"], 0);
 
@@ -4587,7 +4587,7 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
     // with size, cap, and sub-piece count — id-joined to the piece.
     drop(requests);
     let records = read_attempts_log(&out);
-    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    let moves: Vec<&Value> = records.iter().filter(|r| r["type"] == "move").collect();
     assert_eq!(moves.len(), 2, "{moves:?}");
     let run_id = records[0]["run_id"].as_str().unwrap();
     assert_eq!(moves[0]["move"], "escalate");
@@ -4608,7 +4608,7 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
     assert_eq!(moves[1]["sub_pieces"], 2);
     // The two length-limited attempts both name the same piece the
     // moves do; the sub-pieces' attempts name their own.
-    let attempts: Vec<&Value> = records.iter().filter(|r| r["kind"] == "attempt").collect();
+    let attempts: Vec<&Value> = records.iter().filter(|r| r["type"] == "attempt").collect();
     assert_eq!(attempts.len(), 4);
     assert_eq!(attempts[0]["piece_id"], moves[0]["piece_id"]);
     assert_eq!(attempts[1]["state"], "length_limited");
@@ -4665,7 +4665,7 @@ fn a_runaway_answer_fails_the_source_after_one_round_with_the_move_recorded() {
     drop(requests);
 
     let records = read_attempts_log(&out);
-    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    let moves: Vec<&Value> = records.iter().filter(|r| r["type"] == "move").collect();
     assert_eq!(moves.len(), 1, "{moves:?}");
     assert_eq!(moves[0]["move"], "runaway");
     assert_eq!(moves[0]["answer_bytes"], 4000);
@@ -4675,7 +4675,7 @@ fn a_runaway_answer_fails_the_source_after_one_round_with_the_move_recorded() {
         "{}",
         moves[0]
     );
-    let attempts: Vec<&Value> = records.iter().filter(|r| r["kind"] == "attempt").collect();
+    let attempts: Vec<&Value> = records.iter().filter(|r| r["type"] == "attempt").collect();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0]["state"], "length_limited");
     assert_eq!(attempts[0]["piece_id"], moves[0]["piece_id"]);
@@ -4726,7 +4726,7 @@ fn runaway_ratio_zero_keeps_the_pre_0035_path_end_to_end() {
     assert!(
         !records
             .iter()
-            .any(|r| r["kind"] == "move" && r["move"] == "runaway"),
+            .any(|r| r["type"] == "move" && r["move"] == "runaway"),
         "ratio 0 records no runaway judgment"
     );
 
@@ -4793,9 +4793,9 @@ stderr: {stderr}"
     assert_eq!(records[0]["state"], "stop_valid");
     assert_eq!(records[0]["transport_retries"], 2, "{:?}", records[0]);
     let log = read_attempts_log(&out);
-    let attempt = log.iter().find(|r| r["kind"] == "attempt").unwrap();
+    let attempt = log.iter().find(|r| r["type"] == "attempt").unwrap();
     assert_eq!(attempt["transport_retries"], 2);
-    assert!(!log.iter().any(|r| r["kind"] == "move"), "no ladder move");
+    assert!(!log.iter().any(|r| r["type"] == "move"), "no ladder move");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -5112,7 +5112,7 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
     .collect();
     let moves: Vec<&Value> = a_records
         .iter()
-        .filter(|record| record["kind"] == "move")
+        .filter(|record| record["type"] == "move")
         .collect();
     let kinds: Vec<&str> = moves.iter().map(|m| m["move"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["escalate", "demote"], "{moves:?}");
@@ -5133,7 +5133,7 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
     // under json_object.
     let attempts: Vec<&Value> = a_records
         .iter()
-        .filter(|record| record["kind"] == "attempt")
+        .filter(|record| record["type"] == "attempt")
         .collect();
     assert_eq!(attempts.len(), 3, "{attempts:?}");
     assert_eq!(attempts[0]["rung"], "json_schema", "{}", attempts[0]);
@@ -5143,7 +5143,7 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
     // resolved at startup — the probe's own verdict, before any demote.
     let settings = a_records
         .iter()
-        .find(|record| record["kind"] == "settings")
+        .find(|record| record["type"] == "settings")
         .unwrap();
     assert_eq!(settings["rung"], "json_schema", "{settings:?}");
     assert_eq!(settings["structured_output"], "auto");
@@ -5725,7 +5725,7 @@ fn a_cut_off_cross_chunk_correction_is_resent_once_at_the_escalated_budget() {
     let records = read_attempts_log(&out);
     let attempts: Vec<&Value> = records
         .iter()
-        .filter(|r| r["kind"] == "attempt" && r["stage"] == "cross_chunk")
+        .filter(|r| r["type"] == "attempt" && r["stage"] == "cross_chunk")
         .collect();
     assert_eq!(attempts.len(), 2, "{attempts:?}");
     assert_eq!(attempts[0]["state"], "length_limited");
@@ -5733,7 +5733,7 @@ fn a_cut_off_cross_chunk_correction_is_resent_once_at_the_escalated_budget() {
     assert_eq!(attempts[1]["state"], "stop_valid");
     assert_eq!(attempts[1]["requested_max_tokens"], 1024);
     assert_eq!(attempts[1]["piece_id"], attempts[0]["piece_id"]);
-    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    let moves: Vec<&Value> = records.iter().filter(|r| r["type"] == "move").collect();
     assert_eq!(moves.len(), 1, "{moves:?}");
     assert_eq!(moves[0]["move"], "escalate");
     assert_eq!(moves[0]["piece_id"], attempts[0]["piece_id"]);
@@ -5829,7 +5829,7 @@ fn a_correction_cut_off_at_the_escalated_budget_leaves_its_alias_to_the_prune() 
     let records = read_attempts_log(&out);
     let states: Vec<&Value> = records
         .iter()
-        .filter(|r| r["kind"] == "attempt" && r["stage"] == "cross_chunk")
+        .filter(|r| r["type"] == "attempt" && r["stage"] == "cross_chunk")
         .map(|r| &r["state"])
         .collect();
     assert_eq!(states, ["length_limited", "length_limited"], "{records:?}");
@@ -5892,7 +5892,7 @@ fn a_cut_off_correction_without_a_budget_is_not_resent() {
     );
     let records = read_attempts_log(&out);
     assert!(
-        !records.iter().any(|r| r["kind"] == "move"),
+        !records.iter().any(|r| r["type"] == "move"),
         "no ladder, no move: {records:?}"
     );
 
@@ -6238,7 +6238,7 @@ fn diagnostics_out_writes_one_record_per_attempt_with_the_shared_state_vocabular
     let records = read_attempt_records(&diag);
     assert_eq!(records.len(), 2, "{records:?}");
 
-    assert_eq!(records[0]["kind"], "attempt");
+    assert_eq!(records[0]["type"], "attempt");
     assert_eq!(records[0]["source"], doc.to_str().unwrap());
     assert_eq!(records[0]["stage"], "item");
     assert_eq!(records[0]["chunk_index"], 0);
@@ -6460,7 +6460,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "segment"),
+            !all.iter().any(|record| record["type"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -6499,7 +6499,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "segment"),
+            !all.iter().any(|record| record["type"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -6804,7 +6804,7 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
         if let Ok(text) = std::fs::read_to_string(&diag)
             && text.lines().filter(|line| !line.is_empty()).any(|line| {
                 serde_json::from_str::<Value>(line)
-                    .map(|value| value["kind"] == "attempt")
+                    .map(|value| value["type"] == "attempt")
                     .unwrap_or(false)
             })
         {
@@ -6831,14 +6831,14 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
     assert!(!records.is_empty(), "no complete diagnostics line survived");
     // ADR 0023 §3.3: the sidecar's first line names the run; the
     // chunk record still lands before that chunk's first attempt.
-    assert_eq!(records[0]["kind"], "run", "{records:?}");
+    assert_eq!(records[0]["type"], "run", "{records:?}");
     assert_eq!(
-        records[1]["kind"], "chunk",
+        records[1]["type"], "chunk",
         "the chunk record lands before that chunk's first attempt: {records:?}"
     );
     let record = records
         .iter()
-        .find(|value| value["kind"] == "attempt")
+        .find(|value| value["type"] == "attempt")
         .expect("an attempt record must have landed");
     assert_eq!(record["state"], "stop_valid");
     assert_eq!(record["source"], fast_src.as_str());
@@ -6989,13 +6989,13 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
         records[0]["attempt_seq"]
     );
     let (_, trace) = read_trace(&out);
-    let piece = trace.iter().find(|r| r["kind"] == "piece").unwrap();
+    let piece = trace.iter().find(|r| r["type"] == "piece").unwrap();
     assert_eq!(piece["piece_id"], records[0]["piece_id"]);
     assert_eq!(piece["attempt"]["run_id"], records[1]["run_id"]);
     assert_eq!(piece["attempt"]["attempt_seq"], 2, "{piece:?}");
     let alias = trace
         .iter()
-        .find(|r| r["kind"] == "item" && r["item"] == "concept")
+        .find(|r| r["type"] == "item" && r["item"] == "concept")
         .unwrap();
     assert_eq!(alias["alias"], "x");
     assert_eq!(alias["piece_id"], piece["piece_id"]);
@@ -7053,7 +7053,7 @@ fn diagnostics_records_every_chunk_attempt_under_parallel() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
-/// Issue #262, ADR 0003 §7: one `kind: "chunk"` record per chunk,
+/// Issue #262, ADR 0003 §7: one `type: "chunk"` record per chunk,
 /// written before that chunk's first attempt — with correct paragraph
 /// provenance a reader can join against the canonical document without
 /// re-implementing `chunk()`'s packing rule.
@@ -7086,8 +7086,8 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
     let all = read_diagnostics(&diag);
-    let last_chunk_position = all.iter().rposition(|record| record["kind"] == "chunk");
-    let first_attempt_position = all.iter().position(|record| record["kind"] == "attempt");
+    let last_chunk_position = all.iter().rposition(|record| record["type"] == "chunk");
+    let first_attempt_position = all.iter().position(|record| record["type"] == "attempt");
     assert!(
         last_chunk_position < first_attempt_position,
         "every chunk record must land before any attempt record: {all:?}"
@@ -7095,7 +7095,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
 
     let chunks: Vec<&Value> = all
         .iter()
-        .filter(|record| record["kind"] == "chunk")
+        .filter(|record| record["type"] == "chunk")
         .collect();
     let request_count = captured.lock().unwrap().len();
     assert_eq!(
@@ -7141,7 +7141,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
-/// Issue #262, ADR 0003 §7: one `kind: "segment"` record per document
+/// Issue #262, ADR 0003 §7: one `type: "segment"` record per document
 /// written, a structured twin of `Run::report`'s human-readable line —
 /// `concepts`/`labels` counted separately rather than combined into one
 /// "alias(es)" figure.
@@ -7192,11 +7192,11 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     let all = read_diagnostics(&diag);
     let documents: Vec<&Value> = all
         .iter()
-        .filter(|record| record["kind"] == "segment")
+        .filter(|record| record["type"] == "segment")
         .collect();
     assert_eq!(documents.len(), 1, "{all:?}");
     assert_eq!(
-        all.last().unwrap()["kind"],
+        all.last().unwrap()["type"],
         "segment",
         "the segment record lands only once its document is fully written: {all:?}"
     );
@@ -8119,13 +8119,13 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
     let sidecar = read_diagnostics(&diag);
-    assert_eq!(sidecar[0]["kind"], "run", "{sidecar:?}");
+    assert_eq!(sidecar[0]["type"], "run", "{sidecar:?}");
     let run_id = sidecar[0]["run_id"].as_str().unwrap().to_string();
     assert_eq!(run_id.len(), 16, "{run_id:?}");
     assert!(run_id.chars().all(|c| c.is_ascii_hexdigit()), "{run_id:?}");
 
     let (batch_name, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "segment", "{trace:?}");
+    assert_eq!(trace[0]["type"], "segment", "{trace:?}");
     assert_eq!(trace[0]["run_id"], run_id.as_str());
     assert_eq!(trace[0]["source"], doc.to_str().unwrap());
     assert_eq!(trace[0]["chunk_total"], 2);
@@ -8139,9 +8139,9 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
         trace[0]
     );
 
-    let chunks: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "chunk").collect();
-    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
-    let items: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "item").collect();
+    let chunks: Vec<&Value> = trace.iter().filter(|r| r["type"] == "chunk").collect();
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["type"] == "piece").collect();
+    let items: Vec<&Value> = trace.iter().filter(|r| r["type"] == "item").collect();
     assert_eq!(chunks.len(), 2, "{trace:?}");
     assert_eq!(pieces.len(), 2, "{trace:?}");
     // The diagnostics chunk records and the trace chunk records agree
@@ -8149,7 +8149,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     for (index, chunk) in chunks.iter().enumerate() {
         let twin = sidecar
             .iter()
-            .find(|r| r["kind"] == "chunk" && r["chunk_index"] == index)
+            .find(|r| r["type"] == "chunk" && r["chunk_index"] == index)
             .unwrap();
         for field in [
             "chunk_sha256",
@@ -8175,7 +8175,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
         let seq = piece["attempt"]["attempt_seq"].as_u64().unwrap();
         let attempt = sidecar
             .iter()
-            .find(|r| r["kind"] == "attempt" && r["attempt_seq"] == seq)
+            .find(|r| r["type"] == "attempt" && r["attempt_seq"] == seq)
             .unwrap_or_else(|| panic!("no sidecar attempt {seq}: {sidecar:?}"));
         assert_eq!(attempt["run_id"], run_id.as_str());
         assert_eq!(attempt["piece_id"], piece["piece_id"]);
@@ -8185,7 +8185,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     // attempt_seq is 1-based and dense over the run's completions.
     let mut seqs: Vec<u64> = sidecar
         .iter()
-        .filter(|r| r["kind"] == "attempt")
+        .filter(|r| r["type"] == "attempt")
         .map(|r| r["attempt_seq"].as_u64().unwrap())
         .collect();
     seqs.sort_unstable();
@@ -8323,7 +8323,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
     let sidecar = read_diagnostics(&diag);
     let run_id = sidecar[0]["run_id"].as_str().unwrap();
     let (_, trace) = read_trace(&out);
-    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["type"] == "piece").collect();
     assert_eq!(pieces.len(), 2, "{trace:?}");
     let reused = pieces.iter().find(|p| p["chunk_index"] == 0).unwrap();
     let fresh = pieces.iter().find(|p| p["chunk_index"] == 1).unwrap();
@@ -8333,7 +8333,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
     assert_eq!(fresh["reused"], false, "{fresh:?}");
     assert_eq!(fresh["attempt"]["run_id"], run_id, "{fresh:?}");
     assert_eq!(fresh["attempt"]["attempt_seq"], 1, "{fresh:?}");
-    let items: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "item").collect();
+    let items: Vec<&Value> = trace.iter().filter(|r| r["type"] == "item").collect();
     let chunk0 = items.iter().find(|i| i["object"] == "value-0").unwrap();
     let chunk1 = items.iter().find(|i| i["object"] == "value-1").unwrap();
     assert_eq!(chunk0["piece_id"], reused["piece_id"]);
@@ -8422,11 +8422,11 @@ fn trace_records_every_lost_item_with_its_original_text() {
     );
 
     let (_, trace) = read_trace(&out);
-    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
-    let losses: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "loss").collect();
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["type"] == "piece").collect();
+    let losses: Vec<&Value> = trace.iter().filter(|r| r["type"] == "loss").collect();
     let document = read_diagnostics(&diag)
         .into_iter()
-        .find(|r| r["kind"] == "segment")
+        .find(|r| r["type"] == "segment")
         .unwrap();
     let count = |reason: &str| losses.iter().filter(|l| l["reason"] == reason).count();
     assert_eq!(document["removed"], count("removed"), "{losses:?}");
@@ -8572,7 +8572,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     let records = read_attempts_log(&out);
     let kinds: Vec<&str> = records
         .iter()
-        .map(|r| r["kind"].as_str().unwrap())
+        .map(|r| r["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         kinds,
@@ -8666,7 +8666,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(second["piece_id"], first["piece_id"]);
     let sidecar_second = sidecar
         .iter()
-        .find(|r| r["kind"] == "attempt" && r["attempt_seq"] == 2)
+        .find(|r| r["type"] == "attempt" && r["attempt_seq"] == 2)
         .unwrap();
     assert_eq!(sidecar_second["piece_id"], second["piece_id"]);
     assert_eq!(sidecar_second["state"], "stop_valid");
@@ -8723,7 +8723,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     let after_failure = read_attempts_log(&out);
     let kinds: Vec<&str> = after_failure
         .iter()
-        .map(|r| r["kind"].as_str().unwrap())
+        .map(|r| r["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         kinds,
@@ -8757,7 +8757,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     let after_resume = read_attempts_log(&out);
     let kinds: Vec<&str> = after_resume
         .iter()
-        .map(|r| r["kind"].as_str().unwrap())
+        .map(|r| r["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         kinds,
@@ -8777,7 +8777,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     let (_, trace) = read_trace(&out);
     let reused = trace
         .iter()
-        .find(|r| r["kind"] == "piece" && r["reused"] == true)
+        .find(|r| r["type"] == "piece" && r["reused"] == true)
         .unwrap();
     assert_eq!(reused["attempt"]["run_id"], first_run.as_str());
     assert_eq!(reused["attempt"]["attempt_seq"], 1);
@@ -8803,7 +8803,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         after_force
             .iter()
-            .filter(|r| r["kind"] == "segment")
+            .filter(|r| r["type"] == "segment")
             .count(),
         1,
         "{after_force:?}"
@@ -8833,7 +8833,7 @@ fn attempts_log_can_be_switched_off() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "segment");
+    assert_eq!(trace[0]["type"], "segment");
     let logs = std::fs::read_dir(out.join(".extract-trace"))
         .unwrap()
         .filter(|entry| {
@@ -8899,7 +8899,7 @@ fn trace_steering_record_carries_candidates_and_reuse_vocabulary() {
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|record| record["kind"] == "steering")
+            .find(|record| record["type"] == "steering")
             .unwrap()
     };
     // Documents run in sorted order: a.md first, with an empty
@@ -8982,7 +8982,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
-    let steering = trace.iter().find(|r| r["kind"] == "steering").unwrap();
+    let steering = trace.iter().find(|r| r["type"] == "steering").unwrap();
     assert_eq!(steering["schema"], Value::Null, "{steering}");
 
     // The types-only control: one list empty, the other not — the
@@ -9020,7 +9020,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
-    let steering = trace.iter().find(|r| r["kind"] == "steering").unwrap();
+    let steering = trace.iter().find(|r| r["type"] == "steering").unwrap();
     assert_eq!(
         steering["schema"]["types"],
         json!(["Brewery"]),
@@ -9430,7 +9430,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let records_before = read_attempts_log(&out);
     let first_run_id = records_before
         .iter()
-        .find(|r| r["kind"] == "segment")
+        .find(|r| r["type"] == "segment")
         .unwrap()["run_id"]
         .as_str()
         .unwrap()
@@ -9468,7 +9468,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     // its hash must be the recorded run's own, the pinned text.
     let recorded_system_sha256 = records_before
         .iter()
-        .find(|r| r["kind"] == "system")
+        .find(|r| r["type"] == "system")
         .expect("the live run must record its system prompt")["sha256"]
         .as_str()
         .unwrap()
@@ -9476,7 +9476,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let (_, trace_records) = read_trace(&out);
     let steering = trace_records
         .iter()
-        .find(|record| record["kind"] == "steering")
+        .find(|record| record["type"] == "steering")
         .expect("a steering record must exist");
     assert_eq!(
         steering["system_sha256"], recorded_system_sha256,
@@ -9494,17 +9494,17 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let second_run = &records_after[records_before.len()..];
     let kinds: Vec<&str> = second_run
         .iter()
-        .map(|r| r["kind"].as_str().unwrap())
+        .map(|r| r["type"].as_str().unwrap())
         .collect();
     assert_eq!(kinds[0], "segment");
     assert_eq!(second_run[0]["resumed"], true);
     assert!(kinds.contains(&"replay"), "{kinds:?}");
     assert!(kinds.contains(&"replay_summary"), "{kinds:?}");
-    let replay_record = second_run.iter().find(|r| r["kind"] == "replay").unwrap();
+    let replay_record = second_run.iter().find(|r| r["type"] == "replay").unwrap();
     assert_eq!(replay_record["mode"], "strict");
     let summary = second_run
         .iter()
-        .find(|r| r["kind"] == "replay_summary")
+        .find(|r| r["type"] == "replay_summary")
         .unwrap();
     assert_eq!(summary["replayed"], 1);
     assert_eq!(summary["live"], 0);
@@ -9515,11 +9515,11 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     // real completion) without losing the join back to the real one.
     let original_attempt = records_before
         .iter()
-        .find(|r| r["kind"] == "attempt")
+        .find(|r| r["type"] == "attempt")
         .expect("the live run must record its one attempt");
     let replayed_attempt = second_run
         .iter()
-        .find(|r| r["kind"] == "attempt")
+        .find(|r| r["type"] == "attempt")
         .expect("the replay run must also emit an attempt record");
     assert_eq!(
         replayed_attempt["replayed_from"]["run_id"], original_attempt["run_id"],
@@ -9788,7 +9788,7 @@ fn replay_does_not_pin_when_the_log_names_two_distinct_system_prompts() {
     text.push_str(&format!(
         "{}\n",
         json!({
-            "kind": "system",
+            "type": "system",
             "sha256": other_sha256,
             "bytes": other.len(),
             "content": other,
@@ -9821,7 +9821,7 @@ fn replay_does_not_pin_when_the_log_names_two_distinct_system_prompts() {
     let (_, trace_records) = read_trace(&out);
     let steering = trace_records
         .iter()
-        .find(|record| record["kind"] == "steering")
+        .find(|record| record["type"] == "steering")
         .expect("a steering record must exist");
     assert_eq!(
         steering["system_sha256"].as_str().unwrap().len(),
@@ -10257,7 +10257,7 @@ fn overview_records(out: &std::path::Path) -> Vec<Value> {
     let (_name, records) = read_trace(out);
     records
         .into_iter()
-        .filter(|record| record["kind"] == "overview")
+        .filter(|record| record["type"] == "overview")
         .collect()
 }
 
@@ -10790,7 +10790,7 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     let (code, json, _) = run_inspect(&[log_arg, "--json"]);
     assert_eq!(code, 0);
     let report: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(report["kind"], "attempts");
+    assert_eq!(report["type"], "attempts");
     assert_eq!(report["segment"]["source"], doc.to_str().unwrap());
     assert_eq!(report["attempts"][0]["paragraph_first"], 0);
     assert_eq!(report["attempts"][0]["paragraph_last"], 1);

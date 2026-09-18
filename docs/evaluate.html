@@ -695,12 +695,12 @@
    "cases_base":12,"cases_head":12},
  "metrics":[{"metric":"recall.recall_at_k","statistic":"distribution",
    "sides":{"base":0.83,"head":0.90},"delta":0.07}]}
-{"kind":"regressed","case_id":"brand-origin-004",
+{"type":"regressed","case_id":"brand-origin-004",
  "metrics":[{"metric":"citations.recall","sides":{"base":1.0,"head":0.5},"delta":-0.5,
    "direction":"regressed"}]}</code></pre>
     <p>
       Line 1 is always the header; every line after is <b>one record per changed case only</b> —
-      <code>kind</code> ∈ <code>improved | regressed | added | removed</code>. Unchanged cases
+      <code>type</code> ∈ <code>improved | regressed | added | removed</code>. Unchanged cases
       are counted in the header's <code>counts.unchanged</code>, never emitted per case, keeping
       the file's size bounded by the number of cases whose outcome actually moved. Classification
       reads only nine of the ten <code>--thresholds</code>-scoped metrics — every one except

@@ -121,7 +121,8 @@ pub(super) struct SegmentRow {
 #[derive(Serialize)]
 pub(super) struct AttemptsReport {
     target: String,
-    kind: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
     /// The last `document` record — a resumed document appends a new
     /// one per run, and the latest run is the one whose attempts the
     /// tail of the file holds.
@@ -201,7 +202,7 @@ fn write_failure_exit(error: &std::io::Error) -> i32 {
 pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> AttemptsReport {
     let mut report = AttemptsReport {
         target: target.to_string(),
-        kind: "attempts",
+        record_type: "attempts",
         segment: None,
         runs: Vec::new(),
         settings: None,
@@ -220,8 +221,8 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
             report.unreadable_lines += 1;
             continue;
         };
-        match record.get("kind").and_then(Value::as_str) {
-            Some("segment") | Some("document") => {
+        match record.get("type").and_then(Value::as_str) {
+            Some("segment") => {
                 let run_id = str_field(&record, "run_id");
                 report.runs.push(run_id.clone());
                 report.segment = Some(SegmentRow {
@@ -236,7 +237,7 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
             Some("settings") => {
                 let mut settings = Value::Object(record);
                 if let Value::Object(map) = &mut settings {
-                    map.remove("kind");
+                    map.remove("type");
                 }
                 report.settings = Some(settings);
             }
@@ -731,7 +732,7 @@ mod tests {
     ) -> String {
         let user = format!("Segment 'a.md', part {} of 2:\n\n{doc}", chunk + 1);
         json!({
-            "kind": "attempt", "run_id": "r1", "attempt_seq": seq, "piece_id": piece,
+            "type": "attempt", "run_id": "r1", "attempt_seq": seq, "piece_id": piece,
             "source": "a.md", "chunk_index": chunk, "stage": "item", "attempt": 1,
             "max_attempts": 2, "state": state, "length_limited": state == "length_limited",
             "transport_retries": 0, "elapsed_seconds": 1.5, "requested_max_tokens": 4000,
@@ -747,30 +748,17 @@ mod tests {
 
     fn sample_log() -> String {
         [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
-            json!({"kind": "settings", "prompt_version": 4, "model": "stub", "questions_n": 0, "fact_budget": 0, "structured_output": "off", "max_output_tokens": 4000, "chunk_bytes": "", "chunk_context": "off", "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""}).to_string(),
-            json!({"kind": "system", "sha256": "s", "bytes": 3, "content": "sys"}).to_string(),
+            json!({"type": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            json!({"type": "settings", "prompt_version": 4, "model": "stub", "questions_n": 0, "fact_budget": 0, "structured_output": "off", "max_output_tokens": 4000, "chunk_bytes": "", "chunk_context": "off", "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""}).to_string(),
+            json!({"type": "system", "sha256": "s", "bytes": 3, "content": "sys"}).to_string(),
             attempt(1, "aaaa1111bbbb2222cccc", 0, "length_limited", "[0] alpha\n\n[1] beta\n\n[2] gamma", Some("{\"associations\": [")),
-            json!({"kind": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa1111bbbb2222cccc", "chunk_index": 0, "reason": "the answer still ended at the output cap", "piece_bytes": 27, "split_cap": 14, "sub_pieces": 2}).to_string(),
+            json!({"type": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa1111bbbb2222cccc", "chunk_index": 0, "reason": "the answer still ended at the output cap", "piece_bytes": 27, "split_cap": 14, "sub_pieces": 2}).to_string(),
             attempt(2, "dddd3333eeee4444ffff", 0, "stop_valid", "[0] alpha\n\n[1] beta", Some("{\"associations\": []}")),
             attempt(3, "9999888877776666", 0, "stop_malformed", "[2] gamma", Some("{\"associations\": [{\"subject\": \"g\\x\"}]}")),
             attempt(4, "5555444433332222", 1, "stop_valid", "[3] delta", Some("{\"associations\": []}")),
             "{not json".to_string(),
         ]
         .join("\n")
-    }
-
-    #[test]
-    fn build_report_recognizes_the_post_851_segment_kind_the_same_as_document() {
-        let log = json!({"kind": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string();
-        let report = build_report("log", &log, &Filter::All);
-        let segment = report.segment.expect(
-            "a `kind: \"segment\"` record must populate `segment` the same way `document` did",
-        );
-        assert_eq!(segment.source, "a.md");
-        assert_eq!(segment.run_id, "r1");
-        assert!(!segment.resumed);
-        assert_eq!(report.runs, vec!["r1".to_string()]);
     }
 
     #[test]
@@ -881,7 +869,7 @@ mod tests {
     #[test]
     fn moves_and_references_stay_with_their_own_run_when_seqs_collide() {
         let run2_attempt = json!({
-            "kind": "attempt", "run_id": "r2", "attempt_seq": 1, "piece_id": "dddd000000000000",
+            "type": "attempt", "run_id": "r2", "attempt_seq": 1, "piece_id": "dddd000000000000",
             "source": "a.md", "chunk_index": 1, "stage": "item", "attempt": 1, "max_attempts": 2,
             "state": "length_limited", "length_limited": true, "transport_retries": 0,
             "elapsed_seconds": 1.0, "requested_max_tokens": 4000, "finish_reason": "length",
@@ -891,7 +879,7 @@ mod tests {
         })
         .to_string();
         let run2_retry = json!({
-            "kind": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "dddd000000000000",
+            "type": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "dddd000000000000",
             "corrects": {"run_id": "r1", "attempt_seq": 1},
             "source": "a.md", "chunk_index": 1, "stage": "item", "attempt": 2, "max_attempts": 2,
             "state": "stop_valid", "length_limited": false, "transport_retries": 0,
@@ -902,13 +890,13 @@ mod tests {
         })
         .to_string();
         let log = [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            json!({"type": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
             attempt(1, "aaaa000000000000", 0, "length_limited", "[0] a", Some("{")),
-            json!({"kind": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa000000000000", "chunk_index": 0, "reason": "the first pass's move", "piece_bytes": 5, "split_cap": 3, "sub_pieces": 2}).to_string(),
+            json!({"type": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa000000000000", "chunk_index": 0, "reason": "the first pass's move", "piece_bytes": 5, "split_cap": 3, "sub_pieces": 2}).to_string(),
             attempt(2, "bbbb000000000000", 0, "stop_valid", "[0] a", Some("{}")),
-            json!({"kind": "document", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
+            json!({"type": "segment", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
             run2_attempt,
-            json!({"kind": "move", "move": "escalate", "run_id": "r2", "piece_id": "dddd000000000000", "chunk_index": 1, "reason": "the second pass's move", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
+            json!({"type": "move", "move": "escalate", "run_id": "r2", "piece_id": "dddd000000000000", "chunk_index": 1, "reason": "the second pass's move", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
             run2_retry,
         ]
         .join("\n");
@@ -938,7 +926,7 @@ mod tests {
         assert_eq!(text.matches("— run ").count(), 2, "{text}");
         // One run: no markers.
         let single = [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            json!({"type": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
             attempt(1, "aaaa000000000000", 0, "stop_valid", "[0] a", Some("{}")),
         ]
         .join("\n");
@@ -958,7 +946,7 @@ mod tests {
             .map(|i| format!("associations[{i}].weight: bad"))
             .collect();
         let many = json!({
-            "kind": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "cafe000000000000",
+            "type": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "cafe000000000000",
             "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1, "max_attempts": 2,
             "state": "stop_malformed", "length_limited": false, "transport_retries": 0,
             "elapsed_seconds": 1.0, "requested_max_tokens": null, "finish_reason": "stop",
@@ -968,13 +956,13 @@ mod tests {
         })
         .to_string();
         let log = [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
-            json!({"kind": "document", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
-            json!({"kind": "settings", "prompt_version": 4, "model": "stub", "max_output_tokens": 0, "rung": "json_schema", "lossy": true, "chunk_bytes": ""}).to_string(),
+            json!({"type": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            json!({"type": "segment", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
+            json!({"type": "settings", "prompt_version": 4, "model": "stub", "max_output_tokens": 0, "rung": "json_schema", "lossy": true, "chunk_bytes": ""}).to_string(),
             attempt(1, "cafe000000000000", 0, "length_limited", "[0] a", Some("{")),
-            json!({"kind": "move", "move": "escalate", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the answer ended at the output cap", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
-            json!({"kind": "move", "move": "demote", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the rung looped", "from_rung": "json_schema", "to_rung": "json_object"}).to_string(),
-            json!({"kind": "move", "move": "runaway", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "outgrew the piece", "piece_bytes": 50, "answer_bytes": 21745}).to_string(),
+            json!({"type": "move", "move": "escalate", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the answer ended at the output cap", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
+            json!({"type": "move", "move": "demote", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the rung looped", "from_rung": "json_schema", "to_rung": "json_object"}).to_string(),
+            json!({"type": "move", "move": "runaway", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "outgrew the piece", "piece_bytes": 50, "answer_bytes": 21745}).to_string(),
             many,
         ]
         .join("\n");
@@ -1014,7 +1002,7 @@ mod tests {
             Some("nope"),
         );
         let retry = json!({
-            "kind": "attempt", "run_id": "r1", "attempt_seq": 2, "piece_id": "abcdef0123456789",
+            "type": "attempt", "run_id": "r1", "attempt_seq": 2, "piece_id": "abcdef0123456789",
             "corrects": {"run_id": "r1", "attempt_seq": 1},
             "replayed_from": {"run_id": "r0", "attempt_seq": 3},
             "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 2, "max_attempts": 2,
@@ -1045,7 +1033,7 @@ mod tests {
     #[test]
     fn cross_chunk_attempts_and_unlabeled_pieces_still_locate() {
         let cross = json!({
-            "kind": "attempt", "run_id": "r1", "attempt_seq": 7, "piece_id": "feedfacefeedface",
+            "type": "attempt", "run_id": "r1", "attempt_seq": 7, "piece_id": "feedfacefeedface",
             "source": "a.md", "chunk_index": 1, "stage": "cross_chunk", "attempt": 1, "max_attempts": 1,
             "state": "stop_valid", "length_limited": false, "transport_retries": 0,
             "elapsed_seconds": 2.0, "requested_max_tokens": 8000, "finish_reason": "stop",
@@ -1093,7 +1081,7 @@ mod tests {
         // is still a chunk, not a cross-chunk row, and an empty
         // document part earns no byte suffix.
         let bare = json!({
-            "kind": "attempt", "run_id": "r1", "attempt_seq": 9, "piece_id": "bare000000000000",
+            "type": "attempt", "run_id": "r1", "attempt_seq": 9, "piece_id": "bare000000000000",
             "source": "a.md", "chunk_index": 2, "stage": "item", "attempt": 1, "max_attempts": 2,
             "state": "transport", "length_limited": false, "transport_retries": 4,
             "elapsed_seconds": 0.1, "requested_max_tokens": null, "finish_reason": null,

@@ -726,7 +726,7 @@ struct MetricDiffRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum ChangeRecord {
     Improved {
         case_id: String,

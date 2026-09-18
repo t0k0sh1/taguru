@@ -173,7 +173,7 @@ struct Locator {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum DifferenceRecord {
     /// Whether a document counts toward this pair's association records
     /// at all — a document only one side ever completed a run for is
