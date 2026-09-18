@@ -1120,11 +1120,11 @@ taguru extract --context ops --out sources/ --redact --redact-rules redact-rules
       The sidecar is a tagged stream: a <code>type</code> field discriminates
       <code>"run"</code> (the first line — <code>run_id</code>, the identity of this invocation;
       ADR 0023), <code>"chunk"</code>, <code>"attempt"</code>, and <code>"segment"</code>
-      records, described below. A consumer written before <code>"chunk"</code>/
-      <code>"segment"</code>/<code>"run"</code> existed keeps working unmodified as long as it
-      filters on <code>type == "attempt"</code> — the same discriminator it already needed to
-      read the sidecar at all — since an <code>attempt</code> record's own shape has only ever
-      gained fields.
+      records, described below. Filter on <code>type == "attempt"</code> to read only the
+      attempts and skip any record type this sidecar adds later — an <code>attempt</code>
+      record's own shape only ever gains fields. The discriminator was named
+      <code>kind</code> before ADR 0042: a consumer written against that name has to read
+      <code>type</code> instead, since nothing writes <code>kind</code> any more.
     </p>
     <p>
       Every <code>attempt</code> record carries: <code>run_id</code>, <code>attempt_seq</code>
