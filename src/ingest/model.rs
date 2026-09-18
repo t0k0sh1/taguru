@@ -358,7 +358,8 @@ fn parse_schema(
     check_size(number, "context", &line.context, MAX_CONTEXT_NAME_BYTES)?;
     check_nonempty(number, "context", &line.context)?;
     let document = schema::SchemaDocument {
-        schema: schema::SCHEMA_VERSION,
+        record_type: schema::SchemaType::Schema,
+        version: Some(crate::format::FORMAT_VERSION.to_string()),
         mode: line.mode,
         closed_labels: line.closed_labels,
         types: line.types,

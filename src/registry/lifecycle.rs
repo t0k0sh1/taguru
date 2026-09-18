@@ -1818,7 +1818,7 @@ mod tests {
     fn rename_context_moves_the_schema_file_and_its_recorded_digest_too() {
         let dir = scratch_dir("rename-context-schema");
         let document =
-            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         let digest = crate::sha256::sha256_hex(document);
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -2702,7 +2702,8 @@ mod tests {
 
     fn valid_schema_document() -> schema::SchemaDocument {
         schema::SchemaDocument {
-            schema: schema::SCHEMA_VERSION,
+            record_type: schema::SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             mode: schema::SchemaMode::Strict,
             closed_labels: false,
             types: BTreeMap::from([("Brewery".to_string(), schema::TypeDef::default())]),

@@ -417,7 +417,7 @@ fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "strict",
             "closed_labels": false,
             "types": {"Brewery": {}, "Person": {}},
@@ -463,18 +463,38 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
     server.ok("PUT", "/contexts/sake", Some(json!({})));
 
     let document = json!({
-        "schema": 1,
+        "type": "schema",
+        "version": "2026-09-17",
         "mode": "warn",
         "closed_labels": false,
         "types": {"Brewery": {"is_a": []}},
         "relations": {}
     });
+    // `version` rides through to the route: one this server does not
+    // read refuses, rather than being dropped on the way and installing.
+    let refused = server.call_tool(
+        0,
+        "put_schema",
+        json!({
+            "context": "sake",
+            "type": "schema",
+            "version": "2099-01-01",
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {},
+            "relations": {}
+        }),
+    );
+    assert_eq!(refused["isError"], json!(true), "{refused}");
+
+    // Omitted, it means this server's own — and the stored document
+    // states it.
     let put_reply = server.call_tool(
         1,
         "put_schema",
         json!({
             "context": "sake",
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"Brewery": {}},
@@ -512,7 +532,7 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
     );
 
     let document = json!({
-        "schema": 1,
+        "type": "schema",
         "mode": "strict",
         "closed_labels": false,
         "types": {"Brewery": {}, "Person": {}},

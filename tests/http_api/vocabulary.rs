@@ -375,7 +375,7 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "off", "closed_labels": false,
+            "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
         })),
     );

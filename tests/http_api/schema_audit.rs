@@ -13,7 +13,7 @@ use crate::support::*;
 
 fn strict_document() -> serde_json::Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": "strict",
         "closed_labels": false,
         "types": {
@@ -454,7 +454,7 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "off", "closed_labels": false,
+            "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
         })),
     );

@@ -87,16 +87,20 @@
 
   <section id="document">
     <h2>The document</h2>
-    <p class="section-sub">One JSON object per <code>context</code>, independent of the source-file/<code>group</code>/image format versions.</p>
-    <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
+    <p class="section-sub">One JSON object per <code>context</code>, stating its <code>type</code> and <code>version</code> like every other taguru record.</p>
+    <pre><code>{<span class="k">"type"</span>: <span class="s">"schema"</span>, <span class="k">"version"</span>: <span class="s">"2026-09-17"</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
  <span class="k">"types"</span>: {<span class="s">"Brewery"</span>: {<span class="k">"is_a"</span>: []}, <span class="s">"Person"</span>: {<span class="k">"is_a"</span>: []}},
  <span class="k">"relations"</span>: {<span class="s">"杜氏"</span>: {<span class="k">"domain"</span>: [<span class="s">"Brewery"</span>], <span class="k">"range"</span>: [<span class="s">"Person"</span>]}}}</code></pre>
     <p>
-      <code>schema</code> is <code>SCHEMA_VERSION</code> (currently <code>1</code>), independent
-      of the file-format <code>version</code> and of <code>IMAGE_VERSION</code> — the
-      document has its own version lane because it changes on its own schedule.
+      <code>type</code> is always <code>"schema"</code> — the document says what it is.
+      <code>version</code> is the file-format revision, the same date every other taguru
+      record carries (independent of <code>IMAGE_VERSION</code>). It is the one optional
+      field: leave it off and it means the running server's own revision; spell it and it
+      must equal that revision, or the document is refused by name (<code>null</code> is
+      not an omission). Whatever installs is stored and served with <code>version</code>
+      stated.
       <code>mode</code> is one of <code>"off"</code>, <code>"warn"</code>, or
-      <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every top-level
+      <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every other top-level
       field is required and unknown fields are refused, both on the wire
       (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
       <code>{stem}.schema.json</code>): unlike the source stream's <code>group</code> record, nothing here defaults,

@@ -532,13 +532,20 @@ class SchemaDocument:
     """A ``context``'s schema document — the same shape
     `{stem}.schema.json`/`GET /contexts/{name}/schema` persist and
     serve, mirrored field-for-field from `src/schema.rs`'s
-    `SchemaDocument` (ADR 0009 §5.3)."""
+    `SchemaDocument` (ADR 0009 §5.3).
 
-    schema: int
+    ``type`` is always ``"schema"`` — the document says what it is (ADR
+    0043). ``version`` is the format revision, a date string; leave it
+    ``None`` to mean the running server's own — the server states it in
+    whatever it installs and serves, so a fetched document always carries
+    it."""
+
+    type: str
     mode: str
     closed_labels: bool
     types: dict[str, TypeDef]
     relations: dict[str, RelationDef]
+    version: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

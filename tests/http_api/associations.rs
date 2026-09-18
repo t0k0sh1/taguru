@@ -268,7 +268,7 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "off", "closed_labels": false,
+            "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
         })),
     );

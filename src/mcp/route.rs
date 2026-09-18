@@ -361,12 +361,13 @@ pub fn route_tool(
         "get_schema" => ("GET", format!("{}/schema", context_path("context")?), None),
         "put_schema" => {
             let path = format!("{}/schema", context_path("context")?);
-            // Schema-required (ADR 0009 §5): the document has no
-            // optional top-level field, so an omission here would only
-            // be caught downstream by `AppJson`'s `deny_unknown_fields`
-            // rejection rather than this tool's own "missing argument"
-            // message — check each up front instead.
-            for field in ["schema", "mode", "closed_labels", "types", "relations"] {
+            // Schema-required (ADR 0009 §5): `version` is the
+            // document's one optional top-level field (ADR 0043 — absent
+            // means the running server's own), so an omission of any
+            // other would only be caught downstream by `AppJson`'s
+            // missing-field rejection rather than this tool's own
+            // "missing argument" message — check each up front instead.
+            for field in ["type", "mode", "closed_labels", "types", "relations"] {
                 need_present(arguments, field)?;
             }
             (
@@ -374,7 +375,14 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["schema", "mode", "closed_labels", "types", "relations"],
+                    &[
+                        "type",
+                        "version",
+                        "mode",
+                        "closed_labels",
+                        "types",
+                        "relations",
+                    ],
                 )),
             )
         }

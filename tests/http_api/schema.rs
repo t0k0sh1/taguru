@@ -15,7 +15,7 @@ use crate::support::*;
 
 fn valid_document() -> serde_json::Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": "strict",
         "closed_labels": false,
         "types": {
@@ -58,11 +58,19 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_context", "{body}");
 
+    // The body omitted `version` (= this server's own, ADR 0043); what
+    // installs — and is served back — states it.
+    let mut stated = valid_document();
+    stated["version"] = json!("2026-09-17");
     let installed = server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
-    assert_eq!(installed, valid_document());
+    assert_eq!(installed, stated);
 
     let fetched = server.ok("GET", "/contexts/sake/schema", None);
-    assert_eq!(fetched, valid_document());
+    assert_eq!(fetched, stated);
+
+    // Spelling the version out installs the identical document.
+    let respelled = server.ok("PUT", "/contexts/sake/schema", Some(stated.clone()));
+    assert_eq!(respelled, stated);
 }
 
 /// `install`'s refusals — an unread version, an `is_a` cycle, the
@@ -75,10 +83,32 @@ fn install_refusals_answer_400() {
     server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
 
     let mut unread_version = valid_document();
-    unread_version["schema"] = json!(2);
+    unread_version["version"] = json!("2099-01-01");
     let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(unread_version));
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], "invalid_argument", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("version '2099-01-01' is not a format this taguru reads"),
+        "{body}"
+    );
+
+    // ADR 0043: a document that does not say what it is — or that still
+    // carries the `schema: 1` stamp earlier releases wrote — is a
+    // wrong-shaped body, refused before `install` runs.
+    let mut untyped = valid_document();
+    untyped.as_object_mut().unwrap().remove("type");
+    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(untyped.clone()));
+    assert_eq!(status, 422, "{body}");
+    untyped["schema"] = json!(1);
+    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(untyped));
+    assert_eq!(status, 422, "{body}");
+    let mut null_version = valid_document();
+    null_version["version"] = json!(null);
+    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(null_version));
+    assert_eq!(status, 422, "{body}");
 
     let mut cycle = valid_document();
     cycle["types"] = json!({"A": {"is_a": ["B"]}, "B": {"is_a": ["A"]}});
@@ -158,7 +188,7 @@ fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1, "mode": "off", "closed_labels": false,
+            "type": "schema", "mode": "off", "closed_labels": false,
             "types": {"Brewery": {}, "Person": {}},
             "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
         })),
@@ -459,7 +489,7 @@ fn closed_labels_refuses_an_undeclared_label() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "strict",
             "closed_labels": true,
             "types": {},

@@ -502,7 +502,7 @@ fn add_associations_warn_mode_response_shape() {
         "PUT",
         "/contexts/corpus-g/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "warn",
             "closed_labels": false,
             "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},

@@ -259,7 +259,7 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "off",
             "closed_labels": false,
             "types": {},
@@ -282,7 +282,7 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
         "PUT",
         "/contexts/sake/schema",
         Some(json!({
-            "schema": 1,
+            "type": "schema",
             "mode": "off",
             "closed_labels": false,
             "types": {},

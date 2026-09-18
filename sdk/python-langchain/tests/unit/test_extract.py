@@ -66,7 +66,7 @@ def _test_schema(
     closed_labels: bool = False,
 ) -> SchemaDocument:
     return SchemaDocument(
-        schema=1,
+        type="schema",
         mode=mode,
         closed_labels=closed_labels,
         types={name: TypeDef(is_a=is_a) for name, is_a in types.items()},

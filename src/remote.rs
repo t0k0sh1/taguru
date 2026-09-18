@@ -591,7 +591,7 @@ impl Api {
     /// a guess made here). `/version` is auth-exempt (`PROBE_EXEMPT`),
     /// but the bearer rides along anyway — matches every other
     /// request this module sends.
-    fn schema_formats(&self) -> Option<Vec<u64>> {
+    fn schema_formats(&self) -> Option<Vec<String>> {
         let url = self.url(&["version"]).ok()?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(HEALTH_PREFLIGHT_TIMEOUT))
@@ -611,14 +611,17 @@ impl Api {
         let value: Value = serde_json::from_str(&body).ok()?;
         let formats = value.get("schema_formats")?.as_array()?;
         // All-or-nothing: `filter_map` would silently drop a malformed
-        // element (e.g. a stray string in the array), which could turn
-        // `[2, "oops"]` into a false `[2]` match this CLI reads as
-        // "the server carries only format 2" instead of "this
+        // element (e.g. a stray number in the array), which could turn
+        // `["2026-09-17", 7]` into a false `["2026-09-17"]` match this
+        // CLI reads as "the server carries only that format" instead of "this
         // capability array is malformed" — the latter must answer
         // `None` (best-effort, same as every other trouble case this
         // method already treats that way) rather than a guess built on
         // a partial read.
-        formats.iter().map(serde_json::Value::as_u64).collect()
+        formats
+            .iter()
+            .map(|format| format.as_str().map(str::to_string))
+            .collect()
     }
 
     /// `import --url`'s ADR 0009 §13 preflight — call only when the
@@ -633,9 +636,9 @@ impl Api {
     /// refusal (ADR 0009 §13 bullet 2) — this preflight exists to
     /// replace that with an honest one before the network round trip.
     pub(crate) fn schema_import_refusal(&self) -> Option<String> {
-        let mine = crate::schema::SCHEMA_VERSION;
+        let mine = crate::format::FORMAT_VERSION;
         match self.schema_formats() {
-            Some(formats) if formats.contains(&mine) => None,
+            Some(formats) if formats.iter().any(|format| format == mine) => None,
             Some(formats) => Some(format!(
                 "taguru: import: this CLI writes schema format {mine} but the server at {} \
                  reads {formats:?} — nothing was sent; upgrade the server, or import \
@@ -662,9 +665,9 @@ impl Api {
     /// for this CLI to fail to read — only a format this CLI does not
     /// recognize refuses.
     pub(crate) fn schema_export_refusal(&self) -> Option<String> {
-        let mine = crate::schema::SCHEMA_VERSION;
+        let mine = crate::format::FORMAT_VERSION;
         match self.schema_formats() {
-            Some(formats) if !formats.contains(&mine) => Some(format!(
+            Some(formats) if !formats.iter().any(|format| format == mine) => Some(format!(
                 "taguru: export: this CLI reads schema format {mine} but the server at {} \
                  writes {formats:?} — nothing was fetched; upgrade this CLI",
                 self.base
@@ -989,14 +992,17 @@ mod tests {
     /// with).
     #[test]
     fn schema_import_refusal_covers_match_mismatch_and_absence() {
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1]}));
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
+        );
         assert_eq!(Api::new(base).schema_import_refusal(), None);
 
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [2]}));
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
         let message = Api::new(base)
             .schema_import_refusal()
             .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains("reads [2]"), "{message}");
+        assert!(message.contains(r#"reads ["2099-01-01"]"#), "{message}");
         assert!(message.contains("nothing was sent"), "{message}");
 
         let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
@@ -1010,15 +1016,18 @@ mod tests {
     }
 
     /// A mixed-type `schema_formats` array (a malformed capability
-    /// announcement — a stray string among the versions) must refuse
-    /// as a whole, not silently drop the bad element and match on
-    /// whatever numbers happened to parse: `[1, "oops"]` naming this
-    /// CLI's own version must still be treated as "cannot trust this
-    /// array" (absent-shaped fatal), never as "the server carries
-    /// format 1."
+    /// announcement — a stray number among the dates) must refuse as a
+    /// whole, not silently drop the bad element and match on whatever
+    /// strings happened to parse: `["<this build's date>", 1]` naming
+    /// this CLI's own version must still be treated as "cannot trust
+    /// this array" (absent-shaped fatal), never as "the server carries
+    /// this format." A pre-ADR-0042 server's `[1]` lands here too.
     #[test]
     fn schema_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1, "oops"]}));
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"schema_formats": [crate::format::FORMAT_VERSION, 1]}),
+        );
         let message = Api::new(base)
             .schema_import_refusal()
             .expect("a malformed schema_formats must refuse, not silently match");
@@ -1033,14 +1042,17 @@ mod tests {
     /// safe here rather than fatal.
     #[test]
     fn schema_export_refusal_covers_match_mismatch_and_absence() {
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1]}));
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
+        );
         assert_eq!(Api::new(base).schema_export_refusal(), None);
 
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [2]}));
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
         let message = Api::new(base)
             .schema_export_refusal()
             .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains("writes [2]"), "{message}");
+        assert!(message.contains(r#"writes ["2099-01-01"]"#), "{message}");
         assert!(message.contains("nothing was fetched"), "{message}");
 
         let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));

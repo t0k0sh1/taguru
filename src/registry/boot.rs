@@ -1179,7 +1179,7 @@ mod tests {
             state.flush_dirty();
         }
         let document =
-            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         fs::write(schema_path(&dir, "sake"), document).unwrap();
         record_schema_digest(
             &dir,
@@ -1213,7 +1213,7 @@ mod tests {
             state.flush_dirty();
         }
         let document =
-            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         fs::write(schema_path(&dir, "sake"), document).unwrap();
         record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
         // Corrupt the sidecar itself: `read_meta_file` falls back to
@@ -1253,7 +1253,7 @@ mod tests {
             state.flush_dirty();
         }
         let document =
-            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         fs::write(schema_path(&dir, "sake"), document).unwrap();
         record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
         // Remove the sidecar entirely, keeping the schema file: unlike
@@ -1310,7 +1310,7 @@ mod tests {
     fn schema_digest_survives_a_meta_update_write() {
         let dir = scratch_dir("schema-digest-survives");
         let document =
-            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+            br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
         let digest = crate::sha256::sha256_hex(document);
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();

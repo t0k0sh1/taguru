@@ -372,7 +372,7 @@ fn the_destination_schema_judges_the_promoted_batches() {
         "PUT",
         "/contexts/perm/schema",
         Some(json!({
-            "schema": 1, "mode": "strict", "closed_labels": true,
+            "type": "schema", "mode": "strict", "closed_labels": true,
             "types": {},
             "relations": {"テストランナー": {"domain": [], "range": []}}
         })),
@@ -620,7 +620,7 @@ fn a_warn_mode_destination_reports_schema_violations_in_the_envelope() {
         "PUT",
         "/contexts/perm/schema",
         Some(json!({
-            "schema": 1, "mode": "warn", "closed_labels": true,
+            "type": "schema", "mode": "warn", "closed_labels": true,
             "types": {},
             "relations": {"テストランナー": {"domain": [], "range": []}}
         })),

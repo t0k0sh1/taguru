@@ -243,7 +243,8 @@ describe("checkpoint reuse", () => {
     expect(unitCount(store, source)).toBe(1);
 
     server.schemaDocument = {
-      schema: 1,
+      type: "schema",
+      version: "2026-09-17",
       mode: "warn",
       closed_labels: false,
       types: { Brewery: { is_a: [] } },

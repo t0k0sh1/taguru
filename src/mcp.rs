@@ -66,10 +66,10 @@ mod tests {
             "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
             "checks": ["merge"],
-            "schema": 1, "mode": "strict", "closed_labels": false,
+            "type": "schema", "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {},
             "document": {
-                "schema": 1, "mode": "strict", "closed_labels": false,
+                "type": "schema", "mode": "strict", "closed_labels": false,
                 "types": {}, "relations": {},
             },
         });
@@ -424,10 +424,10 @@ mod tests {
             "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
-            "schema": 1, "mode": "strict", "closed_labels": false,
+            "type": "schema", "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {},
             "document": {
-                "schema": 1, "mode": "strict", "closed_labels": false,
+                "type": "schema", "mode": "strict", "closed_labels": false,
                 "types": {}, "relations": {},
             },
         });
@@ -457,7 +457,7 @@ mod tests {
             ("explain_search", "source"),
             ("cite_passage", "source"),
             ("audit_coverage", "origins"),
-            ("put_schema", "schema"),
+            ("put_schema", "type"),
             ("put_schema", "mode"),
             ("put_schema", "closed_labels"),
             ("put_schema", "types"),
@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(body.unwrap()["after"], cursor);
 
         let document = json!({
-            "schema": 1, "mode": "strict", "closed_labels": false,
+            "type": "schema", "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {}
         });
         let (_, _, body) = route_tool(

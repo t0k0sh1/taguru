@@ -616,7 +616,8 @@ mod tests {
 
     fn doc(mode: SchemaMode, closed_labels: bool) -> SchemaDocument {
         SchemaDocument {
-            schema: super::super::SCHEMA_VERSION,
+            record_type: super::super::SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
             mode,
             closed_labels,
             types: BTreeMap::from([

@@ -211,10 +211,10 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
             "batch_formats": [crate::format::FORMAT_VERSION],
             // Equality-checked like `batch_formats`, not range-accepted
-            // like `image_formats` below — ADR 0009 §5.3 bumps
-            // `SCHEMA_VERSION` on every shape change, additive or
-            // breaking, so there is never a range of readable values.
-            "schema_formats": [crate::schema::SCHEMA_VERSION],
+            // like `image_formats` below: a schema document is read at
+            // the one `version` date every taguru record shares (ADR
+            // 0042), so there is never a range of readable values.
+            "schema_formats": [crate::format::FORMAT_VERSION],
             // Every version from 1 through the current one still loads
             // (`src/context/image.rs`'s range-acceptance check), unlike
             // batch/communities formats below, which are checked for

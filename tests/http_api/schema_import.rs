@@ -18,7 +18,7 @@ use crate::support::*;
 /// exercise a domain violation without needing the range side too.
 fn document(mode: &str) -> serde_json::Value {
     json!({
-        "schema": 1,
+        "type": "schema",
         "mode": mode,
         "closed_labels": false,
         "types": {
