@@ -1297,30 +1297,30 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
             "run_index": 1, "prompt_version": 1,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 100.0, "cell_id": "m.run01",
-            "document_id": "brewery", "source": "corpus/brewery.md",
+            "type": "segment", "ts": 100.0, "cell_id": "m.run01",
+            "segment_id": "brewery", "source": "corpus/brewery.md",
             "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
-            "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
+            "type": "attempt", "source": "corpus/brewery.md", "stage": "item",
             "chunk_index": 0, "attempt": 1, "max_attempts": 2, "state": "stop_valid",
             "length_limited": false, "elapsed_seconds": 4.0,
             "provider_metadata": {"finish_reason": "stop", "input_tokens": 1000,
                 "output_tokens": 200, "total_tokens": 1200},
             "parse_error": null, "validation_issues": null,
             "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "brewery", "segment_sha256": "sha-brewery",
+            "segment_id": "brewery", "segment_sha256": "sha-brewery",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 110.0, "cell_id": "m.run01",
-            "document_id": "brewery", "source": "corpus/brewery.md",
+            "type": "segment", "ts": 110.0, "cell_id": "m.run01",
+            "segment_id": "brewery", "source": "corpus/brewery.md",
             "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
         serde_json::json!({
-            "kind": "cell", "ts": 111.0, "cell_id": "m.run01", "outcome": "complete",
+            "type": "cell", "ts": 111.0, "cell_id": "m.run01", "outcome": "complete",
             "documents_written": 1, "attempts_total": 1, "exit_code": 0,
         }),
     ];
@@ -1557,19 +1557,19 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
                 "run_index": 1, "prompt_version": 1,
             }),
             serde_json::json!({
-                "kind": "document", "ts": 100.0, "cell_id": cell_id,
-                "document_id": "brewery", "source": "corpus/brewery.md",
+                "type": "segment", "ts": 100.0, "cell_id": cell_id,
+                "segment_id": "brewery", "source": "corpus/brewery.md",
                 "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
             }),
             serde_json::json!({
-                "kind": "document", "ts": 110.0, "cell_id": cell_id,
-                "document_id": "brewery", "source": "corpus/brewery.md",
+                "type": "segment", "ts": 110.0, "cell_id": cell_id,
+                "segment_id": "brewery", "source": "corpus/brewery.md",
                 "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
                 "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
                 "duplicates": 0, "dropped": 0, "batch_path": batch_path,
             }),
             serde_json::json!({
-                "kind": "cell", "ts": 111.0, "cell_id": cell_id, "outcome": "complete",
+                "type": "cell", "ts": 111.0, "cell_id": cell_id, "outcome": "complete",
                 "documents_written": 1, "attempts_total": 0, "exit_code": 0,
             }),
         ]
@@ -1677,13 +1677,13 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
     assert!(
         lines
             .iter()
-            .any(|l| l["kind"] == "association_shared" && l["key"]["object"] == "lager"),
+            .any(|l| l["type"] == "association_shared" && l["key"]["object"] == "lager"),
         "{lines:?}"
     );
     assert!(
         lines
             .iter()
-            .any(|l| l["kind"] == "polarity_difference" && l["key"]["object"] == "lager"),
+            .any(|l| l["type"] == "polarity_difference" && l["key"]["object"] == "lager"),
         "{lines:?}"
     );
 
@@ -1751,7 +1751,7 @@ fn benchmark_compare_with_text_embeds_paragraph_text() {
     assert_eq!(lines[0]["text_included"], true);
     let polarity = lines
         .iter()
-        .find(|l| l["kind"] == "polarity_difference")
+        .find(|l| l["type"] == "polarity_difference")
         .expect("lager fires polarity_difference");
     assert_eq!(polarity["locator"]["text"], text);
     assert_eq!(polarity["locator"]["text_truncated"], false);

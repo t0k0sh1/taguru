@@ -879,7 +879,8 @@ pub(super) fn block_preamble(index: usize, total: usize) -> String {
 /// ADR 0033 §3.4's `structure` trace record: one per unit.
 #[derive(serde::Serialize)]
 pub(super) struct TraceStructure<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     #[serde(flatten)]
     pub(super) unit: &'a Unit,
 }
@@ -888,7 +889,8 @@ pub(super) struct TraceStructure<'a> {
 /// got a block.
 #[derive(serde::Serialize)]
 pub(super) struct TraceChunkContext<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) chunk_index: usize,
     #[serde(flatten)]
     pub(super) block: &'a ContextBlock,
@@ -1114,7 +1116,8 @@ pub(super) fn units_opening_in(units: &[Unit], first: u32, last: u32) -> Vec<&Un
 /// answered for.
 #[derive(serde::Serialize)]
 pub(super) struct TraceOverview<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) chunk_index: usize,
     #[serde(flatten)]
     pub(super) answer: &'a OverviewAnswer,

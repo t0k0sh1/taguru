@@ -9,6 +9,25 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — every record that used `kind` to say what it is now
+  says so in `type`** (ADR 0042 §3.4, #937 step 5): the extract
+  diagnostics sidecar (`run` / `chunk` / `attempt` / `segment`), the
+  extract trace (`segment` / `redaction` / `structure` / `chunk` /
+  `overview` / `chunk_context` / `piece` / `item` / `loss` / `steering`
+  / `paragraph` / `uncovered`), the attempts log (`segment` /
+  `settings` / `system` / `attempt` / `move` / `replay` /
+  `replay_summary`), the benchmark runs file's rows (`segment` /
+  `chunk` / `attempt` / `cell`), `differences.jsonl`'s rows, `taguru
+  evaluate compare`'s per-case rows (`improved` / `regressed` / `added`
+  / `removed`), and `taguru inspect attempts --json`'s `type:
+  "attempts"`. `kind` stays where it is a sub-classification (an alias
+  line's `concept` | `label`, a locator's `page`, an evidence
+  candidate's lane). Readers of the attempts log, the trace, and the
+  runs file (`--replay`, `inspect attempts`, `benchmark compare`,
+  `scripts/extract_metrics.py`) read `type` only — a file written
+  before this release is skipped record by record, and the pre-#904
+  `document` record name and `document_id` column are no longer read
+  either.
 - **Breaking — a data directory holding a schema installed by an
   earlier release does not boot, and the schema document's shape
   changed for every caller** (ADR 0043, #937). The document — the body

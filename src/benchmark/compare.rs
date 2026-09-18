@@ -33,14 +33,11 @@ use super::identity;
 #[path = "compare/differences.rs"]
 mod differences;
 
-/// `segment_id` is the current field name (#851/#904); `document_id` is
-/// what every runs file written before the rename carries. Centralized
-/// so the two read sites treat both alike instead of one silently
-/// drifting from the other.
+/// A runs record's `segment_id`, `""` when absent. Centralized so the
+/// two read sites cannot drift from each other.
 fn segment_id_field(value: &Value) -> String {
     value
         .get("segment_id")
-        .or_else(|| value.get("document_id"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
@@ -488,7 +485,7 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
             let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
                 continue;
             };
-            match value.get("kind").and_then(Value::as_str) {
+            match value.get("type").and_then(Value::as_str) {
                 Some("attempt") => {
                     let segment_id = segment_id_field(&value);
                     let finish_reason = value
@@ -545,7 +542,7 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
                             .is_some_and(|v| !v.is_null()),
                     });
                 }
-                Some("segment") | Some("document") => {
+                Some("segment") => {
                     let segment_id = segment_id_field(&value);
                     let ts = value.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
                     match value.get("phase").and_then(Value::as_str) {

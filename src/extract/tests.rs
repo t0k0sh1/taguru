@@ -70,7 +70,7 @@ fn every_extract_known_key_is_documented() {
 #[test]
 fn attempt_record_serializes_the_shared_key_set() {
     let full = AttemptRecord {
-        kind: "attempt",
+        record_type: "attempt",
         run_id: "0000deadbeef0000".to_string(),
         attempt_seq: 1,
         corrects: None,
@@ -113,7 +113,6 @@ fn attempt_record_serializes_the_shared_key_set() {
             "attempt_seq",
             "chunk_index",
             "elapsed_seconds",
-            "kind",
             "length_limited",
             "max_attempts",
             "parse_error",
@@ -127,6 +126,7 @@ fn attempt_record_serializes_the_shared_key_set() {
             "stage",
             "state",
             "transport_retries",
+            "type",
             "validation_issues",
         ]
     );
@@ -153,7 +153,7 @@ fn attempt_record_serializes_the_shared_key_set() {
     // actually writes, and the shape the Python side has no
     // counterpart for at all.
     let minimal = AttemptRecord {
-        kind: "attempt",
+        record_type: "attempt",
         run_id: "0000deadbeef0000".to_string(),
         attempt_seq: 1,
         corrects: None,
@@ -193,7 +193,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         assert!(!keys.contains(absent), "{absent} must be omitted: {value}");
     }
     for present in [
-        "kind",
+        "type",
         "run_id",
         "attempt_seq",
         "piece_id",
@@ -219,13 +219,13 @@ fn attempt_record_serializes_the_shared_key_set() {
 
 /// The exact serialized key sets of the two record kinds issue
 /// #262 adds — `AttemptRecord` above stays untouched by this issue
-/// by construction; these two are new, additive `kind`s on the same
+/// by construction; these two are new, additive `type`s on the same
 /// sidecar (ADR 0003 §7).
 #[test]
 fn chunk_and_document_records_serialize_their_fixed_key_sets() {
     let chunk_value: serde_json::Value = serde_json::from_str(
         &serde_json::to_string(&ChunkRecord {
-            kind: "chunk",
+            record_type: "chunk",
             source: "doc.md".to_string(),
             chunk_index: 0,
             chunk_total: 2,
@@ -251,16 +251,16 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             "chunk_index",
             "chunk_sha256",
             "chunk_total",
-            "kind",
             "paragraph_first",
             "paragraph_last",
             "source",
+            "type",
         ]
     );
 
     let document_value: serde_json::Value = serde_json::from_str(
         &serde_json::to_string(&SegmentRecord {
-            kind: "segment",
+            record_type: "segment",
             source: "doc.md".to_string(),
             associations: 41,
             concepts: 6,
@@ -290,11 +290,11 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             "concepts",
             "dropped",
             "duplicates",
-            "kind",
             "labels",
             "questions",
             "removed",
             "source",
+            "type",
             "uncovered",
         ]
     );
@@ -2760,7 +2760,7 @@ fn alias(alias: &str, canonical: &str, kind: &str) -> ModelAlias {
 /// tests need.
 fn empty_steering() -> TraceSteering<'static> {
     TraceSteering {
-        kind: "steering",
+        record_type: "steering",
         chunk_index: None,
         candidates: &[],
         system_sha256: "",
@@ -6188,7 +6188,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         .collect();
     let kinds: Vec<&str> = records
         .iter()
-        .map(|record| record["kind"].as_str().unwrap())
+        .map(|record| record["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         kinds,
@@ -6221,25 +6221,25 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
     let item = |object: &str| {
         records
             .iter()
-            .find(|record| record["kind"] == "item" && record["object"] == object)
+            .find(|record| record["type"] == "item" && record["object"] == object)
             .unwrap()
     };
     assert_eq!(item("beta")["piece_id"], sha256_hex(piece_a.as_bytes()));
     assert_eq!(item("alpha")["item"], "association");
     let gamma_items: Vec<&serde_json::Value> = records
         .iter()
-        .filter(|record| record["kind"] == "item" && record["subject"] == "gamma")
+        .filter(|record| record["type"] == "item" && record["subject"] == "gamma")
         .collect();
     assert_eq!(gamma_items.len(), 1);
     assert_eq!(gamma_items[0]["piece_id"], sha256_hex(piece_b.as_bytes()));
     let delta = records
         .iter()
-        .find(|record| record["kind"] == "item" && record["subject"] == "delta")
+        .find(|record| record["type"] == "item" && record["subject"] == "delta")
         .unwrap();
     assert_eq!(delta["piece_id"], sha256_hex(piece_c.as_bytes()));
     let concept = records
         .iter()
-        .find(|record| record["kind"] == "item" && record["item"] == "concept")
+        .find(|record| record["type"] == "item" && record["item"] == "concept")
         .unwrap();
     assert_eq!(concept["alias"], "g");
     assert_eq!(concept["canonical"], "gamma");
@@ -6587,7 +6587,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
     let losses: Vec<serde_json::Value> = text
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
-        .filter(|record: &serde_json::Value| record["kind"] == "loss")
+        .filter(|record: &serde_json::Value| record["type"] == "loss")
         .collect();
     assert_eq!(losses.len(), 4, "{losses:?}");
     // Removals first, piece by piece; then merge's losses.
@@ -6803,7 +6803,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
     let losses: Vec<serde_json::Value> = text
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
-        .filter(|record: &serde_json::Value| record["kind"] == "loss")
+        .filter(|record: &serde_json::Value| record["type"] == "loss")
         .collect();
     let reasons: Vec<(&str, &str)> = losses
         .iter()
@@ -6964,7 +6964,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         .collect();
     let coverage: Vec<&serde_json::Value> = records
         .iter()
-        .filter(|record| record["kind"] == "paragraph")
+        .filter(|record| record["type"] == "paragraph")
         .collect();
     assert_eq!(coverage.len(), 3, "{coverage:?}");
     // Paragraph 0: cited by the association AND the question.
@@ -6981,7 +6981,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
     }
     let uncovered: Vec<&serde_json::Value> = records
         .iter()
-        .filter(|record| record["kind"] == "uncovered")
+        .filter(|record| record["type"] == "uncovered")
         .collect();
     assert_eq!(uncovered.len(), 1, "{uncovered:?}");
     assert_eq!(uncovered[0]["paragraph"], 1);
@@ -6992,7 +6992,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
     // Records land after every loss record, paragraphs before gaps.
     let kinds: Vec<&str> = records
         .iter()
-        .map(|record| record["kind"].as_str().unwrap())
+        .map(|record| record["type"].as_str().unwrap())
         .collect();
     let first_paragraph = kinds.iter().position(|kind| *kind == "paragraph").unwrap();
     assert!(
@@ -8530,7 +8530,7 @@ fn steering_record_mirrors_the_prompted_lists() {
     // Serialized shape: nothing prompted → empty lists and null schema.
     let value: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&empty_steering()).unwrap()).unwrap();
-    assert_eq!(value["kind"], "steering");
+    assert_eq!(value["type"], "steering");
     assert_eq!(value["chunk_index"], serde_json::Value::Null);
     assert_eq!(value["candidates"], serde_json::json!([]));
     assert_eq!(value["vocabulary"], serde_json::json!([]));
@@ -8658,7 +8658,7 @@ fn replay_attempt_record(
         .map(|(role, content)| replay_turn_json(role, content))
         .collect();
     serde_json::json!({
-        "kind": "attempt",
+        "type": "attempt",
         "run_id": "run-1",
         "attempt_seq": attempt as u64,
         "piece_id": piece_id,
@@ -8712,7 +8712,7 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
     let mut text = String::new();
     text.push_str(
         &serde_json::json!({
-            "kind": "document",
+            "type": "segment",
             "run_id": "run-parse-fixture",
         })
         .to_string(),
@@ -8720,7 +8720,7 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
     text.push('\n');
     text.push_str(
         &serde_json::json!({
-            "kind": "system",
+            "type": "system",
             "sha256": system_sha,
             "bytes": 27,
             "content": "you are a helpful extractor",
@@ -8744,7 +8744,7 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
     );
     text.push('\n');
     text.push_str("{not valid json at all\n");
-    text.push_str(r#"{"kind":"attempt","piece_id":"piece-broken","state":"stop_valid"}"#);
+    text.push_str(r#"{"type":"attempt","piece_id":"piece-broken","state":"stop_valid"}"#);
     text.push('\n');
     fs::write(&path, text).unwrap();
 
@@ -8776,42 +8776,6 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
             assert_eq!(diagnostic.recorded, 0);
         }
         ReplayLookup::Hit(_) => panic!("a malformed record must never be offered for replay"),
-    }
-}
-
-#[test]
-fn replay_index_recognizes_the_post_851_segment_kind_the_same_as_document() {
-    let path = replay_fixture_path("segment-kind");
-    let system_sha = sha256_hex(b"you are a helpful extractor");
-    let mut text = String::new();
-    text.push_str(
-        &serde_json::json!({
-            "kind": "segment",
-            "run_id": "run-segment-fixture",
-        })
-        .to_string(),
-    );
-    text.push('\n');
-    text.push_str(
-        &serde_json::json!({
-            "kind": "system",
-            "sha256": system_sha,
-            "bytes": 27,
-            "content": "you are a helpful extractor",
-        })
-        .to_string(),
-    );
-    text.push('\n');
-    fs::write(&path, text).unwrap();
-
-    match ReplayIndex::load(&path).pinned_system() {
-        SystemPinDecision::Pin { content, run_id } => {
-            assert_eq!(content, "you are a helpful extractor");
-            assert_eq!(run_id, "run-segment-fixture");
-        }
-        _ => {
-            panic!("a `kind: \"segment\"` record must originate a run the same way `document` does")
-        }
     }
 }
 
@@ -9026,7 +8990,7 @@ fn replay_index_reconstructs_usage_when_only_one_token_count_is_present() {
     let path = replay_fixture_path("partial-usage");
     let turns = [("user", "a piece with partial usage")];
     let record = serde_json::json!({
-        "kind": "attempt",
+        "type": "attempt",
         "run_id": "run-1",
         "attempt_seq": 1,
         "piece_id": "piece-1",
@@ -9186,7 +9150,7 @@ fn replay_index_rejects_a_system_record_whose_hash_does_not_match_its_content() 
     write_replay_log(
         &path,
         &[serde_json::json!({
-            "kind": "system",
+            "type": "system",
             "sha256": claimed_sha256,
             "bytes": real_content.len(),
             "content": real_content,
@@ -9208,7 +9172,7 @@ fn replay_index_never_pins_a_system_record_with_no_preceding_document_record() {
     write_replay_log(
         &path,
         &[serde_json::json!({
-            "kind": "system",
+            "type": "system",
             "sha256": sha256_hex(content.as_bytes()),
             "bytes": content.len(),
             "content": content,
@@ -9436,7 +9400,7 @@ fn a_replayed_completion_names_its_original_attempt() {
     write_replay_log(
         &path,
         &[serde_json::json!({
-            "kind": "attempt",
+            "type": "attempt",
             "run_id": "run-original",
             "attempt_seq": 7,
             "piece_id": "piece-hit",

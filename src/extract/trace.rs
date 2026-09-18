@@ -15,7 +15,8 @@ pub(super) const TRACE_DIR_NAME: &str = ".extract-trace";
 /// paragraph — the record deliberately has no `raw`.
 #[derive(serde::Serialize)]
 struct TraceRedaction<'a> {
-    kind: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
     rule: &'a str,
     paragraph: u32,
     placeholder: &'a str,
@@ -27,7 +28,8 @@ struct TraceRedaction<'a> {
 /// ADR 0023 §3.4's `segment` record — the file's first line.
 #[derive(serde::Serialize)]
 pub(super) struct TraceSegment<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) run_id: &'a str,
     pub(super) source: &'a str,
     pub(super) segment_sha256: &'a str,
@@ -40,7 +42,8 @@ pub(super) struct TraceSegment<'a> {
 /// is already one segment's).
 #[derive(serde::Serialize)]
 pub(super) struct TraceChunk<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) chunk_index: usize,
     pub(super) chunk_total: usize,
     pub(super) chunk_sha256: &'a str,
@@ -58,7 +61,8 @@ pub(super) struct TraceChunk<'a> {
 /// real run; tests build bare pieces).
 #[derive(serde::Serialize)]
 pub(super) struct TracePiece<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) piece_id: &'a str,
     pub(super) chunk_index: usize,
     pub(super) chunk_sha256: Option<&'a str>,
@@ -73,7 +77,8 @@ pub(super) struct TracePiece<'a> {
 /// the batch line spells it, plus the `piece_id` it joins on.
 #[derive(serde::Serialize)]
 pub(super) struct TraceItem<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) item: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) subject: Option<&'a str>,
@@ -97,7 +102,7 @@ pub(super) struct TraceItem<'a> {
 impl<'a> TraceItem<'a> {
     fn blank(item: &'static str, piece_id: Option<&'a str>) -> Self {
         Self {
-            kind: "item",
+            record_type: "item",
             item,
             subject: None,
             label: None,
@@ -117,7 +122,8 @@ impl<'a> TraceItem<'a> {
 /// model was shown — the loss is always readable in the original.
 #[derive(serde::Serialize)]
 pub(super) struct TraceLoss<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     /// `association` | `alias` | `question`.
     pub(super) item: &'static str,
     /// `removed` (mechanical, ADR 0013 — Stage 1 or a Stage 2 prune)
@@ -150,7 +156,8 @@ pub(super) struct TraceLoss<'a> {
 /// chunk's steering is the segment-wide record plus its own.
 #[derive(serde::Serialize)]
 pub(super) struct TraceSteering<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) chunk_index: Option<usize>,
     /// ADR 0014's candidate names, as offered (empty: `--candidates`
     /// off, or a segment with none).
@@ -193,7 +200,8 @@ pub(super) struct SteeringSchema<'a> {
 /// batch passage. `bytes` weights the coverage rate.
 #[derive(serde::Serialize)]
 pub(super) struct TraceParagraph<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) paragraph: u32,
     pub(super) bytes: usize,
     /// How many kept items (associations and questions) cite it.
@@ -211,7 +219,8 @@ pub(super) struct TraceParagraph<'a> {
 /// stderr names the gap.
 #[derive(serde::Serialize)]
 pub(super) struct TraceUncovered<'a> {
-    pub(super) kind: &'static str,
+    #[serde(rename = "type")]
+    pub(super) record_type: &'static str,
     pub(super) paragraph: u32,
     pub(super) sentence: &'a str,
     pub(super) text: &'a str,
@@ -306,7 +315,7 @@ pub(super) fn render_trace(
         }
     };
     push(&TraceSegment {
-        kind: "segment",
+        record_type: "segment",
         run_id,
         source,
         segment_sha256,
@@ -319,7 +328,7 @@ pub(super) fn render_trace(
     // matched text (no `raw`, on purpose).
     for redaction in redactions {
         push(&TraceRedaction {
-            kind: "redaction",
+            record_type: "redaction",
             rule: &redaction.rule,
             paragraph: redaction.paragraph,
             placeholder: &redaction.placeholder,
@@ -334,13 +343,13 @@ pub(super) fn render_trace(
     // chunks that cite them by index.
     for unit in units {
         push(&TraceStructure {
-            kind: "structure",
+            record_type: "structure",
             unit,
         });
     }
     for (chunk_index, descriptor) in chunks.iter().enumerate() {
         push(&TraceChunk {
-            kind: "chunk",
+            record_type: "chunk",
             chunk_index,
             chunk_total: chunks.len(),
             chunk_sha256: &descriptor.sha256,
@@ -352,14 +361,14 @@ pub(super) fn render_trace(
         // chunk, then §3.6.4: what the chunk was told.
         if let Some(answer) = overview.get(chunk_index).and_then(Option::as_ref) {
             push(&TraceOverview {
-                kind: "overview",
+                record_type: "overview",
                 chunk_index,
                 answer,
             });
         }
         if let Some(block) = blocks.get(chunk_index).and_then(Option::as_ref) {
             push(&TraceChunkContext {
-                kind: "chunk_context",
+                record_type: "chunk_context",
                 chunk_index,
                 block,
             });
@@ -367,7 +376,7 @@ pub(super) fn render_trace(
     }
     for piece in pieces {
         push(&TracePiece {
-            kind: "piece",
+            record_type: "piece",
             piece_id: &piece.piece_id,
             chunk_index: piece.chunk_index,
             chunk_sha256: chunks
@@ -449,7 +458,7 @@ pub(super) fn render_trace(
                     .and_then(|n| u32::try_from(n).ok()),
             );
             push(&TraceLoss {
-                kind: "loss",
+                record_type: "loss",
                 item: removal.item_kind(),
                 reason,
                 rule: &removal.reason,
@@ -469,7 +478,7 @@ pub(super) fn render_trace(
         };
         let paragraph = cited(loss.paragraph);
         push(&TraceLoss {
-            kind: "loss",
+            record_type: "loss",
             item: loss.kind,
             reason: loss.reason,
             rule: &loss.rule,
@@ -504,7 +513,7 @@ pub(super) fn render_trace(
     for (paragraph, (text, items)) in paragraphs.iter().zip(&citations).enumerate() {
         let covered = *items > 0;
         push(&TraceParagraph {
-            kind: "paragraph",
+            record_type: "paragraph",
             paragraph: paragraph as u32,
             bytes: text.len(),
             items: *items,
@@ -517,7 +526,7 @@ pub(super) fn render_trace(
             (descriptor.paragraph_first..=descriptor.paragraph_last).contains(&gap.paragraph)
         });
         push(&TraceUncovered {
-            kind: "uncovered",
+            record_type: "uncovered",
             paragraph: gap.paragraph,
             sentence: &gap.sentence,
             text: paragraphs

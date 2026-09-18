@@ -2655,11 +2655,9 @@ fn seed_counts_from_existing_runs_file(path: &Path) -> (usize, usize) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        match value.get("kind").and_then(Value::as_str) {
+        match value.get("type").and_then(Value::as_str) {
             Some("attempt") => attempts += 1,
-            Some("segment") | Some("document")
-                if value.get("phase").and_then(Value::as_str) == Some("end") =>
-            {
+            Some("segment") if value.get("phase").and_then(Value::as_str) == Some("end") => {
                 segments_written += 1;
             }
             _ => {}
@@ -2735,7 +2733,7 @@ fn transcribe_diagnostics_line(
     let Ok(mut map) = serde_json::from_str::<Map<String, Value>>(raw_line) else {
         return;
     };
-    let Some(kind) = map.get("kind").and_then(Value::as_str).map(str::to_string) else {
+    let Some(kind) = map.get("type").and_then(Value::as_str).map(str::to_string) else {
         return;
     };
     let Some(source) = map
@@ -2754,7 +2752,7 @@ fn transcribe_diagnostics_line(
     if !open.contains(&segment_id) {
         open.insert(segment_id.clone());
         writer.write_value(&serde_json::json!({
-            "kind": "segment",
+            "type": "segment",
             "ts": now,
             "cell_id": ctx.cell_id,
             "segment_id": segment_id,
@@ -2797,7 +2795,7 @@ fn transcribe_diagnostics_line(
             *attempts_total += 1;
             writer.write_value(&Value::Object(map));
         }
-        "segment" | "document" => {
+        "segment" => {
             open.remove(&segment_id);
             *segments_written += 1;
             let batch_path = map
@@ -2805,7 +2803,7 @@ fn transcribe_diagnostics_line(
                 .and_then(Value::as_str)
                 .map(|path| ctx.relativize_batch_path(path));
             writer.write_value(&serde_json::json!({
-                "kind": "segment",
+                "type": "segment",
                 "ts": now,
                 "cell_id": ctx.cell_id,
                 "segment_id": segment_id,
@@ -2841,7 +2839,7 @@ fn synthesize_failed_ends(
     for (source, doc) in dictionary {
         if open.contains(&doc.segment_id) {
             writer.write_value(&serde_json::json!({
-                "kind": "segment",
+                "type": "segment",
                 "ts": now_unix_secs() as f64,
                 "cell_id": cell_id,
                 "segment_id": doc.segment_id,
@@ -3178,7 +3176,7 @@ fn run_cell(
     if outcome != "interrupted" {
         synthesize_failed_ends(&open, dictionary, &mut writer, &cell_id);
         writer.write_value(&serde_json::json!({
-            "kind": "cell",
+            "type": "cell",
             "ts": now_unix_secs() as f64,
             "cell_id": cell_id,
             "outcome": outcome,
@@ -3242,10 +3240,10 @@ mod cell_runs_tests {
         let path = dir.join("run01.jsonl");
         std::fs::write(
             &path,
-            "{\"kind\":\"attempt\"}\n\
-             {\"kind\":\"document\",\"phase\":\"end\"}\n\
-             {\"kind\":\"segment\",\"phase\":\"end\"}\n\
-             {\"kind\":\"segment\",\"phase\":\"start\"}\n",
+            "{\"type\":\"attempt\"}\n\
+             {\"type\":\"segment\",\"phase\":\"end\"}\n\
+             {\"type\":\"segment\",\"phase\":\"end\"}\n\
+             {\"type\":\"segment\",\"phase\":\"start\"}\n",
         )
         .unwrap();
         assert_eq!(seed_counts_from_existing_runs_file(&path), (1, 2));
@@ -3336,7 +3334,7 @@ mod cell_runs_tests {
             cell_dir: PathBuf::from("/out/cells/m/run01"),
             cell_dir_rel: PathBuf::from("cells/m/run01"),
         };
-        let attempt_line = r#"{"kind":"attempt","source":"corpus/a.md","stage":"item","chunk_index":0,"attempt":1,"max_attempts":2,"state":"stop_valid","length_limited":false,"elapsed_seconds":1.0,"provider_metadata":null,"parse_error":null,"validation_issues":null}"#;
+        let attempt_line = r#"{"type":"attempt","source":"corpus/a.md","stage":"item","chunk_index":0,"attempt":1,"max_attempts":2,"state":"stop_valid","length_limited":false,"elapsed_seconds":1.0,"provider_metadata":null,"parse_error":null,"validation_issues":null}"#;
         transcribe_diagnostics_line(
             attempt_line,
             &ctx,
@@ -3353,11 +3351,11 @@ mod cell_runs_tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "one synthesized start, one attempt");
         let start: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(start["kind"], "segment");
+        assert_eq!(start["type"], "segment");
         assert_eq!(start["phase"], "start");
         assert_eq!(start["segment_id"], "a");
         let attempt: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(attempt["kind"], "attempt");
+        assert_eq!(attempt["type"], "attempt");
         assert_eq!(attempt["chunk_sha256"], "chunksha");
         assert_eq!(attempt["paragraph_first"], 0);
         assert_eq!(attempt["segment_id"], "a");
@@ -3397,7 +3395,7 @@ mod cell_runs_tests {
             cell_dir: PathBuf::from("/out/cells/m/run01"),
             cell_dir_rel: PathBuf::from("cells/m/run01"),
         };
-        let chunk_line = r#"{"kind":"chunk","source":"corpus/a.md","chunk_index":0,"chunk_total":1,"chunk_sha256":"chunksha","chunk_bytes":10,"paragraph_first":0,"paragraph_last":0}"#;
+        let chunk_line = r#"{"type":"chunk","source":"corpus/a.md","chunk_index":0,"chunk_total":1,"chunk_sha256":"chunksha","chunk_bytes":10,"paragraph_first":0,"paragraph_last":0}"#;
         transcribe_diagnostics_line(
             chunk_line,
             &ctx,
@@ -3412,7 +3410,7 @@ mod cell_runs_tests {
         assert_eq!(lines.len(), 2, "one synthesized start, one chunk record");
         let chunk: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(
-            chunk["kind"], "chunk",
+            chunk["type"], "chunk",
             "deleting the \"chunk\" match arm would silently drop this record"
         );
         assert_eq!(chunk["cell_id"], "m.run01");
@@ -3450,7 +3448,7 @@ mod cell_runs_tests {
             cell_dir: PathBuf::from("/out/cells/m/run01"),
             cell_dir_rel: PathBuf::from("cells/m/run01"),
         };
-        let end_line = r#"{"kind":"document","source":"corpus/a.md","phase":"end","associations":1,"concepts":0,"labels":0,"questions":0,"duplicates":0,"dropped":0,"batch_path":"cells/m/run01/a.jsonl"}"#;
+        let end_line = r#"{"type":"segment","source":"corpus/a.md","phase":"end","associations":1,"concepts":0,"labels":0,"questions":0,"duplicates":0,"dropped":0,"batch_path":"cells/m/run01/a.jsonl"}"#;
         transcribe_diagnostics_line(
             end_line,
             &ctx,
@@ -3476,7 +3474,7 @@ mod cell_runs_tests {
             "the segment was already open, so no synthesized start"
         );
         let end: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(end["kind"], "segment");
+        assert_eq!(end["type"], "segment");
         assert_eq!(end["phase"], "end");
         assert_eq!(end["outcome"], "written");
         let _ = fs::remove_file(&path);

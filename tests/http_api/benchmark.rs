@@ -207,14 +207,17 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     // Line 1 is the file's header: it names its type and the format
-    // version, and carries no `kind` (ADR 0042). Every line after it is a
-    // `kind`-tagged record.
+    // version (ADR 0042). Every line after it says what it is in the
+    // same `type` column, and none carries a `kind` (ADR 0042 §3.4).
     assert_eq!(lines[0]["type"], "benchmark_runs", "{}", lines[0]);
     assert_eq!(lines[0]["version"], "2026-09-17", "{}", lines[0]);
-    assert!(lines[0].get("kind").is_none(), "{}", lines[0]);
+    assert!(
+        lines.iter().all(|line| line.get("kind").is_none()),
+        "{lines:?}"
+    );
     let kinds: Vec<&str> = lines[1..]
         .iter()
-        .map(|line| line["kind"].as_str().unwrap())
+        .map(|line| line["type"].as_str().unwrap())
         .collect();
     assert_eq!(kinds.last(), Some(&"cell"));
     assert!(kinds.contains(&"attempt"), "{kinds:?}");
@@ -224,7 +227,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
         "one start, one end: {kinds:?}"
     );
 
-    let attempt = lines.iter().find(|line| line["kind"] == "attempt").unwrap();
+    let attempt = lines.iter().find(|line| line["type"] == "attempt").unwrap();
     assert_eq!(attempt["segment_id"], "brewery");
     assert_eq!(attempt["model_id"], "stub-a");
     assert_eq!(attempt["cell_id"], "stub-a.run01");
@@ -421,12 +424,12 @@ fn a_cell_that_fails_every_segment_is_recorded_failed_with_a_synthesized_end() {
         .collect();
     let end = lines
         .iter()
-        .find(|line| line["kind"] == "segment" && line["phase"] == "end")
+        .find(|line| line["type"] == "segment" && line["phase"] == "end")
         .expect("a synthesized failed end must exist");
     assert_eq!(end["outcome"], "failed");
     assert!(end["associations"].is_null());
     let cell_line = lines.last().unwrap();
-    assert_eq!(cell_line["kind"], "cell");
+    assert_eq!(cell_line["type"], "cell");
     assert_eq!(cell_line["outcome"], "failed");
 }
 
