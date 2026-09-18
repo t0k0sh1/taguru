@@ -58,7 +58,7 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_context", "{body}");
 
-    // The body omitted `version` (= this server's own, ADR 0042); what
+    // The body omitted `version` (= this server's own, ADR 0043); what
     // installs — and is served back — states it.
     let mut stated = valid_document();
     stated["version"] = json!("2026-09-17");
@@ -95,7 +95,7 @@ fn install_refusals_answer_400() {
         "{body}"
     );
 
-    // ADR 0042: a document that does not say what it is — or that still
+    // ADR 0043: a document that does not say what it is — or that still
     // carries the `schema: 1` stamp earlier releases wrote — is a
     // wrong-shaped body, refused before `install` runs.
     let mut untyped = valid_document();

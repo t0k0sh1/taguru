@@ -535,7 +535,7 @@ class SchemaDocument:
     `SchemaDocument` (ADR 0009 §5.3).
 
     ``type`` is always ``"schema"`` — the document says what it is (ADR
-    0042). ``version`` is the format revision, a date string; leave it
+    0043). ``version`` is the format revision, a date string; leave it
     ``None`` to mean the running server's own — the server states it in
     whatever it installs and serves, so a fetched document always carries
     it."""

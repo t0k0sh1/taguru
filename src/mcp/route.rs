@@ -362,7 +362,7 @@ pub fn route_tool(
         "put_schema" => {
             let path = format!("{}/schema", context_path("context")?);
             // Schema-required (ADR 0009 §5): `version` is the
-            // document's one optional top-level field (ADR 0042 — absent
+            // document's one optional top-level field (ADR 0043 — absent
             // means the running server's own), so an omission of any
             // other would only be caught downstream by `AppJson`'s
             // missing-field rejection rather than this tool's own

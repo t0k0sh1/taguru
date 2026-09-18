@@ -547,7 +547,7 @@ export interface RelationDef {
  * `GET /contexts/{name}/schema` persist and serve, mirrored
  * field-for-field from `src/schema.rs`'s `SchemaDocument` (ADR 0009 §5.3).
  *
- * `type` is always `"schema"` — the document says what it is (ADR 0042).
+ * `type` is always `"schema"` — the document says what it is (ADR 0043).
  * `version` is the format revision, a date string; omit it to mean the
  * running server's own — the server states it in whatever it installs and
  * serves, so a fetched document always carries it. Never send it as `null`.

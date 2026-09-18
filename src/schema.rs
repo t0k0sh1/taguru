@@ -42,7 +42,7 @@ use crate::storage::write_atomic;
 mod check;
 pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, expanded_type_sets, schema_issues};
 
-/// The one value a schema document's `type` column accepts (ADR 0042):
+/// The one value a schema document's `type` column accepts (ADR 0043):
 /// the document says what it is in a column named for that, and its
 /// `version` column — [`crate::format::FORMAT_VERSION`], the date every
 /// taguru record shares — says which revision of the shape it is. The
@@ -719,7 +719,7 @@ mod tests {
     }
 
     /// The document says what it is: `type` is required and only
-    /// `"schema"` is read; the pre-ADR-0042 `schema: 1` stamp is an
+    /// `"schema"` is read; the pre-ADR-0043 `schema: 1` stamp is an
     /// unknown field; `version: null` is not an omission.
     #[test]
     fn the_type_column_is_required_and_the_old_stamp_refuses() {
