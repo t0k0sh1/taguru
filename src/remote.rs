@@ -584,14 +584,14 @@ impl Api {
         }
     }
 
-    /// One `GET /version`, read for its `schema_formats` array only —
+    /// One `GET /version`, read for its `record_formats` array only —
     /// best-effort, same posture as [`Api::version_skew_line`] (its
     /// own short timeout, `None` on any transport/non-200/parse
     /// trouble so the verb's own request produces the real fault, not
     /// a guess made here). `/version` is auth-exempt (`PROBE_EXEMPT`),
     /// but the bearer rides along anyway — matches every other
     /// request this module sends.
-    fn schema_formats(&self) -> Option<Vec<String>> {
+    fn record_formats(&self) -> Option<Vec<String>> {
         let url = self.url(&["version"]).ok()?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(HEALTH_PREFLIGHT_TIMEOUT))
@@ -609,7 +609,7 @@ impl Api {
             .read_to_string()
             .ok()?;
         let value: Value = serde_json::from_str(&body).ok()?;
-        let formats = value.get("schema_formats")?.as_array()?;
+        let formats = value.get("record_formats")?.as_array()?;
         // All-or-nothing: `filter_map` would silently drop a malformed
         // element (e.g. a stray number in the array), which could turn
         // `["2026-09-17", 7]` into a false `["2026-09-17"]` match this
@@ -624,55 +624,38 @@ impl Api {
             .collect()
     }
 
-    /// `import --url`'s ADR 0009 §13 preflight — call only when the
-    /// payload actually carries a `schema` record; a
-    /// schema-free import must behave exactly as it did before this
-    /// method existed. `Some(message)` refuses before a byte ships.
-    /// Unlike [`Api::schema_export_refusal`], an ABSENT
-    /// `schema_formats` is fatal here, not safe: it means the peer has
-    /// never heard of the key, so shipping the record would either be
-    /// silently dropped by a schema-unaware server or fall through to
-    /// `parse_stream`'s dispatch as a misleading "not a batch header"
-    /// refusal (ADR 0009 §13 bullet 2) — this preflight exists to
-    /// replace that with an honest one before the network round trip.
-    pub(crate) fn schema_import_refusal(&self) -> Option<String> {
+    /// The record-format preflight `import --url` and `export --url`
+    /// both run before a byte moves (ADR 0044): every record either
+    /// verb carries — source headers, `group` and `schema` records —
+    /// follows one format revision, so the peer must read (import) or
+    /// write (export) this build's. `Some(message)` refuses. An
+    /// ABSENT `record_formats` refuses too: it names a release before
+    /// this dimension existed, whose files this build does not read and
+    /// which does not read this build's — letting the verb proceed
+    /// would only turn that into a "not a source file header" refusal
+    /// further along. `verb` is `"import"` or `"export"`, for the
+    /// message only.
+    pub(crate) fn record_format_refusal(&self, verb: &str) -> Option<String> {
         let mine = crate::format::FORMAT_VERSION;
-        match self.schema_formats() {
+        let outcome = if verb == "export" {
+            "nothing was fetched"
+        } else {
+            "nothing was sent"
+        };
+        match self.record_formats() {
             Some(formats) if formats.iter().any(|format| format == mine) => None,
             Some(formats) => Some(format!(
-                "taguru: import: this CLI writes schema format {mine} but the server at {} \
-                 reads {formats:?} — nothing was sent; upgrade the server, or import \
-                 without the schema record",
+                "taguru: {verb}: this CLI reads and writes record format {mine} but the \
+                 server at {} reports {formats:?} — {outcome}; the two are different \
+                 releases, upgrade the older one",
                 self.base
             )),
             None => Some(format!(
-                "taguru: import: this CLI writes schema format {mine} but the server at {} \
-                 does not report a schema_formats — nothing was sent; upgrade the server, \
-                 or import without the schema record",
+                "taguru: {verb}: this CLI reads and writes record format {mine} but the \
+                 server at {} does not report a record_formats — {outcome}; upgrade the \
+                 server",
                 self.base
             )),
-        }
-    }
-
-    /// `export --url`'s ADR 0009 §13 preflight, run unconditionally
-    /// (unlike [`Api::schema_import_refusal`], which only runs when the
-    /// payload is known to carry a schema record) — a fetch cannot
-    /// know in advance whether the `context` it is about to pull carries
-    /// one, and probing each `context` first would cost a request per
-    /// `context` for no better an answer. An ABSENT `schema_formats` is
-    /// SAFE here, not fatal: a server that has never heard of the key
-    /// cannot have emitted a `schema` line, so there is nothing
-    /// for this CLI to fail to read — only a format this CLI does not
-    /// recognize refuses.
-    pub(crate) fn schema_export_refusal(&self) -> Option<String> {
-        let mine = crate::format::FORMAT_VERSION;
-        match self.schema_formats() {
-            Some(formats) if !formats.iter().any(|format| format == mine) => Some(format!(
-                "taguru: export: this CLI reads schema format {mine} but the server at {} \
-                 writes {formats:?} — nothing was fetched; upgrade this CLI",
-                self.base
-            )),
-            _ => None,
         }
     }
 }
@@ -983,83 +966,74 @@ mod tests {
         );
     }
 
-    /// ADR 0009 §13's `import --url` preflight, over all four cases:
-    /// a match, a mismatch, and the two directions absence cuts —
-    /// fatal for `import` (a server that never heard of the key would
-    /// either drop the record or answer `parse_stream`'s misleading
-    /// "not a batch header" refusal), safe for `export` (such a
-    /// server cannot have emitted a `schema` line to begin
-    /// with).
+    /// ADR 0044's record-format preflight, over its cases: a match, a
+    /// mismatch, and absence — the last refuses for both verbs, since a
+    /// server without the dimension neither reads nor writes this
+    /// build's records.
     #[test]
-    fn schema_import_refusal_covers_match_mismatch_and_absence() {
-        let base = respond_once(
-            "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
-        );
-        assert_eq!(Api::new(base).schema_import_refusal(), None);
+    fn record_format_refusal_covers_match_mismatch_and_absence() {
+        for verb in ["import", "export"] {
+            let base = respond_once(
+                "HTTP/1.1 200 OK",
+                json!({"record_formats": [crate::format::FORMAT_VERSION]}),
+            );
+            assert_eq!(Api::new(base).record_format_refusal(verb), None);
 
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
-        let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains(r#"reads ["2099-01-01"]"#), "{message}");
-        assert!(message.contains("nothing was sent"), "{message}");
+            let base = respond_once("HTTP/1.1 200 OK", json!({"record_formats": ["2099-01-01"]}));
+            let message = Api::new(base)
+                .record_format_refusal(verb)
+                .expect("a format this CLI cannot read must refuse");
+            assert!(
+                message.starts_with(&format!("taguru: {verb}: ")),
+                "{message}"
+            );
+            assert!(message.contains(r#"reports ["2099-01-01"]"#), "{message}");
+            assert!(message.contains("upgrade the older one"), "{message}");
 
+            let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+            let message = Api::new(base)
+                .record_format_refusal(verb)
+                .expect("an absent record_formats refuses");
+            assert!(
+                message.contains("does not report a record_formats"),
+                "{message}"
+            );
+        }
         let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
-        let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("an absent schema_formats is fatal for import");
         assert!(
-            message.contains("does not report a schema_formats"),
-            "{message}"
+            Api::new(base)
+                .record_format_refusal("export")
+                .unwrap()
+                .contains("nothing was fetched")
+        );
+        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+        assert!(
+            Api::new(base)
+                .record_format_refusal("import")
+                .unwrap()
+                .contains("nothing was sent")
         );
     }
 
-    /// A mixed-type `schema_formats` array (a malformed capability
+    /// A mixed-type `record_formats` array (a malformed capability
     /// announcement — a stray number among the dates) must refuse as a
     /// whole, not silently drop the bad element and match on whatever
     /// strings happened to parse: `["<this build's date>", 1]` naming
     /// this CLI's own version must still be treated as "cannot trust
-    /// this array" (absent-shaped fatal), never as "the server carries
-    /// this format." A pre-ADR-0042 server's `[1]` lands here too.
+    /// this array" (absent-shaped), never as "the server carries this
+    /// format."
     #[test]
-    fn schema_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
+    fn record_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
         let base = respond_once(
             "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION, 1]}),
+            json!({"record_formats": [crate::format::FORMAT_VERSION, 1]}),
         );
         let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("a malformed schema_formats must refuse, not silently match");
+            .record_format_refusal("import")
+            .expect("a malformed record_formats must refuse, not silently match");
         assert!(
-            message.contains("does not report a schema_formats"),
+            message.contains("does not report a record_formats"),
             "{message}"
-        );
-    }
-
-    /// [`schema_import_refusal_covers_match_mismatch_and_absence`]'s
-    /// export twin — the one case that differs is absence, which is
-    /// safe here rather than fatal.
-    #[test]
-    fn schema_export_refusal_covers_match_mismatch_and_absence() {
-        let base = respond_once(
-            "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
-        );
-        assert_eq!(Api::new(base).schema_export_refusal(), None);
-
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
-        let message = Api::new(base)
-            .schema_export_refusal()
-            .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains(r#"writes ["2099-01-01"]"#), "{message}");
-        assert!(message.contains("nothing was fetched"), "{message}");
-
-        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
-        assert_eq!(
-            Api::new(base).schema_export_refusal(),
-            None,
-            "an absent schema_formats (a pre-schema server) is safe for export"
         );
     }
 

@@ -5,7 +5,7 @@
 - **Issue**: #378
 - **Related**: #218, #182, #187, #192, #199, #217, ADR 0005 §4, ADR 0006 §1,
   ADR 0007
-- **Supersedes**: — / **Superseded by**: —
+- **Supersedes**: — / **Superseded by**: ADR 0044 (partially — §13's `schema_formats` preflight)
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.

@@ -614,9 +614,8 @@ only under `warn`.
     "http_contract": {"current": 1, "supported": [1]},
     "mcp_contract": {"current": 1, "supported": [1]},
     "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
-    "batch_formats": ["2026-09-17"],
-    "image_formats": [1, 2, 3, 4, 5, 6],
-    "communities_formats": ["2026-09-17"]
+    "record_formats": ["2026-09-17"],
+    "image_formats": [1, 2, 3, 4, 5, 6]
   }
   ```
   `http_contract` covers every enveloped and non-enveloped HTTP
@@ -636,9 +635,11 @@ only under `warn`.
   and never on an absent or unreadable `/version` (a server predating
   this endpoint is treated as speaking `http_contract: 1`, not refused
   outright).
-- The source file format (its `version` column, a date) and the image
-  format are versioned independently of the API: a source file naming a
-  revision this build does not read is refused, one naming none is read
-  as this build's own, and images migrate forward on load. Rolling a server BINARY back
+- The record format (the `version` column every JSON / JSONL record
+  carries — source files, exports, eval sets, benchmark files, the
+  schema document; one date, reported as `record_formats`) and the
+  image format are versioned independently of the API: a record naming
+  a revision this build does not read is refused, one naming none is
+  read as this build's own, and images migrate forward on load. Rolling a server BINARY back
   past an image-format bump needs the data rolled back with it — the
   release notes flag format bumps.

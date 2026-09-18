@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — `GET /version` reports the record format once, as
+  `record_formats`; `batch_formats`, `schema_formats`, and
+  `communities_formats` are gone** (ADR 0044, #937). Every JSON / JSONL
+  record now carries the one `version` date, so the three dimensions
+  had become three spellings of one value; `image_formats` is unchanged.
+  `taguru import --url` and `taguru export --url` both read
+  `record_formats` before a byte moves and refuse, naming both sides,
+  when the server does not read (or write) this build's record format —
+  including a server that reports no `record_formats` at all. The same
+  block appears in `GET /protocol` and the MCP `initialize`
+  instructions. `http_contract` stays at 1.
 - **Breaking — every record that used `kind` to say what it is now
   says so in `type`** (ADR 0042 §3.4, #937 step 5): the extract
   diagnostics sidecar (`run` / `chunk` / `attempt` / `segment`), the

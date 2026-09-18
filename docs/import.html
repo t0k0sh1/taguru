@@ -368,13 +368,6 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <code>"unchanged"</code>): installing a schema cannot itself tell an install apart from a
       no-op re-install of the identical document, and a guessed verb would be worse than none.
     </p>
-    <p class="note">
-      <code>--url</code> carries one more preflight for this record kind: before a byte ships,
-      the CLI reads the peer's <code>GET /version</code> <code>schema_formats</code> and refuses
-      up front — naming both sides — when the peer cannot read this build's schema format. A
-      schema-free stream never triggers the check and behaves exactly as it did before this
-      preflight existed.
-    </p>
 
     <h3><code>group</code> records</h3>
     <p>
@@ -554,10 +547,11 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         arrives after it.
       </li>
       <li>
-        A stream that actually carries a <code>schema</code> record gets one more preflight
-        first: the CLI reads the server's <code>GET /version</code> <code>schema_formats</code>
-        and refuses up front, naming both sides, if the server cannot read this build's schema
-        format — nothing is sent. A schema-free stream never triggers this check.
+        Before a byte ships, the CLI reads the server's <code>GET /version</code>
+        <code>record_formats</code> and refuses up front, naming both sides, if the server does
+        not read this build's record format — the one <code>version</code> date every record in
+        the stream carries (ADR 0044). A server that reports no <code>record_formats</code> at
+        all is refused the same way: it predates the format this build writes.
       </li>
       <li>
         A refused chunk is reported by what it carried, not just by number (#863): the line

@@ -209,19 +209,15 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             "http_contract": {"current": HTTP_CONTRACT, "supported": [HTTP_CONTRACT]},
             "mcp_contract": {"current": MCP_CONTRACT, "supported": [MCP_CONTRACT]},
             "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
-            "batch_formats": [crate::format::FORMAT_VERSION],
-            // Equality-checked like `batch_formats`, not range-accepted
-            // like `image_formats` below: a schema document is read at
-            // the one `version` date every taguru record shares (ADR
-            // 0042), so there is never a range of readable values.
-            "schema_formats": [crate::format::FORMAT_VERSION],
+            // The one `version` date every JSON / JSONL record this build
+            // reads and writes carries (ADR 0042, ADR 0044) — equality-
+            // checked, so a single element, unlike `image_formats`.
+            "record_formats": [crate::format::FORMAT_VERSION],
             // Every version from 1 through the current one still loads
             // (`src/context/image.rs`'s range-acceptance check), unlike
-            // batch/communities formats below, which are checked for
-            // equality — so this dimension is the full range, not just
-            // the current value.
+            // `record_formats`, which is checked for equality — so this
+            // dimension is the full range, not just the current value.
             "image_formats": (1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>(),
-            "communities_formats": [crate::format::FORMAT_VERSION],
         })
     });
     &FACTS
