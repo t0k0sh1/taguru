@@ -590,6 +590,9 @@ fn spawn_mismatched_health_stub() -> String {
     std::thread::spawn(move || {
         let responses = [
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
+            // /version: this build's record format, so the preflight
+            // passes silently and the skew line is the only warning.
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
