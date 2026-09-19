@@ -168,7 +168,7 @@ describe("graph writes and reads", () => {
       { subject: "青嶺酒造", label: "所在地", object: "霧沢町", weight: 1.0 },
     ]);
     const page = await ctx.changes({ since: tail.next });
-    expect(page.events.map((e) => [e.kind, e.count])).toEqual([["associations_added", 1]]);
+    expect(page.events.map((e) => [e.type, e.count])).toEqual([["associations_added", 1]]);
     expect(page.more).toBe(false);
     expect((await ctx.changes({ since: page.next })).events).toEqual([]);
 

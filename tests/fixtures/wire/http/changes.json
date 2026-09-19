@@ -8,8 +8,8 @@
       "events": [
         {
           "count": 1,
-          "kind": "associations_added",
-          "seq": 3
+          "seq": 3,
+          "type": "associations_added"
         }
       ],
       "more": false,

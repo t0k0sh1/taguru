@@ -329,7 +329,7 @@ fn changes_feed_page() {
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        body["result"]["events"][0]["kind"],
+        body["result"]["events"][0]["type"],
         json!("associations_added"),
         "{body}"
     );

@@ -49,7 +49,7 @@
       "stale_cursor"
     ],
     "response.integrity": ["nothing_written", "durable_prefix"],
-    "response.result.events[].kind": [
+    "response.result.events[].type": [
       "associations_added",
       "association_retracted",
       "aliases_added",
