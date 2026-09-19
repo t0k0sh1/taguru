@@ -538,7 +538,7 @@ class Contexts:
                 yield entry
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
-            after = page.contexts[-1].name
+            after = page.contexts[-1].id
 
     def get(self, name: str) -> DirectoryEntry:
         result = self._client._request_json("GET", f"/contexts/{encode_name(name)}")
@@ -650,7 +650,7 @@ class Groups:
                 yield entry
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
-            after = page.groups[-1].name
+            after = page.groups[-1].id
 
     def get(self, name: str) -> GroupEntry:
         result = self._client._request_json("GET", f"/groups/{encode_name(name)}")

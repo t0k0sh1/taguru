@@ -21,7 +21,7 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple", "banana"], "name order, first page");
 
@@ -31,12 +31,12 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["cherry"], "keyset picks up after the cursor");
 
     let single = server.ok("GET", "/contexts/banana", None);
-    assert_eq!(single["name"], json!("banana"));
+    assert_eq!(single["id"], json!("banana"));
     assert_eq!(single["description"], json!("banana"));
     let (status, body) = server.call("GET", "/contexts/nope", None);
     assert_eq!(status, 404);
@@ -65,7 +65,7 @@ fn a_zero_limit_still_returns_one_context_rather_than_reading_as_the_end() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple"], "floored to one, not zero");
 }
@@ -97,13 +97,13 @@ fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple", "cherry"]);
 
     let unpinned = server.ok("GET", "/contexts?pinned=false", None);
     assert_eq!(unpinned["total"], json!(1), "{unpinned}");
-    assert_eq!(unpinned["contexts"][0]["name"], json!("banana"));
+    assert_eq!(unpinned["contexts"][0]["id"], json!("banana"));
 
     let all = server.ok("GET", "/contexts", None);
     assert_eq!(all["total"], json!(3), "no filter means every context");
@@ -149,7 +149,7 @@ fn a_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(
         names,
@@ -165,7 +165,7 @@ fn a_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["name"].as_str().unwrap())
+        .map(|context| context["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["date"], "keyset picks up after the cursor");
 }

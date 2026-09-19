@@ -79,14 +79,14 @@ def test_context_lifecycle(client: Taguru, fresh_name: str) -> None:
         client.contexts.create(fresh_name)
     assert conflict.value.code == "already_exists"
     entry = client.contexts.get(fresh_name)
-    assert entry.name == fresh_name
+    assert entry.id == fresh_name
     assert entry.description == "d"
 
     meta = client.contexts.update(fresh_name, description="d2", dice_floor=0.25)
     assert meta.description == "d2"
     assert meta.dice_floor == 0.25
 
-    names = [e.name for e in client.contexts.iter(limit=2)]
+    names = [e.id for e in client.contexts.iter(limit=2)]
     assert fresh_name in names
 
     renamed = f"{fresh_name}-renamed"
@@ -598,7 +598,7 @@ async def test_async_client_full_smoke(server, fresh_name: str) -> None:
         await ctx.store_passages({"a": "本文。"})
         page = await ctx.recall("s")
         assert page.total == 1
-        names = [e.name async for e in aclient.contexts.iter()]
+        names = [e.id async for e in aclient.contexts.iter()]
         assert fresh_name in names
         exported = await ctx.export()
         assert '"type":"source"' in exported

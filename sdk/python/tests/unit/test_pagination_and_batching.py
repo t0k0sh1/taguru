@@ -16,7 +16,7 @@ from .conftest import ok_response, sync_client
 def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
     rows = [
         {
-            "name": name,
+            "id": name,
             "description": "",
             "pinned": False,
             "loaded": False,
@@ -58,7 +58,7 @@ def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
         raise AssertionError(after)
 
     client = sync_client(handler)
-    names = [entry.name for entry in client.contexts.iter(limit=2)]
+    names = [entry.id for entry in client.contexts.iter(limit=2)]
     assert names == ["a", "b", "c"]
     # A short page is not the last one — a concurrent delete could shorten it
     # while later rows remain — so iteration pages on past the short final page

@@ -352,8 +352,8 @@ impl Api {
                 .ok_or_else(|| format!("{}: not a taguru {collection} page", self.base))?;
             let mut page_names = Vec::with_capacity(items.len());
             for item in items {
-                let name = item["name"].as_str().ok_or_else(|| {
-                    format!("{}: a {collection} entry is missing its name", self.base)
+                let name = item["id"].as_str().ok_or_else(|| {
+                    format!("{}: a {collection} entry is missing its id", self.base)
                 })?;
                 page_names.push(name.to_string());
             }
@@ -1253,11 +1253,11 @@ mod tests {
         let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"name": "c"}, {"name": "d"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"id": "c"}, {"id": "d"}]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -1292,13 +1292,13 @@ mod tests {
         let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 3, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+                json!({"result": {"total": 3, "contexts": [{"id": "a"}, {"id": "b"}]}}),
             ),
             // Short (1 < limit 2) but non-empty: a delete raced the
             // seek on the server side. The walk must keep going.
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 3, "contexts": [{"name": "c"}]}}),
+                json!({"result": {"total": 3, "contexts": [{"id": "c"}]}}),
             ),
             // Only this empty page is the real end.
             (
@@ -1326,11 +1326,11 @@ mod tests {
         let (base, _requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"name": "a"}, {"name": "b"}]}}),
+                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
             ),
         ]);
         let api = Api::new(base);
@@ -1340,17 +1340,24 @@ mod tests {
         assert!(error.contains("did not advance"), "{error}");
     }
 
+    /// A row without `id` — including a pre-#851 server's `name`-keyed
+    /// row — is refused, never silently skipped.
     #[test]
-    fn list_names_refuses_a_page_without_names() {
-        let base = respond_once(
-            "HTTP/1.1 200 OK",
-            json!({"result": {"total": 1, "contexts": [{"description": "no name field"}]}}),
-        );
-        let api = Api::new(base);
-        let error = api
-            .list_names_paged("contexts", 10)
-            .expect_err("a listing entry without a name must not be silently skipped");
-        assert!(error.contains("missing its name"), "{error}");
+    fn list_names_refuses_a_page_without_ids() {
+        for row in [
+            json!({"description": "no id field"}),
+            json!({"name": "a", "description": "the old key"}),
+        ] {
+            let base = respond_once(
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 1, "contexts": [row]}}),
+            );
+            let api = Api::new(base);
+            let error = api
+                .list_names_paged("contexts", 10)
+                .expect_err("a listing entry without an id must not be silently skipped");
+            assert!(error.contains("missing its id"), "{error}");
+        }
     }
 
     #[test]
@@ -1388,7 +1395,7 @@ mod tests {
     fn context_entry_listing_walks_pages_and_refuses_a_non_advancing_one() {
         fn row(name: &str) -> serde_json::Value {
             json!({
-                "name": name, "description": "", "pinned": false, "loaded": false,
+                "id": name, "description": "", "pinned": false, "loaded": false,
                 "dice_floor": null, "semantic_floor": null, "stats": {}, "usage": {}
             })
         }

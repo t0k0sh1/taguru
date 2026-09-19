@@ -556,11 +556,11 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
     };
 
     let context = call("get_context", json!({"context": "sake"}));
-    assert_eq!(context["name"], json!("sake"));
+    assert_eq!(context["id"], json!("sake"));
     assert_eq!(context["description"], json!("酒蔵の記憶"));
 
     let group = call("get_group", json!({"name": "breweries"}));
-    assert_eq!(group["name"], json!("breweries"));
+    assert_eq!(group["id"], json!("breweries"));
     assert_eq!(group["contexts"], json!(["sake"]));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

@@ -173,7 +173,10 @@ class ContextRevision:
 
 @dataclass(slots=True, frozen=True)
 class DirectoryEntry:
-    name: str
+    """One ``context`` directory row. ``id`` is the ``context``'s name — the
+    row's own key (#851)."""
+
+    id: str
     description: str
     pinned: bool
     loaded: bool
@@ -199,9 +202,10 @@ class GroupEntry:
 
     For a ``context``-scoped key ``contexts`` carries only the members the grant
     allows; ``groups`` (child names — labels, not content) is never filtered.
+    ``id`` is the ``group``'s name — the row's own key (#851).
     """
 
-    name: str
+    id: str
     description: str
     contexts: list[str]
     groups: list[str]

@@ -434,7 +434,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /contexts, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -451,7 +451,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"name":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -518,7 +518,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -534,7 +534,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"name":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -654,7 +654,7 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#,
+                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#,
             ),
             ("HTTP/1.1 200 OK", r#"{"result":{"total":1,"contexts":[]}}"#),
             // GET /contexts/sake/export: a per-context failure.
@@ -723,7 +723,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /contexts: one context, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -734,7 +734,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups: two groups, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":2,"groups":[{"name":"g"},{"name":"h"}]}}"#.to_string(),
+                r#"{"result":{"total":2,"groups":[{"id":"g"},{"id":"h"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
