@@ -142,17 +142,23 @@ fn main() {
     // process is still single-threaded (set_var's soundness condition)
     // and before init_telemetry reads RUST_LOG/OTEL_* — file values
     // must steer those too.
-    if let Some(path) = command.config() {
-        config::load_config(path);
-    }
+    // The digest of what was applied seeds the config watch's change
+    // baseline (#942): the watch must not take its own first read as
+    // the baseline, or a rotation landing between this read and that
+    // one is recorded as already seen and never applied.
+    let boot_digest = command.config().map(|path| config::load_config(path));
     match command {
-        cli::Command::Serve(serve_args) => serve(serve_args, auth_source),
+        cli::Command::Serve(serve_args) => serve(serve_args, auth_source, boot_digest),
         cli::Command::Route(route_args) => route::run(route_args.config),
     }
 }
 
 #[tokio::main]
-async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
+async fn serve(
+    serve_args: cli::ServeArgs,
+    auth_source: auth::AuthSource,
+    boot_config_digest: Option<String>,
+) {
     // The subscriber must exist before anything can log — the
     // env_number warnings just below would otherwise be dropped
     // silently (tracing has no default subscriber and no buffering).
@@ -475,6 +481,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         keyring.clone(),
         auth_source,
         state.clone(),
+        boot_config_digest,
     ));
 
     let shipper = match &replicate {
@@ -1067,6 +1074,7 @@ fn spawn_keyring_reload_tasks(
     keyring: auth::SharedKeyring,
     source: auth::AuthSource,
     state: AppState,
+    boot_config_digest: Option<String>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     let source = Arc::new(source);
@@ -1129,9 +1137,16 @@ fn spawn_keyring_reload_tasks(
         // `read_off_worker`), so the flag only ever needs to answer
         // this loop's own overlapping ticks.
         let in_flight: ReadInFlight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut last: Option<String> = read_off_worker(path.clone(), &in_flight)
-            .await
-            .map(|bytes| sha256::sha256_hex(&bytes));
+        // The baseline is the digest of the bytes boot APPLIED — not a
+        // fresh read taken here (#942): a rotation landing between
+        // boot's read and this task's first read would otherwise become
+        // the baseline, recorded as already seen and never applied,
+        // until the file changed again. The router's map watch seeds
+        // itself the same way. (`None` only when no config path was
+        // given, in which case this task is never spawned; kept as an
+        // `Option` so a first tick against an unknown baseline still
+        // reads as a change.)
+        let mut last: Option<String> = boot_config_digest;
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {
