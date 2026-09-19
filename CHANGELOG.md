@@ -9,6 +9,11 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — the change feed's events say what they are in `type`,
+  not `kind`** (ADR 0042 §3.4): `GET /contexts/{name}/changes` answers
+  `{"seq": …, "type": "associations_added", …}`. Same values, same
+  extra fields per type; both SDKs' `ChangeEvent` rename the field to
+  `type`. Rides this release's `http_contract: 2`.
 - **Breaking — `http_contract` is 2.** The #937 series changed the
   schema document's body (ADR 0043) and, below, removes three
   `GET /version` fields — breaking under ADR 0005 §4, so the contract

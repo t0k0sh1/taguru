@@ -178,7 +178,7 @@ def test_graph_reads(client: Taguru, fresh_name: str) -> None:
         [{"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0}]
     )
     page = ctx.changes(since=tail.next)
-    assert [(event.kind, event.count) for event in page.events] == [("associations_added", 1)]
+    assert [(event.type, event.count) for event in page.events] == [("associations_added", 1)]
     assert not page.more
     assert ctx.changes(since=page.next).events == []
 

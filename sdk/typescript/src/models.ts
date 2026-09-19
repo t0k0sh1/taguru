@@ -360,16 +360,16 @@ export interface PathsPage {
 }
 
 /**
- * One recorded content change. `kind` decides which optional fields ride
- * along: `associations_added`/`aliases_added`/`aliases_removed` carry
- * `count`; `source_stored`/`source_retracted` carry `source`;
- * `association_retracted` carries `subject`/`label`/`object`;
- * `schema_updated` carries `mode`. Unknown future kinds decode too —
- * treat them as "something changed".
+ * One recorded content change. `type` — what the event is — decides
+ * which optional fields ride along: `associations_added`/`aliases_added`/
+ * `aliases_removed` carry `count`; `source_stored`/`source_retracted`
+ * carry `source`; `association_retracted` carries `subject`/`label`/
+ * `object`; `schema_updated` carries `mode`. Unknown future types decode
+ * too — treat them as "something changed".
  */
 export interface ChangeEvent {
   seq: number;
-  kind: string;
+  type: string;
   count?: number;
   subject?: string;
   label?: string;

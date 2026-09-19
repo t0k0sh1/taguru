@@ -88,8 +88,10 @@ fn next_epoch() -> u64 {
 }
 
 /// One recorded change. `seq` is per-ring, monotonic, 1-based; the
-/// event kinds mirror what a syncing client acts on, not the WAL's op
-/// vocabulary.
+/// event types mirror what a syncing client acts on, not the WAL's op
+/// vocabulary. On the wire the event says what it is in `type` (ADR
+/// 0042 §3.4 — `kind` is for a sub-classification, never for what the
+/// record is); the flattened enum below is that column.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChangeEvent {
     pub seq: u64,
@@ -98,7 +100,7 @@ pub struct ChangeEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChangeKind {
     /// One write call's worth of applied association assertions —
     /// aggregated so a bulk import is one event, not one per line.

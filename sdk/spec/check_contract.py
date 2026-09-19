@@ -393,19 +393,61 @@ def run_base(ref: str) -> None:
         for dimension in ("HTTP", "MCP")
         if head_versions.get(dimension, 0) > base_versions.get(dimension, 0)
     }
-    if not bumped:
+    if bumped:
         print(
-            f"\n{len(breaking)} breaking change(s) against {ref}, but neither "
-            "HTTP_CONTRACT nor MCP_CONTRACT was bumped in src/api.rs — see "
-            "ADR 0005 §4/§7 and tests/fixtures/wire/README.md",
-            file=sys.stderr,
+            f"\n{len(breaking)} breaking change(s) against {ref}, matched by a bump to "
+            f"{'/'.join(sorted(bumped))}_CONTRACT — see the CHANGELOG entry and migration "
+            "note this PR must also carry (ADR 0005 §7)"
         )
-        sys.exit(1)
+        return
+    # ADR 0005 §7 binds a contract VERSION, and a version binds once it
+    # ships: a bump already on `ref` that no release carries yet is the
+    # same unreleased revision this change lands in, so a second bump
+    # would number a contract nobody ever served. Breaking changes in
+    # that window ride the pending bump; the CHANGELOG entry is still
+    # this PR's to write.
+    # HEAD must still carry that pending version: a change that also
+    # lowers it back (a revert of the bump beside a new break) has no
+    # bump to ride.
+    released_versions = contract_versions(released_api_text() or "")
+    pending = {
+        dimension
+        for dimension in ("HTTP", "MCP")
+        if base_versions.get(dimension, 0) > released_versions.get(dimension, 0)
+        and head_versions.get(dimension, 0) == base_versions.get(dimension, 0)
+    }
+    if pending:
+        print(
+            f"\n{len(breaking)} breaking change(s) against {ref}, riding the "
+            f"{'/'.join(sorted(pending))}_CONTRACT bump already on {ref} that no release "
+            "carries yet (ADR 0005 §7 binds a shipped version) — see the CHANGELOG entry "
+            "and migration note this PR must also carry"
+        )
+        return
     print(
-        f"\n{len(breaking)} breaking change(s) against {ref}, matched by a bump to "
-        f"{'/'.join(sorted(bumped))}_CONTRACT — see the CHANGELOG entry and migration "
-        "note this PR must also carry (ADR 0005 §7)"
+        f"\n{len(breaking)} breaking change(s) against {ref}, but neither "
+        "HTTP_CONTRACT nor MCP_CONTRACT was bumped in src/api.rs — see "
+        "ADR 0005 §4/§7 and tests/fixtures/wire/README.md",
+        file=sys.stderr,
     )
+    sys.exit(1)
+
+
+def released_api_text() -> str | None:
+    """`src/api.rs` at the newest release tag (`v*`, highest by version),
+    or `None` when the checkout carries no tag — then nothing is treated
+    as pending and a breaking change needs its own bump, the strict
+    reading."""
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*", "--sort=-v:refname"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    tags = [line for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or not tags:
+        return None
+    return git_show(tags[0], rel(API_RS))
 
 
 def main() -> None:

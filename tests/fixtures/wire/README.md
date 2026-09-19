@@ -68,7 +68,10 @@ a schema-generation pivot (ADR 0005 §9).
    in `src/api.rs` in the **same PR**, and add the CHANGELOG
    `[Unreleased]` → `### Changed` entry plus a migration note (ADR 0005
    §7) — a caller reading the fixture diff alone should be able to act
-   on it.
+   on it. One bump per release: if `main` already carries a bump that
+   no `v*` tag has shipped, a later breaking change in the same cycle
+   rides it (the guard checks the newest tag), and still owes the
+   CHANGELOG entry.
 5. Adding a field that closes over a fixed set of values (a new `kind`,
    `lane`, `reason`, or `ErrorCode`)? Add it to `shapes.json`'s `enums`
    in the same commit — `sdk/spec/check_contract.py --base <ref>`

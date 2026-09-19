@@ -21,7 +21,7 @@ fn kinds(page: &Value) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|event| event["kind"].as_str().unwrap().to_string())
+        .map(|event| event["type"].as_str().unwrap().to_string())
         .collect()
 }
 
