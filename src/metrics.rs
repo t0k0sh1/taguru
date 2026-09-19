@@ -1091,8 +1091,8 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["server"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(body["http_contract"]["current"], 1);
-        assert_eq!(body["http_contract"]["supported"], serde_json::json!([1]));
+        assert_eq!(body["http_contract"]["current"], 2);
+        assert_eq!(body["http_contract"]["supported"], serde_json::json!([2]));
         assert_eq!(body["mcp_contract"]["current"], 1);
         assert!(
             body["mcp_protocol"]["supported"]

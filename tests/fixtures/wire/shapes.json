@@ -1,5 +1,5 @@
 {
-  "http_contract": 1,
+  "http_contract": 2,
   "mcp_contract": 1,
   "volatile_fields": [
     "time",

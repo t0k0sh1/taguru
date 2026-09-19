@@ -172,8 +172,10 @@ impl<T> ApiResponse<T> {
 /// conforms to (ADR 0005 §3.2, §6). Bump only alongside a change
 /// this crate's own compat/break table (ADR 0005 §4) classifies
 /// breaking, landing in the same PR as a CHANGELOG "Changed" entry
-/// and a migration note (ADR 0005 §7).
-pub(crate) const HTTP_CONTRACT: u64 = 1;
+/// and a migration note (ADR 0005 §7). 2 since ADR 0044: the #937
+/// series changed the schema document's body (ADR 0043) and folded
+/// `GET /version`'s three format dimensions into `record_formats`.
+pub(crate) const HTTP_CONTRACT: u64 = 2;
 
 /// The MCP-owned wire shape version (ADR 0005 §3.3): the 47-tool
 /// name/`inputSchema` table, `retrieve`'s composed output shape (the

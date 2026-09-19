@@ -62,7 +62,7 @@ deliberately excluded from the SDK surface, adds a reasoned entry to
 
 ## Wire-contract fixtures
 
-`http_contract: 1`/`mcp_contract: 1`'s public shape — every enveloped
+`http_contract: 2`/`mcp_contract: 1`'s public shape — every enveloped
 HTTP response/request/error and the MCP-specific envelope, including
 #216's evidence-assembly package — is pinned as golden fixtures in
 [tests/fixtures/wire/](tests/fixtures/wire/), generated from a live

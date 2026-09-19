@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — `http_contract` is 2.** The #937 series changed the
+  schema document's body (ADR 0043) and, below, removes three
+  `GET /version` fields — breaking under ADR 0005 §4, so the contract
+  revs once for the series (ADR 0044). `GET /version` answers
+  `{"current": 2, "supported": [2]}`; both SDKs of this release declare
+  `SUPPORTED_HTTP_CONTRACTS` as `2` alone, so an SDK of this release
+  against a server of an earlier one (or the reverse) raises
+  `IncompatibleServerError` at its first request, naming the side to
+  upgrade — upgrade server and SDK together, as every release already
+  asks. The `GET /version` probe still fails open when the endpoint is
+  missing or unreadable.
 - **Breaking — `GET /version` reports the record format once, as
   `record_formats`; `batch_formats`, `schema_formats`, and
   `communities_formats` are gone** (ADR 0044, #937). Every JSON / JSONL
@@ -19,7 +30,7 @@ Entries that change an on-disk format or a response shape say so.
   when the server does not read (or write) this build's record format —
   including a server that reports no `record_formats` at all. The same
   block appears in `GET /protocol` and the MCP `initialize`
-  instructions. `http_contract` stays at 1.
+  instructions.
 - **Breaking — every record that used `kind` to say what it is now
   says so in `type`** (ADR 0042 §3.4, #937 step 5): the extract
   diagnostics sidecar (`run` / `chunk` / `attempt` / `segment`), the

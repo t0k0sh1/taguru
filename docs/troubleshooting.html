@@ -185,7 +185,7 @@ npm ls langchain-taguru</code></pre>
         <thead><tr><th></th><th>server's <code>http_contract</code> range overlaps the SDK's</th><th>no overlap</th></tr></thead>
         <tbody>
           <tr><td>outcome</td><td>works — compatible patch/minor differences are never refused</td><td>the very first call raises <code>IncompatibleServerError</code> (Python/TypeScript), naming which side to upgrade and the exact command</td></tr>
-          <tr><td>a server predating <code>GET /version</code> (0.5.x and earlier)</td><td colspan="2">treated as <code>http_contract: 1</code> — the check fails open on a 404, never refuses outright</td></tr>
+          <tr><td>a server predating <code>GET /version</code> (0.5.x and earlier)</td><td colspan="2">not checked — the probe fails open on a 404 and the first real request answers for itself (such a server speaks contract 1, which this release's SDKs no longer decode, so that request is where it fails)</td></tr>
         </tbody>
       </table>
     </div>

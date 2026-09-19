@@ -22,11 +22,11 @@ function versionBody(payload: Record<string, unknown>, status = 200): StubResult
 }
 
 function compatibleVersion(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { server: "0.6.0", http_contract: { current: 1, supported: [1] }, ...extra };
+  return { server: "0.6.0", http_contract: { current: 2, supported: [2] }, ...extra };
 }
 
 function incompatibleNewer(): Record<string, unknown> {
-  return { server: "0.7.0", http_contract: { current: 2, supported: [2] } };
+  return { server: "0.7.0", http_contract: { current: 3, supported: [3] } };
 }
 
 describe("preflight", () => {
@@ -109,8 +109,8 @@ describe("incompatibility", () => {
     expect(shaped.status).toBeNull();
     expect(shaped.sdk_version).toBe(VERSION);
     expect(shaped.server_version).toBe("0.7.0");
-    expect(shaped.supported_contracts).toEqual([1]);
-    expect(shaped.server_contracts).toEqual([2]);
+    expect(shaped.supported_contracts).toEqual([2]);
+    expect(shaped.server_contracts).toEqual([3]);
     expect(shaped.message).toContain("0.7.0");
     expect(shaped.message).toContain("Upgrade this SDK");
   });
@@ -141,7 +141,7 @@ describe("incompatibility", () => {
   });
 
   // The remaining directions need the SDK's own range to be something
-  // other than the real `SUPPORTED_HTTP_CONTRACTS = [1]` — a `const`
+  // other than the real `SUPPORTED_HTTP_CONTRACTS = [2]` — a `const`
   // module binding, immutable even from within its own module, unlike
   // Python's `monkeypatch.setattr`. `incompatibility`'s third
   // parameter exists for exactly this: it defaults to the real
@@ -182,7 +182,7 @@ describe("incompatibility", () => {
   });
 
   it("returns null (compatible) when the ranges intersect", () => {
-    expect(incompatibility({ server: "0.6.0", supported: [1] }, "http://test")).toBeNull();
+    expect(incompatibility({ server: "0.6.0", supported: [2] }, "http://test")).toBeNull();
   });
 
   it("returns null (fail-open) for an empty supported array", () => {
@@ -305,7 +305,7 @@ describe("incompatibility message assembly", () => {
   it("a newer server names both ranges and pins the exact npm upgrade", () => {
     const error = incompatibility({ server: "9.9.9", supported: [5, 6] }, "http://test");
     expect(error?.message).toBe(
-      `taguru SDK ${VERSION} speaks http_contract 1, but the server at http://test ` +
+      `taguru SDK ${VERSION} speaks http_contract 2, but the server at http://test ` +
         `(taguru 9.9.9) supports http_contract 5, 6 — no version in common. ` +
         `Upgrade this SDK to a release that speaks http_contract 5, 6: ` +
         `npm install taguru@^9.9.9`,
@@ -315,7 +315,7 @@ describe("incompatibility message assembly", () => {
   it("without a server version, drops the note and the pin", () => {
     const error = incompatibility({ server: null, supported: [5] }, "http://test");
     expect(error?.message).toBe(
-      `taguru SDK ${VERSION} speaks http_contract 1, but the server at http://test ` +
+      `taguru SDK ${VERSION} speaks http_contract 2, but the server at http://test ` +
         `supports http_contract 5 — no version in common. ` +
         `Upgrade this SDK to a release that speaks http_contract 5.`,
     );
@@ -324,7 +324,7 @@ describe("incompatibility message assembly", () => {
   it("an older server pins this SDK to the server's minor release", () => {
     const error = incompatibility({ server: "0.6.2", supported: [0] }, "http://test");
     expect(error?.message.endsWith(
-      "Upgrade the server to a release that speaks http_contract 1, or " +
+      "Upgrade the server to a release that speaks http_contract 2, or " +
         "pin this SDK to the server's release: npm install taguru@0.6.x",
     )).toBe(true);
   });

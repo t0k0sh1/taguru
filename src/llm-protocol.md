@@ -611,7 +611,7 @@ only under `warn`.
   ```json
   {
     "server": "0.6.0",
-    "http_contract": {"current": 1, "supported": [1]},
+    "http_contract": {"current": 2, "supported": [2]},
     "mcp_contract": {"current": 1, "supported": [1]},
     "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
     "record_formats": ["2026-09-17"],
@@ -633,8 +633,8 @@ only under `warn`.
   request, raising a dedicated error with a concrete upgrade remedy on
   a genuine mismatch — never on a compatible patch/minor difference,
   and never on an absent or unreadable `/version` (a server predating
-  this endpoint is treated as speaking `http_contract: 1`, not refused
-  outright).
+  this endpoint is not refused by the probe; the first real request
+  answers for itself).
 - The record format (the `version` column every JSON / JSONL record
   carries — source files, exports, eval sets, benchmark files, the
   schema document; one date, reported as `record_formats`) and the

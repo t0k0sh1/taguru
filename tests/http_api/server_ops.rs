@@ -69,8 +69,8 @@ fn version_is_bare_json_and_matches_the_protocol_trailer() {
     // Bare, not the envelope: no `status`/`result` wrapper.
     assert!(body.get("status").is_none(), "{body}");
     assert!(body.get("result").is_none(), "{body}");
-    assert_eq!(body["http_contract"]["current"], json!(1));
-    assert_eq!(body["http_contract"]["supported"], json!([1]));
+    assert_eq!(body["http_contract"]["current"], json!(2));
+    assert_eq!(body["http_contract"]["supported"], json!([2]));
     assert_eq!(body["mcp_contract"]["current"], json!(1));
     assert_eq!(body["record_formats"], json!(["2026-09-17"]));
     assert!(

@@ -5,9 +5,9 @@
   "request": null,
   "response": {
     "http_contract": {
-      "current": 1,
+      "current": 2,
       "supported": [
-        1
+        2
       ]
     },
     "image_formats": [

@@ -1,4 +1,4 @@
-# 0044. `GET /version` reports the record format once, as `record_formats`, and `import --url` / `export --url` check it before a byte moves
+# 0044. `GET /version` reports the record format once, as `record_formats`, `import --url` / `export --url` check it before a byte moves, and `http_contract` becomes 2
 
 - **Status**: Accepted
 - **Date**: 2026-09-18
@@ -45,15 +45,19 @@ the stream follows that one revision, not just the schema one.
    no longer "safe" for `export`: a server without the dimension writes
    records this build refuses line by line, and the preflight says so
    once, up front.
-3. `http_contract` stays at 1 — the owner's decision for the whole
-   #937 series (recorded on #937): the response-shape changes of ADR
-   0042 through this one are taken as one pre-1.0 format cut, not as
-   contract revisions.
+3. **`http_contract` becomes 2**, once for the whole #937 series: the
+   schema document's body changed (ADR 0043) and this ADR removes three
+   `GET /version` fields — both breaking under ADR 0005 §4, and the
+   contract guard (`sdk/spec/check_contract.py`) holds the series to
+   that table. Both SDKs of this release declare `2` alone: a server of
+   an earlier release answers `supported: [1]`, and the SDK refuses it
+   with its upgrade remedy rather than decoding a schema document whose
+   shape it no longer knows.
 
 ```json
 {
   "server": "0.9.8",
-  "http_contract": {"current": 1, "supported": [1]},
+  "http_contract": {"current": 2, "supported": [2]},
   "mcp_contract": {"current": 1, "supported": [1]},
   "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
   "record_formats": ["2026-09-17"],
@@ -66,6 +70,11 @@ the stream follows that one revision, not just the schema one.
 - A client reading `batch_formats` / `schema_formats` /
   `communities_formats` finds none; `record_formats` is the one
   dimension. Neither official SDK read the old three.
+- `http_contract: 2` means an SDK of this release refuses a server of
+  an earlier one (and an earlier SDK refuses this server) at its first
+  request, with the remedy in the error — the pairing that would
+  otherwise fail on the schema document's shape fails on the contract
+  check instead, by name.
 - `import --url` sends one `GET /version` it did not send before for a
   schema-free stream. A CLI of this release against a server of an
   earlier one refuses before sending, with an upgrade message, instead
