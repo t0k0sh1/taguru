@@ -406,11 +406,15 @@ def run_base(ref: str) -> None:
     # would number a contract nobody ever served. Breaking changes in
     # that window ride the pending bump; the CHANGELOG entry is still
     # this PR's to write.
+    # HEAD must still carry that pending version: a change that also
+    # lowers it back (a revert of the bump beside a new break) has no
+    # bump to ride.
     released_versions = contract_versions(released_api_text() or "")
     pending = {
         dimension
         for dimension in ("HTTP", "MCP")
         if base_versions.get(dimension, 0) > released_versions.get(dimension, 0)
+        and head_versions.get(dimension, 0) == base_versions.get(dimension, 0)
     }
     if pending:
         print(
