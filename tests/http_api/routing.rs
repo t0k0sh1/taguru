@@ -905,15 +905,32 @@ fn mcp_instructions_skip_a_dead_shard_and_fall_back_to_local_text() {
     );
 
     // No shard alive anywhere: initialize still answers, with the
-    // router's local text instead of an error.
+    // router's local text instead of an error — and that text still
+    // carries the version block, since those facts are the router
+    // build's own (the same its `GET /version` answers), not a shard's.
     let all_dead = Server::start_router("mcp-manual-dead", "a = http://127.0.0.1:1\n", &[]);
     let (status, init) = all_dead.call("POST", "/mcp", Some(initialize));
     assert_eq!(status, 200, "{init}");
+    let text = init["result"]["instructions"]
+        .as_str()
+        .expect("instructions must be text");
+    assert!(!text.is_empty(), "{init}");
+    // The version block is the trailer's fenced block — the LAST one in
+    // the manual, after the body's own examples.
+    let fenced = text
+        .rsplit("```json\n")
+        .next()
+        .and_then(|rest| rest.split("\n```").next())
+        .unwrap_or_else(|| panic!("the fallback manual carries the version block: {text}"));
+    let block: serde_json::Value = serde_json::from_str(fenced).unwrap();
+    let (_, version) = all_dead.call("GET", "/version", None);
+    assert_eq!(
+        block, version,
+        "the fallback's version block is the router's own /version"
+    );
     assert!(
-        init["result"]["instructions"]
-            .as_str()
-            .is_some_and(|text| !text.is_empty()),
-        "{init}"
+        !text.contains("Semantic entry is ON"),
+        "no shard answered, so no shard fact may be claimed: {text}"
     );
 }
 
