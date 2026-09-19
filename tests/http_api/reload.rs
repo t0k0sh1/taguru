@@ -482,6 +482,47 @@ fn the_config_watch_picks_up_a_rotation_without_a_signal() {
     assert!(log.contains("trigger=\"config-watch\""), "{log}");
 }
 
+/// #942: the watch's change baseline is the digest of what boot
+/// applied, not a read of its own — so an untouched file never fires
+/// a reload, not even on the first tick (a baseline of "unknown" would
+/// read the unchanged file as a change), and a rotation landing between
+/// boot's read and the task's first tick is still applied (the race the
+/// stop-clean test above hits under load; it cannot be forced from
+/// outside the process, so this pins the baseline's other visible
+/// property instead).
+#[test]
+fn an_untouched_config_never_fires_the_watch_not_even_on_its_first_tick() {
+    let dir = scratch("watch-untouched");
+    let config = dir.join("taguru.env");
+    let stderr = dir.join("stderr.log");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit-u1\n").unwrap();
+    let server = Server::start_with_config(
+        "reload-watch-untouched",
+        &config,
+        &stderr,
+        &[
+            ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+            ("RUST_LOG", "info"),
+        ],
+    );
+    // Past the first real tick (the interval is ~5s), with margin.
+    std::thread::sleep(Duration::from_secs(8));
+    assert_eq!(
+        server
+            .call_with_token("GET", "/contexts", None, Some("sekrit-u1"))
+            .0,
+        200
+    );
+    let log = std::fs::read_to_string(&stderr).unwrap();
+    assert!(
+        !log.contains("trigger=\"config-watch\""),
+        "an unchanged file must not reload: {log}"
+    );
+    let (_, metrics) = server.call("GET", "/metrics", None);
+    let text = metrics.as_str().unwrap();
+    assert_eq!(counter(text, "taguru_keyring_reloads_total"), 0, "{text}");
+}
+
 /// Issue #309: a same-LENGTH rotation whose mtime is put back to its
 /// original value (a fixed-width token swap on a filesystem too
 /// coarse to move the clock, or a metadata-preserving copy) must still

@@ -153,6 +153,16 @@ Entries that change an on-disk format or a response shape say so.
   said "source". `source` keeps its one meaning (the origin an
   association cites). No key, flag, SDK name, or prompt changed.
 
+### Fixed
+
+- The `--config` watch no longer misses a key rotation that lands
+  between boot's read of the file and the watch's first read (#942):
+  its change baseline is now the digest of the bytes boot applied, the
+  way the router's map watch already seeded itself, instead of a fresh
+  read of its own. Before, such a rotation became the baseline and was
+  never applied until the file changed again — silently, with the
+  pre-rotation keys still armed.
+
 ## [0.9.7] - 2026-09-15
 
 A sensitive-content gate release. `extract --redact` masks secrets and

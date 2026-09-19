@@ -191,15 +191,19 @@ pub(crate) fn documented_as_whole_word(haystack: &str, name: &str) -> bool {
 /// Reads a configuration file into the process environment. Exits with
 /// a usage error on an unreadable file or a malformed line — a config
 /// the operator pointed at explicitly must never be half-applied.
+/// Returns the sha256 of the bytes it applied: the `--config` watch
+/// seeds its change baseline with it (#942), so a rewrite landing
+/// between this read and the watch's first tick is still a change.
 ///
 /// Call this before the async runtime exists: applying the file means
 /// `std::env::set_var`, which is only sound while the process is
 /// single-threaded.
-pub(crate) fn load_config(path: &Path) {
+pub(crate) fn load_config(path: &Path) -> String {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => usage_error(&format!("cannot read config {}: {error}", path.display())),
     };
+    let digest = crate::sha256::sha256_hex(text.as_bytes());
     let pairs = match parse_config(&text) {
         Ok(pairs) => pairs,
         Err(message) => usage_error(&format!("config {}: {message}", path.display())),
@@ -235,6 +239,7 @@ pub(crate) fn load_config(path: &Path) {
         // access exists.
         unsafe { std::env::set_var(key, value) };
     }
+    digest
 }
 
 /// The `docker run --env-file` dialect: one KEY=VALUE per line, `#`
