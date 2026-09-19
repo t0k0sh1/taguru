@@ -182,7 +182,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|context| context["name"] == "free")
+        .find(|context| context["id"] == "free")
         .expect("free was created by the landed batch")
         .clone();
     assert_eq!(free["stats"]["associations"], json!(1), "{free}");

@@ -21,7 +21,7 @@ import {
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
 const DIRECTORY_ROW = {
-  name: "sake",
+  id: "sake",
   description: "酒蔵の知識",
   pinned: false,
   loaded: true,
@@ -51,7 +51,7 @@ describe("envelope and raw-body handling", () => {
     const row = { ...DIRECTORY_ROW, brand_new_field: { nested: true } };
     const client = stubClient(() => okBody(row));
     const entry = await client.contexts.get("sake");
-    expect(entry.name).toBe("sake");
+    expect(entry.id).toBe("sake");
   });
 
   it("describe null result is null, not an error", async () => {
@@ -437,7 +437,7 @@ describe("header normalization", () => {
 describe("pagination iterators", () => {
   it("walks directory pages with the keyset cursor", async () => {
     const cursors: Array<string | null> = [];
-    const rowFor = (name: string) => ({ ...DIRECTORY_ROW, name });
+    const rowFor = (id: string) => ({ ...DIRECTORY_ROW, id });
     const client = stubClient((req) => {
       const after = new URL(req.url).searchParams.get("after");
       cursors.push(after);
@@ -451,7 +451,7 @@ describe("pagination iterators", () => {
     });
     const names: string[] = [];
     for await (const entry of client.contexts.iter({ limit: 2 })) {
-      names.push(entry.name);
+      names.push(entry.id);
     }
     expect(names).toEqual(["a", "b", "c", "d"]);
     expect(cursors).toEqual([null, "b", "c", "d"]);

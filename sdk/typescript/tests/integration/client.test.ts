@@ -86,7 +86,7 @@ describe("context lifecycle", () => {
 
     const names: string[] = [];
     for await (const row of client.contexts.iter({ limit: 2 })) {
-      names.push(row.name);
+      names.push(row.id);
     }
     expect(names).toContain(name);
 
@@ -753,7 +753,7 @@ describe("groups and cross-context search", () => {
 
     const names: string[] = [];
     for await (const row of client.groups.iter({ limit: 2 })) {
-      names.push(row.name);
+      names.push(row.id);
     }
     expect(names).toContain(group);
     expect(names).toContain(child);

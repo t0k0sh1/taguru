@@ -119,7 +119,7 @@ fn data_survives_a_graceful_restart() {
     let data_dir = server.stop_gracefully();
     let server = Server::start_on("restart2", data_dir);
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory["contexts"][0]["name"], json!("sake"));
+    assert_eq!(directory["contexts"][0]["id"], json!("sake"));
     assert_eq!(
         directory["contexts"][0]["description"],
         json!("再起動テスト")

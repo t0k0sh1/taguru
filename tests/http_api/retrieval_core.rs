@@ -380,7 +380,7 @@ fn full_retrieval_loop_over_http() {
     );
     // The single-context row says the same thing without the listing.
     let single = server.ok("GET", "/contexts/sake", None);
-    assert_eq!(single["name"], json!("sake"));
+    assert_eq!(single["id"], json!("sake"));
     assert_eq!(single["stats"]["associations"], json!(5));
     let (status, _) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
     assert_eq!(status, 501);

@@ -39,7 +39,7 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|group| group["name"].as_str().unwrap())
+        .map(|group| group["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["empty", "fruit"], "name order");
     assert_eq!(
@@ -49,9 +49,9 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
     );
     let page = server.ok("GET", "/groups?limit=1", None);
     assert_eq!(page["total"], json!(2));
-    assert_eq!(page["groups"][0]["name"], json!("empty"));
+    assert_eq!(page["groups"][0]["id"], json!("empty"));
     let page = server.ok("GET", "/groups?limit=1&after=empty", None);
-    assert_eq!(page["groups"][0]["name"], json!("fruit"));
+    assert_eq!(page["groups"][0]["id"], json!("fruit"));
 
     let single = server.ok("GET", "/groups/fruit", None);
     assert_eq!(single["description"], json!("果物の文脈"));
@@ -215,7 +215,7 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     assert_eq!(row["groups"], json!(["leaf"]), "{row}");
     assert_eq!(row["contexts"], json!(["b"]));
     let page = server.ok("GET", "/groups", None);
-    assert_eq!(page["groups"][2]["name"], json!("top"), "{page}");
+    assert_eq!(page["groups"][2]["id"], json!("top"), "{page}");
     assert_eq!(page["groups"][2]["groups"], json!(["mid"]));
 
     // A fourth storey refuses as a cap, a cycle (the self-loop
@@ -374,7 +374,7 @@ fn key_scopes_filter_group_members_and_gate_group_writes() {
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(2), "{listed}");
     assert_eq!(
-        listed["result"]["groups"][0]["name"],
+        listed["result"]["groups"][0]["id"],
         json!("mixed"),
         "{listed}"
     );
@@ -664,7 +664,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["name"] == json!("apple"))
+        .find(|row| row["id"] == json!("apple"))
         .unwrap();
     assert_eq!(apple["revision"]["graph"], json!(1), "{apple}");
     assert_eq!(apple["revision"]["config"], json!(1), "{apple}");
@@ -672,7 +672,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["name"] == json!("banana"))
+        .find(|row| row["id"] == json!("banana"))
         .unwrap();
     assert_eq!(banana["revision"]["passages"], json!(1), "{banana}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());

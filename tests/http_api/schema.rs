@@ -244,7 +244,7 @@ fn schema_mode_echoes_on_the_directory_and_the_put_bumps_config_revision() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["name"] == "sake")
+        .find(|row| row["id"] == "sake")
         .unwrap();
     assert_eq!(row["schema_mode"], "warn", "{row}");
 }

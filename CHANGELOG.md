@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — a `context` row and a `group` row name their own key
+  `id`** (#851): `GET /contexts` / `GET /contexts/{name}` answer
+  `{"id": "sake", "description": …}` and `GET /groups` /
+  `GET /groups/{name}` answer `{"id": "kura", …}` where both said
+  `name`. The value is unchanged (the context's or group's name); the
+  path segments, `?after=`, `PUT` bodies, and the `contexts` / `groups`
+  member lists are untouched. Both SDKs' `DirectoryEntry` and
+  `GroupEntry` rename the field to `id`; `taguru export --url` reads
+  `id` and refuses a `name`-keyed row. Rides this release's
+  `http_contract: 2`. Not changed: `GET /contexts/{name}/sources`'s
+  `entries[].name`, resolve candidates' `name`, and every other `name`.
 - **Breaking — the change feed's events say what they are in `type`,
   not `kind`** (ADR 0042 §3.4): `GET /contexts/{name}/changes` answers
   `{"seq": …, "type": "associations_added", …}`. Same values, same
