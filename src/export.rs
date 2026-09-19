@@ -910,13 +910,9 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     }
     let api = Api::new(base.to_string());
     api.warn_on_version_skew("export");
-    // ADR 0009 §13's explicit compatibility refusal — run
-    // unconditionally (a fetch cannot know in advance which context,
-    // if any, carries a schema) but only fatal when the server's
-    // `schema_formats` names a version this CLI cannot read; an
-    // absent key (a pre-schema server) is safe, since such a server
-    // cannot have emitted a `schema` line in the first place.
-    if let Some(message) = api.schema_export_refusal() {
+    // ADR 0044's record-format preflight: the server must write the
+    // record format this build reads, or nothing is fetched.
+    if let Some(message) = api.record_format_refusal("export") {
         eprintln!("{message}");
         return 1;
     }

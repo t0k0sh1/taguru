@@ -107,7 +107,7 @@ class FakeServer {
 
     if (path === "/version") {
       return new Response(
-        JSON.stringify({ server: "0.6.0", http_contract: { current: 1, supported: [1] } }),
+        JSON.stringify({ server: "0.6.0", http_contract: { current: 2, supported: [2] } }),
         { status: 200 },
       );
     }

@@ -174,8 +174,9 @@ class Taguru:
         Fails closed only on positive proof the two ranges share nothing
         (see ``_contract.incompatibility``). Every absence of
         information is fail-open: a 404 (any server predating this
-        endpoint — pre-0.6 servers are ``http_contract: 1`` in substance
-        regardless), a non-JSON body, a missing/malformed
+        endpoint — pre-0.6 servers speak ``http_contract: 1`` in
+        substance, and the first real request is where such a pairing
+        fails), a non-JSON body, a missing/malformed
         ``http_contract`` key. ``GET /version`` is auth-exempt and
         outside the rate limiter and in-flight ceiling (`PROBE_EXEMPT`
         server-side), so this costs no permit — only one small request,

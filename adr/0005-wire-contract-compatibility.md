@@ -4,7 +4,7 @@
 - **Date**: 2026-07-30
 - **Issue**: #299
 - **Related**: #220, #216, #300, #301, #302, ADR 0002 §10, ADR 0003 §10
-- **Supersedes**: ADR 0002 §10 (partially — see §6) / **Superseded by**: —
+- **Supersedes**: ADR 0002 §10 (partially — see §6) / **Superseded by**: ADR 0044 (partially — the `batch_formats` and `communities_formats` dimensions)
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.

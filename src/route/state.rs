@@ -247,8 +247,12 @@ impl RouterState {
     }
 
     /// The MCP manual: the first shard's `GET /protocol`, cached for
-    /// the process lifetime once one answers; the local text (no
-    /// configuration trailer) until then.
+    /// the process lifetime once one answers; until then the local
+    /// text with the router's own version block — the same facts its
+    /// `GET /version` answers (ADR 0005 §6), which are the router
+    /// build's and so do not depend on any shard — and no semantic-tier
+    /// paragraph, since that is a shard fact this router cannot know
+    /// without one answering.
     pub(super) async fn mcp_instructions(&self, deadline: Deadline) -> Arc<String> {
         if let Some(cached) = self.inner.instructions.get() {
             return Arc::clone(cached);
@@ -275,6 +279,8 @@ impl RouterState {
                 return Arc::clone(self.inner.instructions.get().unwrap_or(&manual));
             }
         }
-        Arc::new(api::protocol_text(None))
+        Arc::new(api::protocol_text(Some(&api::protocol_trailer(
+            None, false,
+        ))))
     }
 }

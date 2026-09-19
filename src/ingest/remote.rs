@@ -559,13 +559,11 @@ pub(super) fn run_remote(
     // before sending anything.
     eprintln!("import → {base}");
     api.warn_on_version_skew("import");
-    // ADR 0009 §13's explicit compatibility refusal, checked only when
-    // the stream actually carries a schema record — a schema-free
-    // import must behave exactly as it did before this preflight
-    // existed, skew warning included, whatever the peer reports.
-    if schema_count > 0
-        && let Some(message) = api.schema_import_refusal()
-    {
+    // ADR 0044's record-format preflight: every record in the stream
+    // follows one format revision, so the peer must read this build's —
+    // refused here, by name, rather than as the peer's own "not a
+    // source file header" further along.
+    if let Some(message) = api.record_format_refusal("import") {
         eprintln!("{message}");
         if as_json {
             print_import_json_values(

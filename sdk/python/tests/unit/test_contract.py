@@ -34,11 +34,11 @@ def version_response(payload: dict[str, object], status: int = 200) -> httpx.Res
 
 
 def compatible_version(**extra: object) -> dict[str, object]:
-    return {"server": "0.6.0", "http_contract": {"current": 1, "supported": [1]}, **extra}
+    return {"server": "0.6.0", "http_contract": {"current": 2, "supported": [2]}, **extra}
 
 
 def incompatible_newer() -> dict[str, object]:
-    return {"server": "0.7.0", "http_contract": {"current": 2, "supported": [2]}}
+    return {"server": "0.7.0", "http_contract": {"current": 3, "supported": [3]}}
 
 
 def test_preflight_runs_once_per_client() -> None:
@@ -92,7 +92,7 @@ async def test_concurrent_first_calls_share_one_probe_and_all_see_incompatibilit
             # resolves — a same-tick race wouldn't prove much on its own.
             await release_probe.wait()
             return version_response(
-                {"server": "0.7.0", "http_contract": {"current": 2, "supported": [2]}}
+                {"server": "0.7.0", "http_contract": {"current": 3, "supported": [3]}}
             )
         raise AssertionError(f"the real request must not run: {req.url.path}")
 
@@ -130,8 +130,8 @@ def test_incompatible_newer_server_raises_with_upgrade_sdk_remedy() -> None:
     assert error.status is None
     assert error.sdk_version == taguru.__version__
     assert error.server_version == "0.7.0"
-    assert error.supported_contracts == (1,)
-    assert error.server_contracts == (2,)
+    assert error.supported_contracts == (2,)
+    assert error.server_contracts == (3,)
     assert "0.7.0" in str(error)
     assert "Upgrade this SDK" in str(error)
 
@@ -150,11 +150,11 @@ async def test_incompatible_newer_server_raises_async() -> None:
 def test_incompatible_older_server_raises_with_upgrade_server_remedy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("taguru._contract.SUPPORTED_HTTP_CONTRACTS", (2,))
+    monkeypatch.setattr("taguru._contract.SUPPORTED_HTTP_CONTRACTS", (3,))
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/version":
-            return version_response(compatible_version())  # server still speaks contract 1
+            return version_response(compatible_version())  # server still speaks contract 2
         raise AssertionError(f"the real request must not run: {req.url.path}")
 
     client = sync_client(handler, check_contract=True)
@@ -162,8 +162,8 @@ def test_incompatible_older_server_raises_with_upgrade_server_remedy(
         client.context("sake").recall("cue")
 
     error = excinfo.value
-    assert error.supported_contracts == (2,)
-    assert error.server_contracts == (1,)
+    assert error.supported_contracts == (3,)
+    assert error.server_contracts == (2,)
     assert "Upgrade the server" in str(error)
     # The server is already at 0.6.0 — telling the user to "upgrade to
     # 0.6.0" would be nonsensical, since that's the version it's
@@ -208,16 +208,16 @@ async def test_confirmed_incompatibility_blocks_every_later_call_async() -> None
 def test_disjoint_interleaved_ranges_raise_the_generic_remedy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Neither side is simply "newer" — SDK speaks {1, 3}, server speaks
-    {2} — so the remedy names no direction, just that one side must
+    """Neither side is simply "newer" — SDK speaks {2, 4}, server speaks
+    {3} — so the remedy names no direction, just that one side must
     move (ADR 0005 §6's dual-serving window is not decided, but the
     message must still make sense if it ever exists)."""
-    monkeypatch.setattr("taguru._contract.SUPPORTED_HTTP_CONTRACTS", (1, 3))
+    monkeypatch.setattr("taguru._contract.SUPPORTED_HTTP_CONTRACTS", (2, 4))
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/version":
             return version_response(
-                {"server": "0.7.0", "http_contract": {"current": 2, "supported": [2]}}
+                {"server": "0.7.0", "http_contract": {"current": 3, "supported": [3]}}
             )
         raise AssertionError(f"the real request must not run: {req.url.path}")
 

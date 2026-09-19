@@ -1080,8 +1080,8 @@ mod tests {
 
     /// `GET /version` (ADR 0005 §6): bare JSON, every dimension named,
     /// `image_formats` the full `1..=IMAGE_VERSION` range (unlike
-    /// `batch_formats`/`communities_formats`, which are single-element
-    /// since they're checked for equality, not range acceptance).
+    /// `record_formats`, which is single-element since it is checked
+    /// for equality, not range acceptance).
     #[tokio::test]
     async fn version_names_every_contract_dimension() {
         let response = version().await;
@@ -1091,8 +1091,8 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["server"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(body["http_contract"]["current"], 1);
-        assert_eq!(body["http_contract"]["supported"], serde_json::json!([1]));
+        assert_eq!(body["http_contract"]["current"], 2);
+        assert_eq!(body["http_contract"]["supported"], serde_json::json!([2]));
         assert_eq!(body["mcp_contract"]["current"], 1);
         assert!(
             body["mcp_protocol"]["supported"]
@@ -1100,16 +1100,17 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("2025-06-18"))
         );
-        assert_eq!(body["batch_formats"], serde_json::json!(["2026-09-17"]));
+        assert_eq!(body["record_formats"], serde_json::json!(["2026-09-17"]));
         assert_eq!(
             body["image_formats"],
             serde_json::json!((1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>())
         );
-        assert_eq!(
-            body["communities_formats"],
-            serde_json::json!(["2026-09-17"])
-        );
-        assert_eq!(body["schema_formats"], serde_json::json!(["2026-09-17"]));
+        for gone in ["batch_formats", "schema_formats", "communities_formats"] {
+            assert!(
+                body.get(gone).is_none(),
+                "{gone} folded into record_formats"
+            );
+        }
     }
 
     /// The readiness probe treats a maintenance sweep as a deliberate

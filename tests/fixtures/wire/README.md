@@ -1,6 +1,6 @@
 # Golden wire-contract fixtures
 
-Machine-readable pins of `http_contract: 1` / `mcp_contract: 1` (ADR
+Machine-readable pins of `http_contract: 2` / `mcp_contract: 1` (ADR
 0005 §3, §9) — a representative request/response for every wire shape
 this repository has committed to keeping stable within the current
 contract version, including #216's evidence-assembly package

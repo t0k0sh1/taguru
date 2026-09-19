@@ -425,9 +425,12 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         let responses = [
-            // /health, /version: no skew warning, no schema refusal.
+            // /health, /version: no skew warning, no record-format refusal.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
-            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+            ),
             // GET /contexts, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
@@ -506,9 +509,12 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         let responses = [
-            // /health, /version: no skew warning, no schema refusal.
+            // /health, /version: no skew warning, no record-format refusal.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
-            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+            ),
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
@@ -584,6 +590,9 @@ fn spawn_mismatched_health_stub() -> String {
     std::thread::spawn(move || {
         let responses = [
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
+            // /version: this build's record format, so the preflight
+            // passes silently and the skew line is the only warning.
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -640,8 +649,8 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
         let responses = [
             // /health: no version key, no skew warning.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
-            // /version: no schema_formats, which export treats as safe.
-            ("HTTP/1.1 200 OK", r#"{}"#),
+            // /version: this build's record format, so no refusal.
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
@@ -707,7 +716,10 @@ fn per_item_failures_count_and_the_rest_still_lands() {
     std::thread::spawn(move || {
         let responses = [
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
-            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+            ),
             // GET /contexts: one context, then the terminator.
             (
                 "HTTP/1.1 200 OK",

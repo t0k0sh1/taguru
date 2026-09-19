@@ -1,5 +1,5 @@
 //! Golden wire-contract fixtures (#301, ADR 0005 §9): the machine-
-//! readable pin of the current `http_contract: 1` / `mcp_contract: 1`
+//! readable pin of the current `http_contract: 2` / `mcp_contract: 1`
 //! shapes, including #216's evidence-assembly package (#305). Every
 //! fixture under `tests/fixtures/wire/{http,mcp}/` is produced and
 //! verified here, against the real server binary — Python and

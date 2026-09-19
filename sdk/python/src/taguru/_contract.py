@@ -31,7 +31,7 @@ from ._errors import IncompatibleServerError
 # accepted versions, not a {min, max} range: it mirrors GET /version's own
 # `supported` array (ADR 0005 §6) so the check is a plain set intersection,
 # and it can express a future gap (e.g. `(1, 3)`) a min/max pair cannot.
-SUPPORTED_HTTP_CONTRACTS: tuple[int, ...] = (1,)
+SUPPORTED_HTTP_CONTRACTS: tuple[int, ...] = (2,)
 
 # ADR 0005 §6: exempt from auth like the other probes, always 200.
 VERSION_PATH = "/version"

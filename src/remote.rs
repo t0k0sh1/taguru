@@ -584,97 +584,132 @@ impl Api {
         }
     }
 
-    /// One `GET /version`, read for its `schema_formats` array only —
-    /// best-effort, same posture as [`Api::version_skew_line`] (its
-    /// own short timeout, `None` on any transport/non-200/parse
-    /// trouble so the verb's own request produces the real fault, not
-    /// a guess made here). `/version` is auth-exempt (`PROBE_EXEMPT`),
-    /// but the bearer rides along anyway — matches every other
-    /// request this module sends.
-    fn schema_formats(&self) -> Option<Vec<String>> {
-        let url = self.url(&["version"]).ok()?;
+    /// One `GET /version`, read for its `record_formats` array only.
+    /// `/version` is auth-exempt (`PROBE_EXEMPT`), but the bearer rides
+    /// along anyway — matches every other request this module sends.
+    /// The three outcomes are kept apart because
+    /// [`Api::record_format_refusal`] acts on them differently: a
+    /// server that answered but names no readable list, a server that
+    /// could not be asked, and a list.
+    fn record_formats(&self) -> RecordFormats {
+        let url = match self.url(&["version"]) {
+            Ok(url) => url,
+            Err(error) => return RecordFormats::Unavailable(error),
+        };
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(HEALTH_PREFLIGHT_TIMEOUT))
             .http_status_as_error(false)
             .build()
             .into();
-        let mut response = self.bearer(agent.get(&url)).call().ok()?;
-        if response.status().as_u16() != 200 {
-            return None;
+        let mut response = match self.bearer(agent.get(&url)).call() {
+            Ok(response) => response,
+            Err(error) => return RecordFormats::Unavailable(error.to_string()),
+        };
+        let status = response.status().as_u16();
+        if status != 200 {
+            return RecordFormats::Unavailable(format!("GET /version answered {status}"));
         }
-        let body = response
+        let body = match response
             .body_mut()
             .with_config()
             .limit(REMOTE_RESPONSE_CAP_BYTES)
             .read_to_string()
-            .ok()?;
-        let value: Value = serde_json::from_str(&body).ok()?;
-        let formats = value.get("schema_formats")?.as_array()?;
+        {
+            Ok(body) => body,
+            Err(error) => {
+                return RecordFormats::Unavailable(format!(
+                    "GET /version body could not be read: {error}"
+                ));
+            }
+        };
+        let value: Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return RecordFormats::Unavailable(format!("GET /version is not JSON: {error}"));
+            }
+        };
         // All-or-nothing: `filter_map` would silently drop a malformed
         // element (e.g. a stray number in the array), which could turn
         // `["2026-09-17", 7]` into a false `["2026-09-17"]` match this
-        // CLI reads as "the server carries only that format" instead of "this
-        // capability array is malformed" — the latter must answer
-        // `None` (best-effort, same as every other trouble case this
-        // method already treats that way) rather than a guess built on
-        // a partial read.
-        formats
-            .iter()
-            .map(|format| format.as_str().map(str::to_string))
-            .collect()
-    }
-
-    /// `import --url`'s ADR 0009 §13 preflight — call only when the
-    /// payload actually carries a `schema` record; a
-    /// schema-free import must behave exactly as it did before this
-    /// method existed. `Some(message)` refuses before a byte ships.
-    /// Unlike [`Api::schema_export_refusal`], an ABSENT
-    /// `schema_formats` is fatal here, not safe: it means the peer has
-    /// never heard of the key, so shipping the record would either be
-    /// silently dropped by a schema-unaware server or fall through to
-    /// `parse_stream`'s dispatch as a misleading "not a batch header"
-    /// refusal (ADR 0009 §13 bullet 2) — this preflight exists to
-    /// replace that with an honest one before the network round trip.
-    pub(crate) fn schema_import_refusal(&self) -> Option<String> {
-        let mine = crate::format::FORMAT_VERSION;
-        match self.schema_formats() {
-            Some(formats) if formats.iter().any(|format| format == mine) => None,
-            Some(formats) => Some(format!(
-                "taguru: import: this CLI writes schema format {mine} but the server at {} \
-                 reads {formats:?} — nothing was sent; upgrade the server, or import \
-                 without the schema record",
-                self.base
-            )),
-            None => Some(format!(
-                "taguru: import: this CLI writes schema format {mine} but the server at {} \
-                 does not report a schema_formats — nothing was sent; upgrade the server, \
-                 or import without the schema record",
-                self.base
-            )),
+        // CLI reads as "the server carries only that format" instead of
+        // "this capability array is malformed" — the latter is treated
+        // like an absent key (the server names no readable list) rather
+        // than a guess built on a partial read.
+        let list = value
+            .get("record_formats")
+            .and_then(Value::as_array)
+            .and_then(|formats| {
+                formats
+                    .iter()
+                    .map(|format| format.as_str().map(str::to_string))
+                    .collect::<Option<Vec<String>>>()
+            });
+        match list {
+            Some(formats) => RecordFormats::Reported(formats),
+            None => RecordFormats::Absent,
         }
     }
 
-    /// `export --url`'s ADR 0009 §13 preflight, run unconditionally
-    /// (unlike [`Api::schema_import_refusal`], which only runs when the
-    /// payload is known to carry a schema record) — a fetch cannot
-    /// know in advance whether the `context` it is about to pull carries
-    /// one, and probing each `context` first would cost a request per
-    /// `context` for no better an answer. An ABSENT `schema_formats` is
-    /// SAFE here, not fatal: a server that has never heard of the key
-    /// cannot have emitted a `schema` line, so there is nothing
-    /// for this CLI to fail to read — only a format this CLI does not
-    /// recognize refuses.
-    pub(crate) fn schema_export_refusal(&self) -> Option<String> {
+    /// The record-format preflight `import --url` and `export --url`
+    /// both run before a byte moves (ADR 0044): every record either
+    /// verb carries — source headers, `group` and `schema` records —
+    /// follows one format revision, so the peer must read (import) or
+    /// write (export) this build's. `Some(message)` refuses. An
+    /// ABSENT `record_formats` refuses too: it names a release before
+    /// this dimension existed, whose files this build does not read and
+    /// which does not read this build's — letting the verb proceed
+    /// would only turn that into a "not a source file header" refusal
+    /// further along. A `/version` that could not be read at all (a
+    /// connection failure, a non-200, a body that is not JSON) is NOT
+    /// an absence: the check is skipped with one warning naming the
+    /// cause, and the verb's own request produces the real fault —
+    /// same posture as the skew warning. `verb` is `"import"` or
+    /// `"export"`, for the messages only.
+    pub(crate) fn record_format_refusal(&self, verb: &str) -> Option<String> {
         let mine = crate::format::FORMAT_VERSION;
-        match self.schema_formats() {
-            Some(formats) if !formats.iter().any(|format| format == mine) => Some(format!(
-                "taguru: export: this CLI reads schema format {mine} but the server at {} \
-                 writes {formats:?} — nothing was fetched; upgrade this CLI",
+        let outcome = if verb == "export" {
+            "nothing was fetched"
+        } else {
+            "nothing was sent"
+        };
+        match self.record_formats() {
+            RecordFormats::Reported(formats) if formats.iter().any(|format| format == mine) => None,
+            RecordFormats::Reported(formats) => Some(format!(
+                "taguru: {verb}: this CLI reads and writes record format {mine} but the \
+                 server at {} reports {formats:?} — {outcome}; the two are different \
+                 releases, upgrade the older one",
                 self.base
             )),
-            _ => None,
+            RecordFormats::Absent => Some(format!(
+                "taguru: {verb}: this CLI reads and writes record format {mine} but the \
+                 server at {} does not report a record_formats — {outcome}; upgrade the \
+                 server",
+                self.base
+            )),
+            RecordFormats::Unavailable(reason) => {
+                eprintln!(
+                    "taguru: {verb}: warning: could not read GET /version at {} ({reason}) — \
+                     the record-format check was skipped",
+                    self.base
+                );
+                None
+            }
         }
     }
+}
+
+/// What one `GET /version` said about the record format, as
+/// [`Api::record_format_refusal`] needs to tell the cases apart.
+#[derive(Debug, PartialEq)]
+enum RecordFormats {
+    /// A 200 with a `record_formats` array of strings.
+    Reported(Vec<String>),
+    /// A 200 JSON object without a readable `record_formats` — the key
+    /// missing, not an array, or an array with a non-string element.
+    Absent,
+    /// `/version` could not be asked or did not answer 200 JSON; the
+    /// reason, for the warning.
+    Unavailable(String),
 }
 
 /// The `(major, minor)` prefix of a version string; `None` when it
@@ -880,9 +915,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        Api, IMPORT_CHUNK_BYTES, ImportFailure, REMOTE_RESPONSE_CAP_BYTES, base_url_for,
-        loopback_of, pack_import_chunks, reject_unusable_base, reject_userinfo, skew_warning,
-        token_from_ring,
+        Api, IMPORT_CHUNK_BYTES, ImportFailure, REMOTE_RESPONSE_CAP_BYTES, RecordFormats,
+        base_url_for, loopback_of, pack_import_chunks, reject_unusable_base, reject_userinfo,
+        skew_warning, token_from_ring,
     };
 
     #[test]
@@ -983,84 +1018,125 @@ mod tests {
         );
     }
 
-    /// ADR 0009 §13's `import --url` preflight, over all four cases:
-    /// a match, a mismatch, and the two directions absence cuts —
-    /// fatal for `import` (a server that never heard of the key would
-    /// either drop the record or answer `parse_stream`'s misleading
-    /// "not a batch header" refusal), safe for `export` (such a
-    /// server cannot have emitted a `schema` line to begin
-    /// with).
+    /// ADR 0044's record-format preflight, over its cases: a match, a
+    /// mismatch, and absence — the last refuses for both verbs, since a
+    /// server without the dimension neither reads nor writes this
+    /// build's records.
     #[test]
-    fn schema_import_refusal_covers_match_mismatch_and_absence() {
-        let base = respond_once(
-            "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
-        );
-        assert_eq!(Api::new(base).schema_import_refusal(), None);
+    fn record_format_refusal_covers_match_mismatch_and_absence() {
+        for verb in ["import", "export"] {
+            let base = respond_once(
+                "HTTP/1.1 200 OK",
+                json!({"record_formats": [crate::format::FORMAT_VERSION]}),
+            );
+            assert_eq!(Api::new(base).record_format_refusal(verb), None);
 
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
-        let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains(r#"reads ["2099-01-01"]"#), "{message}");
-        assert!(message.contains("nothing was sent"), "{message}");
+            let base = respond_once("HTTP/1.1 200 OK", json!({"record_formats": ["2099-01-01"]}));
+            let message = Api::new(base)
+                .record_format_refusal(verb)
+                .expect("a format this CLI cannot read must refuse");
+            assert!(
+                message.starts_with(&format!("taguru: {verb}: ")),
+                "{message}"
+            );
+            assert!(message.contains(r#"reports ["2099-01-01"]"#), "{message}");
+            assert!(message.contains("upgrade the older one"), "{message}");
 
+            let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+            let message = Api::new(base)
+                .record_format_refusal(verb)
+                .expect("an absent record_formats refuses");
+            assert!(
+                message.contains("does not report a record_formats"),
+                "{message}"
+            );
+        }
         let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
-        let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("an absent schema_formats is fatal for import");
         assert!(
-            message.contains("does not report a schema_formats"),
-            "{message}"
+            Api::new(base)
+                .record_format_refusal("export")
+                .unwrap()
+                .contains("nothing was fetched")
+        );
+        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+        assert!(
+            Api::new(base)
+                .record_format_refusal("import")
+                .unwrap()
+                .contains("nothing was sent")
         );
     }
 
-    /// A mixed-type `schema_formats` array (a malformed capability
+    /// A mixed-type `record_formats` array (a malformed capability
     /// announcement — a stray number among the dates) must refuse as a
     /// whole, not silently drop the bad element and match on whatever
     /// strings happened to parse: `["<this build's date>", 1]` naming
-    /// this CLI's own version must still be treated as "cannot trust
-    /// this array" (absent-shaped fatal), never as "the server carries
-    /// this format." A pre-ADR-0042 server's `[1]` lands here too.
+    /// this CLI's own version must still be treated as "no readable
+    /// list" (absent), never as "the server carries this format."
     #[test]
-    fn schema_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
+    fn record_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
         let base = respond_once(
             "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION, 1]}),
+            json!({"record_formats": [crate::format::FORMAT_VERSION, 1]}),
+        );
+        assert_eq!(
+            Api::new(base.clone()).record_formats(),
+            RecordFormats::Absent
+        );
+        let base = respond_once(
+            "HTTP/1.1 200 OK",
+            json!({"record_formats": [crate::format::FORMAT_VERSION, 1]}),
         );
         let message = Api::new(base)
-            .schema_import_refusal()
-            .expect("a malformed schema_formats must refuse, not silently match");
+            .record_format_refusal("import")
+            .expect("a malformed record_formats must refuse, not silently match");
         assert!(
-            message.contains("does not report a schema_formats"),
+            message.contains("does not report a record_formats"),
             "{message}"
         );
     }
 
-    /// [`schema_import_refusal_covers_match_mismatch_and_absence`]'s
-    /// export twin — the one case that differs is absence, which is
-    /// safe here rather than fatal.
+    /// A `/version` that cannot be read — a 503, a body that is not
+    /// JSON, a server that is not there — is not an absent
+    /// `record_formats`: the preflight is skipped (no refusal), and the
+    /// reason is kept for the warning rather than folded into "the
+    /// server does not report".
     #[test]
-    fn schema_export_refusal_covers_match_mismatch_and_absence() {
+    fn an_unreadable_version_is_unavailable_not_absent_and_does_not_refuse() {
         let base = respond_once(
-            "HTTP/1.1 200 OK",
-            json!({"schema_formats": [crate::format::FORMAT_VERSION]}),
+            "HTTP/1.1 503 Service Unavailable",
+            json!({"status": "error", "code": "unavailable"}),
         );
-        assert_eq!(Api::new(base).schema_export_refusal(), None);
-
-        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": ["2099-01-01"]}));
-        let message = Api::new(base)
-            .schema_export_refusal()
-            .expect("a format this CLI cannot read must refuse");
-        assert!(message.contains(r#"writes ["2099-01-01"]"#), "{message}");
-        assert!(message.contains("nothing was fetched"), "{message}");
-
-        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
-        assert_eq!(
-            Api::new(base).schema_export_refusal(),
-            None,
-            "an absent schema_formats (a pre-schema server) is safe for export"
+        match Api::new(base.clone()).record_formats() {
+            RecordFormats::Unavailable(reason) => {
+                assert!(reason.contains("503"), "{reason}");
+            }
+            other => panic!("a 503 is unavailable, got {other:?}"),
+        }
+        let base = respond_once(
+            "HTTP/1.1 503 Service Unavailable",
+            json!({"status": "error", "code": "unavailable"}),
         );
+        assert_eq!(Api::new(base).record_format_refusal("import"), None);
+
+        // Nothing listening: a connection failure.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert!(matches!(
+            Api::new(base.clone()).record_formats(),
+            RecordFormats::Unavailable(_)
+        ));
+        assert_eq!(Api::new(base).record_format_refusal("export"), None);
+
+        // A 200 that is not JSON.
+        let base = respond_once_raw("HTTP/1.1 200 OK", "not json");
+        match Api::new(base).record_formats() {
+            RecordFormats::Unavailable(reason) => {
+                assert!(reason.contains("not JSON"), "{reason}");
+            }
+            other => panic!("a non-JSON body is unavailable, got {other:?}"),
+        }
     }
 
     /// A minimal one-shot HTTP stub — bind, accept once, answer with a
@@ -1077,6 +1153,27 @@ mod tests {
             let mut buffer = [0u8; 1024];
             let _ = stream.read(&mut buffer); // discard the request itself
             let body = body.to_string();
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        format!("http://{addr}")
+    }
+
+    /// [`respond_once`], with a raw (not necessarily JSON) body.
+    fn respond_once_raw(status_line: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let status_line = status_line.to_string();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer);
             let response = format!(
                 "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()

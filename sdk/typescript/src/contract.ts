@@ -33,7 +33,7 @@ import { VERSION } from "./version.js";
  * set intersection, and it can express a future gap (e.g. `[1, 3]`) a
  * min/max pair cannot.
  */
-export const SUPPORTED_HTTP_CONTRACTS: readonly number[] = [1];
+export const SUPPORTED_HTTP_CONTRACTS: readonly number[] = [2];
 
 /** ADR 0005 §6: exempt from auth like the other probes, always 200. */
 export const VERSION_PATH = "/version";

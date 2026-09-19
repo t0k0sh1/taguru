@@ -4,16 +4,10 @@
   "operation": "version",
   "request": null,
   "response": {
-    "batch_formats": [
-      "2026-09-17"
-    ],
-    "communities_formats": [
-      "2026-09-17"
-    ],
     "http_contract": {
-      "current": 1,
+      "current": 2,
       "supported": [
-        1
+        2
       ]
     },
     "image_formats": [
@@ -37,7 +31,7 @@
         "2025-06-18"
       ]
     },
-    "schema_formats": [
+    "record_formats": [
       "2026-09-17"
     ],
     "server": "0.0.0"

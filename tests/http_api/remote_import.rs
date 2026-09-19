@@ -820,6 +820,9 @@ fn spawn_mismatched_health_stub() -> String {
     std::thread::spawn(move || {
         let responses = [
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
+            // /version: this build's record format, so the preflight
+            // passes and the import itself is what fails below.
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -867,8 +870,8 @@ fn a_mismatched_server_version_prints_the_skew_warning_once() {
 }
 
 /// A scripted stub: `GET /health` (matching version, no skew warning),
-/// then `POST /import` answers 413 for the whole (2-batch) chunk,
-/// 200 for the first half after the client halves it at the batch
+/// `GET /version` (this build's record format), then `POST /import`
+/// answers 413 for the whole (2-batch) chunk, 200 for the first half after the client halves it at the batch
 /// boundary, then drops the connection on the second half without
 /// answering at all — proving both halves of ADR 0002 §9's 413
 /// adaptation and §8's "connection lost after chunk N/M" wording,
@@ -886,6 +889,18 @@ fn spawn_413_then_drop_stub() -> String {
                 r#"{{"status":"ok","version":"{}"}}"#,
                 env!("CARGO_PKG_VERSION")
             );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+        // 1b) GET /version — this build's record format, so the
+        //     preflight passes.
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"record_formats":["2026-09-17"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -937,6 +952,18 @@ fn spawn_413_twice_then_drop_stub() -> String {
                 r#"{{"status":"ok","version":"{}"}}"#,
                 env!("CARGO_PKG_VERSION")
             );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+        // 1b) GET /version — this build's record format, so the
+        //     preflight passes.
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"record_formats":["2026-09-17"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()

@@ -172,8 +172,10 @@ impl<T> ApiResponse<T> {
 /// conforms to (ADR 0005 §3.2, §6). Bump only alongside a change
 /// this crate's own compat/break table (ADR 0005 §4) classifies
 /// breaking, landing in the same PR as a CHANGELOG "Changed" entry
-/// and a migration note (ADR 0005 §7).
-pub(crate) const HTTP_CONTRACT: u64 = 1;
+/// and a migration note (ADR 0005 §7). 2 since ADR 0044: the #937
+/// series changed the schema document's body (ADR 0043) and folded
+/// `GET /version`'s three format dimensions into `record_formats`.
+pub(crate) const HTTP_CONTRACT: u64 = 2;
 
 /// The MCP-owned wire shape version (ADR 0005 §3.3): the 47-tool
 /// name/`inputSchema` table, `retrieve`'s composed output shape (the
@@ -209,19 +211,15 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             "http_contract": {"current": HTTP_CONTRACT, "supported": [HTTP_CONTRACT]},
             "mcp_contract": {"current": MCP_CONTRACT, "supported": [MCP_CONTRACT]},
             "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
-            "batch_formats": [crate::format::FORMAT_VERSION],
-            // Equality-checked like `batch_formats`, not range-accepted
-            // like `image_formats` below: a schema document is read at
-            // the one `version` date every taguru record shares (ADR
-            // 0042), so there is never a range of readable values.
-            "schema_formats": [crate::format::FORMAT_VERSION],
+            // The one `version` date every JSON / JSONL record this build
+            // reads and writes carries (ADR 0042, ADR 0044) — equality-
+            // checked, so a single element, unlike `image_formats`.
+            "record_formats": [crate::format::FORMAT_VERSION],
             // Every version from 1 through the current one still loads
             // (`src/context/image.rs`'s range-acceptance check), unlike
-            // batch/communities formats below, which are checked for
-            // equality — so this dimension is the full range, not just
-            // the current value.
+            // `record_formats`, which is checked for equality — so this
+            // dimension is the full range, not just the current value.
             "image_formats": (1..=u64::from(taguru::context::IMAGE_VERSION)).collect::<Vec<_>>(),
-            "communities_formats": [crate::format::FORMAT_VERSION],
         })
     });
     &FACTS
