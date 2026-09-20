@@ -9,8 +9,8 @@
         {
           "description": "wire-contract corpus",
           "dice_floor": null,
+          "id": "corpus-a",
           "loaded": true,
-          "name": "corpus-a",
           "pinned": false,
           "revision": {
             "config": 0,

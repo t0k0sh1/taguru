@@ -213,7 +213,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| c["name"].as_str().unwrap())
+        .map(|c| c["id"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"sake::m1"), "{names:?}");
     assert!(names.contains(&"sake::m2"), "{names:?}");

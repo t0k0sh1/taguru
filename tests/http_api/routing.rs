@@ -1314,7 +1314,7 @@ fn merge_contexts_dedups_a_mid_move_stray_by_map_ownership() {
             .as_array()
             .expect("directory rows")
             .iter()
-            .find(|entry| entry["name"] == json!(name))
+            .find(|entry| entry["id"] == json!(name))
             .unwrap_or_else(|| panic!("{name} missing from {listing}"))["description"]
             .as_str()
             .unwrap()

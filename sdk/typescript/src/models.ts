@@ -194,8 +194,9 @@ export interface ContextRevision {
   config: number;
 }
 
+/** One `context` directory row. `id` is the `context`'s name — the row's own key (#851). */
 export interface DirectoryEntry {
-  name: string;
+  id: string;
   description: string;
   pinned: boolean;
   loaded: boolean;
@@ -221,7 +222,8 @@ export interface ContextPage {
  * `groups` (child names — labels, not content) is never filtered.
  */
 export interface GroupEntry {
-  name: string;
+  /** The `group`'s name — the row's own key (#851). */
+  id: string;
   description: string;
   contexts: string[];
   groups: string[];

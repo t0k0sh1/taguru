@@ -34,13 +34,13 @@ FACT_ONLY_ASSOCIATION = {
 
 GROUP_ROWS = {
     "brewery": {
-        "name": "brewery",
+        "id": "brewery",
         "description": "蔵元一式",
         "contexts": ["sake", "tea"],
         "groups": [],
     },
-    "parent": {"name": "parent", "description": "", "contexts": ["sake"], "groups": ["childg"]},
-    "childg": {"name": "childg", "description": "", "contexts": ["tea"], "groups": []},
+    "parent": {"id": "parent", "description": "", "contexts": ["sake"], "groups": ["childg"]},
+    "childg": {"id": "childg", "description": "", "contexts": ["tea"], "groups": []},
 }
 
 

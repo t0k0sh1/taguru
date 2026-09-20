@@ -32,6 +32,10 @@ pub struct GroupPage {
 /// PATCH response are all this one shape, as with [`DirectoryEntry`].
 #[derive(Serialize, Deserialize)]
 pub struct GroupEntry {
+    /// The `group`'s id — its name. `id` on the wire (#851: a row's own
+    /// key is `id`, as the `group` record on file already says); `name`
+    /// inside the program.
+    #[serde(rename = "id")]
     pub name: String,
     pub description: String,
     /// Member `context` names, sorted. For a `context`-scoped key this

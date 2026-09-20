@@ -754,7 +754,7 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry["name"].as_str().unwrap())
+        .map(|entry| entry["id"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["glossary", "sake"], "{page}");
 
@@ -905,7 +905,7 @@ fn context_names(server: &Server) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry["name"].as_str().unwrap().to_string())
+        .map(|entry| entry["id"].as_str().unwrap().to_string())
         .collect()
 }
 
@@ -1016,7 +1016,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     );
     assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
     let groups = replica.ok("GET", "/groups", None);
-    assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
+    assert_eq!(groups["groups"][0]["id"], "breweries", "{groups}");
     // `GET /schema` is a read (ADR 0009 §12.5) — it passes the replica
     // gate like every other retrieval GET. `glossary` never installed
     // one, so its 404 is the ordinary "no schema installed" answer,

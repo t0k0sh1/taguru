@@ -391,6 +391,9 @@ fn unix_now() -> u64 {
 /// cold ones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
+    /// The `context`'s id — its name. `id` on the wire (#851: a row's
+    /// own key is `id`); `name` inside the program, where it always was.
+    #[serde(rename = "id")]
     pub name: String,
     pub description: String,
     pub pinned: bool,

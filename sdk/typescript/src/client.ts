@@ -603,7 +603,7 @@ export class Contexts {
       yield* page.contexts;
       // A short page is not the last one: a concurrent delete can shorten
       // it while later rows remain, so page until an empty page.
-      after = page.contexts[page.contexts.length - 1]!.name;
+      after = page.contexts[page.contexts.length - 1]!.id;
     }
   }
 
@@ -718,7 +718,7 @@ export class Groups {
       yield* page.groups;
       // A short page is not the last one: a concurrent delete can shorten
       // it while later rows remain, so page until an empty page.
-      after = page.groups[page.groups.length - 1]!.name;
+      after = page.groups[page.groups.length - 1]!.id;
     }
   }
 

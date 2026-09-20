@@ -234,7 +234,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(1), "{listed}");
     assert_eq!(
-        listed["result"]["contexts"][0]["name"],
+        listed["result"]["contexts"][0]["id"],
         json!("sake"),
         "{listed}"
     );

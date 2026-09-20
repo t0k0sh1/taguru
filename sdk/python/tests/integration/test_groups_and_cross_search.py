@@ -61,7 +61,7 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     assert conflict.value.code == "already_exists"
 
     entry = client.groups.get(group)
-    assert entry.name == group
+    assert entry.id == group
     assert entry.description == "蔵元一式"
     assert entry.contexts == [sake]
     assert entry.groups == []
@@ -78,7 +78,7 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     entry = client.groups.update(group, add_groups=[child])
     assert entry.groups == [child]
 
-    names = [row.name for row in client.groups.iter(limit=2)]
+    names = [row.id for row in client.groups.iter(limit=2)]
     assert group in names and child in names
 
     # Rename: the old name is gone, the new one keeps the membership.

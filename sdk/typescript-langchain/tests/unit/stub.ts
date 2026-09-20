@@ -23,9 +23,9 @@ export const FACT_ONLY_ASSOCIATION = {
 };
 
 const GROUP_ROWS: Record<string, unknown> = {
-  brewery: { name: "brewery", description: "蔵元一式", contexts: ["sake", "tea"], groups: [] },
-  parent: { name: "parent", description: "", contexts: ["sake"], groups: ["childg"] },
-  childg: { name: "childg", description: "", contexts: ["tea"], groups: [] },
+  brewery: { id: "brewery", description: "蔵元一式", contexts: ["sake", "tea"], groups: [] },
+  parent: { id: "parent", description: "", contexts: ["sake"], groups: ["childg"] },
+  childg: { id: "childg", description: "", contexts: ["tea"], groups: [] },
 };
 
 const ok = (result: unknown): Response =>
