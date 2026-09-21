@@ -222,7 +222,7 @@ parameters: { type: gp3 }</code></pre></li>
 
   <section id="secrets">
     <h2>Secrets: the token never touches a manifest</h2>
-    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, provider keys, …) come from a secret store at boot.</p>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_GRANTS</code>, provider keys, …) come from a secret store at boot.</p>
     <ul>
       <li><b>EC2:</b> put the token in SSM Parameter Store as a <code>SecureString</code> (or in
         Secrets Manager) and read it in the boot script with the instance role —

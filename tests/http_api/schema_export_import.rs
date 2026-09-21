@@ -80,18 +80,19 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
     );
 }
 
-/// A scoped key's grant is checked against a schema record's context
-/// the same way a batch's is — before anything applies. The sake
-/// batch precedes the bunko schema record in the SAME stream; the
+/// A context-scoped key's grant is checked against a schema record's
+/// context the same way a batch's is — before anything applies. The
+/// sake batch precedes the bunko schema record in the SAME stream; the
 /// refusal must still land with nothing written, batch included.
 #[test]
-fn a_scoped_key_without_a_grant_on_the_schema_records_context_refuses_with_nothing_applied() {
+fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_with_nothing_applied()
+{
     let server = Server::start_with_env(
         "schema-stream-scope",
         &[
             ("TAGURU_API_TOKENS", "admin:atok,writer:wtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"writer": {"role": "admin", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -131,7 +132,8 @@ fn a_scoped_key_without_a_grant_on_the_schema_records_context_refuses_with_nothi
     assert_eq!(status, 200, "{sake}");
     assert_eq!(sake["result"]["stats"]["associations"], 0, "{sake}");
 
-    // The unscoped admin key carries the same stream through cleanly.
+    // The admin key with no grant entry carries the same stream through
+    // cleanly.
     let (status, applied) = post_import(&server, &stream, Some("atok"));
     assert_eq!(status, 200, "{applied}");
 }

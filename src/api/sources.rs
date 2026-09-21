@@ -1643,7 +1643,7 @@ pub struct CrossSearchPassagesRequest {
 /// not a correctness risk.
 pub async fn cross_search_passages(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossSearchPassagesRequest>,
@@ -1651,7 +1651,7 @@ pub async fn cross_search_passages(
     let started_at = Instant::now();
     let targets = match cross_targets(
         &state,
-        &scope,
+        &grant,
         &key,
         request.contexts,
         request.groups,

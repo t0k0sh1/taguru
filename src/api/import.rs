@@ -824,7 +824,7 @@ pub(super) fn quota_refusal_from_apply(
 pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<ImportQuery>,
     AppBytes(body): AppBytes,
@@ -853,11 +853,11 @@ pub async fn import_batch(
     // Import's contexts live in the BODY, out of the route-level
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies.
-    if let Some(axum::Extension(scope)) = &scope
+    if let Some(axum::Extension(grant)) = &grant
         && let Some(refused) = stream
             .batches
             .iter()
-            .find(|batch| !scope.allows_context(&batch.context))
+            .find(|batch| !grant.allows_context(&batch.context))
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -879,11 +879,11 @@ pub async fn import_batch(
     // before anything applies — one step earlier than the group check
     // just below, since schemas install before groups restore (ADR
     // 0009 §13).
-    if let Some(axum::Extension(scope)) = &scope
+    if let Some(axum::Extension(grant)) = &grant
         && let Some((context, _)) = stream
             .schemas
             .iter()
-            .find(|(context, _)| !scope.allows_context(context))
+            .find(|(context, _)| !grant.allows_context(context))
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -901,13 +901,13 @@ pub async fn import_batch(
     }
     // Group records are judged the way every group write is: by the
     // context closure — the standing record's and the prospective
-    // one's both — before anything applies. Gated on the scope first,
-    // [`scoped_group_refusal`]'s discipline: an unscoped key never
+    // one's both — before anything applies. Gated on the grant first,
+    // [`scoped_group_refusal`]'s discipline: a key with no grant never
     // pays for the closure read.
-    if scope.is_some()
+    if grant.is_some()
         && !stream.groups.is_empty()
         && let Some(refusal) = scope_refusal(
-            &scope,
+            &grant,
             &key,
             &state.group_restore_involves(&stream.groups),
             started_at,
@@ -1312,7 +1312,7 @@ pub(super) fn export_response(
 pub async fn export_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> Response {
     let started_at = Instant::now();
     let Some(record) = state.group(&name) else {
@@ -1320,7 +1320,7 @@ pub async fn export_group(
     };
     let filtered = GroupRecord {
         description: record.description,
-        contexts: scoped_member_contexts(record.contexts, &scope),
+        contexts: scoped_member_contexts(record.contexts, &grant),
         // Child names stay whole, as on the row: labels, not content.
         groups: record.groups,
     };

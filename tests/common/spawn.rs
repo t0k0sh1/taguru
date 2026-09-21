@@ -31,7 +31,7 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
         "TAGURU_RERANK_TIMEOUT_SECS",
         "TAGURU_API_TOKEN",
         "TAGURU_API_TOKENS",
-        "TAGURU_KEY_SCOPES",
+        "TAGURU_KEY_GRANTS",
         "TAGURU_EXTRACT_URL",
         "TAGURU_EXTRACT_MODEL",
         "TAGURU_EXTRACT_API_KEY",

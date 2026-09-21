@@ -570,20 +570,20 @@ pub(crate) fn community_hits(
 
 /// The auth middleware checked the PATH `context`; `derived` is a second
 /// read target (a communities artifact) and gets the same per-`context`
-/// grant check — otherwise a scoped key could read any `context` by
-/// naming it here. Shared by `search_communities` and #305's
+/// grant check — otherwise a context-scoped key could read any `context`
+/// by naming it here. Shared by `search_communities` and #305's
 /// `assemble_evidence` communities lane, the two callers that ever
 /// name a second, derived `context` this way.
 pub(crate) fn check_derived_scope(
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     name: &str,
     derived: &str,
     started_at: Instant,
 ) -> Option<Response> {
-    let Some(axum::Extension(scope)) = scope else {
+    let Some(axum::Extension(grant)) = grant else {
         return None;
     };
-    (!scope.allows_context(derived)).then(|| {
+    (!grant.allows_context(derived)).then(|| {
         error(
             ErrorCode::Forbidden,
             format!(
@@ -598,7 +598,7 @@ pub(crate) fn check_derived_scope(
 pub async fn search_communities(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchCommunitiesRequest>,
 ) -> Response {
@@ -611,7 +611,7 @@ pub async fn search_communities(
         .derived
         .clone()
         .unwrap_or_else(|| derived_context_name(&name));
-    if let Some(refusal) = check_derived_scope(&scope, &name, &derived, started_at) {
+    if let Some(refusal) = check_derived_scope(&grant, &name, &derived, started_at) {
         return refusal;
     }
     // The source context anchors the staleness verdict; its absence is

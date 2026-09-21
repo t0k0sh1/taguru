@@ -64,8 +64,8 @@
 //!
 //! **Auth is pass-through.** The router forwards `Authorization`
 //! verbatim and holds no key store — shards keep enforcing keys,
-//! scopes, and rate limits, so keyrings must agree across shards.
-//! Setting TAGURU_API_TOKEN(S)/TAGURU_KEY_SCOPES on the router is a
+//! grants, and rate limits, so keyrings must agree across shards.
+//! Setting TAGURU_API_TOKEN(S)/TAGURU_KEY_GRANTS on the router is a
 //! boot refusal, not a silent no-op: an operator who set them expected
 //! enforcement that would not happen. OAuth (TAGURU_PUBLIC_URL) is
 //! refused the same way: consent and registration are durable state a
@@ -74,15 +74,15 @@
 //! with the caller's bearer re-attached to every dispatched call.
 //!
 //! **Known divergences from one instance, on purpose:**
-//! - A scoped-key group write refused by shard k leaves shards <k
+//! - A context-scoped key's group write refused by shard k leaves shards <k
 //!   applied (deltas converge on retry); a single instance applies
 //!   nothing. Import does NOT share this gap — its preflight catches
 //!   refusals before anything lands.
 //! - Multi-shard import refusals that survive preflight (mid-apply IO)
 //!   number batches within the failing chunk, not the whole stream.
-//! - A scoped key naming an UNMAPPED context in a cross-search gets
+//! - A context-scoped key naming an UNMAPPED context in a cross-search gets
 //!   `no_context` from the map's own truth; a single instance checks
-//!   the scope first. The router cannot evaluate scopes (it holds no
+//!   the scope first. The router cannot evaluate grants (it holds no
 //!   keyring), and what the earlier 404 reveals is deployment
 //!   topology, not data.
 //! - `/metrics` is router-shaped (`taguru_router_*`), not server-shaped.

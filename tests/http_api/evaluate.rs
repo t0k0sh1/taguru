@@ -196,7 +196,7 @@ fn evaluate_completes_on_a_read_only_api_key() {
         "evaluate-readonly",
         &[
             ("TAGURU_API_TOKENS", "admin:tok-admin,ci:tok-read"),
-            ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"ci": "read"}"#),
         ],
     );
     seed_context(&server, "sake", Some("tok-admin"));
@@ -504,7 +504,7 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
                 "TAGURU_API_TOKENS",
                 &format!("admin:tok-admin,ci:{CANARY_TOKEN}"),
             ),
-            ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"ci": "read"}"#),
         ],
     );
     seed_context(&server, "sake", Some("tok-admin"));

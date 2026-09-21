@@ -33,13 +33,13 @@ use crate::mcp;
 /// tool calls run against — free of every layer except authorization;
 /// `instructions` is the manual exactly as GET /protocol serves it;
 /// `key` is the OUTER request's authenticated identity, stamped onto
-/// each dispatched call so a scoped key's grant holds through the MCP
-/// surface exactly as over raw HTTP — and `scope` is the grant the
+/// each dispatched call so a key's grant holds through the MCP
+/// surface exactly as over raw HTTP — and `grant` is the grant the
 /// bearer gate resolved alongside it, stamped the same way so every
 /// dispatched call is judged by the keyring snapshot that
 /// authenticated the outer request (a hot reload landing mid-batch
 /// must not re-grade later tool calls, let alone elevate a removed
-/// key to the unscoped default); `max_result_bytes` bounds how much
+/// key to the default grant); `max_result_bytes` bounds how much
 /// of a dispatched tool's response this transport will buffer (see
 /// [`RESULT_TOO_BIG`]); `deadline` is the OUTER request's budget,
 /// stamped onto the dispatched call the same way — without this, a
@@ -50,7 +50,7 @@ pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
-    scope: Option<crate::auth::KeyScope>,
+    grant: Option<crate::auth::KeyGrant>,
     headers: HeaderMap,
     body: Bytes,
     max_result_bytes: usize,
@@ -182,7 +182,7 @@ pub async fn serve(
                                         &path,
                                         body,
                                         key.as_ref(),
-                                        scope.as_ref(),
+                                        grant.as_ref(),
                                         max_result_bytes,
                                         deadline,
                                     )
@@ -242,7 +242,7 @@ pub async fn serve(
                         &path,
                         body,
                         key.as_ref(),
-                        scope.as_ref(),
+                        grant.as_ref(),
                         max_result_bytes,
                         deadline,
                     )
@@ -470,7 +470,7 @@ async fn call_inner(
     path: &str,
     body: Option<Value>,
     key: Option<&crate::auth::AuthKey>,
-    scope: Option<&crate::auth::KeyScope>,
+    grant: Option<&crate::auth::KeyGrant>,
     max_result_bytes: usize,
     deadline: Deadline,
 ) -> Result<String, mcp::ToolError> {
@@ -497,15 +497,15 @@ async fn call_inner(
     .map_err(mcp::ToolError::from)?;
     // The outer request's identity travels with the dispatched call:
     // the authorization layer on the dispatch router judges each tool
-    // call by the same grant the raw API would. The scope goes with
+    // call by the same grant the raw API would. The grant goes with
     // it — the grant the bearer gate resolved from the snapshot that
     // authenticated this key, so a keyring reload landing mid-request
     // cannot re-grade the dispatched calls.
     if let Some(key) = key {
         request.extensions_mut().insert(key.clone());
     }
-    if let Some(scope) = scope {
-        request.extensions_mut().insert(scope.clone());
+    if let Some(grant) = grant {
+        request.extensions_mut().insert(grant.clone());
     }
     // Likewise the outer request's time budget: dispatched calls never
     // pass back through `enforce_timeout`, so this is the only way a

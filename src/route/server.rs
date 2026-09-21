@@ -15,7 +15,7 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     // Misconfiguration refuses to boot, replica-mode style: a router
     // that silently ignored a keyring would advertise enforcement that
     // never happens.
-    for var in ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_SCOPES"] {
+    for var in ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_GRANTS"] {
         if std::env::var(var).is_ok_and(|value| !value.trim().is_empty()) {
             tracing::error!(
                 "{var} is set, but the router holds no key store — it forwards \
@@ -151,7 +151,7 @@ pub(crate) async fn run(config: Option<PathBuf>) {
                     } else {
                         Arc::new(String::new())
                     };
-                    // No key and no scope: the router authenticates
+                    // No key and no grant: the router authenticates
                     // nobody — the bearer rides the reattached header
                     // and the SHARDS judge it.
                     crate::remote_mcp::serve(
@@ -206,7 +206,7 @@ pub(crate) async fn run(config: Option<PathBuf>) {
         mapped_contexts = booted_map.contexts.len(),
         timeout_secs,
         max_body_mib = max_body_bytes / (1024 * 1024),
-        "router ready — stateless; auth, scopes, and rate limits are enforced by the shards",
+        "router ready — stateless; auth, grants, and rate limits are enforced by the shards",
     );
     axum::serve(
         listener,

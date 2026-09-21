@@ -154,14 +154,14 @@ fn urlencode(value: &str) -> String {
 
 /// POST /contexts/{name}/compact rewrites the image live: smaller
 /// footprint, identical answers, and — being an admin verb — refused
-/// for write-scoped keys by the fail-closed role table.
+/// for keys granted only Write by the fail-closed role table.
 #[test]
 fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
     let server = Server::start_with_env(
         "http-compact",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
-            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"scribe": "write"}"#),
         ],
     );
     let admin = Some("atok");
@@ -228,7 +228,7 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok,curator:ctok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"scribe": "write", "curator": {"role": "admin", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -256,7 +256,8 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
         admin,
     );
 
-    // Write-scoped, unscoped: refused by the plain role table.
+    // Write role only, no context restriction: refused by the plain
+    // role table.
     let (status, refused) =
         server.call_with_token("POST", "/maintenance/compact", None, Some("wtok"));
     assert_eq!(status, 403, "{refused}");

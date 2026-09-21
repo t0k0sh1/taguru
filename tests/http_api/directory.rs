@@ -1,4 +1,5 @@
-//! The /contexts directory listing: paging, pinning, scoped-key filtering.
+//! The /contexts directory listing: paging, pinning, context-scoped key
+//! filtering.
 
 use serde_json::json;
 
@@ -111,16 +112,16 @@ fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
 
 /// A context-scoped key's directory listing pages its own allow-list,
 /// not the full registry — the allow-list has no relation to name
-/// order, so this exercises a different path from the unscoped case
-/// above.
+/// order, so this exercises a different path from the no-grant-entry
+/// case above.
 #[test]
-fn a_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
+fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
     let server = Server::start_with_env(
         "http-scoped-dirpage",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"curator": {"role": "read", "contexts": ["date", "apple", "cherry"]}}"#,
             ),
         ],
@@ -135,13 +136,13 @@ fn a_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
         assert_eq!(status, 200);
     }
 
-    // The unscoped admin sees everything.
+    // The admin key with no grant entry sees everything.
     let (status, full) = server.call_with_token("GET", "/contexts", None, Some("atok"));
     assert_eq!(status, 200);
     assert_eq!(full["result"]["total"], json!(4), "{full}");
 
-    // The scoped key's world is its three-context grant — "banana"
-    // never appears, and `total` counts only the visible set.
+    // The context-scoped key's world is its three-context grant —
+    // "banana" never appears, and `total` counts only the visible set.
     let (status, first) = server.call_with_token("GET", "/contexts?limit=2", None, Some("ctok"));
     assert_eq!(status, 200, "{first}");
     assert_eq!(first["result"]["total"], json!(3), "{first}");

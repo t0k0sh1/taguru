@@ -231,7 +231,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok,reader:rtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"scribe": "write", "reader": "read"}"#,
             ),
         ],
@@ -457,7 +457,7 @@ fn the_mcp_flush_tool_stays_admin_gated() {
         "mcp-ops-auth",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
-            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"scribe": "write"}"#),
         ],
     );
     let call = |token: &str| {
@@ -491,7 +491,7 @@ fn the_mcp_compact_tool_stays_admin_gated() {
         "mcp-compact-auth",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok"),
-            ("TAGURU_KEY_SCOPES", r#"{"scribe": "write"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"scribe": "write"}"#),
         ],
     );
     server.call_with_token(

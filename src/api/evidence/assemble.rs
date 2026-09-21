@@ -57,7 +57,7 @@ use super::{CitationEntry, EvidenceCandidate, FusedCandidate, fuse};
 /// *rule*, not a request-tunable pool size to run it over). At the
 /// house ceiling, a caller could ask for up to 2000 combined passage/
 /// community candidates and drive on the order of two million pairwise
-/// comparisons on one request from an ordinary Read-scoped key. 200
+/// comparisons on one request from an ordinary key granted only Read. 200
 /// keeps the worst case two orders of magnitude smaller while staying
 /// well above the default (5) and any realistic caller's real need —
 /// nothing in ADR 0006 requires `search_limit` to share
@@ -154,7 +154,7 @@ pub struct EvidencePackage {
 pub async fn assemble_evidence(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AssembleEvidenceRequest>,
 ) -> Response {
@@ -449,7 +449,7 @@ pub async fn assemble_evidence(
         LanePlan::skipped("include_communities was false")
     } else {
         let derived = derived_context_name(&name);
-        if let Some(refusal) = check_derived_scope(&scope, &name, &derived, started_at) {
+        if let Some(refusal) = check_derived_scope(&grant, &name, &derived, started_at) {
             return refusal;
         }
         if deadline.expired() {

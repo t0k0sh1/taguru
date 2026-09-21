@@ -1,6 +1,6 @@
 //! Key rotation without a restart (issue #134): SIGHUP and the
 //! `--config` file watch swap `TAGURU_API_TOKEN(S)` /
-//! `TAGURU_KEY_SCOPES` on the running binary — fail closed (a broken
+//! `TAGURU_KEY_GRANTS` on the running binary — fail closed (a broken
 //! edit keeps the previous table, and a reload can never disarm
 //! auth), audited by name only, with in-flight requests seeing the
 //! old table or the new one and never a dropped response.
@@ -279,11 +279,11 @@ fn a_router_graceful_stop_completes_even_when_the_map_watch_read_is_stuck() {
 
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
 /// authenticate, the removed key and the old bytes die, the reloaded
-/// scope demotes the key live, and the audit line carries names —
+/// grant demotes the key live, and the audit line carries names —
 /// never token bytes.
 #[cfg(unix)]
 #[test]
-fn sighup_rotates_keys_and_scopes_and_audits_names_only() {
+fn sighup_rotates_keys_and_grants_and_audits_names_only() {
     let dir = scratch("sighup");
     let config = dir.join("taguru.env");
     let stderr = dir.join("stderr.log");
@@ -313,7 +313,7 @@ fn sighup_rotates_keys_and_scopes_and_audits_names_only() {
     // Rotate ci's bytes, drop laptop, and demote ci to read-only.
     std::fs::write(
         &config,
-        "TAGURU_API_TOKENS=ci:sekrit-new\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+        "TAGURU_API_TOKENS=ci:sekrit-new\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
     )
     .unwrap();
     server.signal("-HUP");
@@ -339,7 +339,7 @@ fn sighup_rotates_keys_and_scopes_and_audits_names_only() {
             .0,
         401
     );
-    // The reloaded scope binds immediately: read works above, write
+    // The reloaded grant binds immediately: read works above, write
     // is now beyond ci's grant.
     let (refused, body) = server.call_with_token(
         "PUT",
@@ -360,7 +360,7 @@ fn sighup_rotates_keys_and_scopes_and_audits_names_only() {
     assert!(audit.contains("trigger=\"sighup\""), "{audit}");
     assert!(audit.contains("removed=[\"laptop\"]"), "{audit}");
     assert!(audit.contains("rotated=[\"ci\"]"), "{audit}");
-    assert!(audit.contains("rescoped=[\"ci\"]"), "{audit}");
+    assert!(audit.contains("regranted=[\"ci\"]"), "{audit}");
     assert!(
         !log.contains("sekrit"),
         "token bytes must never reach the log:\n{log}"

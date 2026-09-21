@@ -649,9 +649,9 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
 /// `check_derived_scope`'s Forbidden: the auth middleware already
 /// cleared the PATH context ('sci'), but the DERIVED artifact context
 /// ('sci::communities') is a second read target named in the body, and
-/// a scoped key without a grant on it must be refused just as it would
-/// be for the path context — otherwise a scoped key could read any
-/// context by aiming a search's `derived` field at it.
+/// a context-scoped key without a grant on it must be refused just as
+/// it would be for the path context — otherwise a context-scoped key
+/// could read any context by aiming a search's `derived` field at it.
 #[test]
 fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_context() {
     let server = Server::start_with_env(
@@ -659,7 +659,7 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"reader": {"role": "read", "contexts": ["sci"]}}"#,
             ),
         ],
