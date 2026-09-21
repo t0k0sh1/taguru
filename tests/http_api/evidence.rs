@@ -451,15 +451,15 @@ fn malformed_input_is_refused_with_the_documented_error_codes() {
     assert_eq!(body["code"], json!("malformed_request"), "{body}");
 }
 
-/// A read-scoped key reaches the endpoint; the existing direct
+/// A key granted only Read reaches the endpoint; the existing direct
 /// endpoints this call composes stay unaffected by its existence.
 #[test]
-fn a_read_scoped_key_reaches_evidence_assembly() {
+fn a_key_granted_only_read_reaches_evidence_assembly() {
     let server = Server::start_with_env(
-        "evidence-scopes",
+        "evidence-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
-            ("TAGURU_KEY_SCOPES", r#"{"reader": "read"}"#),
+            ("TAGURU_KEY_GRANTS", r#"{"reader": "read"}"#),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {

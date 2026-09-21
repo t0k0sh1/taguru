@@ -333,7 +333,7 @@ load-bearing ones:
 | `TAGURU_DATA_DIR` | `./data` | Data directory |
 | `TAGURU_API_TOKEN` | — | Bearer token (everything but `/health`, `/live`, `/metrics`). Unset = unauthenticated, localhost only |
 | `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation |
-| `TAGURU_KEY_SCOPES` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named `contexts`. These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
+| `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named `contexts`. These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
@@ -401,7 +401,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   (below) — `contexts` no longer need to cohabit to be searched or
   grouped together.
 - **Key rotation never costs a restart.** The auth table —
-  `TAGURU_API_TOKEN(S)`, `TAGURU_KEY_SCOPES` — hot-reloads on the
+  `TAGURU_API_TOKEN(S)`, `TAGURU_KEY_GRANTS` — hot-reloads on the
   running server: send SIGHUP, or (with `--config FILE`) just rewrite
   the file and the ~5s watch picks it up. Fail closed: a malformed
   edit keeps the previous table armed (loud log line +
@@ -410,7 +410,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   never transition "tokens configured" → "no tokens"; disarming auth
   stays a restart-only decision. Each reload leaves one
   `taguru::audit` line naming the keys added / removed / rotated /
-  rescoped — names only, never token bytes. OAuth delegations minted
+  regranted — names only, never token bytes. OAuth delegations minted
   from a removed key die with it, per-key rate-limit budgets carry
   over untouched, and in-flight requests judge against the old table
   or the new one, never a mix. On Kubernetes, mount the keys Secret
@@ -452,7 +452,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   `group` records alike,
   so a stream one instance would refuse with nothing applied is
   refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
-  behind one LB. Auth passes through: shards enforce keys and scopes
+  behind one LB. Auth passes through: shards enforce keys and grants
   (keep their keyrings identical), the router holds none. A shard that
   answers an error fails the request whole; a shard that cannot be
   *reached* degrades fan-out reads to labeled partials (`unreached`

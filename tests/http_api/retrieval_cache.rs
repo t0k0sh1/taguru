@@ -1,6 +1,6 @@
 //! The exact-match retrieval cache end to end: hits skip the search
 //! path (visible on /metrics), invalidation follows exactly the
-//! revision lanes each surface depends on, scoped keys share entries
+//! revision lanes each surface depends on, granted keys share entries
 //! only when their grants resolve a request identically, and a
 //! recreated name never serves its old incarnation's results.
 
@@ -303,13 +303,13 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
 /// single-context request do share, which is safe because the
 /// middleware already vetted both.
 #[test]
-fn scoped_keys_share_entries_exactly_when_their_grants_resolve_alike() {
+fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
     let server = Server::start_with_env(
-        "rcache-scopes",
+        "rcache-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,narrow:ntok,wide:wtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"narrow": {"role": "read", "contexts": ["x"]},
                     "wide": {"role": "read", "contexts": ["x", "y"]}}"#,
             ),

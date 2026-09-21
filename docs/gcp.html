@@ -310,7 +310,7 @@ volumeBindingMode: WaitForFirstConsumer</code></pre>
 
   <section id="secrets">
     <h2>Secrets: Secret Manager feeds the boot</h2>
-    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, the embedding key, …) come from Secret Manager at boot; nothing lands in a manifest or a template.</p>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_GRANTS</code>, the embedding key, …) come from Secret Manager at boot; nothing lands in a manifest or a template.</p>
     <ul>
       <li><b>GCE VM:</b> the attached service account plus
         <code>roles/secretmanager.secretAccessor</code> is the whole credential chain — the

@@ -412,13 +412,13 @@ fn the_destination_schema_judges_the_promoted_batches() {
 /// a context-scoped key needs `into` in its grant too, and a grant
 /// covering both contexts clears the gate.
 #[test]
-fn a_scoped_key_needs_the_destination_in_its_grant() {
+fn a_context_scoped_key_needs_the_destination_in_its_grant() {
     let server = Server::start_with_env(
-        "promote-scopes",
+        "promote-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,pair:ptok,half:htok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"pair": {"role": "write", "contexts": ["scratch-claude", "perm"]},
                     "half": {"role": "write", "contexts": ["scratch-claude"]}}"#,
             ),

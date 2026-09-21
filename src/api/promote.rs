@@ -92,7 +92,7 @@ pub async fn promote_sources(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     axum::Extension(heavy_ops): axum::Extension<HeavyOpsLimiter>,
     AppQuery(query): AppQuery<PromoteQuery>,
@@ -146,8 +146,8 @@ pub async fn promote_sources(
     // The destination lives in the BODY, out of the route-level
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies (`/import`'s discipline).
-    if let Some(axum::Extension(scope)) = &scope
-        && !scope.allows_context(&request.into)
+    if let Some(axum::Extension(grant)) = &grant
+        && !grant.allows_context(&request.into)
     {
         return validation_error(
             ErrorCode::Forbidden,

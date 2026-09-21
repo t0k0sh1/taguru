@@ -30,7 +30,7 @@ mod explore_audit;
 mod extract;
 mod groups;
 mod groups_cross_mcp;
-mod key_scopes_cross_context;
+mod key_grants_cross_context;
 mod mcp_basics;
 mod metrics;
 mod observability;

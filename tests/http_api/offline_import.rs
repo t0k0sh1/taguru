@@ -1848,17 +1848,17 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
     );
 }
 
-/// A scoped key's group records are judged like any group write — by
-/// the transitive context closure, the standing record's and the
-/// prospective one's both — before anything at all applies.
+/// A context-scoped key's group records are judged like any group
+/// write — by the transitive context closure, the standing record's
+/// and the prospective one's both — before anything at all applies.
 #[test]
-fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
+fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let server = Server::start_with_env(
         "http-import-group-scope",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"curator": {"role": "admin", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -1912,7 +1912,7 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
 
     // The replace side is judged too: shrinking a standing group that
     // bundles an out-of-grant member would release that member, so the
-    // scoped replace refuses.
+    // context-scoped replace refuses.
     let wide = "{\"type\": \"group\", \"id\": \"wide\", \"contexts\": [\"sake\", \"bunko\"]}\n";
     let (status, seeded) = post_import(&server, wide, Some("atok"));
     assert_eq!(status, 200, "{seeded}");
@@ -1927,13 +1927,13 @@ fn a_scoped_key_cannot_import_group_records_beyond_its_grant() {
 /// beyond its grant, whether that name is already someone else's
 /// context or brand new.
 #[test]
-fn a_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
+fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
     let server = Server::start_with_env(
         "http-rename-scope",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok,wide:wtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"curator": {"role": "admin", "contexts": ["sake"]},
                     "wide": {"role": "admin", "contexts": ["sake", "shochu"]}}"#,
             ),
@@ -2005,8 +2005,8 @@ fn a_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
 }
 
 /// `GET /groups/{name}/export` serves one `group` record that
-/// `POST /import` restores whole — and a scoped key exports exactly
-/// the slice its grant lets it read.
+/// `POST /import` restores whole — and a context-scoped key exports
+/// exactly the slice its grant lets it read.
 #[test]
 fn a_group_exports_as_one_import_record() {
     let server = Server::start_with_env(
@@ -2014,7 +2014,7 @@ fn a_group_exports_as_one_import_record() {
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"curator": {"role": "read", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -2082,8 +2082,8 @@ fn a_group_exports_as_one_import_record() {
     let (_, row) = call("GET", "/groups/kura", None, "atok");
     assert_eq!(row["result"]["contexts"], json!(["bunko", "sake"]), "{row}");
 
-    // A scoped key exports its grant's slice — the row it can read IS
-    // the record it takes away.
+    // A context-scoped key exports its grant's slice — the row it can
+    // read IS the record it takes away.
     let (status, sliced) = call("GET", "/groups/kura/export", None, "ctok");
     assert_eq!(status, 200, "{sliced}");
     assert_eq!(sliced["contexts"], json!(["sake"]), "{sliced}");

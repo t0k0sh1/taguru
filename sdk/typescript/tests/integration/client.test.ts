@@ -40,7 +40,7 @@ beforeAll(async () => {
   binary = serverBinary();
   server = await spawnServer(binary, {
     TAGURU_API_TOKENS: `admin:${ADMIN_TOKEN},reader:${READER_TOKEN}`,
-    TAGURU_KEY_SCOPES: '{"reader": "read"}',
+    TAGURU_KEY_GRANTS: '{"reader": "read"}',
     // The default 1s auto-flush (spawn_flusher in src/main.rs) can race
     // "compacts and flushes" below: if a background tick lands between
     // seed() and flush(), it clears the dirty flag first and the explicit
@@ -599,7 +599,7 @@ describe("auth and limits", () => {
     await missing.health();
   });
 
-  it("scopes a read key out of writes", async () => {
+  it("denies writes to a key granted only Read", async () => {
     const name = fresh();
     await seed(name);
     const ctx = reader.context(name);

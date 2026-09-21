@@ -365,7 +365,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/promote` | `{into, sources, audit?=true}`, `?dry_run=true` to preview → `{batches: [...], aliases_dropped, audit?, audit_skipped?}` graph-path memory promotion (ADR 0018, docs/promotion.html): move the named source ids from this (scratch) context into the established context `into` WITHOUT re-extraction — the export/import round trip in one call. Each source moves whole (passage, `date`, tags, only its own share of every edge's weight; aliases ride exactly when their canonical is live in the promoted slice, `aliases_dropped` counts the rest), source ids survive (promoted citations still name the session), and applying is per-source retract-then-apply — re-promoting is idempotent. `into` must exist (never created here; write grant checked like `/import`'s body contexts) and its own schema judges the incoming sources; a named source missing from the scratch refuses the WHOLE request path-addressed, `nothing_written`; over 1,000 `sources` refuses `over_limit` before any per-id validation, like every list-shaped input. After a real apply, `audit` carries `consolidation/audit`'s full default report on `into` (all three checks) — candidates to judge, never applied; `audit_skipped` names why it could not run (the sources are durable by then). The dry run previews the same `batches` shape, writes nothing, audits nothing. Retiring the promoted scratch stays an explicit `sources/retract` |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records, and rewrite the passage log without retracted sources' text (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped, passages_compacted, image_persisted}` — `image_persisted: false` means the rebuild itself succeeded (the numbers above are real) but the smaller image has not yet reached disk (e.g. a full disk); the next flush tick retries it |
 | POST | `/flush` | force every context's unflushed state to disk now, ahead of the periodic flusher → the flushed context names; admin, server-wide (refused for a context-scoped key — the answer names every flushed context, grant or no grant) |
-| POST | `/mcp` | the MCP Streamable HTTP transport, stateless profile: each POSTed JSON-RPC message answered as plain `application/json` (no SSE stream, no session id — the spec's stateless profile). Tool calls dispatch in process onto the routes above under the outer request's own auth, scope, deadline, and body cap — one client request, one budget, one log line; `initialize` hands out the same manual `GET /protocol` serves |
+| POST | `/mcp` | the MCP Streamable HTTP transport, stateless profile: each POSTed JSON-RPC message answered as plain `application/json` (no SSE stream, no session id — the spec's stateless profile). Tool calls dispatch in process onto the routes above under the outer request's own auth, grant, deadline, and body cap — one client request, one budget, one log line; `initialize` hands out the same manual `GET /protocol` serves |
 | POST | `/maintenance/compact` | `?min_dead_ratio=0.0` (default; any dead weight at all) → sweep every context whose live dead ratio strictly exceeds it, worst ratio first, each rebuilt like `/contexts/{name}/compact`; admin, server-wide (refused for a context-scoped key, like `/flush`) — closes the server to ordinary traffic for the sweep (`/health` answers `503 maintenance` meanwhile, distinct from an actual fault) and reopens when it ends or the deadline cuts it short → `{contexts:[{name, bytes_before, bytes_after, dead_edges, aliases_dropped, passages_compacted, image_persisted}], skipped:[{name, error}], deadline_exceeded}` — `skipped` names every candidate the sweep selected but could not compact at all (a load failure, a quota refusal); a sweep that fails on every candidate no longer reads as a clean, empty run |
 
 Reading `POST /contexts/{name}/evidence`'s `plan`: `plan.selection.dedup_dropped`
@@ -408,20 +408,21 @@ an invariant (ADR 0006 §12).
   `Authorization: Bearer` but opens `POST /mcp` ONLY — every other
   route still requires `TAGURU_API_TOKEN` (or a keyring key); an
   OAuth token presented elsewhere is a plain `401`.
-- Keys may carry a scope (`TAGURU_KEY_SCOPES`): a role — read (the
+- Keys may carry a grant (`TAGURU_KEY_GRANTS`): a role — read (the
   retrieval loop) ⊂ write (+ the ingest loop, group create/update) ⊂
   admin (+ context and group deletion and renaming, `/import`,
   `/flush`, `/maintenance/compact`) — and
-  optionally a context list. Out of scope → `403` in the error shape,
-  naming what the key lacks; a context-scoped key sees only its grant
-  in `GET /contexts`, group listings — and the group export — show it
-  only the members it may see (child group names stay visible — they
-  are labels, not content), and a cross-context search naming a context beyond the
-  grant in `contexts` — or a group write touching one, counted
-  through nested children — is refused whole. A cross-search `groups`
-  entry instead resolves to just the members the grant covers, the
-  same slice the listing shows: a refusal there would name what the
-  listing hides. Scopes bind MCP tool calls exactly as raw HTTP.
+  optionally a context list. Beyond the grant → `403` in the error
+  shape, naming what the key lacks; a context-scoped key sees only its
+  grant in `GET /contexts`, group listings — and the group export —
+  show it only the members it may see (child group names stay visible
+  — they are labels, not content), and a cross-context search naming a
+  context beyond the grant in `contexts` — or a group write touching
+  one, counted through nested children — is refused whole. A
+  cross-search `groups` entry instead resolves to just the members the
+  grant covers, the same slice the listing shows: a refusal there
+  would name what the listing hides. Grants bind MCP tool calls
+  exactly as raw HTTP.
 
 ## Errors and limits
 

@@ -322,18 +322,18 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     assert!(!on_disk.contains("nowhere"), "{on_disk}");
 }
 
-/// The scope story for groups: every key sees every row but only its
+/// The grant story for groups: every key sees every row but only its
 /// granted members; a write touching any context beyond the grant —
 /// current members included — refuses whole, and out-of-scope names
 /// answer the same 403 whether or not they exist (no existence oracle).
 #[test]
-fn key_scopes_filter_group_members_and_gate_group_writes() {
+fn key_grants_filter_group_members_and_gate_group_writes() {
     let server = Server::start_with_env(
-        "groups-scopes",
+        "groups-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok,potter:stok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"reader": "read", "potter": {"role": "write", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -369,7 +369,7 @@ fn key_scopes_filter_group_members_and_gate_group_writes() {
     );
 
     // Reads: every row is visible (groups are labels, not content),
-    // but a scoped key sees only its granted members.
+    // but a context-scoped key sees only its granted members.
     let (status, listed) = call("GET", "/groups", None, "stok");
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(2), "{listed}");
@@ -435,7 +435,7 @@ fn key_scopes_filter_group_members_and_gate_group_writes() {
         "the refused adds must not have applied: {ours}"
     );
 
-    // Inside the grant, a scoped writer works normally...
+    // Inside the grant, a context-scoped writer works normally...
     assert_eq!(
         call(
             "PATCH",
@@ -501,8 +501,9 @@ fn key_scopes_filter_group_members_and_gate_group_writes() {
             .contains("no grant on context 'bunko'"),
         "{refused}"
     );
-    // Naming such a child in a delta refuses the same way — a scoped
-    // key cannot create a parent over contexts it has no grant on.
+    // Naming such a child in a delta refuses the same way — a
+    // context-scoped key cannot create a parent over contexts it has
+    // no grant on.
     let (status, refused) = call(
         "PUT",
         "/groups/annex",

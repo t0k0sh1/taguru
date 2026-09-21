@@ -174,9 +174,9 @@ pub async fn recall(
 /// (`no_context`, before any `context` is searched); and the first `group`
 /// name that is not a `group` (`no_group` — `group` rows are visible to
 /// every key, so that refusal probes nothing). `group`-RESOLVED members
-/// beyond the grant are dropped, not refused: a scoped key searches
-/// its slice of a `group` exactly as `GET /groups` shows it that slice
-/// ([`group_entry`]) — refusing would name out-of-grant members and
+/// beyond the grant are dropped, not refused: a context-scoped key
+/// searches its slice of a `group` exactly as `GET /groups` shows it that
+/// slice ([`group_entry`]) — refusing would name out-of-grant members and
 /// leak what the listing hides. The slice can come up empty; a legal
 /// request that resolves to nothing is an empty result, not an error.
 ///
@@ -189,7 +189,7 @@ pub async fn recall(
 /// happens when a target loses the race.
 pub(super) fn cross_targets(
     state: &AppState,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     contexts: Vec<String>,
     groups: Vec<String>,
@@ -212,7 +212,7 @@ pub(super) fn cross_targets(
         .into_iter()
         .filter(|name| seen.insert(name.clone()))
         .collect();
-    if let Some(refusal) = scope_refusal(scope, key, &targets, started_at) {
+    if let Some(refusal) = scope_refusal(grant, key, &targets, started_at) {
         return Err(Box::new(refusal));
     }
     if let Some(missing) = targets.iter().find(|name| !state.context_exists(name)) {
@@ -233,7 +233,7 @@ pub(super) fn cross_targets(
         targets.extend(
             resolved
                 .into_iter()
-                .filter(|name| scope_allows(scope, name) && seen.insert(name.clone())),
+                .filter(|name| scope_allows(grant, name) && seen.insert(name.clone())),
         );
     }
     Ok(targets.into())
@@ -550,7 +550,7 @@ fn resolve_cross_type_schemas(
 /// nothing to half-apply).
 pub async fn cross_recall(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossRecallRequest>,
@@ -567,7 +567,7 @@ pub async fn cross_recall(
     }
     let targets = match cross_targets(
         &state,
-        &scope,
+        &grant,
         &key,
         request.contexts,
         request.groups,
@@ -952,7 +952,7 @@ pub struct CrossQueryRequest {
 /// failure aborts.
 pub async fn cross_query(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CrossQueryRequest>,
@@ -983,7 +983,7 @@ pub async fn cross_query(
     }
     let targets = match cross_targets(
         &state,
-        &scope,
+        &grant,
         &key,
         request.contexts,
         request.groups,

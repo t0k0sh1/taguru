@@ -72,7 +72,7 @@ use tracing::{error, info, warn};
 /// (`--config FILE` / `TAGURU_CONFIG=FILE`, the `docker --env-file`
 /// dialect; real environment variables win over the file). Everything
 /// is boot-time except the auth table — `TAGURU_API_TOKEN`,
-/// `TAGURU_API_TOKENS`, `TAGURU_KEY_SCOPES` — which hot-reloads on
+/// `TAGURU_API_TOKENS`, `TAGURU_KEY_GRANTS` — which hot-reloads on
 /// SIGHUP and when the `--config` file changes (see
 /// [`spawn_keyring_reload_tasks`]), so key rotation never costs the
 /// restart everything else legitimately does:
@@ -116,7 +116,7 @@ use tracing::{error, info, warn};
 ///   ceiling above. `0`/`false` restores manual-only compaction for
 ///   operators who prefer scheduled quiet-window sweeps.
 /// - `TAGURU_CONTEXT_QUOTAS`: per-`context` ceilings, one JSON object in
-///   the `TAGURU_KEY_SCOPES` mold — `{"name": {"storage_bytes": N,
+///   the `TAGURU_KEY_GRANTS` mold — `{"name": {"storage_bytes": N,
 ///   "cache_bytes": M}}`, each field optional but never both absent.
 ///   `storage_bytes` refuses growth writes (507 `storage_full`) once
 ///   the `context`'s on-disk family reaches it; retract/compact/delete
@@ -227,9 +227,9 @@ async fn serve(
         std::env::var("TAGURU_API_TOKENS").ok(),
     )
     .and_then(|mut keyring| {
-        // Scopes are part of the same credential story: a grant that
+        // Grants are part of the same credential story: a grant that
         // silently failed to arm is an authorization hole.
-        keyring.apply_scopes(std::env::var("TAGURU_KEY_SCOPES").ok().as_deref())?;
+        keyring.apply_grants(std::env::var("TAGURU_KEY_GRANTS").ok().as_deref())?;
         Ok(keyring)
     }) {
         Ok(keyring) => keyring,
@@ -242,7 +242,7 @@ async fn serve(
     if auth_configured {
         info!(
             keys = keyring.key_count(),
-            scoped = keyring.scoped_key_count(),
+            granted = keyring.granted_key_count(),
             "bearer auth enabled"
         );
     } else {
@@ -547,7 +547,7 @@ async fn serve(
     // middleware stack goes on, so a tool call that already passed
     // auth, the timeout, and the body cap at /mcp is not re-charged
     // inside — one client request, one budget, one log line — but it
-    // DOES carry its own authorization layer, so a scoped key's grant
+    // DOES carry its own authorization layer, so a key's grant
     // is enforced on each dispatched tool call exactly as on the raw
     // API. ("No body cap inside" is explicit: an extractor that finds
     // no DefaultBodyLimit extension falls back to axum's hardcoded
@@ -562,14 +562,14 @@ async fn serve(
         post(
             move |deadline: axum::Extension<Deadline>,
                   key: Option<axum::Extension<auth::AuthKey>>,
-                  scope: Option<axum::Extension<auth::KeyScope>>,
+                  grant: Option<axum::Extension<auth::KeyGrant>>,
                   headers: axum::http::HeaderMap,
                   body: axum::body::Bytes| {
                 remote_mcp::serve(
                     mcp_dispatch.clone(),
                     Arc::clone(&mcp_instructions),
                     key.map(|extension| extension.0),
-                    scope.map(|extension| extension.0),
+                    grant.map(|extension| extension.0),
                     headers,
                     body,
                     mcp_max_result_bytes,
@@ -623,7 +623,7 @@ async fn serve(
     // merge above; layering it earlier (as this once did) silently
     // left both surfaces unchecked. Idempotent on auth-exempt routes:
     // enforce_authorization no-ops when no AuthKey extension is present.
-    // Keyring-free: it judges the scope the bearer gate resolves and
+    // Keyring-free: it judges the grant the bearer gate resolves and
     // stamps, so both layers see one table per request even across a
     // hot reload.
     let app = app.layer(axum::middleware::from_fn(auth::enforce_authorization));

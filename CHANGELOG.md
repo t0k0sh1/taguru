@@ -9,6 +9,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking — the per-key grants environment variable is
+  `TAGURU_KEY_GRANTS`, not `TAGURU_KEY_SCOPES`** (#959): the value
+  shape is unchanged (`{"name": "role" | {"role": …, "contexts":
+  […]}}`), and so is everything it configures — only the variable
+  name changed, so `--config` files and deployment secrets must rename
+  the key on upgrade; the server does not read the old name as a
+  fallback. Terminology throughout the codebase and docs now reserves
+  "scope"/"scoped" for the context-range portion of a grant (as in "a
+  context-scoped key") and uses "grant"/"granted" for the whole
+  concept (role plus context range) — so, for example, "an unscoped
+  key" is now "a key with no `TAGURU_KEY_GRANTS` entry". The
+  keyring-reload audit line's field for keys whose grant changed is
+  `regranted`, not `rescoped`, and the boot log's granted-key-count
+  field is `granted`, not `scoped`.
 - **Breaking — a `context` row and a `group` row name their own key
   `id`** (#851): `GET /contexts` / `GET /contexts/{name}` answer
   `{"id": "sake", "description": …}` and `GET /groups` /

@@ -232,7 +232,7 @@ mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></
 
   <section id="secrets">
     <h2>Secrets: Key Vault feeds the boot, identity does the auth</h2>
-    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, the embedding key, …) come from Key Vault at boot; nothing lands in a manifest or a template.</p>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_GRANTS</code>, the embedding key, …) come from Key Vault at boot; nothing lands in a manifest or a template.</p>
     <ul>
       <li><b>VM:</b> a system-assigned managed identity plus the <code>Key Vault Secrets
         User</code> role is the whole credential chain — the boot script trades the IMDS

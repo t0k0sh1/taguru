@@ -261,7 +261,7 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap
-  TAGURU_KEY_SCOPES            JSON grants per key name: {\"ci\": \"read\",
+  TAGURU_KEY_GRANTS            JSON grants per key name: {\"ci\": \"read\",
                                \"bot\": {\"role\": \"write\", \"contexts\":
                                [\"sake\"]}} — roles read ⊂ write ⊂ admin;
                                unnamed keys keep the full historical grant

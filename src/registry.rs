@@ -1445,7 +1445,7 @@ pub struct ContextQuota {
 
 /// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping `context`
 /// names to [`ContextQuota`]s, the same declarative-policy shape as
-/// `TAGURU_KEY_SCOPES`. And the same failure posture: a deployment that
+/// `TAGURU_KEY_GRANTS`. And the same failure posture: a deployment that
 /// DECLARED quotas must not run without them, so any parse or
 /// validation error refuses boot (the caller exits) instead of the
 /// env module's usual warn-and-default. Naming a `context` that does not
@@ -1474,8 +1474,8 @@ pub fn parse_context_quotas(json: Option<&str>) -> Result<HashMap<String, Contex
         if quota.storage_bytes == Some(0) || quota.cache_bytes == Some(0) {
             return Err(format!(
                 "TAGURU_CONTEXT_QUOTAS gives '{name}' a zero ceiling, which would refuse \
-                 every write (storage) or every residency (cache) — scope keys to \
-                 read-only via TAGURU_KEY_SCOPES if that is the intent"
+                 every write (storage) or every residency (cache) — grant keys \
+                 read-only via TAGURU_KEY_GRANTS if that is the intent"
             ));
         }
     }

@@ -41,7 +41,7 @@ pub struct GroupEntry {
     /// Member `context` names, sorted. For a `context`-scoped key this
     /// carries only the members its grant allows.
     pub contexts: Vec<String>,
-    /// Child `group` names, sorted — never scope-filtered (so the set
+    /// Child `group` names, sorted — never grant-filtered (so the set
     /// moves straight from the record): like the row itself, a `group`'s
     /// name is an organizational label, not `context` content, and the
     /// `contexts` BEHIND a child stay filtered wherever they are served.
@@ -62,21 +62,21 @@ pub struct GroupEntry {
     pub fingerprint: String,
 }
 
-/// Whether the key's grant lets it see the named `context` — no scope
+/// Whether the key's grant lets it see the named `context` — no grant
 /// means everything is visible. The one predicate behind every place
 /// that FILTERS to the grant rather than refusing ([`group_entry`],
-/// [`cross_targets`]'s `group` resolution), so "the slice a scoped key
+/// [`cross_targets`]'s `group` resolution), so "the slice a context-scoped key
 /// sees" is defined exactly once and the two surfaces cannot drift.
 pub(super) fn scope_allows(
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     name: &str,
 ) -> bool {
-    scope
+    grant
         .as_ref()
-        .is_none_or(|axum::Extension(scope)| scope.allows_context(name))
+        .is_none_or(|axum::Extension(grant)| grant.allows_context(name))
 }
 
-/// The scope cut on one `group` row. Deliberately different from
+/// The grant-filtered view of one `group` row. Deliberately different from
 /// `list_contexts`, which hides whole rows: a `group` is an
 /// organizational label over `contexts`, not `context` content, and hiding
 /// the row would also hide it from the very key that may still add or
@@ -90,14 +90,14 @@ fn group_entry(
     state: &AppState,
     name: String,
     record: GroupRecord,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
 ) -> Result<GroupEntry, DeadlineExceeded> {
-    let fingerprint = group_fingerprint(state, &name, scope, deadline)?;
+    let fingerprint = group_fingerprint(state, &name, grant, deadline)?;
     Ok(GroupEntry {
         name,
         description: record.description,
-        contexts: scoped_member_contexts(record.contexts, scope),
+        contexts: scoped_member_contexts(record.contexts, grant),
         groups: record.groups,
         fingerprint,
     })
@@ -113,20 +113,20 @@ fn deadline_gated_group_entry(
     state: &AppState,
     name: String,
     record: GroupRecord,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
     started_at: Instant,
 ) -> Response {
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match tokio::task::block_in_place(|| group_entry(state, name, record, scope, deadline)) {
+    match tokio::task::block_in_place(|| group_entry(state, name, record, grant, deadline)) {
         Ok(entry) => ok(entry, started_at),
         Err(DeadlineExceeded) => deadline_exceeded(started_at),
     }
 }
 
-/// The change token on one `group` row: FNV-1a over the scope-visible
+/// The change token on one `group` row: FNV-1a over the grant-visible
 /// transitive `context` closure, each member as its length-prefixed name
 /// followed by the three revision counters — structurally unambiguous,
 /// so distinct closures cannot collide by concatenation. The closure
@@ -147,7 +147,7 @@ fn deadline_gated_group_entry(
 fn group_fingerprint(
     state: &AppState,
     name: &str,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
 ) -> Result<String, DeadlineExceeded> {
     let mut digest = crate::hash::FNV1A_OFFSET;
@@ -155,7 +155,7 @@ fn group_fingerprint(
         if deadline.expired() || injected_fingerprint_loop_expiry() {
             return Err(DeadlineExceeded);
         }
-        if !scope_allows(scope, &context) {
+        if !scope_allows(grant, &context) {
             continue;
         }
         let Some(revision) = state.context_revision(&context) else {
@@ -221,38 +221,38 @@ fn injected_fingerprint_loop_expiry() -> bool {
 /// [`group_entry`]'s member filter on its own — the one loop behind
 /// every surface that serves a `group`'s members (the row, the export),
 /// generic over the collection each output shape wants, so the
-/// surfaces cannot drift in what a scoped key sees.
+/// surfaces cannot drift in what a context-scoped key sees.
 pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
     contexts: BTreeSet<String>,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> C {
     contexts
         .into_iter()
-        .filter(|context| scope_allows(scope, context))
+        .filter(|context| scope_allows(grant, context))
         .collect()
 }
 
-/// The gate for a scoped key on any operation whose `context` names ride
-/// the body or the stored record rather than the path — `group` writes
+/// The gate for a context-scoped key on any operation whose `context` names
+/// ride the body or the stored record rather than the path — `group` writes
 /// (through [`scoped_group_refusal`], at membership granularity, the
 /// import gate's pre-apply judgement) and the cross-`context` searches:
 /// one involved `context` beyond the grant refuses the request whole.
 /// Checked BEFORE existence on purpose: existence-first would answer
-/// 404 for a missing out-of-scope name and 403 for a live one, handing
-/// a scoped key an oracle for which `context` names exist beyond its
-/// grant.
+/// 404 for a name the grant excludes and 403 for a live one, handing
+/// a context-scoped key an oracle for which `context` names exist beyond
+/// its grant.
 pub(super) fn scope_refusal<'a>(
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     involved: impl IntoIterator<Item = &'a String>,
     started_at: Instant,
 ) -> Option<Response> {
-    let Some(axum::Extension(scope)) = scope else {
+    let Some(axum::Extension(grant)) = grant else {
         return None;
     };
     let refused = involved
         .into_iter()
-        .find(|context| !scope.allows_context(context))?;
+        .find(|context| !grant.allows_context(context))?;
     Some(error(
         ErrorCode::Forbidden,
         format!(
@@ -267,22 +267,22 @@ pub(super) fn scope_refusal<'a>(
 /// [`scope_refusal`]: resolves what the operation involves — the
 /// transitive `context` closures of the `closure_roots` `groups` plus the
 /// `direct` `context` names — and refuses if any of it sits beyond the
-/// grant. An unscoped key passes immediately, without paying for the
+/// grant. A key with no grant passes immediately, without paying for the
 /// closure read.
 fn scoped_group_refusal<'r, 'd>(
     state: &AppState,
-    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     closure_roots: impl IntoIterator<Item = &'r str>,
     direct: impl IntoIterator<Item = &'d String>,
     started_at: Instant,
 ) -> Option<Response> {
-    if scope.is_none() {
+    if grant.is_none() {
         return None;
     }
     let mut involved = state.group_context_closures(closure_roots);
     involved.extend(direct.into_iter().cloned());
-    scope_refusal(scope, key, &involved, started_at)
+    scope_refusal(grant, key, &involved, started_at)
 }
 
 /// The `group` directory: every `group`'s name, description, member
@@ -293,7 +293,7 @@ fn scoped_group_refusal<'r, 'd>(
 /// on.
 pub async fn list_groups(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
@@ -320,7 +320,7 @@ pub async fn list_groups(
     }
     let groups: Result<Vec<_>, DeadlineExceeded> = tokio::task::block_in_place(|| {
         page.into_iter()
-            .map(|(name, record)| group_entry(&state, name, record, &scope, &deadline))
+            .map(|(name, record)| group_entry(&state, name, record, &grant, &deadline))
             .collect()
     });
     match groups {
@@ -332,13 +332,13 @@ pub async fn list_groups(
 pub async fn get_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     match state.group(&name) {
         Some(record) => {
-            deadline_gated_group_entry(&state, name, record, &scope, &deadline, started_at)
+            deadline_gated_group_entry(&state, name, record, &grant, &deadline, started_at)
         }
         None => group_not_found(&name, started_at),
     }
@@ -359,7 +359,7 @@ pub struct CreateGroupRequest {
 pub async fn create_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
@@ -386,12 +386,12 @@ pub async fn create_group(
     if let Some(refusal) = overlong("groups", request.groups.len(), started_at) {
         return refusal;
     }
-    // A scoped key is judged against everything the new group would
+    // A context-scoped key is judged against everything the new group would
     // address: the listed contexts plus every context reachable
     // through the listed children.
     if let Some(refusal) = scoped_group_refusal(
         &state,
-        &scope,
+        &grant,
         &key,
         request.groups.iter().map(String::as_str),
         &request.contexts,
@@ -467,7 +467,7 @@ pub struct UpdateGroupRequest {
 pub async fn update_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UpdateGroupRequest>,
@@ -495,13 +495,13 @@ pub async fn update_group(
     if let Some(refusal) = overlong("remove_groups", request.remove_groups.len(), started_at) {
         return refusal;
     }
-    // A scoped key is judged against every context this update touches:
+    // A context-scoped key is judged against every context this update touches:
     // the group's transitive members plus every name the request
     // carries — context names directly, group names through their own
     // closures.
     if let Some(refusal) = scoped_group_refusal(
         &state,
-        &scope,
+        &grant,
         &key,
         [name.as_str()]
             .into_iter()
@@ -542,7 +542,7 @@ pub async fn update_group(
             // the request's own — the only caller in this file that
             // does, and only because the mutation is already durable.
             let entry = tokio::task::block_in_place(|| {
-                group_entry(&state, name, record, &scope, &Deadline::unbounded())
+                group_entry(&state, name, record, &grant, &Deadline::unbounded())
             });
             match entry {
                 Ok(entry) => ok(entry, started_at),
@@ -579,7 +579,7 @@ pub async fn update_group(
 pub async fn delete_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
@@ -588,7 +588,7 @@ pub async fn delete_group(
     // members included: judged like any other group write.
     if let Some(refusal) = scoped_group_refusal(
         &state,
-        &scope,
+        &grant,
         &key,
         [name.as_str()],
         std::iter::empty(),
@@ -636,12 +636,12 @@ pub async fn delete_group(
 /// every OTHER `group` naming `name` as a child is rewritten to match.
 /// Unlike `rename_context`, `{name}` here is a GROUP name, so it is
 /// one of the routes the authorization middleware exempts from its
-/// per-`context` grant check — the scope gate belongs to this handler,
+/// per-`context` grant check — the grant gate belongs to this handler,
 /// exactly as `delete_group`'s does.
 pub async fn rename_group(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RenameRequest>,
@@ -659,7 +659,7 @@ pub async fn rename_group(
     // members included — exactly like deleting it.
     if let Some(refusal) = scoped_group_refusal(
         &state,
-        &scope,
+        &grant,
         &key,
         [name.as_str()],
         std::iter::empty(),

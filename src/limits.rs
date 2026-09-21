@@ -330,7 +330,7 @@ pub async fn enforce_rate_limit(
     // to the shared bucket; production always carries one.)
     //
     // An OAuth delegation ("key@client") buckets on its base key —
-    // `auth::base_key`, the same fallback `scope_of`/`recognizes` walk
+    // `auth::base_key`, the same fallback `grant_of`/`recognizes` walk
     // — so a caller cannot multiply its request budget by minting more
     // delegated clients from the same key.
     let key = match request.extensions().get::<auth::AuthKey>() {

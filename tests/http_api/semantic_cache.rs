@@ -2,7 +2,7 @@
 //! serves its canonical's cached page, every guard tripwire
 //! (negation, number, entity) splits instead of serving, a write turns
 //! a held claim stale and the next fill re-canonicalizes the cluster,
-//! scoped keys share claims exactly when their grants resolve alike,
+//! granted keys share claims exactly when their grants resolve alike,
 //! and the tier stays silent unless both the threshold and the
 //! embedding lane are configured.
 //!
@@ -275,7 +275,7 @@ fn a_write_turns_the_claim_stale_and_the_next_fill_recanonicalizes() {
 /// single-context surface shares freely behind the middleware's own
 /// grant check.
 #[test]
-fn scoped_keys_share_claims_exactly_when_their_grants_resolve_alike() {
+fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
     let provider = spawn_paired_embeddings();
     let mut env = semantic_env(&provider);
     env.push((
@@ -283,13 +283,13 @@ fn scoped_keys_share_claims_exactly_when_their_grants_resolve_alike() {
         "boss:atok,narrow:ntok,wide:wtok".to_string(),
     ));
     env.push((
-        "TAGURU_KEY_SCOPES",
+        "TAGURU_KEY_GRANTS",
         r#"{"narrow": {"role": "read", "contexts": ["x"]},
             "wide": {"role": "read", "contexts": ["x", "y"]}}"#
             .to_string(),
     ));
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let server = Server::start_with_env("semcache-scopes", &env);
+    let server = Server::start_with_env("semcache-grants", &env);
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         let (status, parsed) = server.call_with_token(method, path, body, Some(token));
         assert_eq!(status, 200, "{method} {path} -> {parsed}");

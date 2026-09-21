@@ -5,8 +5,8 @@
 //! (§7.1 — "strict means from now on"), and `schema_mode`/`revision`
 //! echoing on the directory rows. `strict`/`warn` enforcement on
 //! `POST /contexts/{name}/associations` itself (S5, #383) lives at the
-//! bottom of this file. Auth/scope classification lives in
-//! `key_scopes_cross_context.rs`; retrieval-cache invalidation in
+//! bottom of this file. Auth/grant classification lives in
+//! `key_grants_cross_context.rs`; retrieval-cache invalidation in
 //! `retrieval_cache.rs`; replica refusal in `replication.rs`.
 
 use serde_json::json;

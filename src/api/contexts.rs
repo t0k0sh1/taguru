@@ -51,7 +51,7 @@ pub struct ContextPage {
 /// mean a megabytes-large response on every routing decision.
 pub async fn list_contexts(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<ListContextsQuery>,
 ) -> Response {
@@ -63,14 +63,14 @@ pub async fn list_contexts(
     // the full directory and filtering afterward could come back short
     // even when more allowed contexts exist further along — instead,
     // the (typically small, operator-configured) allow-list is paged
-    // as its own sorted collection. An unscoped key (or one scoped to
-    // "every context") pages the registry directly — unless `pinned`
-    // is set, which (like the allow-list) defines the population
+    // as its own sorted collection. A key with no grant (or one whose
+    // grant covers every context) pages the registry directly — unless
+    // `pinned` is set, which (like the allow-list) defines the population
     // rather than a cursor and so also forces the whole-directory path:
     // the BTreeMap-seeking `directory_page` fast path has no way to
     // know in advance how many pinned entries lie within any range.
-    let allowed = match &scope {
-        Some(axum::Extension(scope)) => scope.contexts.clone(),
+    let allowed = match &grant {
+        Some(axum::Extension(grant)) => grant.contexts.clone(),
         None => None,
     };
     let (total, contexts) = if allowed.is_none() && query.pinned.is_none() {
@@ -116,12 +116,12 @@ pub async fn list_contexts(
 /// backup.
 pub async fn flush_all(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    if let Some(axum::Extension(scope)) = &scope
-        && scope.contexts.is_some()
+    if let Some(axum::Extension(grant)) = &grant
+        && grant.contexts.is_some()
     {
         return error(
             ErrorCode::Forbidden,
@@ -158,14 +158,14 @@ pub struct MaintenanceCompactQuery {
 /// refused outright rather than silently filtered.
 pub async fn maintenance_compact(
     State(state): State<AppState>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     AppQuery(query): AppQuery<MaintenanceCompactQuery>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    if let Some(axum::Extension(scope)) = &scope
-        && scope.contexts.is_some()
+    if let Some(axum::Extension(grant)) = &grant
+        && grant.contexts.is_some()
     {
         return error(
             ErrorCode::Forbidden,
@@ -484,11 +484,11 @@ pub struct RenameRequest {
 /// DESTINATION lives in the body, out of that middleware's reach —
 /// same discipline as `import_batch` — so this handler gates it with
 /// [`scope_refusal`] before renaming: otherwise a `context`-scoped key
-/// could move its data to an unscoped name.
+/// could move its data to a name outside its grant.
 pub async fn rename_context(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
-    scope: Option<axum::Extension<crate::auth::KeyScope>>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RenameRequest>,
@@ -502,7 +502,7 @@ pub async fn rename_context(
     ) {
         return refusal;
     }
-    if let Some(refusal) = scope_refusal(&scope, &key, [&request.to], started_at) {
+    if let Some(refusal) = scope_refusal(&grant, &key, [&request.to], started_at) {
         return refusal;
     }
     if deadline.expired() {

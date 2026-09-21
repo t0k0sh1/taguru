@@ -5,7 +5,7 @@
 //! rotating the others, and rotation itself is an overlap (add the
 //! new key, move callers, drop the old).
 //!
-//! Authorization rides on top: `TAGURU_KEY_SCOPES` grants each key a
+//! Authorization rides on top: `TAGURU_KEY_GRANTS` grants each key a
 //! ROLE (read ⊂ write ⊂ admin) and optionally a `context` list, and
 //! [`enforce_authorization`] holds every request — the in-process MCP
 //! dispatch included — to that grant. A key the variable does not
@@ -80,10 +80,11 @@ fn strip_bearer_prefix(value: &str) -> Option<&str> {
     Some(rest.trim_start_matches(' '))
 }
 
-/// The credential a key name is billed and scoped against: itself, or
-/// — for an OAuth delegation, `"key@client"` — the name before the
-/// last '@'. Every consumer of a key name that isn't an exact keyring
-/// lookup (scope resolution, liveness, rate limiting) must fall back
+/// The credential a key name is billed and its grant resolved
+/// against: itself, or — for an OAuth delegation, `"key@client"` —
+/// the name before the last '@'. Every consumer of a key name that
+/// isn't an exact keyring lookup (grant resolution, liveness, rate
+/// limiting) must fall back
 /// through this so a caller cannot dilute a limit meant for one key by
 /// minting more delegated clients from it.
 pub(crate) fn base_key(key_name: &str) -> &str {
@@ -120,15 +121,15 @@ impl Role {
 
 /// One key's grant: its role, and the `contexts` it may touch (`None` =
 /// every `context`). The default — and the grant of any key
-/// `TAGURU_KEY_SCOPES` does not name — is exactly what every key
-/// could do before scopes existed: admin, everywhere.
+/// `TAGURU_KEY_GRANTS` does not name — is exactly what every key
+/// could do before grants existed: admin, everywhere.
 #[derive(Clone, Debug, PartialEq)]
-pub struct KeyScope {
+pub struct KeyGrant {
     pub role: Role,
     pub contexts: Option<Arc<HashSet<String>>>,
 }
 
-impl Default for KeyScope {
+impl Default for KeyGrant {
     fn default() -> Self {
         Self {
             role: Role::Admin,
@@ -137,7 +138,7 @@ impl Default for KeyScope {
     }
 }
 
-impl KeyScope {
+impl KeyGrant {
     pub fn allows_context(&self, name: &str) -> bool {
         self.contexts
             .as_ref()
@@ -145,11 +146,11 @@ impl KeyScope {
     }
 }
 
-/// One entry of the `TAGURU_KEY_SCOPES` JSON: `"read"` as shorthand,
+/// One entry of the `TAGURU_KEY_GRANTS` JSON: `"read"` as shorthand,
 /// or `{"role": "write", "contexts": ["sake"]}` in full.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum ScopeSpec {
+enum GrantSpec {
     Role(String),
     Full {
         role: String,
@@ -162,7 +163,7 @@ enum ScopeSpec {
 /// mode, warned about loudly at boot).
 pub struct Keyring {
     keys: Vec<(Arc<str>, String)>,
-    scopes: HashMap<String, KeyScope>,
+    grants: HashMap<String, KeyGrant>,
 }
 
 impl Keyring {
@@ -203,10 +204,10 @@ impl Keyring {
                     ));
                 }
                 // '@' is reserved: OAuth delegations act as "key@client",
-                // and `scope_of` strips at the last '@' to inherit the
+                // and `grant_of` strips at the last '@' to inherit the
                 // underlying key's grant. A raw key whose name contains
                 // '@' would collide with that fallback — silently
-                // inheriting an unrelated scoped key's grant instead of
+                // inheriting an unrelated key's grant instead of
                 // the documented default. Refuse it at boot, keyring-style.
                 if name.contains('@') {
                     return Err(format!(
@@ -220,7 +221,7 @@ impl Keyring {
                 // A duplicated token VALUE is refused too: `authenticate`
                 // scans every key and keeps the last match, so two names
                 // sharing one token would silently resolve to whichever
-                // was listed last — its scope, its audit name — and
+                // was listed last — its grant, its audit name — and
                 // rotating the other name would revoke nothing. The
                 // `default` key from TAGURU_API_TOKEN sits in `keys`
                 // already, so a collision across the two variables is
@@ -239,38 +240,38 @@ impl Keyring {
         }
         Ok(Self {
             keys,
-            scopes: HashMap::new(),
+            grants: HashMap::new(),
         })
     }
 
-    /// Applies `TAGURU_KEY_SCOPES` — a JSON object mapping key names to
+    /// Applies `TAGURU_KEY_GRANTS` — a JSON object mapping key names to
     /// grants: `{"ci": "read", "bot": {"role": "write", "contexts":
-    /// ["sake"]}}`. Refusals are boot refusals, keyring-style: a scope
+    /// ["sake"]}}`. Refusals are boot refusals, keyring-style: a grant
     /// naming no configured key is a typo that would silently guard
     /// nobody, and an empty `contexts` list would grant nothing at all —
     /// omitting the field is how "every `context`" is said.
-    pub fn apply_scopes(&mut self, json: Option<&str>) -> Result<(), String> {
+    pub fn apply_grants(&mut self, json: Option<&str>) -> Result<(), String> {
         let Some(json) = json else {
             return Ok(());
         };
         if json.trim().is_empty() {
-            return Err("TAGURU_KEY_SCOPES is set but empty".to_string());
+            return Err("TAGURU_KEY_GRANTS is set but empty".to_string());
         }
-        let raw: HashMap<String, ScopeSpec> = serde_json::from_str(json).map_err(|error| {
+        let raw: HashMap<String, GrantSpec> = serde_json::from_str(json).map_err(|error| {
             format!(
-                "TAGURU_KEY_SCOPES is not the documented JSON shape \
+                "TAGURU_KEY_GRANTS is not the documented JSON shape \
                  ({{\"name\": \"role\" | {{\"role\": …, \"contexts\": […]}}}}): {error}"
             )
         })?;
         for (name, spec) in raw {
             if !self.keys.iter().any(|(key, _)| key.as_ref() == name) {
                 return Err(format!(
-                    "TAGURU_KEY_SCOPES names '{name}', which is no configured key"
+                    "TAGURU_KEY_GRANTS names '{name}', which is no configured key"
                 ));
             }
             let (role, contexts) = match spec {
-                ScopeSpec::Role(role) => (role, None),
-                ScopeSpec::Full { role, contexts } => (role, contexts),
+                GrantSpec::Role(role) => (role, None),
+                GrantSpec::Full { role, contexts } => (role, contexts),
             };
             let role = match role.as_str() {
                 "read" => Role::Read,
@@ -278,7 +279,7 @@ impl Keyring {
                 "admin" => Role::Admin,
                 other => {
                     return Err(format!(
-                        "TAGURU_KEY_SCOPES key '{name}': unknown role '{other}' \
+                        "TAGURU_KEY_GRANTS key '{name}': unknown role '{other}' \
                          (read, write, or admin)"
                     ));
                 }
@@ -287,13 +288,13 @@ impl Keyring {
                 None => None,
                 Some(list) if list.is_empty() => {
                     return Err(format!(
-                        "TAGURU_KEY_SCOPES key '{name}': an empty contexts list grants \
+                        "TAGURU_KEY_GRANTS key '{name}': an empty contexts list grants \
                          nothing — omit the field to grant every context"
                     ));
                 }
                 Some(list) => Some(Arc::new(list.into_iter().collect())),
             };
-            self.scopes.insert(name, KeyScope { role, contexts });
+            self.grants.insert(name, KeyGrant { role, contexts });
         }
         Ok(())
     }
@@ -301,18 +302,18 @@ impl Keyring {
     /// The grant behind a key name. OAuth delegations act as
     /// "key@client", so the lookup falls back to the name before the
     /// last '@' — the delegation can never out-rank the key it wraps.
-    pub fn scope_of(&self, key_name: &str) -> KeyScope {
-        if let Some(scope) = self.scopes.get(key_name) {
-            return scope.clone();
+    pub fn grant_of(&self, key_name: &str) -> KeyGrant {
+        if let Some(grant) = self.grants.get(key_name) {
+            return grant.clone();
         }
-        if let Some(scope) = self.scopes.get(base_key(key_name)) {
-            return scope.clone();
+        if let Some(grant) = self.grants.get(base_key(key_name)) {
+            return grant.clone();
         }
-        KeyScope::default()
+        KeyGrant::default()
     }
 
-    pub fn scoped_key_count(&self) -> usize {
-        self.scopes.len()
+    pub fn granted_key_count(&self) -> usize {
+        self.grants.len()
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -339,12 +340,12 @@ impl Keyring {
 
     /// Whether `key_name` is still a live credential — named directly,
     /// or (for an OAuth delegation, `"key@client"`) via its base key,
-    /// the same fallback `scope_of` walks. OAuth mints an access token
+    /// the same fallback `grant_of` walks. OAuth mints an access token
     /// once and then persists it independently of the keyring
     /// (`data_dir/oauth.json`), so a key later dropped from
     /// `TAGURU_API_TOKENS` must retire every token delegated from it
     /// too — otherwise the stale delegation keeps authenticating and
-    /// `scope_of` falls through to the unscoped default (admin,
+    /// `grant_of` falls through to the default grant (admin,
     /// unrestricted) for a caller nobody configured anymore.
     pub(crate) fn recognizes(&self, key_name: &str) -> bool {
         let is_configured = |name: &str| self.keys.iter().any(|(key, _)| key.as_ref() == name);
@@ -355,12 +356,12 @@ impl Keyring {
     /// reload audit line's payload. Token bytes never leave this
     /// function: only which names appeared, vanished, changed bytes,
     /// or changed grant. `rotated` is its own list (independent of
-    /// `rescoped`) because the common Kubernetes rotation changes
+    /// `regranted`) because the common Kubernetes rotation changes
     /// bytes under a stable name and would be invisible in a pure
-    /// name diff. `rescoped` compares the EFFECTIVE grant via
-    /// `scope_of`, so a scope entry dropped from `TAGURU_KEY_SCOPES`
-    /// counts too — that key falls back to the unscoped admin
-    /// default, a real change worth a line.
+    /// name diff. `regranted` compares the EFFECTIVE grant via
+    /// `grant_of`, so a grant entry dropped from `TAGURU_KEY_GRANTS`
+    /// counts too — that key falls back to the default admin
+    /// grant, a real change worth a line.
     fn diff(&self, next: &Keyring) -> KeyringDiff {
         let mut diff = KeyringDiff::default();
         let old: HashMap<&str, &str> = self
@@ -375,8 +376,8 @@ impl Keyring {
                     if *previous != token.as_str() {
                         diff.rotated.push(name.to_string());
                     }
-                    if self.scope_of(name) != next.scope_of(name) {
-                        diff.rescoped.push(name.to_string());
+                    if self.grant_of(name) != next.grant_of(name) {
+                        diff.regranted.push(name.to_string());
                     }
                 }
             }
@@ -390,7 +391,7 @@ impl Keyring {
             &mut diff.added,
             &mut diff.removed,
             &mut diff.rotated,
-            &mut diff.rescoped,
+            &mut diff.regranted,
         ] {
             list.sort_unstable();
         }
@@ -404,7 +405,7 @@ struct KeyringDiff {
     added: Vec<String>,
     removed: Vec<String>,
     rotated: Vec<String>,
-    rescoped: Vec<String>,
+    regranted: Vec<String>,
 }
 
 impl KeyringDiff {
@@ -412,7 +413,7 @@ impl KeyringDiff {
         self.added.is_empty()
             && self.removed.is_empty()
             && self.rotated.is_empty()
-            && self.rescoped.is_empty()
+            && self.regranted.is_empty()
     }
 }
 
@@ -448,9 +449,9 @@ impl SharedKeyring {
 
     /// The current table. Callers hold the snapshot for their whole
     /// operation: the bearer gate resolves authentication, the OAuth
-    /// `recognizes` check, AND the scope from one load — re-loading
+    /// `recognizes` check, AND the grant from one load — re-loading
     /// between them would let a key a reload just removed fall
-    /// through `scope_of` to the unscoped admin default.
+    /// through `grant_of` to the default admin grant.
     pub fn load(&self) -> Arc<Keyring> {
         Arc::clone(&self.ring.read())
     }
@@ -464,7 +465,7 @@ impl SharedKeyring {
 /// and nothing else. The single-token spelling belongs here too: it
 /// is the same table (key name "default"), and leaving it out would
 /// keep single-token deployments restarting to rotate.
-const AUTH_VARS: [&str; 3] = ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_SCOPES"];
+const AUTH_VARS: [&str; 3] = ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_GRANTS"];
 
 /// Where each auth variable's CURRENT value comes from on a reload.
 /// Captured in `main` BEFORE `config::load_config` folds the file
@@ -611,7 +612,7 @@ fn apply_reload(
         tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
         ReloadOutcome::Refused
     };
-    let [single, named, scopes] = match values {
+    let [single, named, grants] = match values {
         Ok(values) => values,
         Err(error) => return refused(error),
     };
@@ -619,7 +620,7 @@ fn apply_reload(
         Ok(next) => next,
         Err(error) => return refused(error),
     };
-    if let Err(error) = next.apply_scopes(scopes.as_deref()) {
+    if let Err(error) = next.apply_grants(grants.as_deref()) {
         return refused(error);
     }
     let current = shared.load();
@@ -639,7 +640,7 @@ fn apply_reload(
         return ReloadOutcome::Unchanged;
     }
     let keys = next.key_count();
-    let scoped = next.scoped_key_count();
+    let granted = next.granted_key_count();
     shared.store(Arc::new(next));
     tracing::info!(
         target: "taguru::audit",
@@ -647,9 +648,9 @@ fn apply_reload(
         added = ?diff.added,
         removed = ?diff.removed,
         rotated = ?diff.rotated,
-        rescoped = ?diff.rescoped,
+        regranted = ?diff.regranted,
         keys,
-        scoped,
+        granted,
         "keyring reloaded",
     );
     ReloadOutcome::Applied
@@ -678,10 +679,10 @@ pub async fn require_bearer(
     next: Next,
 ) -> Response {
     // ONE snapshot for the whole request: authentication, the OAuth
-    // `recognizes` check, and the scope resolution below must agree
+    // `recognizes` check, and the grant resolution below must agree
     // on one table. Under a mid-request reload, a second load between
     // them would let a key the reload just removed fall through
-    // `scope_of` to the unscoped admin default — an elevation, not
+    // `grant_of` to the default admin grant — an elevation, not
     // just staleness.
     let keyring = gate.keyring.load();
     if keyring.is_disabled() {
@@ -727,7 +728,7 @@ pub async fn require_bearer(
         // of consulting a (possibly newer) keyring of its own, and
         // `remote_mcp` stamps it onto every dispatched tool call
         // alongside the key.
-        request.extensions_mut().insert(keyring.scope_of(&key));
+        request.extensions_mut().insert(keyring.grant_of(&key));
         let mut response = next.run(request).await;
         response.extensions_mut().insert(AuthKey(key));
         return response;
@@ -773,7 +774,7 @@ pub async fn require_bearer(
 
 /// The least role a (method, route template) demands. Fail closed: a
 /// route this table does not classify demands Admin, so an endpoint
-/// added without a classification locks down for scoped keys instead
+/// added without a classification locks down for granted keys instead
 /// of leaking open. `/mcp` itself needs only Read — every tool call
 /// dispatches onto a real route in-process and is judged there.
 pub(crate) fn required_role(method: &Method, route: &str) -> Role {
@@ -847,9 +848,9 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// Holds a request to its key's grant. Sits INSIDE the bearer gate on
 /// the HTTP surface (it needs WHO), and directly on the in-process
 /// `/mcp` dispatch router — `remote_mcp` stamps the outer request's
-/// key AND scope onto every dispatched tool call, so the two surfaces
+/// key AND grant onto every dispatched tool call, so the two surfaces
 /// cannot drift. No key at all (auth off, or an exempt path) means no
-/// restriction, exactly as before scopes existed. The [`KeyScope`]
+/// restriction, exactly as before grants existed. The [`KeyGrant`]
 /// judged here is the one the bearer gate resolved from the same
 /// keyring snapshot that authenticated the key — this layer holds no
 /// keyring of its own, so a hot reload landing mid-request can never
@@ -868,12 +869,12 @@ pub async fn enforce_authorization(
         return next.run(request).await;
     };
     // The gate is the only producer of `AuthKey` on a live server and
-    // always pairs it with the resolved scope; the default (the
+    // always pairs it with the resolved grant; the default (the
     // historical full grant) only catches a hand-built request in a
     // test.
-    let scope = request
+    let grant = request
         .extensions()
-        .get::<KeyScope>()
+        .get::<KeyGrant>()
         .cloned()
         .unwrap_or_default();
     let started_at = Instant::now();
@@ -882,13 +883,13 @@ pub async fn enforce_authorization(
         .map(|matched| matched.as_str().to_string())
         .unwrap_or_else(|| "<unmatched>".to_string());
     let required = required_role(request.method(), &route);
-    if scope.role < required {
+    if grant.role < required {
         return api::error(
             api::ErrorCode::Forbidden,
             format!(
                 "key '{}' has role '{}', but {} {} needs '{}'",
                 key.0,
-                scope.role.as_str(),
+                grant.role.as_str(),
                 request.method(),
                 route,
                 required.as_str()
@@ -907,7 +908,7 @@ pub async fn enforce_authorization(
     // context and is not listed here mis-answers 403 for scoped keys,
     // never leaks open (a prefix test would silently swallow future
     // `/groups/...` sub-routes instead of forcing that decision).
-    if scope.contexts.is_some()
+    if grant.contexts.is_some()
         && !matches!(
             route.as_str(),
             "/groups/{name}" | "/groups/{name}/export" | "/groups/{name}/rename"
@@ -915,7 +916,7 @@ pub async fn enforce_authorization(
     {
         let context = api::path_param(&mut parts, "name").await;
         if let Some(context) = context
-            && !scope.allows_context(&context)
+            && !grant.allows_context(&context)
         {
             return api::error(
                 api::ErrorCode::Forbidden,
@@ -924,7 +925,7 @@ pub async fn enforce_authorization(
             );
         }
     }
-    // The scope extension came in on the request (the gate stamped
+    // The grant extension came in on the request (the gate stamped
     // it) and survives the parts round-trip — nothing to re-insert.
     next.run(Request::from_parts(parts, body)).await
 }
@@ -1097,7 +1098,7 @@ mod tests {
                 .key_count(),
             1
         );
-        // '@' in a key name collides with the OAuth-delegation scope
+        // '@' in a key name collides with the OAuth-delegation grant
         // fallback, so it is refused at boot rather than silently
         // inheriting an unrelated key's grant.
         let error = Keyring::parse(None, Some("bot@internal:sekrit-z".to_string()))
@@ -1108,7 +1109,7 @@ mod tests {
 
     /// Two names sharing one token value would make `authenticate`'s
     /// last-match-wins scan resolve the token to whichever name was
-    /// listed last — its scope, its audit-log name — while rotating
+    /// listed last — its grant, its audit-log name — while rotating
     /// the first name revoked nothing. Refused at boot, and the error
     /// names both keys without echoing the token itself.
     #[test]
@@ -1236,7 +1237,7 @@ mod tests {
     /// token delegated from it too. `oauth.json` outlives the keyring
     /// that issued a grant, so replaying a still-unexpired access
     /// token after the base key is gone must fail closed instead of
-    /// falling through `scope_of` to the unscoped admin default.
+    /// falling through `grant_of` to the default admin grant.
     #[tokio::test]
     async fn revoking_a_key_revokes_its_oauth_delegations_too() {
         let dir = std::env::temp_dir().join(format!("taguru-authrevoke-{}", std::process::id()));
@@ -1291,7 +1292,7 @@ mod tests {
     }
 
     /// The diff a reload logs: names only, sorted, with `rotated`
-    /// (same name, new bytes) and `rescoped` (same name, new grant)
+    /// (same name, new bytes) and `regranted` (same name, new grant)
     /// tracked independently — and never a token byte in the output,
     /// since the whole struct goes onto the audit line via `Debug`.
     #[test]
@@ -1301,28 +1302,28 @@ mod tests {
             Some("ci:sekrit-a,laptop:sekrit-b,bot:sekrit-c".into()),
         )
         .unwrap();
-        old.apply_scopes(Some(r#"{"bot": "read"}"#)).unwrap();
+        old.apply_grants(Some(r#"{"bot": "read"}"#)).unwrap();
         let mut new = Keyring::parse(
             Some("sekrit-legacy".into()),
             Some("ci:sekrit-a2,bot:sekrit-c,fresh:sekrit-d".into()),
         )
         .unwrap();
-        new.apply_scopes(Some(r#"{"bot": "write"}"#)).unwrap();
+        new.apply_grants(Some(r#"{"bot": "write"}"#)).unwrap();
         let diff = old.diff(&new);
         assert_eq!(diff.added, vec!["fresh"]);
         assert_eq!(diff.removed, vec!["laptop"]);
         assert_eq!(diff.rotated, vec!["ci"]);
-        assert_eq!(diff.rescoped, vec!["bot"]);
+        assert_eq!(diff.regranted, vec!["bot"]);
         let printed = format!("{diff:?}");
         assert!(!printed.contains("sekrit"), "{printed}");
 
-        // A scope entry DROPPED is a rescope too: the key falls back
-        // to the unscoped admin default, a real change worth a line.
-        let unscoped = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
-        let mut scoped = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
-        scoped.apply_scopes(Some(r#"{"bot": "read"}"#)).unwrap();
-        assert_eq!(scoped.diff(&unscoped).rescoped, vec!["bot"]);
-        assert!(scoped.diff(&scoped).is_empty());
+        // A grant entry DROPPED is a regrant too: the key falls back
+        // to the default admin grant, a real change worth a line.
+        let no_grant = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
+        let mut granted = Keyring::parse(None, Some("bot:sekrit-c".into())).unwrap();
+        granted.apply_grants(Some(r#"{"bot": "read"}"#)).unwrap();
+        assert_eq!(granted.diff(&no_grant).regranted, vec!["bot"]);
+        assert!(granted.diff(&granted).is_empty());
     }
 
     /// `table_from` fed the exact bytes on disk must agree with
@@ -1341,7 +1342,7 @@ mod tests {
         let config = dir.join("taguru.env");
         std::fs::write(
             &config,
-            "TAGURU_API_TOKENS=ci:tok-a,laptop:tok-b\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+            "TAGURU_API_TOKENS=ci:tok-a,laptop:tok-b\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
         )
         .unwrap();
 
@@ -1521,17 +1522,17 @@ mod tests {
             ReloadOutcome::Unchanged
         );
 
-        // A scope-only change still applies.
+        // A grant-only change still applies.
         std::fs::write(
             &config,
-            "TAGURU_API_TOKENS=ci:tok-a\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+            "TAGURU_API_TOKENS=ci:tok-a\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
         )
         .unwrap();
         assert_eq!(
             reload_keyring(&keyring, &source, "test"),
             ReloadOutcome::Applied
         );
-        assert_eq!(keyring.load().scope_of("ci").role, Role::Read);
+        assert_eq!(keyring.load().grant_of("ci").role, Role::Read);
 
         // A disabled gate may ARM by reload — that transition closes.
         let disabled = SharedKeyring::new(Keyring::parse(None, None).unwrap());
@@ -1621,30 +1622,30 @@ mod tests {
         assert_eq!(send("Bearer s3cret").await.status(), StatusCode::OK);
     }
 
-    /// Scope grants parse strictly: a scope naming no configured key, a
+    /// Key grants parse strictly: a grant naming no configured key, a
     /// role typo, an empty `contexts` list, or non-JSON all refuse the
     /// boot instead of arming a partial authorization table.
     #[test]
-    fn scope_grants_parse_strictly_and_resolve_with_the_oauth_fallback() {
+    fn key_grants_parse_strictly_and_resolve_with_the_oauth_fallback() {
         let mut keyring =
             Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
         keyring
-            .apply_scopes(Some(
+            .apply_grants(Some(
                 r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
             ))
             .unwrap();
-        assert_eq!(keyring.scoped_key_count(), 2);
+        assert_eq!(keyring.granted_key_count(), 2);
         // Unnamed keys keep the historical full grant.
-        assert_eq!(keyring.scope_of("boss").role, Role::Admin);
-        assert!(keyring.scope_of("boss").allows_context("anything"));
-        assert_eq!(keyring.scope_of("reader").role, Role::Read);
+        assert_eq!(keyring.grant_of("boss").role, Role::Admin);
+        assert!(keyring.grant_of("boss").allows_context("anything"));
+        assert_eq!(keyring.grant_of("reader").role, Role::Read);
         // OAuth delegations ("key@client") inherit the key's grant.
-        let delegated = keyring.scope_of("bot@claude-abc123");
+        let delegated = keyring.grant_of("bot@claude-abc123");
         assert_eq!(delegated.role, Role::Write);
         assert!(delegated.allows_context("sake"));
         assert!(!delegated.allows_context("bunko"));
 
-        for (scopes, complaint) in [
+        for (grants, complaint) in [
             (r#"{"ghost": "read"}"#, "no configured key"),
             (r#"{"reader": "supreme"}"#, "unknown role"),
             (r#"{"reader": {"role": "read", "contexts": []}}"#, "empty"),
@@ -1652,13 +1653,13 @@ mod tests {
             ("", "empty"),
         ] {
             let mut keyring = Keyring::parse(None, Some("reader:tok-b".to_string())).unwrap();
-            let error = keyring.apply_scopes(Some(scopes)).unwrap_err();
-            assert!(error.contains(complaint), "{scopes} → {error}");
+            let error = keyring.apply_grants(Some(grants)).unwrap_err();
+            assert!(error.contains(complaint), "{grants} → {error}");
         }
     }
 
     /// The role table fails closed: an endpoint nobody classified
-    /// demands admin, so a scoped key locks out of new surface until
+    /// demands admin, so a granted key locks out of new surface until
     /// someone decides otherwise.
     #[test]
     fn unclassified_routes_demand_admin() {
@@ -1726,7 +1727,7 @@ mod tests {
 
     /// The three `/explain` endpoints are read-only diagnostics for
     /// their base endpoint — same role, or fail-closed silently
-    /// demotes a scoped reader to Admin the moment they ask why a
+    /// demotes a granted reader to Admin the moment they ask why a
     /// call resolved the way it did.
     #[test]
     fn explain_routes_share_their_base_endpoints_role() {
@@ -1780,11 +1781,11 @@ mod tests {
     /// grants, and the untouched full-grant default, all in the
     /// ApiError shape with a 403.
     #[tokio::test]
-    async fn scoped_keys_are_held_to_role_and_context() {
+    async fn granted_keys_are_held_to_role_and_context() {
         let mut keyring =
             Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
         keyring
-            .apply_scopes(Some(
+            .apply_grants(Some(
                 r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
             ))
             .unwrap();
@@ -1811,7 +1812,7 @@ mod tests {
                 )
                 // Authorization innermost, the bearer gate outside it —
                 // the same nesting main.rs builds. It judges from the
-                // scope extension the gate stamps, keyring-free.
+                // grant extension the gate stamps, keyring-free.
                 .layer(axum::middleware::from_fn(enforce_authorization))
                 .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
         };
@@ -1876,7 +1877,7 @@ mod tests {
             StatusCode::FORBIDDEN
         );
 
-        // The unscoped key keeps the historical full grant.
+        // A key with no TAGURU_KEY_GRANTS entry keeps the historical full grant.
         assert_eq!(
             send("DELETE", "/contexts/sake", "tok-a").await.status(),
             200
@@ -1892,7 +1893,7 @@ mod tests {
     async fn scope_check_matches_a_percent_encoded_context_name() {
         let mut keyring = Keyring::parse(None, Some("bot:tok-c".to_string())).unwrap();
         keyring
-            .apply_scopes(Some(r#"{"bot": {"role": "write", "contexts": ["sake"]}}"#))
+            .apply_grants(Some(r#"{"bot": {"role": "write", "contexts": ["sake"]}}"#))
             .unwrap();
         let keyring = SharedKeyring::new(keyring);
         let gate = Arc::new(Gate {

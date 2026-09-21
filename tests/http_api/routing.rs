@@ -455,13 +455,13 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
 /// router holds none.
 #[test]
 fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
-    // Two keys on every shard: an unscoped one for the test's own
-    // driving, and one granted `sake` only — the scoped-import case
+    // Two keys on every shard: one with no grant entry for the test's
+    // own driving, and one granted `sake` only — the scoped-import case
     // below needs it.
     let keyed = &[
         ("TAGURU_API_TOKENS", "ops:sesame,limited:hush"),
         (
-            "TAGURU_KEY_SCOPES",
+            "TAGURU_KEY_GRANTS",
             r#"{"limited": {"role": "write", "contexts": ["sake"]}}"#,
         ),
     ][..];
@@ -511,7 +511,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     assert_eq!(body["result"]["total"], 2, "{body}");
     assert!(body.get("unreached").is_none(), "{body}");
 
-    // A scoped key whose stream carries an out-of-grant GROUP record:
+    // A context-scoped key whose stream carries an out-of-grant GROUP record:
     // a single instance scope-checks the record's closure before
     // anything applies and answers 403 with nothing landed. The
     // router's preflight must keep that — the in-grant batch ahead of

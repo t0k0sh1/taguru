@@ -30,13 +30,13 @@ def server_binary() -> Path:
 def server(
     server_binary: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[SpawnedServer]:
-    """The main server: named keys with an admin and a read-scoped one."""
+    """The main server: named keys with an admin and a key granted only Read."""
     spawned = SpawnedServer(
         server_binary,
         tmp_path_factory.mktemp("taguru-data"),
         {
             "TAGURU_API_TOKENS": f"admin:{ADMIN_TOKEN},reader:{READER_TOKEN}",
-            "TAGURU_KEY_SCOPES": '{"reader": "read"}',
+            "TAGURU_KEY_GRANTS": '{"reader": "read"}',
             # The default 1s auto-flush (spawn_flusher in src/main.rs) can race
             # test_flush_names_dirty_contexts: if a background tick lands
             # between seed() and flush(), it clears the dirty flag first and

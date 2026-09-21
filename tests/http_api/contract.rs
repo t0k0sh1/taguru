@@ -897,8 +897,9 @@ fn error_malformed_request() {
     evidence_fixture("error_malformed_request", request, status, body);
 }
 
-/// A read-scoped key restricted to `forbidden-corpus` alone (never
-/// `forbidden-corpus::communities`) asking for `include_communities`.
+/// A key granted only Read, restricted to `forbidden-corpus` alone
+/// (never `forbidden-corpus::communities`) asking for
+/// `include_communities`.
 #[test]
 fn error_forbidden() {
     let server = Server::start_with_env(
@@ -906,7 +907,7 @@ fn error_forbidden() {
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"reader": {"role": "read", "contexts": ["forbidden-corpus"]}}"#,
             ),
         ],

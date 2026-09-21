@@ -1,4 +1,4 @@
-//! Scoped-key gating and cross-context search/recall merges.
+//! Key-grant gating and cross-context search/recall merges.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -7,21 +7,21 @@ use serde_json::{Value, json};
 
 use crate::support::*;
 
-/// TAGURU_KEY_SCOPES end to end: roles gate the verbs, context grants
-/// gate the objects, the directory shows a scoped key only its world,
-/// import checks its body-carried contexts, and an MCP tool call is
-/// judged exactly as the route it dispatches onto.
+/// TAGURU_KEY_GRANTS end to end: roles gate the verbs, context grants
+/// gate the objects, the directory shows a context-scoped key only its
+/// world, import checks its body-carried contexts, and an MCP tool call
+/// is judged exactly as the route it dispatches onto.
 #[test]
-fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
+fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     let server = Server::start_with_env(
-        "http-scopes",
+        "http-grants",
         &[
             (
                 "TAGURU_API_TOKENS",
                 "boss:atok,reader:rtok,scribe:wtok,potter:stok,curator:ctok",
             ),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"reader": "read", "scribe": "write", "potter": {"role": "write", "contexts": ["sake"]}, "curator": {"role": "admin", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -32,7 +32,8 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     let fact = json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
                       "weight": 1.0, "source": "a.md"}]);
 
-    // The unscoped key keeps the historical full grant: admin, everywhere.
+    // The key with no TAGURU_KEY_GRANTS entry keeps the historical full
+    // grant: admin, everywhere.
     assert_eq!(
         call(
             "PUT",
@@ -63,7 +64,8 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         .0,
         200
     );
-    // The unscoped admin key clears every role gate, drift/audit included.
+    // The key with no grant entry (default admin) clears every role
+    // gate, drift/audit included.
     assert_eq!(
         call("POST", "/contexts/sake/drift/audit", None, "atok").0,
         200
@@ -105,7 +107,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     );
     // #305's evidence assembly is Role::Read too — an unclassified
     // route would fail closed to Admin (auth.rs's own rule), so this
-    // pins it reaches a scoped reader directly.
+    // pins that the reader key reaches it directly.
     assert_eq!(
         call(
             "POST",
@@ -177,8 +179,8 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         200
     );
     // schema/audit (#385, ADR 0009 §12.5) is Role::Read too — `bunko`
-    // now has the schema just installed above, so the unscoped reader
-    // key reaches schema/audit directly, the same way it reaches
+    // now has the schema just installed above, so the reader key
+    // reaches schema/audit directly, the same way it reaches
     // drift/audit.
     assert_eq!(
         call("POST", "/contexts/bunko/schema/audit", None, "rtok").0,
@@ -190,7 +192,7 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     // Flush is server-wide (it names every flushed context), so a
     // context-scoped key is refused even at admin role — the refusal
     // is the CONTEXT bypass guard, not the role check (curator IS
-    // admin). The unscoped admin flushes normally.
+    // admin). The admin key with no grant entry flushes normally.
     let (status, scoped_flush) = call("POST", "/flush", None, "ctok");
     assert_eq!(status, 403, "{scoped_flush}");
     assert!(
@@ -803,8 +805,8 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     );
 }
 
-/// A scoped key's cross-context search is refused whole on any name
-/// beyond the grant — and because the grant check runs before the
+/// A context-scoped key's cross-context search is refused whole on any
+/// name beyond the grant — and because the grant check runs before the
 /// existence check, the 403 for a live out-of-grant name and for a
 /// made-up one are indistinguishable: no existence oracle. A `groups`
 /// target resolves to the grant's slice instead of refusing: a refusal
@@ -812,11 +814,11 @@ fn cross_context_search_resolves_groups_beside_contexts() {
 #[test]
 fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let server = Server::start_with_env(
-        "cross-scopes",
+        "cross-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,potter:stok"),
             (
-                "TAGURU_KEY_SCOPES",
+                "TAGURU_KEY_GRANTS",
                 r#"{"potter": {"role": "read", "contexts": ["sake"]}}"#,
             ),
         ],
@@ -875,7 +877,8 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
         "the refusals must differ in nothing but the echoed name"
     );
 
-    // The unscoped admin hears the truth about the same request.
+    // The admin key with no grant entry hears the truth about the same
+    // request.
     let (status, truth) = call(
         "POST",
         "/recall",
@@ -902,8 +905,8 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     assert_eq!(status, 403);
 
     // A group target resolves to the grant's slice instead of refusing
-    // — the same slice `GET /groups` shows a scoped key — so nothing
-    // in the answer betrays the out-of-grant member.
+    // — the same slice `GET /groups` shows a context-scoped key — so
+    // nothing in the answer betrays the out-of-grant member.
     for (context, fact) in [
         (
             "sake",
