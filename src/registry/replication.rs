@@ -80,12 +80,8 @@ impl AppState {
         // (the stem — the id — never moves): swap the display name and
         // re-index it below, once `inner` is released (registry after
         // entry lock would invert the crate's lock order).
-        let renamed_from = match tailed_name {
-            Some(tailed_name) if tailed_name != inner.name => {
-                Some(std::mem::replace(&mut inner.name, tailed_name))
-            }
-            _ => None,
-        };
+        let renamed_from = tailed_rename(tailed_name, &inner.name)
+            .map(|tailed_name| std::mem::replace(&mut inner.name, tailed_name));
         inner.meta = meta;
         inner.stats = stats;
         // Not `max`-merged like the revision counters below: a digest
@@ -280,6 +276,16 @@ impl AppState {
         groups::repair_nesting(&mut fresh);
         *groups = fresh;
     }
+}
+
+/// The rename a tailed sidecar carries, if any: the recorded display
+/// name, when it differs from the current one. Pure and separate so
+/// the equality that decides "this refresh is a rename" is pinned by
+/// its own test — inside `replica_refresh` a wrongly-firing arm is
+/// behaviorally invisible (replacing a name with itself and moving an
+/// id between one set and the same set are both no-ops).
+fn tailed_rename(tailed_name: Option<String>, current: &str) -> Option<String> {
+    tailed_name.filter(|tailed_name| tailed_name != current)
 }
 
 #[cfg(test)]
@@ -717,5 +723,19 @@ mod tests {
         assert_eq!(entry.id, stem, "same entry, same id — nothing moved");
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `tailed_rename` is what makes a tailed refresh a rename — and
+    /// what keeps a same-name refresh from being one. Pinned directly
+    /// because inside `replica_refresh` a wrongly-firing arm is a
+    /// behavioral no-op (see the function's own doc).
+    #[test]
+    fn tailed_rename_fires_only_on_a_genuinely_different_name() {
+        assert_eq!(
+            tailed_rename(Some("shochu".to_string()), "sake"),
+            Some("shochu".to_string())
+        );
+        assert_eq!(tailed_rename(Some("sake".to_string()), "sake"), None);
+        assert_eq!(tailed_rename(None, "sake"), None);
     }
 }

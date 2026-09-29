@@ -323,14 +323,7 @@ impl AppState {
                 &mut record.contexts
             })
         };
-        if !membership_persisted {
-            tracing::warn!(
-                from = %from,
-                to = %to,
-                "context rename: a group record still names the old name; retry the rename \
-                 or re-put the group, or the next boot's reconcile drops the member"
-            );
-        }
+        warn_unpersisted_membership(from, to, membership_persisted);
         Ok(())
     }
 
@@ -366,6 +359,25 @@ impl AppState {
             return Err(RenameContextError::Io(error));
         }
         Ok(())
+    }
+}
+
+/// The rename's membership-rewrite warning, split out so its gate can
+/// be skipped for mutation testing: which branch runs only decides
+/// whether one `warn!` line fires — the rewrite itself already ran and
+/// the rename already succeeded — so a mutated condition here changes
+/// nothing a behavioral test can observe short of capturing log
+/// output, which nothing in this codebase does (same reasoning as
+/// `boot.rs`'s `remove_persisted_file_quietly`).
+#[mutants::skip]
+fn warn_unpersisted_membership(from: &str, to: &str, membership_persisted: bool) {
+    if !membership_persisted {
+        tracing::warn!(
+            from = %from,
+            to = %to,
+            "context rename: a group record still names the old name; retry the rename \
+             or re-put the group, or the next boot's reconcile drops the member"
+        );
     }
 }
 

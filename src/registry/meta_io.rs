@@ -422,4 +422,51 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// `read_scanned_meta`'s missing-sidecar arm is the SILENT default
+    /// (`MetaFile::default()`, zeroed revision), not the degraded
+    /// fallback — the same distinction `read_meta_file` draws, and the
+    /// same fingerprint-collision reasoning behind it: nothing has
+    /// degraded, so there is nothing to shield a consumer from. An
+    /// unreadable-but-present sidecar takes the clock-seeded degraded
+    /// path instead.
+    #[test]
+    fn a_missing_sidecar_scans_as_a_plain_zeroed_default() {
+        let dir = scratch_dir("scanned-meta-missing");
+        fs::create_dir_all(&dir).unwrap();
+        match read_scanned_meta(&dir, "never-written") {
+            ScannedMeta::Degraded(meta_file) => {
+                assert_eq!(
+                    meta_file.revision.config, 0,
+                    "a sidecar that never existed must not clock-seed"
+                );
+            }
+            _ => panic!("a missing sidecar is the degraded-shape fallback"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_sidecar_scans_with_a_clock_seeded_config_revision() {
+        let dir = scratch_dir("scanned-meta-unreadable");
+        fs::create_dir_all(&dir).unwrap();
+        // A directory at the sidecar's path fails `fs::read` with
+        // something other than NotFound, deterministically (root and
+        // CAP_DAC_OVERRIDE ignore permission bits; they cannot read a
+        // directory as a file).
+        fs::create_dir_all(meta_path(&dir, "sake")).unwrap();
+        let before = crate::clock::now_unix_secs();
+        match read_scanned_meta(&dir, "sake") {
+            ScannedMeta::Degraded(meta_file) => {
+                let after = crate::clock::now_unix_secs();
+                assert!(
+                    (before..=after).contains(&meta_file.revision.config),
+                    "an unreadable sidecar must clock-seed, not zero: {meta_file:?}"
+                );
+            }
+            _ => panic!("an unreadable sidecar is the degraded-shape fallback"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

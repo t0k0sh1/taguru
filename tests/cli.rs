@@ -1221,6 +1221,29 @@ fn inspect_fails_a_pre_id_sidecar_with_the_migration_message() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The other refused sidecar shape: an id that is not its own stem (a
+/// copied or hand-edited family) fails the inspection — exit code and
+/// all, which is what pins the failure COUNTER, not just the line.
+#[test]
+fn inspect_fails_a_sidecar_recording_a_foreign_id() {
+    let dir = common::scratch_dir("cli-inspect-foreign-id");
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("copied-here.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("copied-here.meta.json"),
+        br#"{"id":"original-stem","name":"sake","description":"d","pinned":false}"#,
+    )
+    .unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("not its own stem"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn inspect_warns_on_unparseable_meta_json_but_does_not_fail() {
     let dir = common::scratch_dir("cli-inspect-badmeta");
