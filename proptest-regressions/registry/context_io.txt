@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 87540cde309cf3acea35340b5da3011bc2015089b9b0dc491bbda9f42f1326c6 # shrinks to (assoc_ops, alias_ops, retractions) = ([AssocInput { subject: "青嶺酒造", label: "好き", object: "青嶺酒造", weight: 0.0, source: None, paragraph: Some(0) }], [Label { alias: "aliasLabelC", canonical: "好き" }, Label { alias: "設立年エイリアス", canonical: "好き" }], [Association { subject: "青嶺酒造", label: "好き", object: "青嶺酒造" }]), dice_floor = None

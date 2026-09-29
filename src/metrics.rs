@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn the_replica_family_gates_on_role_and_tracks_the_gap() {
         let metrics = Metrics::default();
-        metrics.note_replica_lane("sake", "graph", 2, 2);
+        metrics.note_replica_lane("sake-id", "sake", "graph", 2, 2);
         let writer_scrape = metrics.render_prometheus(&empty_gauges());
         assert!(
             !writer_scrape.contains("taguru_replica ")
@@ -495,7 +495,7 @@ mod tests {
 
         // The shipped side outruns the applied one: the gap shows, and
         // its age starts counting.
-        metrics.note_replica_shipped("sake", "graph", 5);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 5);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
             rendered.contains("taguru_replica_shipped_seq{context=\"sake\",lane=\"graph\"} 5"),
@@ -507,7 +507,7 @@ mod tests {
         );
 
         // Catching up zeroes the age.
-        metrics.note_replica_lane("sake", "graph", 5, 5);
+        metrics.note_replica_lane("sake-id", "sake", "graph", 5, 5);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
             rendered.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0"),
@@ -515,8 +515,8 @@ mod tests {
         );
 
         // A vanished context's rows leave the scrape.
-        metrics.note_replica_lane("sake", "passages", 1, 1);
-        metrics.forget_replica_context("sake");
+        metrics.note_replica_lane("sake-id", "sake", "passages", 1, 1);
+        metrics.forget_replica_context("sake-id");
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
             !rendered.contains("context=\"sake\""),
@@ -527,9 +527,9 @@ mod tests {
         // are per-lineage, and a successor that started from an older
         // watermark ships LOWER seqs — a surviving predecessor value
         // would fake a caught-up lane.
-        metrics.note_replica_lane("sake", "graph", 9, 9);
+        metrics.note_replica_lane("sake-id", "sake", "graph", 9, 9);
         metrics.reset_replica_lanes();
-        metrics.note_replica_shipped("sake", "graph", 4);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 4);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
             rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 0"),
@@ -544,19 +544,19 @@ mod tests {
     #[test]
     fn a_shipped_report_at_or_below_applied_clears_the_behind_age() {
         let metrics = Metrics::default();
-        let key = ("sake".to_string(), "graph");
-        metrics.note_replica_lane("sake", "graph", 5, 5);
-        metrics.note_replica_shipped("sake", "graph", 7);
+        let key = ("sake-id".to_string(), "graph");
+        metrics.note_replica_lane("sake-id", "sake", "graph", 5, 5);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 7);
         let stamped = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_ne!(stamped, 0, "a real gap starts the age");
-        metrics.note_replica_shipped("sake", "graph", 5);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 5);
         let cleared = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_eq!(cleared, 0, "no gap, no age");
         // Strictly below, not just equal — the caught-up arm is `>=`,
         // and a regressed shipped seq (a successor lineage's lower
         // watermark) must clear the age the same way.
-        metrics.note_replica_shipped("sake", "graph", 7);
-        metrics.note_replica_shipped("sake", "graph", 4);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 7);
+        metrics.note_replica_shipped("sake-id", "sake", "graph", 4);
         let cleared_below = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_eq!(cleared_below, 0, "a lower shipped seq also clears the age");
     }
@@ -637,13 +637,13 @@ mod tests {
 
         // A deleted context's lane rows leave the replicaTION scrape —
         // the shipper-side twin of `forget_replica_context`'s test.
-        metrics.note_replication_lane("sake", "graph", 3, 60);
+        metrics.note_replication_lane("sake-id", "sake", "graph", 3, 60);
         let with_lane = metrics.render_prometheus(&empty_gauges());
         assert!(
             with_lane.contains("taguru_replication_lag_records{context=\"sake\",lane=\"graph\"} 3"),
             "{with_lane}"
         );
-        metrics.forget_replication_lane("sake", "graph");
+        metrics.forget_replication_lane("sake-id", "graph");
         let without = metrics.render_prometheus(&empty_gauges());
         assert!(
             !without.contains("context=\"sake\""),
@@ -669,7 +669,7 @@ mod tests {
         // the age (the `== 0` first-stamp arm), and a repeat report
         // keeps the ORIGINAL stamp rather than restamping.
         let key = ("mill".to_string(), "graph");
-        metrics.note_replica_lane("mill", "graph", 1, 5);
+        metrics.note_replica_lane("mill", "mill", "graph", 1, 5);
         let stamped = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_ne!(
             stamped, 0,
@@ -685,12 +685,55 @@ mod tests {
             .get_mut(&key)
             .unwrap()
             .behind_since_epoch = 42;
-        metrics.note_replica_lane("mill", "graph", 2, 5);
+        metrics.note_replica_lane("mill", "mill", "graph", 2, 5);
         let kept = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_eq!(kept, 42, "still behind: the age keeps its origin");
         // Catching up clears it.
-        metrics.note_replica_lane("mill", "graph", 5, 5);
+        metrics.note_replica_lane("mill", "mill", "graph", 5, 5);
         assert_eq!(metrics.replica_lag.lock()[&key].behind_since_epoch, 0);
+    }
+
+    /// The lag rows key on the context's STEM (its id) and carry the
+    /// display name only as a rotating label: a rename re-labels the
+    /// same row in place (no series stranded under the old name), and
+    /// a forget lands by stem even though the registry entry — and
+    /// with it the name — is already gone by then (CodeRabbit, PR
+    /// #978).
+    #[test]
+    fn lag_rows_key_on_the_stem_so_renames_rotate_and_forgets_land() {
+        let metrics = Metrics::default();
+        metrics.set_replica_mode();
+
+        metrics.note_replica_lane("id-1", "sake", "graph", 1, 1);
+        // The upstream rename: same stem, new display name.
+        metrics.note_replica_lane("id-1", "shochu", "graph", 2, 2);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_applied_seq{context=\"shochu\",lane=\"graph\"} 2"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("context=\"sake\""),
+            "the old name must rotate away, not linger as a second series: {rendered}"
+        );
+        // Forgotten by stem — no display name needed or known.
+        metrics.forget_replica_context("id-1");
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(!rendered.contains("context=\"shochu\""), "{rendered}");
+
+        // The writer-side family behaves identically.
+        metrics.note_replication_lane("id-1", "sake", "graph", 3, 60);
+        metrics.note_replication_lane("id-1", "shochu", "graph", 3, 60);
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered
+                .contains("taguru_replication_lag_records{context=\"shochu\",lane=\"graph\"} 3"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("context=\"sake\""), "{rendered}");
+        metrics.forget_replication_lane("id-1", "graph");
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(!rendered.contains("context=\"shochu\""), "{rendered}");
     }
 
     /// The in-flight counter: a ceiling refuses at capacity, zero means

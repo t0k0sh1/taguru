@@ -241,18 +241,17 @@ pub(crate) fn lane_stem(lane_name: &str) -> &str {
 }
 
 /// The per-lane label pair the lag metric carries: the `context`'s
-/// decoded name where the stem decodes (it always should — these files
-/// were written by the server), plus which lane. The replica's lag
-/// rows reuse it so the two vocabularies cannot drift.
-pub(crate) fn lane_metric_labels(lane_name: &str) -> (String, &'static str) {
+/// display name — resolved through the registry, since the stem is
+/// the id and no longer encodes it (ADR 0045) — plus which lane. The
+/// replica's lag rows reuse it so the two vocabularies cannot drift.
+pub(crate) fn lane_metric_labels(
+    state: &crate::registry::AppState,
+    lane_name: &str,
+) -> (String, &'static str) {
     let kind = if lane_name.ends_with(".passages.wal.jsonl") {
         "passages"
     } else {
         "graph"
     };
-    let stem = lane_stem(lane_name);
-    (
-        crate::registry::name_from_stem(stem).unwrap_or_else(|| stem.to_string()),
-        kind,
-    )
+    (state.name_of_stem(lane_stem(lane_name)), kind)
 }

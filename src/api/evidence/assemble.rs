@@ -685,8 +685,8 @@ mod tests {
     /// `io::Error` — the same trick `api::sources`'s own io-error
     /// tests use (issue #620): a snapshot file `PassageStore::load`
     /// cannot parse, written before the `context`'s first passage touch.
-    fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
-        let stem = crate::registry::file_stem(context);
+    fn corrupt_passages_snapshot(state: &AppState, dir: &std::path::Path, context: &str) {
+        let stem = state.stem_of(context).unwrap();
         let path = crate::registry::passages_path(dir, &stem);
         std::fs::write(path, b"not a valid passages snapshot").unwrap();
     }
@@ -726,7 +726,7 @@ mod tests {
     async fn assemble_evidence_reports_a_genuine_io_error_as_unreadable_not_timeout() {
         let (state, dir) = scratch_state("io-error");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
 
         let response = assemble_evidence(
             State(state),
@@ -753,7 +753,7 @@ mod tests {
     async fn assemble_evidence_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
         let (state, dir) = scratch_state("io-error-timeout");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
         crate::api::expire_deadline_race();
 
         let response = assemble_evidence(

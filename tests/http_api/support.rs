@@ -8,8 +8,11 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
 
+#[allow(unused_imports)]
 #[path = "../common/spawn.rs"]
 pub(crate) mod common;
+#[allow(unused_imports)]
+pub use common::context_stem;
 
 /// [`common::read_listen_line`], then spawns a thread draining whatever
 /// follows so the child never blocks writing to a full stdout pipe —
@@ -91,6 +94,14 @@ impl Server {
     /// directly (e.g. its thread count) rather than through its API.
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// The file stem (the `context`'s id, ADR 0045) of the context
+    /// named `name` in this server's data directory — the bridge for
+    /// tests that reach into the files behind the API.
+    #[allow(dead_code)]
+    pub fn context_stem(&self, name: &str) -> String {
+        common::context_stem(&self.data_dir, name)
     }
 
     /// Sends `signal` (e.g. "-HUP") to the running server without

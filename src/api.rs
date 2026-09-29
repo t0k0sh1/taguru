@@ -1335,6 +1335,18 @@ fn access_error_noted(
             format!("{note}context '{name}' not found"),
             started_at,
         ),
+        // Reachable only from a hand-assembled data directory while
+        // this build still addresses contexts by name (#964 moves the
+        // wire to ids): served as an explicit conflict, never as "not
+        // found" and never from one of the claimants.
+        AccessError::AmbiguousName(count) => error(
+            ErrorCode::Conflict,
+            format!(
+                "{note}context name '{name}' is ambiguous: {count} contexts share it; \
+                 rename them apart (ids reach the wire in a later release)"
+            ),
+            started_at,
+        ),
         AccessError::Load(message) => {
             state.metrics().record_error(ErrorKind::Load);
             error(ErrorCode::Internal, format!("{note}{message}"), started_at)

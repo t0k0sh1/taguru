@@ -98,7 +98,26 @@ impl CodeMap {
     /// AccessError mapping took when reads still went through the
     /// registry).
     pub(crate) fn open(data_dir: &std::path::Path, name: &str) -> Result<CodeMap, String> {
-        let stem = crate::registry::file_stem(name);
+        // The stem is the context's id (ADR 0045), recorded in the
+        // sidecar metas — resolve the name offline the same way boot
+        // would, refusing an ambiguous one instead of picking.
+        let stems = crate::registry::stems_named(data_dir, name)
+            .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
+        let stem = match stems.as_slice() {
+            [stem] => stem.clone(),
+            [] => {
+                return Err(format!(
+                    "context '{name}' not found — run `taguru-code sync` first"
+                ));
+            }
+            several => {
+                return Err(format!(
+                    "context name '{name}' is ambiguous ({} contexts share it); \
+                     rename them apart",
+                    several.len()
+                ));
+            }
+        };
         let image_path = crate::registry::image_path(data_dir, &stem);
         let bytes = std::fs::read(&image_path)
             .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;

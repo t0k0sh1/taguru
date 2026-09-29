@@ -1172,24 +1172,74 @@ fn inspect_reports_no_images_under_an_empty_directory() {
 }
 
 #[test]
-fn inspect_warns_on_an_undecodable_stem_but_does_not_fail() {
-    let dir = common::scratch_dir("cli-inspect-badstem");
+fn inspect_reads_the_name_from_the_sidecar_and_falls_back_to_the_stem() {
+    let dir = common::scratch_dir("cli-inspect-sidecar-name");
     std::fs::create_dir_all(&dir).unwrap();
 
-    // "%zz" is not valid hex — file_stem's own encoding can never
-    // produce it, so this is a backup file the server would skip too.
-    std::fs::write(dir.join("%zz.ctx"), b"never parsed as an image").unwrap();
+    // The stem is the context's id (ADR 0045); the display name lives
+    // in the sidecar. A family with no sidecar at all reports under
+    // its stem — the same fallback boot applies — not a failure.
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join("some-id.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("some-id.meta.json"),
+        br#"{"id":"some-id","name":"sake","description":"d","pinned":false}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("bare-id.ctx"), context.to_bytes()).unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(
-        stdout.contains("%zz.ctx: WARNING — stem does not decode"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("total: 1 contexts"), "{stdout}");
+    assert!(stdout.contains("sake"), "{stdout}");
+    assert!(stdout.contains("bare-id"), "{stdout}");
+    assert!(stdout.contains("total: 2 contexts"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sidecar recording no id (a pre-ADR 0045 directory) fails the
+/// inspection with the migration message — the server refuses this
+/// directory too.
+#[test]
+fn inspect_fails_a_pre_id_sidecar_with_the_migration_message() {
+    let dir = common::scratch_dir("cli-inspect-pre-id");
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("sake.meta.json"),
+        br#"{"description":"d","pinned":false}"#,
+    )
+    .unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("records no context id"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other refused sidecar shape: an id that is not its own stem (a
+/// copied or hand-edited family) fails the inspection — exit code and
+/// all, which is what pins the failure COUNTER, not just the line.
+#[test]
+fn inspect_fails_a_sidecar_recording_a_foreign_id() {
+    let dir = common::scratch_dir("cli-inspect-foreign-id");
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("copied-here.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("copied-here.meta.json"),
+        br#"{"id":"original-stem","name":"sake","description":"d","pinned":false}"#,
+    )
+    .unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("not its own stem"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2364,10 +2414,11 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
 
     // Delete one context and one group from the data directory, the
     // way an offline operator does — the export must converge on it.
+    let old_stem = common::context_stem(&data, "old");
     for entry in std::fs::read_dir(&data).expect("data dir must list") {
         let entry = entry.expect("entry must read");
         let name = entry.file_name().into_string().expect("ascii stems");
-        if name.starts_with("old.") || name == "dead.group" {
+        if name.starts_with(&format!("{old_stem}.")) || name == "dead.group" {
             std::fs::remove_file(entry.path()).expect("delete must work");
         }
     }
@@ -2948,7 +2999,7 @@ fn compact_dry_run_reports_dead_weight_without_rewriting() {
     // Snapshot the image bytes before the dry run so a mutation, if
     // one somehow happened, would be caught even if the report text
     // itself looked plausible.
-    let image = data.join("sake.ctx");
+    let image = data.join(format!("{}.ctx", common::context_stem(&data, "sake")));
     let before = std::fs::read(&image).expect("image must exist after import");
 
     let dry = run_in(&["compact", "--dry-run"]);

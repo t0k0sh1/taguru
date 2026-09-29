@@ -27,9 +27,9 @@ use crate::groups::{
     GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting, trim_membership,
 };
 use crate::registry::{
-    IMPORT_MARKER_EXTENSION, ImportMarker, bm25_path, meta_path, name_from_stem, passages_path,
-    passages_wal_path, pvectors_path, scanned_stem_and_name, schema_digest_of, sources_path,
-    vectors_path, wal_path,
+    IMPORT_MARKER_EXTENSION, ImportMarker, ScannedMeta, bm25_path, meta_path, passages_path,
+    passages_wal_path, pvectors_path, read_scanned_meta, scanned_stem_and_name, schema_digest_of,
+    sources_path, vectors_path, wal_path,
 };
 use crate::schema;
 use crate::wal;
@@ -573,10 +573,12 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         .collect();
     // Context EXISTENCE is file presence — a corrupt image still
     // occupies its name at boot — so this set is what the group
-    // reference warnings below judge against.
+    // reference warnings below judge against. The name lives in the
+    // sidecar meta (ADR 0045: the stem is the id), read with the
+    // same classification and fallbacks the boot scan applies.
     let context_names: BTreeSet<String> = stems
         .iter()
-        .filter_map(|stem| name_from_stem(stem))
+        .filter_map(|stem| read_scanned_meta(dir, stem).display_name(stem))
         .collect();
 
     let mut failures = 0usize;
@@ -591,22 +593,52 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
     let mut notices: Vec<Notice> = Vec::new();
 
     for stem in &stems {
-        let name = match name_from_stem(stem) {
-            Some(name) => name,
-            None => {
-                // Not a failure: the server skips it too — but a backup
-                // holding files the server will never serve is worth a line.
+        // The same id/name classification boot applies (ADR 0045):
+        // the two refused shapes fail the inspection outright — the
+        // server will not start on this directory.
+        let scanned = read_scanned_meta(dir, stem);
+        let name = match (scanned.display_name(stem), scanned) {
+            (Some(name), _) => name,
+            (None, ScannedMeta::PreId) => {
                 if as_json {
-                    notices.push(Notice::warning(
-                        "undecodable_stem",
-                        format!("{stem}.ctx"),
-                        "stem does not decode; the server will skip it",
+                    context_rows.push(ContextRow::corrupt(
+                        stem.clone(),
+                        "pre_id_sidecar",
+                        "sidecar records no context id: written before ADR 0045 — the server \
+                         refuses this directory; export with the release that wrote it, then \
+                         import here"
+                            .to_string(),
                     ));
                 } else {
-                    println!("{stem}.ctx: WARNING — stem does not decode; the server will skip it");
+                    println!(
+                        "{stem}.meta.json: FAILURE — records no context id (pre-ADR 0045 \
+                         directory); export with the release that wrote it, then import here"
+                    );
                 }
+                failures += 1;
                 continue;
             }
+            (None, ScannedMeta::ForeignId(id)) => {
+                if as_json {
+                    context_rows.push(ContextRow::corrupt(
+                        stem.clone(),
+                        "foreign_id_sidecar",
+                        format!(
+                            "sidecar records id '{id}', not its own stem — the family was \
+                             copied or hand-edited; restore it under its original stem"
+                        ),
+                    ));
+                } else {
+                    println!(
+                        "{stem}.meta.json: FAILURE — records id '{id}', not its own stem; \
+                         restore the family under its original stem"
+                    );
+                }
+                failures += 1;
+                continue;
+            }
+            // display_name is Some for every Current/Degraded meta.
+            (None, _) => unreachable!("current/degraded metas always yield a name"),
         };
         let image = dir.join(format!("{stem}.ctx"));
         let (context, image_bytes, generation) = match load_image(&image) {

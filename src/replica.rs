@@ -446,12 +446,14 @@ impl Tailer {
         // re-hydration).
         self.pending_refresh.extend(report.stale.iter().cloned());
         for stem in &report.vanished {
-            let Some(name) = crate::registry::name_from_stem(stem) else {
-                continue;
-            };
-            tracing::info!(context = %name, "the lineage no longer carries this context; dropping it");
-            self.state.replica_deregister(&name);
-            self.state.metrics().forget_replica_context(&name);
+            if let Some(name) = self.state.replica_deregister(stem) {
+                tracing::info!(context = %name, "the lineage no longer carries this context; dropping it");
+            }
+            // By stem, and outside the deregister guard: the lag rows
+            // are keyed on the stem and may exist even for a stem
+            // that never registered (a failed lane still notes its
+            // shipped side).
+            self.state.metrics().forget_replica_context(stem);
             self.pending_refresh.remove(stem);
         }
         // Shared files (groups, the grant store, every sidecar meta)
@@ -466,15 +468,15 @@ impl Tailer {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let Some(name) = crate::registry::name_from_stem(stem) else {
-                // Undecodable: never registered, so it was never
-                // hydrated either — it must count as failed, or the
-                // per-lane metrics below (keyed on `failed`) would
-                // report this lane as fully caught up.
+            let Some(name) = self.state.replica_register(stem) else {
+                // A sidecar the boot scan would refuse (pre-id, or a
+                // foreign id — `replica_register` already warned):
+                // never hydrated, never refreshed, and it must count
+                // as failed or the per-lane metrics below (keyed on
+                // `failed`) would report this lane as fully caught up.
                 failed.insert(stem.as_str());
                 continue;
             };
-            self.state.replica_register(stem);
             if let Err(error) = self.hydrator.ensure_context(stem) {
                 tracing::warn!(
                     context = %name,
@@ -484,7 +486,7 @@ impl Tailer {
                 failed.insert(stem.as_str());
                 continue;
             }
-            self.state.replica_refresh(&name);
+            self.state.replica_refresh(stem);
             self.pending_refresh.remove(stem);
         }
         // Applied seqs are per-lineage, so a switch must clear the old
@@ -509,16 +511,16 @@ impl Tailer {
         // gap, with the age counting from the first poll that saw it
         // behind.
         for (lane_name, lane) in &manifest.lanes {
-            let (context, lane_label) = ship::lane_metric_labels(lane_name);
+            let (context, lane_label) = ship::lane_metric_labels(&self.state, lane_name);
             let stem = ship::lane_stem(lane_name);
             if failed.contains(stem) {
                 self.state
                     .metrics()
-                    .note_replica_shipped(&context, lane_label, lane.seq);
+                    .note_replica_shipped(stem, &context, lane_label, lane.seq);
             } else {
                 self.state
                     .metrics()
-                    .note_replica_lane(&context, lane_label, lane.seq, lane.seq);
+                    .note_replica_lane(stem, &context, lane_label, lane.seq, lane.seq);
             }
         }
         if !failed.is_empty() {
@@ -826,7 +828,7 @@ mod tests {
         std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"d","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"d","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
@@ -1106,7 +1108,7 @@ mod tests {
         std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"old","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
@@ -1146,7 +1148,7 @@ mod tests {
         // The writer moves the meta and ships a second segment.
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"new","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
@@ -1209,7 +1211,7 @@ mod tests {
         std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"old","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
@@ -1248,7 +1250,7 @@ mod tests {
 
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"new","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
@@ -1307,7 +1309,7 @@ mod tests {
         std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"old","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
@@ -1362,7 +1364,7 @@ mod tests {
         // invisible.
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"new","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
         )
         .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
@@ -1422,14 +1424,14 @@ mod tests {
         std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"a","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"a","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
         std::fs::write(writer.join("ctx_b.ctx"), b"image-v1").unwrap();
         std::fs::write(
             writer.join("ctx_b.meta.json"),
-            br#"{"description":"b","pinned":false}"#,
+            br#"{"id":"ctx_b","name":"ctx_b","description":"b","pinned":false}"#,
         )
         .unwrap();
         wal::append_batch(&writer.join("ctx_b.wal.jsonl"), 1, &[associate("b")]).unwrap();
@@ -1484,7 +1486,7 @@ mod tests {
         std::fs::remove_file(writer.join("ctx_b.wal.jsonl")).unwrap();
         std::fs::write(
             writer.join("ctx_a.meta.json"),
-            br#"{"description":"a2","pinned":false}"#,
+            br#"{"id":"ctx_a","name":"ctx_a","description":"a2","pinned":false}"#,
         )
         .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();

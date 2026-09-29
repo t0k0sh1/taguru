@@ -127,7 +127,12 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
     let (status, body) = server.call("GET", "/metrics", None);
     assert_eq!(status, 200);
     let text = body.as_str().expect("metrics body is text");
-    assert!(server.data_dir.join("pc.ctx").exists());
+    assert!(
+        server
+            .data_dir
+            .join(format!("{}.ctx", server.context_stem("pc")))
+            .exists()
+    );
     assert_eq!(
         gauge(
             text,
@@ -150,9 +155,13 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
     server.ok("POST", "/flush", None);
     let (_, body) = server.call("GET", "/metrics", None);
     let text = body.as_str().expect("metrics body is text");
-    let image_len = std::fs::metadata(server.data_dir.join("pc.ctx"))
-        .expect("image exists")
-        .len();
+    let image_len = std::fs::metadata(
+        server
+            .data_dir
+            .join(format!("{}.ctx", server.context_stem("pc"))),
+    )
+    .expect("image exists")
+    .len();
     assert!(image_len > 0);
     assert_eq!(
         gauge(

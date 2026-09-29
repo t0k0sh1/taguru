@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{assoc_op, scratch_dir};
+    use super::test_support::{assoc_op, scratch_dir, stem_on_disk};
     use super::*;
     use crate::context_proptest::{config as proptest_config, wal_op_strategy};
     use proptest::prelude::*;
@@ -403,7 +403,7 @@ mod tests {
             .unwrap();
         let entry = state.lookup("sake").unwrap();
         entry.bm25_dirty.store(false, Ordering::Relaxed);
-        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let store = state.entry_passages(&entry, &entry.id).unwrap();
 
         // A source this index never held anything for: `store.get`
         // misses and `remove_source` is a genuine no-op.
@@ -462,7 +462,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let before = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        let before = fs::read(meta_path(&dir, &stem_on_disk(&dir, "sake"))).unwrap();
 
         let state = AppState::boot_with(
             dir.clone(),
@@ -485,7 +485,7 @@ mod tests {
             before_revision + 1,
             "memory still bumps on a replica"
         );
-        let after_bytes = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        let after_bytes = fs::read(meta_path(&dir, &state.stem_of("sake").unwrap())).unwrap();
         assert_eq!(
             before, after_bytes,
             "a replica must never persist the sidecar for this bump"
@@ -537,16 +537,15 @@ mod tests {
         }
     }
 
-    /// `ensure_hot`'s own copy of ADR 0009 §5.2's schema check
-    /// (`registry.rs:2858-2866`) has no failure test — the one test
-    /// that reaches this call at all
-    /// (`schema_of_lazily_resolves_after_a_rename_carried_the_digest_but_not_the_schema`
-    /// in `lifecycle.rs`) only exercises the success arm. Reuses the
-    /// same fixture (a rename carries the digest but not the schema,
-    /// so the entry's own `ensure_hot` call is the only place this
-    /// check can run) and corrupts the schema file at the new stem
-    /// instead of the image, so THIS check — not the later image
-    /// load — is what fails.
+    /// `ensure_hot`'s own copy of ADR 0009 §5.2's schema check has no
+    /// failure test otherwise. The digest-recorded-but-unresolved
+    /// state it guards is the replica registration's (an entry
+    /// registered from its meta alone, `cold_from_meta` with
+    /// `schema: None` — a rename used to produce it too, before the
+    /// stem became the id); construct it directly — drop the
+    /// resident schema and slot by hand — and corrupt the schema
+    /// file, so THIS check — not the later image load — is what
+    /// fails.
     #[test]
     fn ensure_hot_refuses_to_load_when_its_own_schema_check_fails() {
         let dir = scratch_dir("ensure-hot-schema-check-fails");
@@ -554,20 +553,19 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         let installed = schema::install(valid_schema_document()).unwrap();
         state.put_schema("sake", installed).unwrap().unwrap();
-
         state.rename_context("sake", "shochu").unwrap();
-        assert!(
-            state
-                .lookup("shochu")
-                .unwrap()
-                .inner
-                .read()
-                .schema
-                .is_none(),
-            "sanity: the freshly registered entry must not resolve the schema up front"
-        );
+        {
+            let entry = state.lookup("shochu").unwrap();
+            let mut inner = entry.inner.write();
+            inner.slot = Slot::Cold;
+            inner.schema = None;
+        }
 
-        fs::write(schema_path(&dir, &file_stem("shochu")), b"not json").unwrap();
+        fs::write(
+            schema_path(&dir, &state.stem_of("shochu").unwrap()),
+            b"not json",
+        )
+        .unwrap();
 
         let error = state
             .read_context("shochu", |context| context.association_count())

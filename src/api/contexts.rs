@@ -451,6 +451,17 @@ pub async fn delete_context(
             format!("context '{name}' is mid-rename; retry after it completes"),
             started_at,
         ),
+        // Same posture as `AccessError::AmbiguousName` (`api.rs`):
+        // nothing was deleted, and picking one claimant is exactly
+        // what this refusal exists to prevent.
+        Some(Err(DeleteError::AmbiguousName(count))) => error(
+            ErrorCode::Conflict,
+            format!(
+                "context name '{name}' is ambiguous: {count} contexts share it; \
+                 rename them apart (ids reach the wire in a later release)"
+            ),
+            started_at,
+        ),
         Some(Ok(())) => {
             audit(true);
             ok(true, started_at)
@@ -538,6 +549,15 @@ pub async fn rename_context(
             format!(
                 "context '{name}' or '{}' is mid-rename, -create, or -delete; retry shortly",
                 request.to
+            ),
+            started_at,
+        ),
+        // Same posture as `AccessError::AmbiguousName` (`api.rs`).
+        Err(RenameContextError::AmbiguousName(count)) => error(
+            ErrorCode::Conflict,
+            format!(
+                "context name '{name}' is ambiguous: {count} contexts share it; \
+                 rename them apart (ids reach the wire in a later release)"
             ),
             started_at,
         ),

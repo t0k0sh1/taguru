@@ -2639,8 +2639,8 @@ mod tests {
     /// successful load to "then corrupt" — the snapshot file does not
     /// exist yet for a `context` that has never stored a passage, so
     /// this is simply that file's first-ever write.
-    fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
-        let stem = crate::registry::file_stem(context);
+    fn corrupt_passages_snapshot(state: &AppState, dir: &std::path::Path, context: &str) {
+        let stem = state.stem_of(context).unwrap();
         let path = crate::registry::passages_path(dir, &stem);
         std::fs::write(path, b"not a valid passages snapshot").unwrap();
     }
@@ -2657,7 +2657,7 @@ mod tests {
     async fn search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
         let (state, dir) = scratch_state("search-io-error");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
 
         let request = SearchPassagesRequest {
             query: "AAA".to_string(),
@@ -2691,7 +2691,7 @@ mod tests {
     async fn search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
         let (state, dir) = scratch_state("search-io-error-timeout");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
         crate::api::expire_deadline_race();
 
         let request = SearchPassagesRequest {
@@ -2728,7 +2728,7 @@ mod tests {
     async fn explain_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
         let (state, dir) = scratch_state("explain-io-error");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
 
         let request = ExplainSearchRequest {
             query: "AAA".to_string(),
@@ -2760,7 +2760,7 @@ mod tests {
     {
         let (state, dir) = scratch_state("explain-io-error-timeout");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
         crate::api::expire_deadline_race();
 
         let request = ExplainSearchRequest {
@@ -2795,7 +2795,7 @@ mod tests {
     async fn cross_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
         let (state, dir) = scratch_state("cross-search-io-error");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
 
         let request = CrossSearchPassagesRequest {
             contexts: vec!["sake".to_string()],
@@ -2830,7 +2830,7 @@ mod tests {
     async fn cross_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
         let (state, dir) = scratch_state("cross-search-io-error-timeout");
         state.create("sake", ContextMeta::default()).unwrap();
-        corrupt_passages_snapshot(&dir, "sake");
+        corrupt_passages_snapshot(&state, &dir, "sake");
         crate::api::expire_deadline_race();
 
         let request = CrossSearchPassagesRequest {

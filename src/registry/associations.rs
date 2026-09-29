@@ -10,7 +10,7 @@ use crate::wal::WalOp;
 
 use super::{
     AccessError, AppState, AssocOp, ChangeKind, ImportMarker, PartialWrite, applied_count,
-    apply_in_order, file_stem, import_marker_path,
+    apply_in_order, import_marker_path,
 };
 
 impl AppState {
@@ -110,7 +110,7 @@ impl AppState {
         // than failing the preview: the graph half is the load-bearing
         // number, and the real retraction reports its own passage
         // failure honestly when it happens.
-        let passage_present = match self.entry_passages(&entry, &file_stem(name)) {
+        let passage_present = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store.get(source).is_some(),
             Err(_) => false,
         };
@@ -163,7 +163,7 @@ impl AppState {
         // so a marker-clearing caller can still tell "nothing to
         // remove" and "removal genuinely failed" apart.
         let (passage_removed, passage_removal_errored) =
-            match self.entry_passages(&entry, &file_stem(name)) {
+            match self.entry_passages(&entry, &entry.id) {
                 Ok(store) => match store.retract(source) {
                     Ok(removed) => {
                         if removed {
@@ -230,13 +230,22 @@ impl AppState {
         if !self.0.import_markers_enabled {
             return Ok(());
         }
+        // The marker sits in the context's file family, so it is
+        // addressed by the context's id; a name that no longer
+        // resolves means the delete won — nothing to mark.
+        let Some(entry) = self.lookup(context) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("context '{context}' not found"),
+            ));
+        };
         let marker = ImportMarker {
             context: context.to_string(),
             source: source.to_string(),
         };
         let body = serde_json::to_vec(&marker).map_err(io::Error::from)?;
         write_atomic(
-            &import_marker_path(&self.0.data_dir, &file_stem(context), source),
+            &import_marker_path(&self.0.data_dir, &entry.id, source),
             &body,
         )
     }
@@ -248,7 +257,12 @@ impl AppState {
     /// keeps reporting a tear that is no longer one, until a re-import
     /// or a hand unlink clears it.
     pub fn clear_import_marker(&self, context: &str, source: &str) {
-        let path = import_marker_path(&self.0.data_dir, &file_stem(context), source);
+        // A name that no longer resolves means the context (and its
+        // markers) are already gone with the family.
+        let Some(entry) = self.lookup(context) else {
+            return;
+        };
+        let path = import_marker_path(&self.0.data_dir, &entry.id, source);
         if let Err(error) = remove_persisted_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -310,7 +324,7 @@ impl AppState {
         let Some(_fence) = entry.read_unless_deleted() else {
             return ops;
         };
-        let Ok(store) = self.entry_passages(&entry, &file_stem(name)) else {
+        let Ok(store) = self.entry_passages(&entry, &entry.id) else {
             return ops;
         };
         for op in &mut ops {
@@ -424,7 +438,7 @@ mod tests {
     use crate::registry::ContextMeta;
     use crate::registry::changes::ChangesOutcome;
     use crate::registry::paths::import_marker_paths;
-    use crate::registry::test_support::{assoc_op, plain, scratch_dir};
+    use crate::registry::test_support::{assoc_op, plain, scratch_dir, stem_on_disk};
     use crate::storage::{clear_persistence_fault, fail_persistence_ops_after};
 
     /// Standalone `retract_source` — the only path the HTTP endpoint and
@@ -460,7 +474,7 @@ mod tests {
             fail_persistence_ops_after(failure);
             let first = state.retract_source("sake", "doc");
             let past_end = clear_persistence_fault();
-            let marker = import_marker_path(&dir, "sake", "doc");
+            let marker = import_marker_path(&dir, &state.stem_of("sake").unwrap(), "doc");
 
             if past_end {
                 assert!(
@@ -557,13 +571,14 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
 
+        let stem = state.stem_of("sake").unwrap();
         state.open_import_marker("sake", "doc-1").unwrap();
-        let marker = import_marker_path(&dir, "sake", "doc-1");
+        let marker = import_marker_path(&dir, &stem, "doc-1");
         assert!(marker.exists(), "open writes the marker");
         // Distinct sources get distinct files — concurrent imports of
         // one context never race on a shared marker.
         state.open_import_marker("sake", "doc-2").unwrap();
-        assert_eq!(import_marker_paths(&dir, "sake").len(), 2);
+        assert_eq!(import_marker_paths(&dir, &stem).len(), 2);
         // The content names the pair, so reports never decode filenames.
         let parsed: ImportMarker = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
         assert_eq!(
@@ -573,13 +588,13 @@ mod tests {
 
         state.clear_import_marker("sake", "doc-1");
         assert!(!marker.exists(), "clear removes exactly its own marker");
-        assert_eq!(import_marker_paths(&dir, "sake").len(), 1);
+        assert_eq!(import_marker_paths(&dir, &stem).len(), 1);
 
         // Deletion takes the survivors with the family: a marker must
         // not have boot report a tear in a context that is gone.
         state.delete("sake").unwrap().unwrap();
         assert!(
-            import_marker_paths(&dir, "sake").is_empty(),
+            import_marker_paths(&dir, &stem).is_empty(),
             "delete sweeps markers"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -817,8 +832,8 @@ mod tests {
         );
 
         state.flush_dirty();
+        let log = crate::registry::passages_wal_path(&dir, &state.stem_of("sake").unwrap());
         drop(state);
-        let log = dir.join("sake.passages.wal.jsonl");
         let mut corrupt = fs::read(&log).unwrap();
         corrupt.splice(0..0, *b"not json\n"); // a corrupt INTERIOR line
         fs::write(&log, &corrupt).unwrap();
@@ -940,7 +955,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let log = dir.join("sake.passages.wal.jsonl");
+        let log = crate::registry::passages_wal_path(&dir, &stem_on_disk(&dir, "sake"));
         let healthy = fs::read(&log).unwrap();
         let mut corrupt = healthy.clone();
         corrupt.splice(0..0, *b"not json\n");

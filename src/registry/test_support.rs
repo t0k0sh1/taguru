@@ -8,6 +8,34 @@ pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The stem (id) of the `context` named `name` in `dir`, read back
+/// from the sidecar metas on disk — for assertions that outlive the
+/// `AppState` that created the context (a reboot boundary), where
+/// `AppState::stem_of` has nothing to answer from. Panics on a name
+/// no sidecar records.
+pub(crate) fn stem_on_disk(dir: &Path, name: &str) -> String {
+    for dir_entry in fs::read_dir(dir).expect("data dir must be listable") {
+        let path = dir_entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value.get("name").and_then(|v| v.as_str()) == Some(name) {
+            return stem.to_string();
+        }
+    }
+    panic!("no sidecar in {} records the name '{name}'", dir.display());
+}
+
 pub(crate) fn loaded_map(state: &AppState) -> HashMap<String, bool> {
     state
         .directory()

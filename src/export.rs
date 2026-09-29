@@ -1247,6 +1247,9 @@ fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<Str
         .export_context(name, Deadline::unbounded())
         .map_err(|failure| match failure {
             AccessError::NotFound => "no such context".to_string(),
+            AccessError::AmbiguousName(count) => {
+                format!("context name is ambiguous ({count} contexts share it); rename them apart")
+            }
             AccessError::Load(error) => error,
             AccessError::Unpersisted(error) => error,
             // The CLI runs with Deadline::unbounded(), which never
