@@ -8,10 +8,24 @@ use serde::{Deserialize, Serialize};
 use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 use crate::storage::write_atomic;
 
-/// Encodes a `context` name as a file stem: bytes outside [A-Za-z0-9_-]
-/// become %XX. Context names arrive from URL paths and may contain path
+/// Mints a fresh `context` id — a UUID v4 in its canonical hyphenated
+/// lowercase form, which doubles as the file stem of the context's
+/// whole family (ADR 0045: the id, not the name, addresses the files,
+/// so a rename never touches them). Plain ASCII inside `[a-f0-9-]`,
+/// so it needs no [`file_stem`] encoding and never collides with one:
+/// an encoded stem cannot contain `-`-separated hex groups of this
+/// shape by accident, and uniqueness comes from the 122 random bits.
+pub(crate) fn mint_context_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Encodes a `group` name as a file stem: bytes outside [A-Za-z0-9_-]
+/// become %XX. Group names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data
-/// directory (no traversal) and reversible.
+/// directory (no traversal) and reversible. (`context` families no
+/// longer use this: their stem is the context's id — see
+/// [`mint_context_id`] — and their name lives in the meta sidecar.
+/// Groups follow in #965, when they get ids of their own.)
 pub(crate) fn file_stem(name: &str) -> String {
     let mut stem = String::new();
     for byte in name.bytes() {
@@ -23,7 +37,7 @@ pub(crate) fn file_stem(name: &str) -> String {
     stem
 }
 
-/// Decodes [`file_stem`]'s encoding back into a `context` name.
+/// Decodes [`file_stem`]'s encoding back into a `group` name.
 pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(stem.len());
     let mut cursor = stem.bytes();
@@ -147,6 +161,11 @@ pub(crate) fn deleted_marker_path(dir: &Path, stem: &str) -> PathBuf {
 /// reconcile see `from` as dangling and drop it, losing the
 /// membership for good rather than carrying it to `to`. Removed only
 /// once both the move and the rewrite are durable.
+/// Test-only since context renames stopped writing markers (the stem
+/// is the id): the shared marker machinery below is still live for
+/// groups (`.grouprenaming`), and its own tests keep exercising it
+/// through this original extension.
+#[cfg(test)]
 pub(crate) fn renaming_marker_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.renaming"))
 }

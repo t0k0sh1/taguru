@@ -26,7 +26,7 @@ impl AppState {
                 None => return,
             }
         };
-        if let Err(error) = write_atomic(&bm25_path(&self.0.data_dir, &file_stem(name)), &bytes) {
+        if let Err(error) = write_atomic(&bm25_path(&self.0.data_dir, &entry.id), &bytes) {
             entry.bm25_dirty.store(true, Ordering::Relaxed);
             tracing::warn!("BM25 index for '{name}' not persisted (will retry): {error}");
         }
@@ -40,7 +40,11 @@ impl AppState {
     /// failed save is retried on the next tick (the entry stays dirty).
     pub fn flush_dirty(&self) -> Vec<String> {
         let mut flushed = Vec::new();
-        for (name, entry) in self.snapshot() {
+        for entry in self.snapshot() {
+            // The display name, for logs, metrics, and the refresh
+            // list — read once here; the files are addressed by
+            // `entry.id`, which no rename can move mid-flush.
+            let name = entry.inner.read().name.clone();
             self.flush_bm25(&name, &entry);
             if self.flush_entry(&name, &entry) {
                 flushed.push(name);
@@ -129,8 +133,8 @@ impl AppState {
             )
         };
 
-        let stem = file_stem(name);
-        let image = image_path(&self.0.data_dir, &stem);
+        let stem = entry.id.as_str();
+        let image = image_path(&self.0.data_dir, stem);
         let staged = match stage_bytes(&image, &bytes, false) {
             Ok(staged) => staged,
             Err(error) => {
@@ -190,7 +194,11 @@ impl AppState {
         // instead lag the image until the next successful flush.
         let outcome = write_meta(
             &self.0.data_dir,
-            &stem,
+            stem,
+            // The publication-time name, not a staging-time capture: a
+            // rename that landed while the image staged owns the
+            // sidecar's name field, and this write must not regress it.
+            &inner.name,
             &meta,
             &stats,
             &entry.usage.snapshot(),
@@ -219,7 +227,7 @@ impl AppState {
                 // the whole log — a write that landed mid-stage sits past
                 // our watermark and its records must survive.
                 if inner.wal_seq.saturating_sub(1) == watermark {
-                    self.truncate_wal(name, inner);
+                    self.truncate_wal(name, stem, inner);
                 }
                 true
             }
@@ -249,8 +257,8 @@ impl AppState {
     /// whole-image upload instead of a few log records. Bounded by the
     /// shipper's own deferral budget, so a dead bucket can never walk
     /// this log into its cap.
-    fn truncate_wal(&self, name: &str, inner: &mut EntryInner) {
-        let path = wal_path(&self.0.data_dir, &file_stem(name));
+    fn truncate_wal(&self, name: &str, stem: &str, inner: &mut EntryInner) {
+        let path = wal_path(&self.0.data_dir, stem);
         if let Some(progress) = &self.0.ship_progress
             && !progress.allows_reset(&path, inner.wal_seq.saturating_sub(1), inner.wal_bytes)
         {
@@ -342,7 +350,7 @@ impl AppState {
         operate: impl FnOnce(&mut Context) -> T,
         applied: impl FnOnce(&T) -> usize,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let entry = self.lookup_resolved(name)?;
         let mut wal_behind = false;
         let result = 'write: {
             // Same tombstone rule as with_hot: a delete that beat us to
@@ -351,6 +359,7 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 name,
                 &mut inner,
                 &self.0.metrics,
@@ -399,7 +408,7 @@ impl AppState {
                         inner.wal_bytes, self.0.wal_max_bytes
                     )));
                 }
-                let path = wal_path(&self.0.data_dir, &file_stem(name));
+                let path = wal_path(&self.0.data_dir, &entry.id);
                 let len_before = inner.wal_bytes;
                 match wal::append_batch(&path, inner.wal_seq, ops) {
                     Ok(appended) => {
@@ -584,7 +593,7 @@ impl AppState {
             warn_if_recovery_flush_missed(name, self.flush_entry(name, &entry));
         }
         self.touch(&entry);
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         result
     }
 
@@ -657,7 +666,7 @@ impl AppState {
 
         let mut candidates: Vec<(bool, u64, usize, String, Arc<Entry>)> = Vec::new();
         let mut total = 0usize;
-        for (name, entry) in self.snapshot() {
+        for entry in self.snapshot() {
             let inner = entry.inner.read();
             if inner.meta.pinned {
                 continue;
@@ -668,6 +677,10 @@ impl AppState {
                 // the graph and the delete cleared the vectors.
                 Slot::Cold | Slot::Deleted => 0,
             };
+            // The quota table is still keyed by display name (#966
+            // moves it to ids); read it under the same lock as the
+            // rest of this entry's snapshot.
+            let name = inner.name.clone();
             drop(inner);
             // Cached vector stores, resident passages, the BM25 index,
             // and paragraph vectors count too — a cold entry can hold
@@ -713,7 +726,7 @@ impl AppState {
             if total <= self.0.cache_bytes {
                 break;
             }
-            if name == except {
+            if entry.id == except {
                 continue;
             }
             if self.evict_entry(&name, &entry) {
@@ -800,7 +813,8 @@ impl AppState {
                 let stats = ContextStats::of(context);
                 if let Err(error) = save_files(
                     &self.0.data_dir,
-                    name,
+                    &entry.id,
+                    &inner.name,
                     &inner.meta,
                     &stats,
                     &entry.usage.snapshot(),
@@ -820,7 +834,7 @@ impl AppState {
                 }
                 inner.stats = stats;
                 entry.dirty.store(false, Ordering::Relaxed);
-                self.truncate_wal(name, inner);
+                self.truncate_wal(name, &entry.id, inner);
             } else {
                 inner.stats = ContextStats::of(context);
             }
@@ -884,10 +898,8 @@ impl AppState {
                 freed = true;
                 if !self.is_replica()
                     && entry.bm25_dirty.swap(false, Ordering::Relaxed)
-                    && let Err(error) = write_atomic(
-                        &bm25_path(&self.0.data_dir, &file_stem(name)),
-                        &index.to_bytes(),
-                    )
+                    && let Err(error) =
+                        write_atomic(&bm25_path(&self.0.data_dir, &entry.id), &index.to_bytes())
                 {
                     tracing::warn!("BM25 index for '{name}' evicted unpersisted: {error}");
                 }
@@ -924,7 +936,9 @@ fn warn_if_recovery_flush_missed(name: &str, flushed: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_support::{assoc_op, loaded_map, plain, rendered, scratch_dir};
+    use crate::registry::test_support::{
+        assoc_op, loaded_map, plain, rendered, scratch_dir, stem_on_disk,
+    };
 
     #[test]
     fn ensure_hot_records_hits_and_loads() {
@@ -1429,8 +1443,9 @@ mod tests {
         let stale = i64::MAX;
         state.0.resident_estimate.store(stale, Ordering::Relaxed);
         // `budget_ops` is now 1 — off-beat, and `except` is still
-        // "big" — the exact same name the sweep above saturated on.
-        state.enforce_budget("big");
+        // `big`'s id — the exact same except the sweep above
+        // saturated on (the write path passes `entry.id`).
+        state.enforce_budget(&state.stem_of("big").unwrap());
         assert_eq!(
             state.0.resident_estimate.load(Ordering::Relaxed),
             stale,
@@ -1755,7 +1770,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let image = dir.join("sake.ctx");
+        let image = image_path(&dir, &stem_on_disk(&dir, "sake"));
         let healthy = fs::read(&image).unwrap();
         let mut corrupt = healthy.clone();
         corrupt[8] = 0xFF; // the version field — refused by from_bytes
@@ -2067,23 +2082,23 @@ mod tests {
         // The flusher's world an instant before the delete: entry Arcs
         // cloned out of the registry, the victim still dirty.
         let stale = state.snapshot();
+        let stem = state.stem_of("victim").unwrap();
         state.delete("victim").unwrap().unwrap();
 
         // Even if a stale handle re-marks the entry dirty (delete does
         // clear the flag, but that is an optimization), the tombstone
         // is what must hold.
-        for (_, entry) in &stale {
+        for entry in &stale {
             entry.dirty.store(true, Ordering::Relaxed);
         }
         // The flusher arrives late and works through its stale snapshot.
-        for (name, entry) in &stale {
+        for entry in &stale {
             assert!(
-                !state.flush_entry(name, entry),
+                !state.flush_entry("victim", entry),
                 "a deleted context must not flush"
             );
         }
 
-        let stem = file_stem("victim");
         for suffix in [
             "ctx",
             "meta.json",
@@ -2459,11 +2474,11 @@ mod tests {
                 })
             };
             thread::sleep(Duration::from_millis(20)); // flusher snapshots, then parks on the decoy
+            let stem = state.stem_of("victim").unwrap();
             state.delete("victim").unwrap().unwrap();
             drop(hold);
             flusher.join().unwrap();
 
-            let stem = file_stem("victim");
             for suffix in [
                 "ctx",
                 "meta.json",
@@ -2539,13 +2554,14 @@ mod tests {
     #[test]
     fn replay_does_not_double_apply_records_already_baked_into_the_image() {
         let dir = scratch_dir("wal-noreplay");
-        let wal_file = wal_path(&dir, &file_stem("sake"));
+        let wal_file;
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
                 .unwrap();
+            wal_file = wal_path(&dir, &state.stem_of("sake").unwrap());
             state
                 .add_associations(
                     "sake",
@@ -2728,7 +2744,7 @@ mod tests {
             .unwrap();
         // A directory sitting where the log file belongs makes the
         // append fail deterministically.
-        fs::create_dir_all(wal_path(&dir, &file_stem("sake"))).unwrap();
+        fs::create_dir_all(wal_path(&dir, &state.stem_of("sake").unwrap())).unwrap();
 
         let outcome = state.add_associations(
             "sake",
@@ -2779,7 +2795,7 @@ mod tests {
             // the engine's own append (the injected failure below)
             // refuses without moving its bookkeeping, just as a
             // sync-then-rollback double failure leaves things.
-            let path = wal_path(&dir, &file_stem("sake"));
+            let path = wal_path(&dir, &state.stem_of("sake").unwrap());
             let (_, top) = wal::replay::<WalOp>(&path, 0).unwrap();
             let refused = assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None);
             wal::append_batch(&path, top + 1, &[WalOp::Associate(refused.clone())]).unwrap();
@@ -2838,7 +2854,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let path = wal_path(&dir, &file_stem("sake"));
+            let path = wal_path(&dir, &state.stem_of("sake").unwrap());
             let (_, top) = wal::replay::<WalOp>(&path, 0).unwrap();
             let refused = assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None);
             wal::append_batch(&path, top + 1, &[WalOp::Associate(refused.clone())]).unwrap();
@@ -2903,7 +2919,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(
-                !wal_path(&dir, &file_stem("sake")).exists(),
+                !wal_path(&dir, &state.stem_of("sake").unwrap()).exists(),
                 "no log may be written when disabled"
             );
             // No flush: with the WAL off, this write is the accepted
@@ -3202,7 +3218,7 @@ mod tests {
             .unwrap();
         flusher.join().unwrap();
 
-        let stem = file_stem("sake");
+        let stem = state.stem_of("sake").unwrap();
         let sidecar = read_meta_file(&dir, &stem);
         let image_bytes = fs::read(image_path(&dir, &stem)).unwrap();
         let published_count = Context::from_bytes(&image_bytes)
@@ -3733,7 +3749,7 @@ mod tests {
             );
             let books = inner.wal_bytes;
             drop(inner);
-            let on_disk = fs::metadata(wal_path(&dir, &file_stem("sake")))
+            let on_disk = fs::metadata(wal_path(&dir, &state.stem_of("sake").unwrap()))
                 .unwrap()
                 .len();
             assert_eq!(
@@ -3918,7 +3934,7 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         assert!(
-            !wal_path(&dir, &file_stem("sake")).exists(),
+            !wal_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "no write has landed; the log must not exist yet"
         );
         let flushes_before = rendered(&state)
@@ -4123,7 +4139,7 @@ mod tests {
             state.flush_dirty();
             // No search here: the BM25 sidecar must not exist yet.
         }
-        assert!(!bm25_path(&dir, &file_stem("sake")).exists());
+        assert!(!bm25_path(&dir, &stem_on_disk(&dir, "sake")).exists());
 
         let state = AppState::boot_with(
             dir.clone(),
@@ -4146,7 +4162,7 @@ mod tests {
         );
         state.evict_entry("sake", &entry);
         assert!(
-            !bm25_path(&dir, &file_stem("sake")).exists(),
+            !bm25_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "a replica must never write the sidecar the manifest owns"
         );
 
@@ -4283,7 +4299,7 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         // First eviction compacts the pending log into the snapshot.
         assert!(state.evict_entry("sake", &entry));
-        let snapshot = crate::registry::passages_path(&dir, &file_stem("sake"));
+        let snapshot = crate::registry::passages_path(&dir, &state.stem_of("sake").unwrap());
         let inode = fs::metadata(&snapshot).unwrap().ino();
 
         // Resident again with nothing pending …
@@ -4544,7 +4560,7 @@ mod tests {
             "the dirty flag is swapped off unconditionally before the None check"
         );
         assert!(
-            !bm25_path(&dir, &file_stem("sake")).exists(),
+            !bm25_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "nothing must be written when there is no index to persist"
         );
 
@@ -4577,11 +4593,11 @@ mod tests {
             .unwrap();
         let entry = state.lookup("sake").unwrap();
         state.flush_bm25("sake", &entry);
-        assert!(bm25_path(&dir, &file_stem("sake")).exists());
+        assert!(bm25_path(&dir, &entry.id).exists());
 
         state.delete("sake").unwrap().unwrap();
         assert!(
-            !bm25_path(&dir, &file_stem("sake")).exists(),
+            !bm25_path(&dir, &entry.id).exists(),
             "sanity: delete must have removed the sidecar already"
         );
 
@@ -4592,7 +4608,7 @@ mod tests {
         state.flush_bm25("sake", &entry);
 
         assert!(
-            !bm25_path(&dir, &file_stem("sake")).exists(),
+            !bm25_path(&dir, &entry.id).exists(),
             "the fence must stop a stale handle from resurrecting a \
              deleted context's sidecar"
         );
@@ -4647,7 +4663,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let wal = wal_path(&dir, &file_stem("sake"));
+        let wal = wal_path(&dir, &state.stem_of("sake").unwrap());
         let before = fs::metadata(&wal).unwrap().len();
         assert!(
             before > 0,

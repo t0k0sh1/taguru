@@ -15,24 +15,41 @@ impl AppState {
     /// — the runtime twin of boot's hydrator registration. Idempotent;
     /// the sidecar meta is already local (the shared hydration pass
     /// lands every meta before families are touched).
-    pub(crate) fn replica_register(&self, stem: &str) {
-        let Some(name) = name_from_stem(stem) else {
-            return;
-        };
+    /// Returns the display name the `context` registered (or was
+    /// already registered) under — the tailer's log label.
+    pub(crate) fn replica_register(&self, stem: &str) -> String {
+        {
+            let registry = self.0.registry.read();
+            if let Some(entry) = registry.get_id(stem) {
+                return entry.inner.read().name.clone();
+            }
+        }
+        let meta_file = read_meta_file(&self.0.data_dir, stem);
+        // The name lives in the sidecar (ADR 0045); a writer of this
+        // build always records it, so the fallback to the stem is the
+        // same degraded-sidecar posture the boot scan takes.
+        let name = meta_file.name.clone().unwrap_or_else(|| stem.to_string());
         let mut registry = self.0.registry.write();
-        registry.entry(name).or_insert_with(|| {
-            // Not schema-verified here, same asymmetry as boot's
-            // hydrator registration (`boot_with`): the family this
-            // digest describes is not necessarily local yet, only the
-            // meta is. `ensure_hot`'s own copy of ADR 0009 §5.2's check
-            // runs once a load actually needs the bytes.
+        if let Some(entry) = registry.get_id(stem) {
+            return entry.inner.read().name.clone();
+        }
+        // Not schema-verified here, same asymmetry as boot's
+        // hydrator registration (`boot_with`): the family this
+        // digest describes is not necessarily local yet, only the
+        // meta is. `ensure_hot`'s own copy of ADR 0009 §5.2's check
+        // runs once a load actually needs the bytes.
+        registry.insert(
+            &name,
             Arc::new(Entry::cold_from_meta(
-                read_meta_file(&self.0.data_dir, stem),
+                stem.to_string(),
+                name.clone(),
+                meta_file,
                 0,
                 0,
                 None,
-            ))
-        });
+            )),
+        );
+        name
     }
 
     /// Replica tailer: the in-memory half of applying one tailed
@@ -43,21 +60,32 @@ impl AppState {
     /// bytes through the ordinary load path (image plus watermark
     /// replay), and reloads immediately when pinned — pinned means
     /// resident, on a replica as anywhere.
-    pub(crate) fn replica_refresh(&self, name: &str) {
-        let Some(entry) = self.lookup(name) else {
+    pub(crate) fn replica_refresh(&self, stem: &str) {
+        let Some(entry) = self.0.registry.read().get_id(stem).cloned() else {
             return;
         };
         let Some(mut inner) = entry.lock_unless_deleted() else {
             return;
         };
-        let stem = file_stem(name);
         let MetaFile {
+            id: _,
+            name: tailed_name,
             meta,
             stats,
             usage: _,
             revision,
             schema_digest,
-        } = read_meta_file(&self.0.data_dir, &stem);
+        } = read_meta_file(&self.0.data_dir, stem);
+        // An upstream rename arrives as a meta change like any other
+        // (the stem — the id — never moves): swap the display name and
+        // re-index it below, once `inner` is released (registry after
+        // entry lock would invert the crate's lock order).
+        let renamed_from = match tailed_name {
+            Some(tailed_name) if tailed_name != inner.name => {
+                Some(std::mem::replace(&mut inner.name, tailed_name))
+            }
+            _ => None,
+        };
         inner.meta = meta;
         inner.stats = stats;
         // Not `max`-merged like the revision counters below: a digest
@@ -107,9 +135,9 @@ impl AppState {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(_) => last,
         };
-        inner.wal_bytes = restat(&wal_path(&self.0.data_dir, &stem), inner.wal_bytes);
+        inner.wal_bytes = restat(&wal_path(&self.0.data_dir, stem), inner.wal_bytes);
         inner.passages_wal_bytes = restat(
-            &passages_wal_path(&self.0.data_dir, &stem),
+            &passages_wal_path(&self.0.data_dir, stem),
             inner.passages_wal_bytes,
         );
         if matches!(inner.slot, Slot::Hot(_)) {
@@ -132,9 +160,11 @@ impl AppState {
         *entry.passage_vectors_load_failure.lock() = None;
         *entry.vectors_load_failure.lock() = None;
         if inner.meta.pinned {
+            let name = inner.name.clone();
             if let Err(error) = ensure_hot(
                 &self.0.data_dir,
-                name,
+                &entry.id,
+                &name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -142,6 +172,14 @@ impl AppState {
                 tracing::warn!(context = %name, %error, "pinned context not reloaded after tailing");
             }
             self.recount_entry(&mut inner);
+        }
+        drop(inner);
+        if let Some(renamed_from) = renamed_from {
+            let renamed_to = entry.inner.read().name.clone();
+            self.0
+                .registry
+                .write()
+                .reindex(&entry.id, &renamed_from, &renamed_to);
         }
     }
 
@@ -151,12 +189,17 @@ impl AppState {
     /// does not know), and nothing here writes: no deletion marker, no
     /// `group` sweep (the manifest's own `group` files arrive already
     /// swept by the writer that deleted the `context`).
-    pub(crate) fn replica_deregister(&self, name: &str) {
-        let Some(entry) = self.0.registry.write().remove(name) else {
-            return;
+    /// Returns the dropped `context`'s display name (the tailer's log
+    /// and metrics label), or `None` when the stem was not registered.
+    pub(crate) fn replica_deregister(&self, stem: &str) -> Option<String> {
+        let name = {
+            let registry = self.0.registry.read();
+            registry.get_id(stem)?.inner.read().name.clone()
         };
+        let entry = self.0.registry.write().remove_id(stem, &name)?;
         let mut inner = entry.inner.write();
         self.tombstone_locked(&mut inner, &entry);
+        Some(name)
     }
 
     /// Replica tailer: re-reads `group` records from disk after a shared
@@ -267,7 +310,7 @@ mod tests {
                 .expect("a live context keys")
         };
         let before = key(&state);
-        state.replica_refresh("sake");
+        state.replica_refresh(&state.stem_of("sake").unwrap());
         let after = key(&state);
         assert_eq!(
             before.targets[0].lanes, after.targets[0].lanes,
@@ -290,11 +333,11 @@ mod tests {
         let dir = scratch_dir("replica-refresh-wal-bytes");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
-        let stem = file_stem("sake");
+        let stem = state.stem_of("sake").unwrap();
         // The tailer's shape: bytes land as plain file writes.
         fs::write(wal_path(&dir, &stem), b"{\"tailed\":1}\n").unwrap();
         fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":2}\n").unwrap();
-        state.replica_refresh("sake");
+        state.replica_refresh(&stem);
         let entry = state.lookup("sake").unwrap();
         {
             let inner = entry.inner.read();
@@ -311,7 +354,7 @@ mod tests {
         // A vanished WAL is the one honest zero.
         fs::remove_file(wal_path(&dir, &stem)).unwrap();
         fs::remove_file(passages_wal_path(&dir, &stem)).unwrap();
-        state.replica_refresh("sake");
+        state.replica_refresh(&stem);
         {
             let inner = entry.inner.read();
             assert_eq!(inner.wal_bytes, 0);
@@ -325,14 +368,14 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::write(wal_path(&dir, &stem), b"{\"tailed\":3}\n").unwrap();
             fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":4}\n").unwrap();
-            state.replica_refresh("sake");
+            state.replica_refresh(&stem);
             let before = {
                 let inner = entry.inner.read();
                 (inner.wal_bytes, inner.passages_wal_bytes)
             };
             assert_ne!(before, (0, 0));
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
-            state.replica_refresh("sake");
+            state.replica_refresh(&stem);
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
             let inner = entry.inner.read();
             assert_eq!((inner.wal_bytes, inner.passages_wal_bytes), before);
@@ -356,7 +399,7 @@ mod tests {
             .unwrap();
         let entry = state.lookup("sake").unwrap();
         let generation = entry.inner.read().image_generation;
-        state.replica_refresh("sake");
+        state.replica_refresh(&entry.id);
         {
             let inner = entry.inner.read();
             assert!(
@@ -534,13 +577,13 @@ mod tests {
             "nothing registered before the tailer touches it"
         );
 
-        let stem = file_stem("sake");
+        let stem = "sake-id";
         fs::write(
             dir.join(format!("{stem}.meta.json")),
-            br#"{"description":"sake","pinned":false}"#,
+            br#"{"id":"sake-id","name":"sake","description":"sake","pinned":false}"#,
         )
         .unwrap();
-        state.replica_register(&stem);
+        state.replica_register(stem);
         assert_eq!(
             state
                 .directory_entry("sake")
@@ -554,7 +597,7 @@ mod tests {
         // (a fresh entry with the same name still looks up fine), so
         // this pins the actual identity via `Arc::ptr_eq`.
         let first = state.lookup("sake").expect("just registered");
-        state.replica_register(&stem);
+        state.replica_register(stem);
         let second = state.lookup("sake").expect("still registered");
         assert!(
             std::sync::Arc::ptr_eq(&first, &second),
@@ -564,12 +607,13 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// #618: an undecodable stem (never a name this server itself
-    /// wrote) must be a silent no-op, not a panic — the tailer's own
-    /// worklist loop already filters these via `name_from_stem`, but
-    /// `replica_register` guards against it independently too.
+    /// Under ids there is no "undecodable" stem any more (nothing is
+    /// decoded): a stem whose sidecar has not landed yet registers
+    /// under the stem itself as a display fallback — the same
+    /// degraded posture the boot scan takes — instead of being
+    /// skipped or panicking (#618's original concern).
     #[test]
-    fn a_replica_register_ignores_an_undecodable_stem() {
+    fn a_replica_register_with_no_sidecar_falls_back_to_the_stem_as_name() {
         let dir = scratch_dir("replica-register-undecodable");
         let state = AppState::boot_with(
             dir.clone(),
@@ -581,23 +625,15 @@ mod tests {
             },
         )
         .unwrap();
-        // `context_count` is the actual registry `replica_register`
-        // writes into — `group_page` is a different subsystem and
-        // would pass even if this call registered something.
-        //
-        // `name_from_stem` only refuses a `%`-escape it cannot decode
-        // (an odd/invalid hex pair, or a `%` with nothing — or too
-        // little — after it): a plain string with no `%` at all
-        // decodes to itself unchanged, so it is NOT the "undecodable"
-        // case this test means to cover — `"trailing%"` genuinely is,
-        // its dangling `%` running out of input mid-escape.
         let before = state.context_count();
-        state.replica_register("trailing%");
+        let name = state.replica_register("some-fresh-stem");
+        assert_eq!(name, "some-fresh-stem", "the fallback name is the stem");
         assert_eq!(
             state.context_count(),
-            before,
-            "an undecodable stem must not register anything"
+            before + 1,
+            "the stem registers even before its sidecar lands"
         );
+        assert!(state.directory_entry("some-fresh-stem").is_some());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -617,16 +653,16 @@ mod tests {
             },
         )
         .unwrap();
-        let stem = file_stem("sake");
+        let stem = "sake-id";
         fs::write(
             dir.join(format!("{stem}.meta.json")),
-            br#"{"description":"sake","pinned":false}"#,
+            br#"{"id":"sake-id","name":"sake","description":"sake","pinned":false}"#,
         )
         .unwrap();
-        state.replica_register(&stem);
+        state.replica_register(stem);
         assert!(state.lookup("sake").is_some());
 
-        state.replica_deregister("sake");
+        state.replica_deregister(stem);
         assert!(
             state.lookup("sake").is_none(),
             "the lineage no longer carrying this context must drop it in memory"
@@ -634,6 +670,51 @@ mod tests {
 
         // A name never registered: a no-op, not a panic.
         state.replica_deregister("never-registered");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An upstream rename reaches a replica as a meta change under an
+    /// unmoved stem: the tailed refresh must swap the display name
+    /// AND re-index it, so the old name stops answering and the new
+    /// one resolves — without the entry (or its files) moving.
+    #[test]
+    fn a_replica_refresh_reindexes_an_upstream_rename() {
+        let dir = scratch_dir("replica-refresh-rename");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        let stem = "sake-id";
+        fs::write(
+            dir.join(format!("{stem}.meta.json")),
+            br#"{"id":"sake-id","name":"sake","description":"d","pinned":false}"#,
+        )
+        .unwrap();
+        state.replica_register(stem);
+        assert!(state.lookup("sake").is_some());
+
+        // The writer renamed it; the tailer lands the new meta bytes
+        // and refreshes.
+        fs::write(
+            dir.join(format!("{stem}.meta.json")),
+            br#"{"id":"sake-id","name":"shochu","description":"d","pinned":false}"#,
+        )
+        .unwrap();
+        state.replica_refresh(stem);
+
+        assert!(
+            state.lookup("sake").is_none(),
+            "the old name must stop answering"
+        );
+        let entry = state.lookup("shochu").expect("the new name must answer");
+        assert_eq!(entry.id, stem, "same entry, same id — nothing moved");
 
         let _ = fs::remove_dir_all(dir);
     }

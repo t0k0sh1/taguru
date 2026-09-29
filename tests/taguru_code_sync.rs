@@ -121,6 +121,29 @@ impl Drop for Repo {
     }
 }
 
+/// The file stem (the context's id, ADR 0045) of the context named
+/// `name` in `data_dir`, read from the sidecar metas — stems stopped
+/// encoding names, so tests reach files through this.
+fn context_stem(data_dir: &std::path::Path, name: &str) -> String {
+    for entry in fs::read_dir(data_dir).expect("data dir must list") {
+        let path = entry.expect("entry must read").path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value.get("name").and_then(|v| v.as_str()) == Some(name) {
+            return stem.to_string();
+        }
+    }
+    panic!("no sidecar records the name '{name}'");
+}
+
 #[test]
 fn sync_find_edit_rename_delete_round_trip() {
     let repo = Repo::new();
@@ -617,8 +640,9 @@ fn sync_compacts_the_passage_log_once_it_outgrows_the_snapshot() {
     let (code, out) = repo.run(&["sync", "."]);
     assert_eq!(code, 0, "{out}");
 
-    let wal = repo.dir.join(".taguru/code.passages.wal.jsonl");
-    let snapshot = repo.dir.join(".taguru/code.passages.bin");
+    let stem = context_stem(&repo.dir.join(".taguru"), "code");
+    let wal = repo.dir.join(format!(".taguru/{stem}.passages.wal.jsonl"));
+    let snapshot = repo.dir.join(format!(".taguru/{stem}.passages.bin"));
     assert!(
         snapshot.exists(),
         "sync must fold the outgrown log into a snapshot"

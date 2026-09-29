@@ -35,8 +35,7 @@ impl AppState {
         // server) would each cache and flush independently — last
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
-        let (mut registry, resumed_context_renames) =
-            scan_data_dir(&data_dir, options.hydrator.as_deref())?;
+        let mut registry = scan_data_dir(&data_dir, options.hydrator.as_deref())?;
         // A lazy bucket boot: the manifest's contexts are real even
         // though their images are not local yet — register them cold
         // from the sidecar metas the shared hydration already landed,
@@ -53,69 +52,45 @@ impl AppState {
         // for this path.
         if let Some(hydrator) = &options.hydrator {
             for stem in hydrator.context_stems() {
-                let Some(name) = name_from_stem(&stem) else {
+                if registry.get_id(&stem).is_some() {
                     continue;
-                };
-                registry.entry(name).or_insert_with(|| {
-                    // Not schema-verified here (see the comment
-                    // above): the family is not local yet, so there
-                    // is nothing to resolve. `ensure_hot` populates
-                    // this once hydration lands it.
+                }
+                // The name lives in the sidecar the shared hydration
+                // already landed; the stem is the id (ADR 0045). The
+                // stem fallback is the boot scan's degraded posture.
+                let meta_file = read_meta_file(&data_dir, &stem);
+                let name = meta_file.name.clone().unwrap_or_else(|| stem.clone());
+                // Not schema-verified here (see the comment above):
+                // the family is not local yet, so there is nothing to
+                // resolve. `ensure_hot` populates this once hydration
+                // lands it.
+                registry.insert(
+                    &name,
                     Arc::new(Entry::cold_from_meta(
-                        read_meta_file(&data_dir, &stem),
+                        stem.clone(),
+                        name.clone(),
+                        meta_file,
                         0,
                         0,
                         None,
-                    ))
-                });
-            }
-        }
-        // Groups scan after contexts (the context scan also sweeps
-        // staging leftovers). Both scans finish moving any in-flight
-        // rename's files, and hand back the (from, to) pairs whose
-        // marker survived; rewrite group membership for those FIRST —
-        // before reconcile, which has no notion of a rename in flight
-        // and would see `from` as a plain dangling reference (nothing
-        // registered under that name any more) and drop it instead of
-        // carrying it to `to`. Each rewrite persists immediately (it
-        // cannot rely on reconcile's own before/after diff, which
-        // would see no further change to make and skip the write), so
-        // the marker is safe to remove right after.
-        let (mut groups, resumed_group_renames) = groups::scan_groups(&data_dir)?;
-        // Rewrite membership only once the destination's pivot has
-        // landed (else there is no `to` to point at, and `from` still
-        // holds the files); remove the marker only once the move is
-        // complete (else a straggler still needs the next boot to
-        // retry). See `ResumedRename` for why these must not be one
-        // condition.
-        for rename in &resumed_context_renames {
-            // `true` when there was nothing to rewrite (`!landed`): a
-            // marker resumed that far is still cleared by `complete`
-            // alone, same as before this field existed.
-            let membership_persisted = if rename.landed {
-                rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
-                    &mut record.contexts
-                })
-            } else {
-                true
-            };
-            // Removing the marker unconditionally on `complete` — the
-            // move alone — is the bug `rename_in_membership`'s own doc
-            // warns about; see `retire_rename_marker`'s doc for why
-            // `complete` alone is not enough. Only reached once the
-            // move is complete: a straggler still needs the next boot
-            // to retry regardless of membership, so nothing runs here
-            // at all otherwise.
-            if rename.complete {
-                retire_rename_marker(
-                    &renaming_marker_path(&data_dir, &file_stem(&rename.from)),
-                    membership_persisted,
-                    &rename.from,
-                    &rename.to,
-                    "context rename's group membership rewrite",
+                    )),
                 );
             }
         }
+        // Groups scan after contexts. The group scan finishes moving
+        // any in-flight group rename's file and hands back the
+        // (from, to) pairs whose marker survived; rewrite nesting
+        // membership for those FIRST — before reconcile, which has no
+        // notion of a rename in flight and would see `from` as a
+        // plain dangling reference (nothing registered under that
+        // name any more) and drop it instead of carrying it to `to`.
+        // Each rewrite persists immediately (it cannot rely on
+        // reconcile's own before/after diff, which would see no
+        // further change to make and skip the write), so the marker
+        // is safe to remove right after. (Context renames stopped
+        // moving files or writing markers when the stem became the id
+        // — there is nothing to resume for them.)
+        let (mut groups, resumed_group_renames) = groups::scan_groups(&data_dir)?;
         for rename in &resumed_group_renames {
             let membership_persisted = if rename.landed {
                 rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
@@ -251,22 +226,24 @@ impl AppState {
     /// workers never contend with each other. Uses [`parallel_map`],
     /// which generalizes exactly this divide-the-queue shape.
     fn preload_pinned(&self) {
-        let pinned: Vec<(String, Arc<Entry>)> = self
+        let pinned: Vec<Arc<Entry>> = self
             .snapshot()
             .into_iter()
-            .filter(|(_, entry)| entry.inner.read().meta.pinned)
+            .filter(|entry| entry.inner.read().meta.pinned)
             .collect();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        parallel_map(pinned, workers, |(name, entry)| {
+        parallel_map(pinned, workers, |entry| {
             let mut inner = entry.inner.write();
             if !inner.meta.pinned {
                 return;
             }
+            let name = inner.name.clone();
             let preload_started = std::time::Instant::now();
             match ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 &name,
                 &mut inner,
                 &self.0.metrics,
@@ -329,7 +306,7 @@ fn passage_vector_limit_leaves_ann_dormant(
 fn scan_data_dir(
     data_dir: &Path,
     hydrator: Option<&crate::hydrate::Hydrator>,
-) -> io::Result<(BTreeMap<String, Arc<Entry>>, ResumedRenames)> {
+) -> io::Result<ContextTable> {
     // Unfinished deletions first: a `.deleted` marker means delete()
     // acknowledged the removal but could not unlink the whole family —
     // without this sweep, a surviving `.ctx` would RESURRECT a context
@@ -361,32 +338,17 @@ fn scan_data_dir(
                     "unfinished deletion: file still held",
                 );
             }
-            // A stuck rename naming this stem as its SOURCE or
-            // DESTINATION goes with the family too — the boot-time
-            // counterpart of `AppState::delete`'s own sweep (see that
-            // function's doc for why a survivor would otherwise have
-            // the rename-resume pass below try to move a family that
-            // no longer exists).
-            remove_persisted_file_quietly(
-                &renaming_marker_path(data_dir, &stem),
-                "unfinished deletion: stale rename marker still held",
-            );
-            // `rename_markers_targeting` matches a marker's `to` field
-            // against the DECODED context name, not the file stem
-            // (`RenameMarker` is written from the names `rename_context`
-            // was called with, before `file_stem`'s percent-encoding) —
-            // `delete`'s own equivalent scan (`lifecycle.rs`) passes
-            // `name` for the same reason. A name that needed encoding
-            // would otherwise never match here, leaving its stale
-            // targeting marker behind for the next boot's resume to
-            // move a deleted family back to life.
-            if let Some(name) = name_from_stem(&stem) {
-                for stale in rename_markers_targeting(data_dir, &name, "renaming") {
-                    remove_persisted_file_quietly(
-                        &stale,
-                        "unfinished deletion: stale rename marker still held",
-                    );
-                }
+            // Import markers go with the family, as `delete`'s own
+            // sweep already removes them: a survivor would have the
+            // marker report below blame a half-applied import on a
+            // recreated NAMESAKE of the deleted context — the marker
+            // names its context by display name, which a recreate
+            // (under a fresh id) legitimately reuses.
+            for stale in import_marker_paths(data_dir, &stem) {
+                remove_persisted_file_quietly(
+                    &stale,
+                    "unfinished deletion: import marker still held",
+                );
             }
             // The marker goes last: it only leaves once the family did.
             if remove_persisted_file(&path).is_err() {
@@ -394,52 +356,7 @@ fn scan_data_dir(
             }
         }
     }
-    // Unfinished renames next, before the `.ctx` scan below: a
-    // `.renaming` marker means `rename_context` moved (or was about to
-    // move) the whole file family but crashed before the group
-    // membership rewrite landed. Finishing the move here — repeatable,
-    // since a missing source file just means it already moved — lets
-    // the `.ctx` scan discover the context under its NEW name. The
-    // marker itself survives this pass; `boot_with` removes it only
-    // after also rewriting group membership, so a second crash still
-    // has everything it needs to resume.
-    let resumed_renames = resume_rename_markers(
-        data_dir,
-        "renaming",
-        "context",
-        |from_stem, to_stem| {
-            // `evict_stem` hydrates the family before vetoing its
-            // re-materialization — the same primitive the live path
-            // uses in `AppState::rename_context_locked` before moving
-            // files, so the two can never drift on the order or the
-            // reasoning. The returned undo token is dropped: unlike the
-            // live path, a resume that fails here just leaves the
-            // marker for the next boot to retry, no rollback needed.
-            //
-            // Logged (like `preload_pinned`'s own timing line) because
-            // this runs inside `scan_data_dir`, before the listener
-            // binds and while the data-directory lock is held: a
-            // permanently unreachable object turns every boot into a
-            // multi-round fetch-retry wait, once per stale marker, and
-            // an operator staring at a slow boot needs to see why.
-            if let Some(hydrator) = hydrator {
-                let hydrate_started = std::time::Instant::now();
-                let result = hydrator.evict_stem(from_stem);
-                tracing::info!(
-                    from_stem,
-                    ms = hydrate_started.elapsed().as_millis() as u64,
-                    ok = result.is_ok(),
-                    "boot resume: hydrated a renamed family before moving it"
-                );
-                result?;
-            }
-            move_context_files(data_dir, from_stem, to_stem)
-        },
-        // The pivot is `.ctx` — its arrival is what lets the `.ctx` scan
-        // below register the context under `to`.
-        |to_stem| image_path(data_dir, to_stem).exists(),
-    )?;
-    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
@@ -457,10 +374,10 @@ fn scan_data_dir(
         if extension != Some("ctx") {
             continue;
         }
-        let Some((stem, name)) = scanned_stem_and_name(&path) else {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        candidates.push((stem, name));
+        candidates.push(stem.to_string());
     }
 
     // The expensive part of a boot scan is the disk I/O per candidate
@@ -483,9 +400,46 @@ fn scan_data_dir(
     let mut indexed: Vec<IndexedCandidate> = parallel_map(
         candidates.into_iter().enumerate().collect(),
         workers,
-        |(index, (stem, name))| {
+        |(index, stem)| {
             let stem = stem.as_str();
-            let meta_file = read_meta_file(data_dir, stem);
+            // The sidecar is where identity lives now (ADR 0045): the
+            // stem must BE the recorded id, and the display name is
+            // read (never derived) — see `ScannedMeta` for the two
+            // refused shapes (a pre-id directory, a copied family)
+            // and the tolerated degraded ones.
+            let meta_file = match read_scanned_meta(data_dir, stem) {
+                ScannedMeta::Current(meta_file) => meta_file,
+                ScannedMeta::PreId => {
+                    return (
+                        index,
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "sidecar '{stem}.meta.json' records no context id: this data \
+                                 directory was written before contexts had ids (ADR 0045) and \
+                                 this build does not read it — export with the release that \
+                                 wrote it, then import here"
+                            ),
+                        )),
+                    );
+                }
+                ScannedMeta::ForeignId(id) => {
+                    return (
+                        index,
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "sidecar '{stem}.meta.json' records id '{id}', not its own \
+                                 stem: the family was copied or hand-edited — restore it \
+                                 under its original stem"
+                            ),
+                        )),
+                    );
+                }
+                ScannedMeta::Degraded(meta_file) => meta_file,
+            };
+            let name = meta_file.name.clone().unwrap_or_else(|| stem.to_string());
+            let name = name.as_str();
             let schema_digest = meta_file.schema_digest.clone();
             // ADR 0009 §5.1/§5.2: an unreadable, malformed, invalid, or
             // digest-mismatched schema file refuses the WHOLE boot — a
@@ -526,8 +480,10 @@ fn scan_data_dir(
             (
                 index,
                 Ok((
-                    name,
+                    name.to_string(),
                     Arc::new(Entry::cold_from_meta(
+                        stem.to_string(),
+                        name.to_string(),
                         meta_file,
                         wal_bytes,
                         passages_wal_bytes,
@@ -538,11 +494,15 @@ fn scan_data_dir(
         },
     );
     indexed.sort_by_key(|(index, _)| *index);
-    let registry: BTreeMap<String, Arc<Entry>> = indexed
-        .into_iter()
-        .map(|(_, result)| result)
-        .collect::<io::Result<BTreeMap<String, Arc<Entry>>>>(
-    )?;
+    let mut registry = ContextTable::default();
+    for (_, result) in indexed {
+        let (name, entry) = result?;
+        // Duplicate display names register side by side — the table
+        // represents them and name resolution refuses them explicitly
+        // (issue #961 decision 1); ids cannot collide (stems are
+        // unique within one directory).
+        registry.insert(&name, entry);
+    }
 
     // Surviving import markers: each says a multi-store batch opened
     // and never finished — a crash (or an unretried refusal) between
@@ -565,7 +525,7 @@ fn scan_data_dir(
             );
             continue;
         };
-        if registry.contains_key(&marker.context) {
+        if registry.contains_name(&marker.context) {
             tracing::warn!(
                 context = %marker.context,
                 source = %marker.source,
@@ -577,7 +537,7 @@ fn scan_data_dir(
             let _ = remove_persisted_file(&path);
         }
     }
-    Ok((registry, resumed_renames))
+    Ok(registry)
 }
 
 /// Boot-time counterpart of the delete-path sweeps: drops every `group`
@@ -595,14 +555,14 @@ fn scan_data_dir(
 /// collection is small enough that checking it all costs nothing.
 fn reconcile_groups(
     data_dir: &Path,
-    registry: &BTreeMap<String, Arc<Entry>>,
+    registry: &ContextTable,
     groups: &mut BTreeMap<String, GroupRecord>,
 ) {
     let scanned = groups.clone();
     for record in groups.values_mut() {
         record
             .contexts
-            .retain(|context| registry.contains_key(context));
+            .retain(|context| registry.contains_name(context));
         record.groups.retain(|child| scanned.contains_key(child));
     }
     // Dangling names never count toward the cap — they were just
@@ -640,7 +600,7 @@ fn reconcile_groups(
 mod tests {
     use super::*;
     use crate::registry::paths::RenameMarker;
-    use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir};
+    use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir, stem_on_disk};
 
     #[test]
     fn the_data_directory_admits_one_registry_at_a_time() {
@@ -684,133 +644,23 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        assert!(dir.join("sake.ctx").exists());
+        let stem = stem_on_disk(&dir, "sake");
+        assert!(image_path(&dir, &stem).exists());
         // The crash-shaped state: delete() wrote its marker, then the
         // process died before (or while) the unlinks ran.
-        fs::write(dir.join("sake.deleted"), b"").unwrap();
+        fs::write(deleted_marker_path(&dir, &stem), b"").unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(
             state.directory_entry("sake").is_none(),
             "an acknowledged deletion must not resurrect"
         );
-        assert!(!dir.join("sake.ctx").exists(), "the family must be gone");
-        assert!(!dir.join("sake.wal.jsonl").exists());
+        assert!(!image_path(&dir, &stem).exists(), "the family must be gone");
+        assert!(!wal_path(&dir, &stem).exists());
         assert!(
-            !dir.join("sake.deleted").exists(),
+            !deleted_marker_path(&dir, &stem).exists(),
             "the marker leaves once the family did"
         );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// The boot-time counterpart of `AppState::delete`'s own rename
-    /// marker sweep: a `.deleted` marker means the ORIGINAL `delete`
-    /// call died before finishing (this is what the resume above is
-    /// for), so it never had the chance to clear a stuck rename's
-    /// marker sitting at (or naming) this stem either. Boot's own
-    /// resume must do it, or a stale marker survives an acknowledged
-    /// deletion and has the NEXT boot try to move a family that no
-    /// longer exists onto a destination stem.
-    #[test]
-    fn an_unfinished_deletion_clears_stray_rename_markers_too() {
-        let dir = scratch_dir("deleted-sweep-rename-markers");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state
-                .create("sake", ContextMeta::default())
-                .map_err(|_| "create")
-                .unwrap();
-            state
-                .create("beer", ContextMeta::default())
-                .map_err(|_| "create")
-                .unwrap();
-        }
-        // The crash-shaped state: `sake`'s own delete died mid-unlink
-        // (the marker survives), while it ALSO happens to sit at the
-        // source stem of one stuck rename (naming "shochu" as `to`) and
-        // the destination of another (from "beer"). Neither marker's
-        // family is this test's concern — only that both are gone once
-        // the deletion sweep finishes with "sake".
-        fs::write(dir.join("sake.deleted"), b"").unwrap();
-        fs::write(
-            renaming_marker_path(&dir, &file_stem("sake")),
-            serde_json::to_vec(&RenameMarker {
-                from: "sake".to_string(),
-                to: "shochu".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            renaming_marker_path(&dir, &file_stem("beer")),
-            serde_json::to_vec(&RenameMarker {
-                from: "beer".to_string(),
-                to: "sake".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.directory_entry("sake").is_none());
-        assert!(
-            !renaming_marker_path(&dir, &file_stem("sake")).exists(),
-            "the deletion sweep must clear a stuck rename marker at its own stem"
-        );
-        assert!(
-            !renaming_marker_path(&dir, &file_stem("beer")).exists(),
-            "the deletion sweep must clear a stuck rename marker naming it as destination"
-        );
-        assert!(
-            state.directory_entry("beer").is_some(),
-            "the untouched, unrelated source context must survive"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Regression: the destination-targeting scan above must compare
-    /// against the DECODED `context` name, not the file stem —
-    /// `RenameMarker.to` is written from the name `rename_context` was
-    /// called with, before `file_stem`'s percent-encoding. A deleted
-    /// `context` whose name needed encoding (anything outside
-    /// `[A-Za-z0-9_-]`) previously never matched here, leaving its
-    /// stale targeting marker behind for the next boot's resume to
-    /// move a family onto a name that no longer exists.
-    #[test]
-    fn an_unfinished_deletion_clears_a_targeting_marker_whose_name_needed_encoding() {
-        let dir = scratch_dir("deleted-sweep-encoded-targeting-marker");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state
-                .create("sake!", ContextMeta::default())
-                .map_err(|_| "create")
-                .unwrap();
-            state
-                .create("beer", ContextMeta::default())
-                .map_err(|_| "create")
-                .unwrap();
-        }
-        fs::write(dir.join(format!("{}.deleted", file_stem("sake!"))), b"").unwrap();
-        fs::write(
-            renaming_marker_path(&dir, &file_stem("beer")),
-            serde_json::to_vec(&RenameMarker {
-                from: "beer".to_string(),
-                to: "sake!".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.directory_entry("sake!").is_none());
-        assert!(
-            !renaming_marker_path(&dir, &file_stem("beer")).exists(),
-            "the deletion sweep must clear a targeting marker even when \
-             the deleted context's name needed percent-encoding"
-        );
-        assert!(state.directory_entry("beer").is_some());
-
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -829,38 +679,41 @@ mod tests {
                 .map_err(|_| "create")
                 .unwrap();
             // The crash-shaped state: batches opened their markers and
-            // the process died between the four mutations.
+            // the process died between the four mutations. The moot
+            // one is hand-planted (its context never existed — under
+            // ids `open_import_marker` refuses a name it cannot
+            // resolve, and a real orphan is a marker whose context
+            // was deleted out from under it).
             state.open_import_marker("sake", "doc-1").unwrap();
-            state.open_import_marker("ghost", "doc-9").unwrap();
+            fs::write(
+                import_marker_path(&dir, "ghost-stem", "doc-9"),
+                br#"{"context":"ghost","source":"doc-9"}"#,
+            )
+            .unwrap();
             state.flush_dirty();
         }
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(
-            import_marker_path(&dir, "sake", "doc-1").exists(),
+            import_marker_path(&dir, &stem_on_disk(&dir, "sake"), "doc-1").exists(),
             "a live context's tear stays visible until the repair runs"
         );
         assert!(
-            !import_marker_path(&dir, "ghost", "doc-9").exists(),
+            !import_marker_path(&dir, "ghost-stem", "doc-9").exists(),
             "a marker without its context is moot; boot removes it"
         );
         drop(state);
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Every existing boot-resume test plants exactly one marker kind
-    /// (`renaming_marker_path` OR `group_renaming_marker_path`), so
-    /// neither exercises the interleaving between the two resume loops
-    /// in `boot_with` (`resumed_context_renames` runs before
-    /// `resumed_group_renames`, both before `reconcile_groups`). Here a
-    /// `group` is itself mid-rename AND names, as a member, a `context`
-    /// that is also mid-rename in the same crash — both must land in
-    /// one boot, with the `group`'s `contexts` set carrying the
-    /// `context`'s NEW name, not the stale one and not dropped as
-    /// dangling.
+    /// A `group` mid-rename in a crash still resumes at boot — the one
+    /// rename resume left, now that a `context` rename is a plain
+    /// sidecar write (nothing to resume) — and its `contexts` set
+    /// carries its members unchanged: renaming the group never
+    /// touches the member names.
     #[test]
-    fn a_context_rename_and_its_containing_group_s_rename_both_resume_in_one_boot() {
-        let dir = scratch_dir("interleaved-context-and-group-rename-resume");
+    fn a_group_rename_resumes_at_boot_with_membership_intact() {
+        let dir = scratch_dir("group-rename-resume");
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
@@ -876,18 +729,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        // No manual file move for either: `scan_data_dir` and
-        // `groups::scan_groups` perform them once they see the
-        // markers, exactly as a real crash resume would.
-        fs::write(
-            renaming_marker_path(&dir, &file_stem("sake")),
-            serde_json::to_vec(&RenameMarker {
-                from: "sake".to_string(),
-                to: "shochu".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
+        // No manual file move: `groups::scan_groups` performs it once
+        // it sees the marker, exactly as a real crash resume would.
         fs::write(
             groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
             serde_json::to_vec(&RenameMarker {
@@ -899,20 +742,15 @@ mod tests {
         .unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.directory_entry("sake").is_none());
-        assert!(state.directory_entry("shochu").is_some());
         assert!(state.group("liquor").is_none());
         let spirits = state
             .group("spirits")
             .expect("the renamed group must exist");
         assert_eq!(
             spirits.contexts,
-            BTreeSet::from(["shochu".to_string()]),
-            "the group's own rename and its member context's rename \
-             must both resolve within one boot, membership pointing at \
-             the context's new name"
+            BTreeSet::from(["sake".to_string()]),
+            "membership rides the group rename unchanged"
         );
-        assert!(!renaming_marker_path(&dir, &file_stem("sake")).exists());
         assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
 
         let _ = fs::remove_dir_all(dir);
@@ -949,8 +787,9 @@ mod tests {
         // A hand-edited-looking directory: the context is gone, but the
         // group file still names it — exactly what reconcile exists to
         // drop and persist.
-        fs::remove_file(dir.join("sake.ctx")).unwrap();
-        fs::remove_file(dir.join("sake.meta.json")).unwrap();
+        let stem = stem_on_disk(&dir, "sake");
+        fs::remove_file(image_path(&dir, &stem)).unwrap();
+        fs::remove_file(meta_path(&dir, &stem)).unwrap();
 
         fail_persistence_ops_after(0);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -1007,7 +846,7 @@ mod tests {
         // Corrupt only "sake"'s image (flip the version byte, same
         // technique `engine.rs`'s own load-failure tests use) so its
         // preload fails while "shochu" stays healthy.
-        let image = image_path(&dir, &file_stem("sake"));
+        let image = image_path(&dir, &stem_on_disk(&dir, "sake"));
         let mut bytes = fs::read(&image).unwrap();
         assert!(bytes.len() > 8, "sanity: the version byte must exist");
         bytes[8] = 0xFF;
@@ -1120,6 +959,158 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0045 §2.7: a data directory written before contexts had
+    /// ids is refused with a migration message, never half-read — the
+    /// stems there are percent-encoded names, and registering them
+    /// would serve the encoding as identity.
+    #[test]
+    fn a_pre_id_sidecar_refuses_the_boot_with_a_migration_message() {
+        let dir = scratch_dir("boot-pre-id");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sake.ctx"), b"whatever").unwrap();
+        fs::write(
+            dir.join("sake.meta.json"),
+            br#"{"description":"d","pinned":false}"#,
+        )
+        .unwrap();
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("records no context id"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("export"),
+            "the refusal must name the migration path: {error}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar recording an id other than its own stem means the
+    /// family was copied or hand-edited — refused rather than
+    /// trusting either value.
+    #[test]
+    fn a_sidecar_recording_a_foreign_id_refuses_the_boot() {
+        let dir = scratch_dir("boot-foreign-id");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state.flush_dirty();
+        }
+        let stem = stem_on_disk(&dir, "sake");
+        // Copy the whole family under a different stem — the classic
+        // hand-restore mistake this refusal exists for.
+        for suffix in ["ctx", "meta.json"] {
+            fs::copy(
+                dir.join(format!("{stem}.{suffix}")),
+                dir.join(format!("copied-elsewhere.{suffix}")),
+            )
+            .unwrap();
+        }
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("not its own"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A missing (or unreadable) sidecar must not make the image
+    /// unreachable — the same leniency `read_meta_file` always had —
+    /// but the name is gone with it, so the context registers under
+    /// its stem as a display fallback an operator can rename away.
+    #[test]
+    fn a_missing_sidecar_falls_back_to_the_stem_as_display_name() {
+        let dir = scratch_dir("boot-missing-sidecar-name");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state.flush_dirty();
+        }
+        let stem = stem_on_disk(&dir, "sake");
+        fs::remove_file(meta_path(&dir, &stem)).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "the display name lived in the sidecar and left with it"
+        );
+        assert!(
+            state.directory_entry(&stem).is_some(),
+            "the image stays reachable under the stem fallback"
+        );
+        // A rename gives it a proper name again — and persists it.
+        state.rename_context(&stem, "sake").unwrap();
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Names are display strings and not unique (issue #961 decision
+    /// 1): two sidecars recording the same name boot side by side —
+    /// both listed — while every name-addressed operation refuses the
+    /// ambiguity explicitly instead of picking a claimant. (The wire
+    /// cannot create this state while creates are name-addressed;
+    /// only a hand-assembled directory can.)
+    #[test]
+    fn duplicate_display_names_boot_side_by_side_and_name_operations_refuse() {
+        let dir = scratch_dir("boot-duplicate-names");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state.create("other", ContextMeta::default()).unwrap();
+            state.flush_dirty();
+        }
+        // Hand-edit "other"'s sidecar to also claim the name "sake".
+        let other_stem = stem_on_disk(&dir, "other");
+        let path = meta_path(&dir, &other_stem);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["name"] = serde_json::json!("sake");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(state.context_count(), 2, "both claimants register");
+        let listed: Vec<String> = state
+            .directory()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            listed,
+            vec!["sake".to_string(), "sake".to_string()],
+            "the listing shows both, in (name, id) order"
+        );
+
+        assert!(
+            matches!(
+                state.read_context("sake", |context| context.association_count()),
+                Err(AccessError::AmbiguousName(2))
+            ),
+            "a read refuses rather than picking a claimant"
+        );
+        assert!(matches!(
+            state.delete("sake"),
+            Some(Err(DeleteError::AmbiguousName(2)))
+        ));
+        assert!(matches!(
+            state.rename_context("sake", "shochu"),
+            Err(RenameContextError::AmbiguousName(2))
+        ));
+        assert!(
+            matches!(
+                state.create("sake", ContextMeta::default()),
+                Err(CreateError::AlreadyExists)
+            ),
+            "a taken name is still a taken name"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Hand-edits the meta sidecar's `schema_digest` directly — S1 ships
     /// no writer for it (`PUT /contexts/{name}/schema` is #380), so
     /// this is the only way a test can put one there; the boot refusal
@@ -1148,15 +1139,16 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
+        let stem = stem_on_disk(&dir, "sake");
         let bytes = b"not json";
-        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
-        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(bytes));
+        fs::write(schema_path(&dir, &stem), bytes).unwrap();
+        record_schema_digest(&dir, &stem, &crate::sha256::sha256_hex(bytes));
 
         let error = AppState::boot(dir.clone(), usize::MAX, None)
             .map(|_| ())
             .unwrap_err();
         assert!(error.to_string().contains("does not parse"), "{error}");
-        assert_eq!(fs::read(schema_corrupt_path(&dir, "sake")).unwrap(), bytes);
+        assert_eq!(fs::read(schema_corrupt_path(&dir, &stem)).unwrap(), bytes);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1178,12 +1170,13 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
+        let stem = stem_on_disk(&dir, "sake");
         let document =
             br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
-        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        fs::write(schema_path(&dir, &stem), document).unwrap();
         record_schema_digest(
             &dir,
-            "sake",
+            &stem,
             &crate::sha256::sha256_hex(b"a different document"),
         );
 
@@ -1212,14 +1205,15 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
+        let stem = stem_on_disk(&dir, "sake");
         let document =
             br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
-        fs::write(schema_path(&dir, "sake"), document).unwrap();
-        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
+        fs::write(schema_path(&dir, &stem), document).unwrap();
+        record_schema_digest(&dir, &stem, &crate::sha256::sha256_hex(document));
         // Corrupt the sidecar itself: `read_meta_file` falls back to
         // `MetaFile::default()`, dropping the digest it just recorded
         // — even though the schema file on disk never changed.
-        fs::write(meta_path(&dir, "sake"), b"not json").unwrap();
+        fs::write(meta_path(&dir, &stem), b"not json").unwrap();
 
         let error = AppState::boot(dir.clone(), usize::MAX, None)
             .map(|_| ())
@@ -1252,14 +1246,15 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
+        let stem = stem_on_disk(&dir, "sake");
         let document =
             br#"{"type":"schema","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
-        fs::write(schema_path(&dir, "sake"), document).unwrap();
-        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
+        fs::write(schema_path(&dir, &stem), document).unwrap();
+        record_schema_digest(&dir, &stem, &crate::sha256::sha256_hex(document));
         // Remove the sidecar entirely, keeping the schema file: unlike
         // the corrupt-content case above, this exercises `fs::read`
         // itself failing rather than `serde_json::from_slice`.
-        fs::remove_file(meta_path(&dir, "sake")).unwrap();
+        fs::remove_file(meta_path(&dir, &stem)).unwrap();
 
         let error = AppState::boot(dir.clone(), usize::MAX, None)
             .map(|_| ())
@@ -1289,7 +1284,8 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        record_schema_digest(&dir, "sake", "deadbeef");
+        let stem = stem_on_disk(&dir, "sake");
+        record_schema_digest(&dir, &stem, "deadbeef");
 
         let error = AppState::boot(dir.clone(), usize::MAX, None)
             .map(|_| ())
@@ -1320,8 +1316,9 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        fs::write(schema_path(&dir, "sake"), document).unwrap();
-        record_schema_digest(&dir, "sake", &digest);
+        let stem = stem_on_disk(&dir, "sake");
+        fs::write(schema_path(&dir, &stem), document).unwrap();
+        record_schema_digest(&dir, &stem, &digest);
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state
@@ -1329,7 +1326,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(meta_path(&dir, "sake")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(meta_path(&dir, &stem)).unwrap()).unwrap();
         assert_eq!(
             value["schema_digest"],
             serde_json::json!(digest),

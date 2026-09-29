@@ -102,16 +102,18 @@ impl AppState {
         if self.is_replica() {
             return;
         }
-        for (name, entry) in self.snapshot() {
+        for entry in self.snapshot() {
             if !entry.usage_dirty.swap(false, Ordering::Relaxed) {
                 continue;
             }
             let Some(guard) = entry.lock_unless_deleted() else {
                 continue;
             };
+            let name = guard.name.clone();
             let outcome = write_meta(
                 &self.0.data_dir,
-                &file_stem(&name),
+                &entry.id,
+                &guard.name,
                 &guard.meta,
                 &guard.stats,
                 &entry.usage.snapshot(),
@@ -152,8 +154,10 @@ impl AppState {
             return;
         }
         let dir = &self.0.data_dir;
-        for (name, entry) in self.snapshot() {
-            let stem = file_stem(&name);
+        for entry in self.snapshot() {
+            // Logs name the context; files are addressed by id.
+            let name = entry.inner.read().name.clone();
+            let stem = entry.id.as_str();
             // `NotFound` is normal (the lane's file has never been
             // written, e.g. a context with no schema) and reads as
             // zero; any other error — a permission problem, EIO, a
@@ -179,19 +183,19 @@ impl AppState {
                 }
             };
             let usage = ContextDiskUsage {
-                image_bytes: len(image_path(dir, &stem)),
-                passages_bytes: len(passages_path(dir, &stem)),
+                image_bytes: len(image_path(dir, stem)),
+                passages_bytes: len(passages_path(dir, stem)),
                 // Meta + sources + gloss vectors + passage vectors +
                 // BM25 + schema (ADR 0009 §5.1's optional per-context
                 // document, `schema.rs`'s `write_atomic` target) —
                 // every sidecar `context_files` names, image and
                 // passages aside (their own lanes above).
-                sidecar_bytes: len(meta_path(dir, &stem))
-                    + len(sources_path(dir, &stem))
-                    + len(vectors_path(dir, &stem))
-                    + len(pvectors_path(dir, &stem))
-                    + len(bm25_path(dir, &stem))
-                    + len(schema_path(dir, &stem)),
+                sidecar_bytes: len(meta_path(dir, stem))
+                    + len(sources_path(dir, stem))
+                    + len(vectors_path(dir, stem))
+                    + len(pvectors_path(dir, stem))
+                    + len(bm25_path(dir, stem))
+                    + len(schema_path(dir, stem)),
             };
             if !ok {
                 continue;
@@ -236,8 +240,9 @@ impl AppState {
         // disagree about one scrape's instant.
         let collect_rows = self.0.per_context_metrics != PerContextMetrics::Off;
         let mut per_context = Vec::new();
-        for (name, entry) in snapshot {
+        for entry in snapshot {
             let inner = entry.inner.read();
+            let name = inner.name.clone();
             let mut graph_footprint = 0u64;
             // (concepts, associations, labels, sources) — live for hot,
             // the last-saved stats snapshot for cold, exactly the
@@ -370,7 +375,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_support::{assoc_op, plain, rendered, scratch_dir};
+    use crate::registry::test_support::{assoc_op, plain, rendered, scratch_dir, stem_on_disk};
 
     #[test]
     fn usage_notes_accumulate_and_survive_a_reboot_via_the_shutdown_sweep() {
@@ -488,7 +493,7 @@ mod tests {
             state.note_write("sake");
             state.persist_usage();
         }
-        let before = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        let before = fs::read(meta_path(&dir, &stem_on_disk(&dir, "sake"))).unwrap();
 
         let state = AppState::boot_with(
             dir.clone(),
@@ -515,7 +520,7 @@ mod tests {
             entry.usage_dirty.load(Ordering::Relaxed),
             "persist_usage must return before clearing usage_dirty on a replica"
         );
-        let after = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        let after = fs::read(meta_path(&dir, &state.stem_of("sake").unwrap())).unwrap();
         assert_eq!(
             before, after,
             "a replica must never persist its own usage counters to the sidecar"
@@ -869,7 +874,7 @@ mod tests {
                     .clone()
             };
             assert!(
-                fs::metadata(image_path(&dir, &file_stem("big")))
+                fs::metadata(image_path(&dir, &state.stem_of("big").unwrap()))
                     .unwrap()
                     .len()
                     > 0
@@ -889,7 +894,7 @@ mod tests {
             state.flush_dirty();
             let after = state.gauge_snapshot();
             let big = row(&after, "big");
-            let image_len = fs::metadata(image_path(&dir, &file_stem("big")))
+            let image_len = fs::metadata(image_path(&dir, &state.stem_of("big").unwrap()))
                 .unwrap()
                 .len();
             assert_eq!(big.disk_image_bytes, image_len);
@@ -1051,19 +1056,19 @@ mod tests {
         // all six files nonzero (#562 item 3: schema used to be
         // missing from this sum entirely).
         fs::write(
-            sources_path(&dir, &file_stem("sake")),
+            sources_path(&dir, &state.stem_of("sake").unwrap()),
             br#"{"ghost":"legacy sources"}"#,
         )
         .unwrap();
         fs::write(
-            schema_path(&dir, &file_stem("sake")),
+            schema_path(&dir, &state.stem_of("sake").unwrap()),
             br#"{"ghost":"legacy schema"}"#,
         )
         .unwrap();
 
         state.refresh_disk_usage();
         let len = |path: std::path::PathBuf| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        let stem = file_stem("sake");
+        let stem = state.stem_of("sake").unwrap();
         let parts = [
             ("meta", len(meta_path(&dir, &stem))),
             ("sources", len(sources_path(&dir, &stem))),
@@ -1157,7 +1162,7 @@ mod tests {
             let entry = state.lookup("sake").unwrap();
             let disk = *entry.disk.lock();
             let total = disk.image_bytes + disk.passages_bytes + disk.sidecar_bytes;
-            let schema_len = fs::metadata(schema_path(&probe_dir, &file_stem("sake")))
+            let schema_len = fs::metadata(schema_path(&probe_dir, &state.stem_of("sake").unwrap()))
                 .unwrap()
                 .len();
             (total - schema_len, schema_len)
@@ -1265,7 +1270,7 @@ mod tests {
 
         // A self-referencing symlink at the meta lane: `fs::metadata`
         // reports ELOOP, not NotFound.
-        let meta = meta_path(&dir, &file_stem("sake"));
+        let meta = meta_path(&dir, &state.stem_of("sake").unwrap());
         fs::remove_file(&meta).unwrap();
         std::os::unix::fs::symlink(&meta, &meta).unwrap();
 

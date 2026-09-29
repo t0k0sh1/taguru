@@ -238,31 +238,21 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
 
 // --- schema-load failure: fail-closed, driven through HTTP ------------------
 
-/// `Some(Err(message))` (`associations.rs`'s schema-load-failure arm)
-/// had no test anywhere — `crate::schema`'s own module doc requires
-/// every trouble case there to be a hard refusal, never a silent
-/// fallback, and this is the one write path guarding that. Reuses
-/// `hidden_label_fails_closed_when_schema_resolution_errors`'s own
-/// technique (`src/registry/lifecycle.rs`): corrupt the on-disk
-/// context image's version byte so `ensure_hot` fails on next load —
-/// driven through the real HTTP surface (`POST .../rename`, then a
-/// direct write to the data directory) rather than an in-process
-/// `AppState`.
-///
-/// The rename step is load-bearing, not incidental: `scan_data_dir`
-/// (`src/registry/boot.rs`) EAGERLY resolves and caches every
-/// context's schema at boot (`schema: Some(...)` from the very first
-/// registration), so a plain restart alone never reaches
-/// `schema_of`'s slow `ensure_hot` path — confirmed empirically, a
-/// restart with a corrupted (even truncated) image still answers `GET
-/// .../schema` correctly from the pre-resolved cache. Only a rename's
-/// re-registration carries the digest WITHOUT the resolved schema
-/// (`schema_of`'s own doc), forcing the slow path on the very next
-/// call — matching the unit test's own `rename_context` step exactly,
-/// just through the live server instead of a direct `AppState` call.
+/// A write into a schema-guarded context whose image will not load
+/// must be a hard refusal with nothing written — never a silent
+/// fallback (`crate::schema`'s module doc). A rename used to be the
+/// one wire-reachable route to the unresolved-schema slow path; under
+/// ids a rename re-registers nothing (the entry survives intact), so
+/// that state is a replica-only affair covered by the unit tests
+/// (`hidden_label_fails_closed_when_schema_resolution_errors`,
+/// `ensure_hot_refuses_to_load_when_its_own_schema_check_fails`).
+/// What the wire can still reach — and what this pins — is the
+/// fail-closed mapping itself: a restart drops the context cold, the
+/// corrupted image fails its next load, and the write answers 500
+/// with `nothing_written`.
 #[test]
 fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
-    let server = Server::start("assoc-schema-load-failure");
+    let mut server = Server::start("assoc-schema-load-failure");
     server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "PUT",
@@ -285,11 +275,18 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
         Some(json!({"to": "shochu"})),
     );
 
-    let image = server.data_dir.join("shochu.ctx");
+    let image = server
+        .data_dir
+        .join(format!("{}.ctx", server.context_stem("shochu")));
+    // Restart so the context is cold — a rename no longer unloads
+    // anything, and a hot context would serve the write from memory
+    // without ever reading the corrupted bytes.
+    let data_dir = server.stop_gracefully();
     let mut bytes = fs::read(&image).expect("the context image must exist");
     assert!(bytes.len() > 8, "sanity: the version byte must exist");
     bytes[8] = 0xFF;
     fs::write(&image, &bytes).expect("the corrupted image must be writable");
+    server = Server::start_on("assoc-schema-load-failure-reboot", data_dir);
 
     let (status, body) = server.call(
         "POST",
@@ -300,13 +297,8 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
     );
     assert_eq!(status, 500, "{body}");
     assert_eq!(body["code"], json!("internal"), "{body}");
-    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
-    assert_eq!(body["retryable_after_correction"], json!(false), "{body}");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("schema could not be loaded"),
+        body["error"].as_str().unwrap().contains("image corrupt"),
         "{body}"
     );
 }

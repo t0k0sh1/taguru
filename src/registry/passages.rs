@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::atomic::Ordering;
 
-use super::{AppState, CitationLookup, Markers, file_stem};
+use super::{AppState, CitationLookup, Markers};
 
 // Test-only fault injection for `store_passages`'s quota-check-to-write
 // window — the same shape as `storage::fail_persistence_ops_after`
@@ -89,7 +89,7 @@ impl AppState {
             )));
         }
         hit_quota_write_checkpoint();
-        let outcome = match self.entry_passages(&entry, &file_stem(name)) {
+        let outcome = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => {
                 let sources: Vec<String> = passages.keys().cloned().collect();
                 let stored = store.store(passages);
@@ -128,7 +128,7 @@ impl AppState {
         drop(fence);
         // Passage text is resident now; give the budget a chance to
         // evict something (possibly this context's own cold graph).
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         Some(outcome)
     }
 
@@ -151,7 +151,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
-            self.entry_passages(&entry, &file_stem(name))
+            self.entry_passages(&entry, &entry.id)
                 .map(|store| store.eligible_sources(filter).0),
         )
     }
@@ -169,7 +169,7 @@ impl AppState {
     ) -> Option<io::Result<std::collections::HashMap<String, u64>>> {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
-        Some(self.entry_passages(&entry, &file_stem(name)).map(|store| {
+        Some(self.entry_passages(&entry, &entry.id).map(|store| {
             store
                 .source_entries()
                 .into_iter()
@@ -190,7 +190,7 @@ impl AppState {
     ) -> Option<io::Result<(BTreeMap<String, String>, Vec<String>)>> {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
-        let store = match self.entry_passages(&entry, &file_stem(name)) {
+        let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
             Err(error) => return Some(Err(error)),
         };
@@ -223,7 +223,7 @@ impl AppState {
     ) -> Option<io::Result<CitationLookup>> {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
-        let store = match self.entry_passages(&entry, &file_stem(name)) {
+        let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
             Err(error) => return Some(Err(error)),
         };
@@ -278,7 +278,7 @@ impl AppState {
         let Some(_fence) = entry.read_unless_deleted() else {
             return HashMap::new();
         };
-        let store = match self.entry_passages(&entry, &file_stem(name)) {
+        let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
             Err(error) => {
                 tracing::warn!(
@@ -307,7 +307,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
-            self.entry_passages(&entry, &file_stem(name))
+            self.entry_passages(&entry, &entry.id)
                 .map(|store| store.source_ids()),
         )
     }
@@ -322,7 +322,7 @@ impl AppState {
         let entry = self.lookup(name)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
-            self.entry_passages(&entry, &file_stem(name))
+            self.entry_passages(&entry, &entry.id)
                 .map(|store| store.source_entries()),
         )
     }
@@ -337,7 +337,7 @@ mod tests {
     use crate::registry::ContextMeta;
     use crate::registry::LOAD_FAILURE_RETRY;
     use crate::registry::paths::{passages_path, passages_wal_path, sources_path};
-    use crate::registry::test_support::{plain, scratch_dir};
+    use crate::registry::test_support::{plain, scratch_dir, stem_on_disk};
     use crate::registry::{BootOptions, ContextQuota};
 
     #[test]
@@ -382,15 +382,12 @@ mod tests {
         // Deleting the context removes the whole passage file family:
         // the log the store just wrote, any snapshot, and a legacy
         // sources file left over from before the migration.
-        fs::write(
-            sources_path(&dir, &file_stem("sake")),
-            br#"{"legacy":"remnant"}"#,
-        )
-        .unwrap();
+        let stem = state.stem_of("sake").unwrap();
+        fs::write(sources_path(&dir, &stem), br#"{"legacy":"remnant"}"#).unwrap();
         state.delete("sake").unwrap().unwrap();
-        assert!(!sources_path(&dir, &file_stem("sake")).exists());
-        assert!(!passages_path(&dir, &file_stem("sake")).exists());
-        assert!(!passages_wal_path(&dir, &file_stem("sake")).exists());
+        assert!(!sources_path(&dir, &stem).exists());
+        assert!(!passages_path(&dir, &stem).exists());
+        assert!(!passages_wal_path(&dir, &stem).exists());
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -413,6 +410,7 @@ mod tests {
         // The racing writer's handle predates the delete — exactly the
         // window the read fence exists for.
         let entry = state.lookup("sake").unwrap();
+        let stem = entry.id.clone();
         state.delete("sake").unwrap().unwrap();
         assert!(
             entry.read_unless_deleted().is_none(),
@@ -423,7 +421,7 @@ mod tests {
             "the name is gone; nothing may recreate it"
         );
         assert!(
-            !passages_wal_path(&dir, &file_stem("sake")).exists(),
+            !passages_wal_path(&dir, &stem).exists(),
             "no passage file rose from the dead"
         );
 
@@ -454,7 +452,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let log = dir.join("sake.passages.wal.jsonl");
+        let log = passages_wal_path(&dir, &stem_on_disk(&dir, "sake"));
         let healthy = fs::read(&log).unwrap();
         let mut corrupt = healthy.clone();
         corrupt.splice(0..0, *b"not json\n"); // a corrupt INTERIOR line
@@ -834,7 +832,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let log = dir.join("sake.passages.wal.jsonl");
+        let log = passages_wal_path(&dir, &stem_on_disk(&dir, "sake"));
         let mut corrupt = fs::read(&log).unwrap();
         corrupt.splice(0..0, *b"not json\n");
         fs::write(&log, &corrupt).unwrap();
@@ -963,7 +961,7 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
         }
-        let log = dir.join("sake.passages.wal.jsonl");
+        let log = passages_wal_path(&dir, &stem_on_disk(&dir, "sake"));
         let mut corrupt = fs::read(&log).unwrap();
         corrupt.splice(0..0, *b"not json\n");
         fs::write(&log, &corrupt).unwrap();

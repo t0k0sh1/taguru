@@ -8,7 +8,7 @@ use taguru::deadline::{Deadline, DeadlineExceeded};
 use super::{
     AppState, ContextMeta, Entry, FusedHit, LimitToReach, PassageExplainLookup, PassageSearch,
     PassageSearchExplanation, PassageSearchHit, PassageSearchLanes, PassageVectorGate,
-    VectorLaneIdle, VectorLaneReport, VectorLaneStatus, bm25_path, file_stem, passage_terms,
+    VectorLaneIdle, VectorLaneReport, VectorLaneStatus, bm25_path, passage_terms,
     spelled_passage_terms,
 };
 
@@ -124,7 +124,7 @@ impl AppState {
         // held for the rest of this call, which likewise keeps
         // eviction's `bm25.take()` waiting until this search is done.
         let fence = entry.read_unless_deleted()?;
-        let store = match self.entry_passages(&entry, &file_stem(name)) {
+        let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
             Err(error) => return Some(Err(error)),
         };
@@ -200,7 +200,7 @@ impl AppState {
                 // Mirrors explain's own lazy gate read: only worth the
                 // call once a cue exists to check it against.
                 let gate = match &cue {
-                    Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
+                    Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &entry.id)),
                     _ => None,
                 };
                 let (hits, status) =
@@ -320,7 +320,7 @@ impl AppState {
         };
 
         let fence = entry.read_unless_deleted()?;
-        let store = match self.entry_passages(&entry, &file_stem(name)) {
+        let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
             Err(error) => return Some(Err(error)),
         };
@@ -363,7 +363,7 @@ impl AppState {
         let lexical_full = index.search(&query_grams, usize::MAX, eligible);
         let floor = self.effective_semantic_floor(floor_override, &fence.meta);
         let gate = match &cue {
-            Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
+            Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &entry.id)),
             _ => None,
         };
         let vector_rows: Vec<(String, u32, u64, f32)> = match (&cue, &gate) {
@@ -702,7 +702,7 @@ impl AppState {
                 entry.bm25_dirty.store(true, Ordering::Relaxed);
                 crate::bm25::Bm25Index::build(&records)
             } else if let Some(mut loaded) =
-                crate::bm25::Bm25Index::load(&bm25_path(&self.0.data_dir, &file_stem(name)))
+                crate::bm25::Bm25Index::load(&bm25_path(&self.0.data_dir, &entry.id))
             {
                 // A sidecar spares the re-tokenization, but its save
                 // cadence is the flush tick — repair whatever drifted
@@ -758,13 +758,13 @@ impl AppState {
     fn short_circuit_filter_report(
         &self,
         entry: &Entry,
-        name: &str,
+        _name: &str,
         filter: Option<&crate::passages::SourceFilter>,
     ) -> io::Result<Option<super::SourceFilterReport>> {
         let Some(filter) = filter else {
             return Ok(None);
         };
-        let store = self.entry_passages(entry, &file_stem(name))?;
+        let store = self.entry_passages(entry, &entry.id)?;
         let (eligible, total) = store.eligible_sources(filter);
         Ok(Some(super::SourceFilterReport {
             eligible: eligible.len(),
@@ -1394,7 +1394,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
-            assert!(bm25_path(&dir, &file_stem("sake")).exists());
+            let stem = state.stem_of("sake").unwrap();
+            assert!(bm25_path(&dir, &stem).exists());
         }
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -1529,7 +1530,8 @@ mod tests {
             .store_passages("sake", plain(passages))
             .unwrap()
             .unwrap();
-        fs::write(bm25_path(&dir, &file_stem("sake")), b"not an index").unwrap();
+        let stem = state.stem_of("sake").unwrap();
+        fs::write(bm25_path(&dir, &stem), b"not an index").unwrap();
 
         let hits = state
             .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
@@ -1539,7 +1541,7 @@ mod tests {
         assert_eq!(hits[0].source, "第1章");
         state.flush_dirty();
         assert!(
-            crate::bm25::Bm25Index::load(&bm25_path(&dir, &file_stem("sake"))).is_some(),
+            crate::bm25::Bm25Index::load(&bm25_path(&dir, &stem)).is_some(),
             "the tick replaces the corpse with a valid sidecar"
         );
 
@@ -1619,7 +1621,7 @@ mod tests {
             .unwrap();
 
         let entry = state.lookup("sake").unwrap();
-        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let store = state.entry_passages(&entry, &entry.id).unwrap();
 
         // Build path: nothing resident yet.
         {
@@ -1689,7 +1691,7 @@ mod tests {
             .unwrap();
 
         let entry = state.lookup("sake").unwrap();
-        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let store = state.entry_passages(&entry, &entry.id).unwrap();
         let record = store.get("第1章").unwrap();
 
         let mut stale = crate::bm25::Bm25Index::build(&[("第1章".to_string(), record.clone())]);
@@ -1739,7 +1741,7 @@ mod tests {
             .unwrap();
 
         let entry = state.lookup("sake").unwrap();
-        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let store = state.entry_passages(&entry, &entry.id).unwrap();
         let already_expired = Deadline::after(std::time::Duration::ZERO);
 
         assert!(
@@ -2971,7 +2973,7 @@ mod tests {
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
-            bm25_path(&dir, &file_stem("sake")).exists(),
+            bm25_path(&dir, &entry.id).exists(),
             "a dirty index rides out with the eviction"
         );
         // The next residency loads it clean instead of re-tokenizing.

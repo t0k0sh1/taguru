@@ -353,7 +353,7 @@ impl Shipper {
             self.lanes.remove(name);
             self.manifest_dirty = true;
             self.progress.forget(&self.data_dir.join(name));
-            let (context, lane_kind) = lane_metric_labels(name);
+            let (context, lane_kind) = lane_metric_labels(&self.state, name);
             self.state
                 .metrics()
                 .forget_replication_lane(&context, lane_kind);
@@ -525,7 +525,7 @@ impl Shipper {
             .pending_since
             .map(|since| since.elapsed().as_secs())
             .unwrap_or(0);
-        let (context, lane_kind) = lane_metric_labels(name);
+        let (context, lane_kind) = lane_metric_labels(&self.state, name);
         self.state.metrics().note_replication_lane(
             &context,
             lane_kind,

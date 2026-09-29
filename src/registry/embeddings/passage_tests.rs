@@ -11,8 +11,9 @@ mod tests {
     use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore};
     use crate::registry::test_support::{
         MockEmbeddings, SlowEmbeddings, boot_for_passage_embedding, plain, scratch_dir,
+        stem_on_disk,
     };
-    use crate::registry::{AppState, BootOptions, ContextMeta, file_stem, pvectors_path};
+    use crate::registry::{AppState, BootOptions, ContextMeta, pvectors_path};
 
     #[test]
     fn refresh_passage_embeddings_embeds_every_paragraph_once_then_nothing() {
@@ -194,7 +195,8 @@ mod tests {
             (0, 1),
             "the retracted source's row is gone without any re-embedding"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(sidecar.len(), 1, "the prune reached the disk too");
 
         let _ = fs::remove_dir_all(dir);
@@ -259,7 +261,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((first.embedded, first.total), (2, 2));
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert!(
             sidecar.iter().all(|(_, row)| row.len() == 2),
             "the first pass stored 2-dim rows"
@@ -279,7 +282,8 @@ mod tests {
             (2, 2),
             "an unchanged corpus still re-embeds every row on a width change"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(sidecar.len(), 2);
         assert!(
             sidecar.iter().all(|(_, row)| row.len() == 3),
@@ -314,7 +318,8 @@ mod tests {
              change — the redo it triggers must reuse that row, not \
              re-purchase it alongside doc-b"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(sidecar.len(), 2);
         assert!(
             sidecar.iter().all(|(_, row)| row.len() == 4),
@@ -390,7 +395,8 @@ mod tests {
             (128, 128),
             "the disagreeing trailing chunk is dropped, not merely undercounted"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert!(sidecar.iter().all(|(_, row)| row.len() == 2));
 
         let _ = fs::remove_dir_all(dir);
@@ -484,7 +490,8 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(
             sidecar.len(),
             128,
@@ -562,7 +569,8 @@ mod tests {
             "only the width probe's one call, not a re-embed of the cached row"
         );
 
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("fruit")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("fruit").unwrap()));
         assert_eq!(
             sidecar.len(),
             outcome.total,
@@ -816,7 +824,8 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("boom"), "{error}");
 
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(
             sidecar.len(),
             172,
@@ -922,7 +931,8 @@ mod tests {
             (130, 130),
             "the reconciliation retry re-embeds every row, carried and fresh alike"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert!(
             sidecar.iter().all(|(_, row)| row.len() == 3),
             "a sibling chunk's transient failure must not block reconciling a width \
@@ -958,7 +968,7 @@ mod tests {
             .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
             .unwrap();
-        let path = pvectors_path(&dir, &file_stem("sake"));
+        let path = pvectors_path(&dir, &state.stem_of("sake").unwrap());
         let inode = fs::metadata(&path).unwrap().ino();
         let config = state.context_revision("sake").unwrap().config;
 
@@ -1024,7 +1034,8 @@ mod tests {
             (0, 2, 1),
             "the third row falls to the limit; nothing re-embeds"
         );
-        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        let sidecar =
+            PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(sidecar.len(), 2, "the shrink must reach the disk");
         assert_eq!(
             state.context_revision("sake").unwrap().config,
@@ -1057,7 +1068,7 @@ mod tests {
             .unwrap();
         assert_eq!((outcome.embedded, outcome.total), (0, 0));
         assert!(
-            !pvectors_path(&dir, &file_stem("sake")).exists(),
+            !pvectors_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "a passage-less refresh must not mint a sidecar"
         );
         assert_eq!(state.context_revision("sake").unwrap().config, config);
@@ -1108,7 +1119,7 @@ mod tests {
             state.flush_dirty();
         }
 
-        let path = pvectors_path(&dir, &file_stem("sake"));
+        let path = pvectors_path(&dir, &stem_on_disk(&dir, "sake"));
         let before = fs::read(&path).unwrap();
         let state =
             boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
@@ -1171,7 +1182,7 @@ mod tests {
         // a permission bit, which root or `CAP_DAC_OVERRIDE` (common
         // in CI containers) simply ignores, making that approach
         // non-deterministic (CodeRabbit, PR #689).
-        let path = pvectors_path(&dir, &file_stem("sake"));
+        let path = pvectors_path(&dir, &stem_on_disk(&dir, "sake"));
         let healthy = fs::read(&path).unwrap();
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
@@ -1185,7 +1196,7 @@ mod tests {
         );
         let entry = state.lookup("sake").unwrap();
 
-        let degraded = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        let degraded = state.entry_passage_vectors(&entry, &state.stem_of("sake").unwrap());
         assert_eq!(degraded.len(), 0);
         assert!(
             entry.passage_vectors.lock().is_none(),
@@ -1197,11 +1208,11 @@ mod tests {
 
         // Still within the quarantine window: the disk is not re-read
         // yet even though it has already recovered.
-        let still_degraded = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        let still_degraded = state.entry_passage_vectors(&entry, &state.stem_of("sake").unwrap());
         assert_eq!(still_degraded.len(), 0);
 
         state.age_load_failures("sake", crate::registry::LOAD_FAILURE_RETRY);
-        let recovered = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        let recovered = state.entry_passage_vectors(&entry, &state.stem_of("sake").unwrap());
         assert_eq!(
             recovered.len(),
             1,

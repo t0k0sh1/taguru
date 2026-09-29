@@ -13,7 +13,7 @@ use crate::hash::fnv1a;
 use super::{
     AccessError, AppState, EmbeddingsStatus, Entry, GlossLaneReport, GlossSidecarStatus,
     PassageRefreshOutcome, PassageSidecarStatus, SEMANTIC_RESOLVE_LIMIT,
-    dispatch_chunks_concurrently, file_stem, pvectors_path, still_quarantined, vectors_path,
+    dispatch_chunks_concurrently, pvectors_path, still_quarantined, vectors_path,
 };
 
 /// Rows per provider call, shared by both the gloss (`embed_stale`) and
@@ -34,7 +34,7 @@ impl AppState {
     /// report stamps its floor with (#131).
     pub fn embeddings_status(&self, name: &str) -> Option<EmbeddingsStatus> {
         let entry = self.lookup(name)?;
-        let stem = file_stem(name);
+        let stem = entry.id.clone();
         // Both sidecar loads sit under the entry's tombstone fence: a
         // delete that won the race must read as the same 404 the
         // context endpoint gives, not a 200 built from unlinked files'
@@ -114,7 +114,7 @@ impl AppState {
         // a delete never waits on it.
         let store = {
             let _fence = entry.read_unless_deleted()?;
-            self.entry_vectors(&entry, &file_stem(name))
+            self.entry_vectors(&entry, &entry.id)
         };
         if store.concepts.is_empty() && store.labels.is_empty() {
             return Some((
@@ -177,7 +177,7 @@ impl AppState {
             labels.retain(|(a, b, _)| !context.labels_share_subject(a, b));
         }) {
             Ok(()) => {}
-            Err(AccessError::NotFound) => return None,
+            Err(AccessError::NotFound) | Err(AccessError::AmbiguousName(_)) => return None,
             Err(AccessError::Load(message))
             | Err(AccessError::Unpersisted(message))
             | Err(AccessError::QuotaExceeded(message)) => {
@@ -283,7 +283,7 @@ impl AppState {
             (concepts, labels)
         }) {
             Ok(glosses) => glosses,
-            Err(AccessError::NotFound) => return None,
+            Err(AccessError::NotFound) | Err(AccessError::AmbiguousName(_)) => return None,
             // A read never yields Unpersisted or QuotaExceeded; the
             // arms are for the type, not a path.
             Err(AccessError::Load(message))
@@ -299,7 +299,7 @@ impl AppState {
             }
         };
         let (concepts, labels) = glosses;
-        let path = vectors_path(&self.0.data_dir, &file_stem(name));
+        let path = vectors_path(&self.0.data_dir, &entry.id);
 
         // Diff and embed while still holding `_serial`, not the entry's
         // data lock — provider round trips can take seconds and must
@@ -314,7 +314,7 @@ impl AppState {
         // where those survive even though the sidecar does not. Empty
         // and disk agree whenever nothing failed, so this changes
         // nothing on the common path.
-        let existing = self.entry_vectors(&entry, &file_stem(name));
+        let existing = self.entry_vectors(&entry, &entry.id);
         // Claim the save-pending flag up front: it only ever reflects a
         // prior pass's save failure (this pass owns the whole write
         // side via `_serial`, so nothing else can set it mid-flight),
@@ -664,8 +664,8 @@ impl AppState {
     pub fn passage_embed_dirty_names(&self) -> Vec<String> {
         self.snapshot()
             .into_iter()
-            .filter(|(_, entry)| entry.passages_embed_dirty.load(Ordering::Relaxed))
-            .map(|(name, _)| name)
+            .filter(|entry| entry.passages_embed_dirty.load(Ordering::Relaxed))
+            .map(|entry| entry.inner.read().name.clone())
             .collect()
     }
 
@@ -737,7 +737,7 @@ impl AppState {
         let was_dirty = entry.passages_embed_dirty.swap(false, Ordering::Relaxed);
         let store = {
             let _fence = entry.read_unless_deleted()?;
-            match self.entry_passages(&entry, &file_stem(name)) {
+            match self.entry_passages(&entry, &entry.id) {
                 Ok(store) => store,
                 Err(error) => {
                     // The claim above must not eat the work: a store
@@ -749,14 +749,14 @@ impl AppState {
             }
         };
         let records = store.snapshot();
-        let path = pvectors_path(&self.0.data_dir, &file_stem(name));
+        let path = pvectors_path(&self.0.data_dir, &entry.id);
         // Read through the memory cache, not straight off disk: a prior
         // refresh's save can fail after the provider already sold it
         // the rows (see the tail of this function), and the cache is
         // where those survive even though the sidecar does not. Empty
         // and disk agree whenever nothing failed, so this changes
         // nothing on the common path.
-        let existing = self.entry_passage_vectors(&entry, &file_stem(name));
+        let existing = self.entry_passage_vectors(&entry, &entry.id);
         let mut fresh_model = existing.model != embedder.model();
         // A provider can change output width behind a stable model name
         // (a backend swap behind the same proxy). Old-width rows carried
@@ -1044,7 +1044,7 @@ impl AppState {
             let fence = entry.read_unless_deleted()?;
             (
                 fence.meta.semantic_floor,
-                self.entry_vectors(&entry, &file_stem(name)),
+                self.entry_vectors(&entry, &entry.id),
             )
         };
         // One-call override beats the context setting beats the server
@@ -1116,7 +1116,7 @@ impl AppState {
             let fence = entry.read_unless_deleted()?;
             (
                 fence.meta.semantic_floor,
-                self.entry_vectors(&entry, &file_stem(name)),
+                self.entry_vectors(&entry, &entry.id),
             )
         };
         let floor = floor_override

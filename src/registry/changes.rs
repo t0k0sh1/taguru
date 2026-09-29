@@ -38,7 +38,7 @@ impl AppState {
         since: Option<&str>,
         limit: usize,
     ) -> Result<ChangesOutcome, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let entry = self.lookup_resolved(name)?;
         let _fence = entry.read_unless_deleted().ok_or(AccessError::NotFound)?;
         let outcome = entry.changes.lock().read(since, limit);
         self.touch(&entry);

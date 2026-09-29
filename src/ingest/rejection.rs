@@ -193,6 +193,11 @@ impl ApplyRefusal {
             Self::Access(AccessError::NotFound) => {
                 "the context was deleted out from under the import".to_string()
             }
+            Self::Access(AccessError::AmbiguousName(count)) => {
+                format!(
+                    "the context name is ambiguous ({count} contexts share it); rename them apart"
+                )
+            }
             Self::Access(AccessError::Load(error)) => {
                 format!("the context image would not load: {error}")
             }

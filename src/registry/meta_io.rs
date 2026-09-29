@@ -13,7 +13,20 @@ use super::*;
 /// zeroed counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(super) struct MetaFile {
+pub(crate) struct MetaFile {
+    /// The `context`'s id (ADR 0045): the UUID the server minted at
+    /// create, which is also this file family's stem. Recorded so the
+    /// sidecar is self-describing, and so boot can tell a pre-id data
+    /// directory (`None` — refused with a migration message) from a
+    /// current one. Boot cross-checks it against the stem it found
+    /// the file under; the two disagreeing means the family was
+    /// copied or hand-edited, and the boot refuses rather than guess.
+    pub(super) id: Option<String>,
+    /// The `context`'s display name (ADR 0045): a free string, NOT
+    /// unique (issue #961 decision 1) and no longer derivable from
+    /// the stem — this field is the one durable place it lives, and
+    /// boot's scan reads it from here.
+    pub(super) name: Option<String>,
     #[serde(flatten)]
     pub(super) meta: ContextMeta,
     pub(super) stats: ContextStats,
@@ -76,6 +89,7 @@ impl MetaFile {
 #[allow(clippy::too_many_arguments)] // every whole-family save call site, not an API
 pub(super) fn save_files(
     dir: &Path,
+    stem: &str,
     name: &str,
     meta: &ContextMeta,
     stats: &ContextStats,
@@ -84,7 +98,6 @@ pub(super) fn save_files(
     schema_digest: Option<&str>,
     context: &Context,
 ) -> io::Result<()> {
-    let stem = file_stem(name);
     // The image is what `scan_data_dir` keys a context's existence on, so
     // it lands LAST: each `write_atomic` fully commits (fsync + rename +
     // parent-dir fsync) before returning, so by the time the `.ctx` is
@@ -94,13 +107,15 @@ pub(super) fn save_files(
     // same-name create — never a durable image with a defaulted sidecar,
     // which would resurrect a context `create` told the client had failed.
     // (Image-then-meta would do exactly that; see `create`'s doc.)
-    write_meta(dir, &stem, meta, stats, usage, revision, schema_digest)?;
-    write_atomic(&image_path(dir, &stem), &context.to_bytes())
+    write_meta(dir, stem, name, meta, stats, usage, revision, schema_digest)?;
+    write_atomic(&image_path(dir, stem), &context.to_bytes())
 }
 
+#[allow(clippy::too_many_arguments)] // every sidecar save call site, not an API
 pub(super) fn write_meta(
     dir: &Path,
     stem: &str,
+    name: &str,
     meta: &ContextMeta,
     stats: &ContextStats,
     usage: &ContextUsage,
@@ -108,6 +123,10 @@ pub(super) fn write_meta(
     schema_digest: Option<&str>,
 ) -> io::Result<()> {
     let file = MetaFile {
+        // The stem IS the id (ADR 0045): every write re-records it so
+        // the sidecar can never drift from the family it sits in.
+        id: Some(stem.to_string()),
+        name: Some(name.to_string()),
         meta: meta.clone(),
         stats: stats.clone(),
         usage: usage.clone(),
@@ -157,6 +176,105 @@ pub(super) fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     }
 }
 
+/// [`read_scanned_meta`]'s classification of one candidate's sidecar —
+/// the boot scan must tell a healthy current sidecar apart from a
+/// pre-id one (refused with a migration message) and from plain
+/// degradation (tolerated exactly as [`read_meta_file`] tolerates it).
+pub(crate) enum ScannedMeta {
+    /// Parsed, and its recorded `id` equals the stem it sits under —
+    /// the only healthy case.
+    Current(MetaFile),
+    /// Parsed, but records no `id`: a data directory written by a
+    /// pre-id release (before ADR 0045). Refused — the stem is a
+    /// percent-encoded name there, not an id, and registering it
+    /// would serve the encoding as identity. Migration is export on
+    /// the old release, import on this one (§2.7: no compatibility).
+    PreId,
+    /// Parsed, but records an `id` other than the stem it sits under:
+    /// the family was copied or hand-edited. Refused — trusting
+    /// either value would silently rebind the other.
+    ForeignId(String),
+    /// Missing, unreadable, or corrupt — the same lenient fallback
+    /// [`read_meta_file`] serves (already logged there when it is a
+    /// real degradation). The id and name fall back to the stem; for
+    /// the id that is even exact (the stem IS the id), for the name
+    /// it is a display fallback an operator can rename away.
+    Degraded(MetaFile),
+}
+
+impl ScannedMeta {
+    /// The display name this classification yields for `stem`, with
+    /// the same fallback the boot scan applies (the stem itself for a
+    /// degraded sidecar, or one that records no name); `None` for the
+    /// two refused shapes, which have no honest name to report.
+    pub(crate) fn display_name(&self, stem: &str) -> Option<String> {
+        match self {
+            ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => {
+                Some(meta_file.name.clone().unwrap_or_else(|| stem.to_string()))
+            }
+            ScannedMeta::PreId | ScannedMeta::ForeignId(_) => None,
+        }
+    }
+}
+
+/// [`read_meta_file`] plus the id-vs-stem classification above — the
+/// boot scan's one read of a candidate's sidecar.
+pub(crate) fn read_scanned_meta(dir: &Path, stem: &str) -> ScannedMeta {
+    match fs::read(meta_path(dir, stem)) {
+        Ok(bytes) => match serde_json::from_slice::<MetaFile>(&bytes) {
+            Ok(meta_file) => match meta_file.id.as_deref() {
+                Some(id) if id == stem => ScannedMeta::Current(meta_file),
+                Some(id) => ScannedMeta::ForeignId(id.to_string()),
+                None => ScannedMeta::PreId,
+            },
+            Err(error) => {
+                tracing::warn!("ignoring corrupt sidecar for '{stem}': {error}");
+                ScannedMeta::Degraded(MetaFile::degraded())
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ScannedMeta::Degraded(MetaFile::default())
+        }
+        Err(error) => {
+            tracing::warn!("sidecar for '{stem}' unreadable, falling back to defaults: {error}");
+            ScannedMeta::Degraded(MetaFile::degraded())
+        }
+    }
+}
+
+/// The stems whose sidecar records the display name `name` — the
+/// offline twin of the registry's name index, for tools that open a
+/// data directory without booting one (`taguru-code`, diagnostics).
+/// Names are not unique (issue #961 decision 1), so this returns
+/// every claimant and the caller decides how to refuse ambiguity.
+/// Read errors on individual sidecars are skipped, matching the boot
+/// scan's lenient posture; only the directory listing itself can
+/// fail.
+#[allow(dead_code)] // consumed by the taguru-code binary only
+pub(crate) fn stems_named(dir: &Path, name: &str) -> io::Result<Vec<String>> {
+    let mut stems = Vec::new();
+    for dir_entry in fs::read_dir(dir)? {
+        let path = dir_entry?.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(meta_file) = serde_json::from_slice::<MetaFile>(&bytes) else {
+            continue;
+        };
+        if meta_file.name.as_deref() == Some(name) {
+            stems.push(stem.to_string());
+        }
+    }
+    stems.sort();
+    Ok(stems)
+}
+
 /// The recorded schema digest alone, for a caller (`taguru inspect`)
 /// that has no use for the rest of the sidecar and must not import
 /// `MetaFile` (private to this module). Same lenient fallback as
@@ -172,11 +290,10 @@ pub(crate) fn schema_digest_of(dir: &Path, stem: &str) -> Option<String> {
 /// boot-time deletion sweep must never disagree about what "the whole
 /// family" means, so both read this one list.
 ///
-/// A curated list, not a mechanical projection of `paths.rs`: that
-/// module has 14 single-path builders, and the four not listed here
-/// (`schema_corrupt_path`, `deleted_marker_path`, `renaming_marker_path`,
-/// `import_marker_path`) are markers and quarantine files, deliberately
-/// NOT family members. Adding an eleventh FAMILY file kind therefore
+/// A curated list, not a mechanical projection of `paths.rs`: the
+/// builders not listed here (`schema_corrupt_path`,
+/// `deleted_marker_path`, `import_marker_path`) are markers and
+/// quarantine files, deliberately NOT family members. Adding an eleventh FAMILY file kind therefore
 /// requires editing this array too — the test pinning its exact
 /// extension set (`core_tests.rs`) fails loudly on a rename or
 /// removal, but a new kind landing here is on the author, not a
@@ -199,63 +316,6 @@ pub(crate) fn context_files(stem: &str) -> [String; 10] {
         schema_path(unrooted, stem),
     ]
     .map(|path| path.to_string_lossy().into_owned())
-}
-
-/// Moves one `context`'s whole file family from `from_stem` to
-/// `to_stem`, file by file, in the fixed order [`context_files`]
-/// defines — a missing source is skipped (an earlier, interrupted
-/// attempt already moved it; safe to retry at boot or from a fresh
-/// call). `.ctx` is index 0 and the pivot the boot scan registers a
-/// `context` by: if IT will not move, nothing else does either (the
-/// family stays wholly under `from_stem`, cleanly retried), and the
-/// call fails before touching a sidecar. Once the pivot has moved, a
-/// sidecar that still sticks is best-effort — the rest are moved anyway
-/// so the retry has fewer orphans to chase — but the first such error
-/// is returned so the caller knows the move is incomplete and keeps the
-/// rename marker. All ten share `data_dir` as their parent, so one
-/// fsync after every rename covers the whole family durably instead of
-/// paying for it (via `commit_staged`) up to ten times. Each rename
-/// itself still goes through the shared [`rename_persisted_file`] choke
-/// point — this crate's highest-risk multi-step FS operation is fault-
-/// injectable exactly like a single-file publish is. The fsync's own
-/// failure is reported too, but only when there was no earlier
-/// straggler to report first — a rename error names the file that
-/// actually didn't move, which is more actionable than a directory
-/// fsync failure that names nothing.
-pub(super) fn move_context_files(
-    data_dir: &Path,
-    from_stem: &str,
-    to_stem: &str,
-) -> io::Result<()> {
-    let mut moved_any = false;
-    let mut first_error: Option<io::Error> = None;
-    for (position, (from_file, to_file)) in context_files(from_stem)
-        .into_iter()
-        .zip(context_files(to_stem))
-        .enumerate()
-    {
-        match rename_persisted_file(data_dir.join(from_file), data_dir.join(to_file)) {
-            Ok(()) => moved_any = true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            // The pivot: fail outright so nothing else moves.
-            Err(error) if position == 0 => return Err(error),
-            // A post-pivot straggler: keep going, remember the first.
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-    }
-    let fsync_result = if moved_any {
-        fsync_dir(data_dir)
-    } else {
-        Ok(())
-    };
-    match first_error {
-        Some(error) => Err(error),
-        None => fsync_result,
-    }
 }
 
 #[cfg(test)]
@@ -338,6 +398,7 @@ mod tests {
         write_meta(
             &dir,
             "sake",
+            "sake",
             &ContextMeta::default(),
             &ContextStats::default(),
             &ContextUsage::default(),
@@ -359,95 +420,6 @@ mod tests {
                 config: 1
             }
         );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// #586: `move_context_files` now routes every one of its ten
-    /// renames through the same [`crate::storage::rename_persisted_file`]
-    /// choke point every other publish uses — the fault injector must
-    /// actually reach the pivot move, the highest-risk multi-step FS
-    /// operation in the crate. A failure there must behave exactly like
-    /// a real `fs::rename` failure on the pivot always has: nothing
-    /// else in the family moves.
-    #[test]
-    fn an_injected_pivot_rename_failure_moves_nothing() {
-        let dir = scratch_dir("meta-io-move-pivot-fault");
-        fs::create_dir_all(&dir).unwrap();
-        let from_stem = file_stem("sake");
-        let to_stem = file_stem("shochu");
-        fs::write(image_path(&dir, &from_stem), b"ctx bytes").unwrap();
-        fs::write(meta_path(&dir, &from_stem), b"meta bytes").unwrap();
-
-        fail_persistence_ops_after(0);
-        let error = move_context_files(&dir, &from_stem, &to_stem).unwrap_err();
-        let past_end = clear_persistence_fault();
-        assert!(
-            !past_end,
-            "the very first rename (the pivot) must be what failed"
-        );
-        assert_eq!(
-            error.kind(),
-            io::ErrorKind::Other,
-            "an injected failure, not a real ENOENT: {error:?}"
-        );
-
-        assert!(
-            image_path(&dir, &from_stem).exists(),
-            "the pivot must stay put"
-        );
-        assert!(
-            meta_path(&dir, &from_stem).exists(),
-            "a post-pivot file must never be touched once the pivot itself failed"
-        );
-        assert!(!image_path(&dir, &to_stem).exists());
-        assert!(!meta_path(&dir, &to_stem).exists());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// The best-effort half of the same contract: an injected failure
-    /// on a post-pivot file (here `.meta.json`, `context_files`'
-    /// second entry) must behave like the existing real-FS-blocker
-    /// tests (`lifecycle.rs`'s straggler tests) already prove for a
-    /// genuine `fs::rename` error — the pivot has already moved, so
-    /// the loop keeps going rather than stopping, and a later file in
-    /// the family (here `sources_path`, the third entry) still lands
-    /// at `to_stem`. The first straggler error is what
-    /// `move_context_files` reports.
-    #[test]
-    fn an_injected_straggler_rename_failure_still_lets_later_files_move() {
-        let dir = scratch_dir("meta-io-move-straggler-fault");
-        fs::create_dir_all(&dir).unwrap();
-        let from_stem = file_stem("sake");
-        let to_stem = file_stem("shochu");
-        fs::write(image_path(&dir, &from_stem), b"ctx bytes").unwrap();
-        fs::write(meta_path(&dir, &from_stem), b"meta bytes").unwrap();
-        fs::write(sources_path(&dir, &from_stem), b"sources bytes").unwrap();
-
-        // One success (the pivot) then fail the very next op — the
-        // `.meta.json` rename.
-        fail_persistence_ops_after(1);
-        let error = move_context_files(&dir, &from_stem, &to_stem).unwrap_err();
-        let past_end = clear_persistence_fault();
-        assert!(!past_end, "the meta rename must be what failed");
-        assert_eq!(error.kind(), io::ErrorKind::Other, "{error:?}");
-
-        assert!(
-            !image_path(&dir, &from_stem).exists(),
-            "the pivot already moved before the fault"
-        );
-        assert!(image_path(&dir, &to_stem).exists());
-        assert!(
-            meta_path(&dir, &from_stem).exists(),
-            "the failed rename must never have touched the source"
-        );
-        assert!(!meta_path(&dir, &to_stem).exists());
-        assert!(
-            !sources_path(&dir, &from_stem).exists() && sources_path(&dir, &to_stem).exists(),
-            "best-effort continues past a post-pivot straggler: a LATER \
-             family member still lands at the destination"
-        );
-
         let _ = fs::remove_dir_all(&dir);
     }
 }

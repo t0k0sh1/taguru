@@ -235,7 +235,12 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     // Not vacuous: prove the schema actually rode along, both as the
     // family's own file and as the export's schema record.
     assert!(
-        restored.join("sake.schema.json").exists(),
+        restored
+            .join(format!(
+                "{}.schema.json",
+                crate::support::context_stem(&restored, "sake")
+            ))
+            .exists(),
         "the restored directory must carry the schema file"
     );
     let sake_stream = String::from_utf8(
@@ -301,18 +306,18 @@ fn a_restore_that_fails_partway_cleans_up_so_a_retry_succeeds() {
             .join("complete")
             .exists()
     });
+    let sake_stem = server.context_stem("sake");
     let data_dir = server.stop_gracefully();
 
     // Corrupt the alphabetically LATER of the two published files
-    // (`sake.ctx` < `sake.meta.json`, and the manifest walks a
-    // `BTreeMap` in name order): restore lands `sake.ctx` first, then
-    // hits the tampered `sake.meta.json` and fails — proving the
-    // cleanup runs against a genuinely PARTIAL result, not an empty
-    // one.
+    // (`{stem}.ctx` < `{stem}.meta.json`, and the manifest walks a
+    // `BTreeMap` in name order): restore lands the image first, then
+    // hits the tampered meta and fails — proving the cleanup runs
+    // against a genuinely PARTIAL result, not an empty one.
     let meta_key = bucket
         .join("gen-00000000000000000001")
         .join("files")
-        .join("sake.meta.json");
+        .join(format!("{sake_stem}.meta.json"));
     let original = std::fs::read(&meta_key).unwrap();
     std::fs::write(&meta_key, b"not the bytes the manifest promised").unwrap();
 
@@ -360,8 +365,8 @@ fn a_restore_that_fails_partway_cleans_up_so_a_retry_succeeds() {
         "a retry against the same --out must succeed once the bucket is healthy: {}",
         String::from_utf8_lossy(&retried.stderr)
     );
-    assert!(restored.join("sake.ctx").exists());
-    assert!(restored.join("sake.meta.json").exists());
+    assert!(restored.join(format!("{sake_stem}.ctx")).exists());
+    assert!(restored.join(format!("{sake_stem}.meta.json")).exists());
 
     for dir in [bucket, data_dir, restored] {
         let _ = std::fs::remove_dir_all(dir);
@@ -560,7 +565,9 @@ fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "第2段落"},
         ])),
     );
-    let wal = server.data_dir.join("sake.wal.jsonl");
+    let wal = server
+        .data_dir
+        .join(format!("{}.wal.jsonl", server.context_stem("sake")));
     wait_for("the write to land in the local wal", || {
         std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0)
     });
@@ -598,6 +605,7 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
         ],
     );
     first.ok("PUT", "/contexts/sake", Some(json!({})));
+    let sake_stem = first.context_stem("sake");
     wait_for("the first writer's baseline", || {
         bucket
             .join("gen-00000000000000000001")
@@ -654,7 +662,7 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
         !bucket
             .join("gen-00000000000000000002")
             .join("files")
-            .join("sake.wal.jsonl")
+            .join(format!("{sake_stem}.wal.jsonl"))
             .exists(),
         "a fenced writer must never write into its successor's generation"
     );
@@ -744,7 +752,10 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
     // Readiness semantics: the port opened, so the pinned context is
     // already local (preload hydrates it eagerly, before binding).
     assert!(
-        second.data_dir.join("glossary.ctx").exists(),
+        second
+            .data_dir
+            .join(format!("{}.ctx", second.context_stem("glossary")))
+            .exists(),
         "a pinned context hydrates before the port opens"
     );
 
@@ -973,12 +984,14 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // manifest: wait until it carries the whole spread — the pinned
     // meta's current version rode the same (or an earlier) cycle as
     // the group file, since every cycle ships all changed files.
+    let glossary_stem = writer.context_stem("glossary");
+    let sake_stem = writer.context_stem("sake");
     wait_for("the writer to ship the whole spread", || {
         std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
             .map(|manifest| {
                 manifest.contains("breweries.group")
-                    && manifest.contains("glossary.ctx")
-                    && manifest.contains("sake.schema.json")
+                    && manifest.contains(&format!("{glossary_stem}.ctx"))
+                    && manifest.contains(&format!("{sake_stem}.schema.json"))
             })
             .unwrap_or(false)
     });
@@ -996,7 +1009,10 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         ],
     );
     assert!(
-        replica.data_dir.join("glossary.ctx").exists(),
+        replica
+            .data_dir
+            .join(format!("{}.ctx", replica.context_stem("glossary")))
+            .exists(),
         "a pinned context hydrates before the replica's port opens"
     );
     assert_eq!(context_names(&replica), ["glossary", "sake"]);
@@ -1168,13 +1184,17 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
 
     // A deletion propagates: the context leaves the directory AND its
     // files leave the replica's disk.
+    let news_stem = replica.context_stem("news");
     writer.ok("DELETE", "/contexts/news", None);
     wait_for("the deletion to propagate", || {
         !context_names(&replica).contains(&"news".to_string())
     });
     wait_for("the deleted family to leave the replica's disk", || {
-        !replica.data_dir.join("news.ctx").exists()
-            && !replica.data_dir.join("news.meta.json").exists()
+        !replica.data_dir.join(format!("{news_stem}.ctx")).exists()
+            && !replica
+                .data_dir
+                .join(format!("{news_stem}.meta.json"))
+                .exists()
     });
 
     let writer_dir = writer.stop_gracefully();
@@ -1209,9 +1229,10 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     // The very first complete can predate the seed (an empty writer's
     // first cycle manifests an empty directory): wait until the
     // manifest actually carries the context.
+    let sake_stem = writer.context_stem("sake");
     wait_for("the writer to ship the seed", || {
         std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
-            .map(|manifest| manifest.contains("sake.ctx"))
+            .map(|manifest| manifest.contains(&format!("{sake_stem}.ctx")))
             .unwrap_or(false)
     });
 

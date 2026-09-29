@@ -51,7 +51,7 @@ impl AppState {
         {
             let registry = self.0.registry.read();
             if let Some(missing) =
-                first_missing(&contexts, |context| registry.contains_key(context))
+                first_missing(&contexts, |context| registry.contains_name(context))
             {
                 return Err(CreateGroupError::NoSuchContext(missing.clone()));
             }
@@ -143,7 +143,7 @@ impl AppState {
         if !add_contexts.is_empty() {
             let registry = self.0.registry.read();
             if let Some(missing) =
-                first_missing(&add_contexts, |context| registry.contains_key(context))
+                first_missing(&add_contexts, |context| registry.contains_name(context))
             {
                 return Err(UpdateGroupError::NoSuchContext(missing.clone()));
             }
@@ -228,7 +228,7 @@ impl AppState {
             let registry = self.0.registry.read();
             for (name, record) in records {
                 if let Some(missing) =
-                    first_missing(&record.contexts, |context| registry.contains_key(context))
+                    first_missing(&record.contexts, |context| registry.contains_name(context))
                 {
                     return Err(RestoreGroupsError::NoSuchContext {
                         group: name.clone(),

@@ -15,7 +15,20 @@ impl AppState {
     /// [`AppState::directory_page`], which seeks a page in O(log n + k)
     /// instead of describing every entry on every call.
     pub fn directory(&self) -> Vec<DirectoryEntry> {
-        self.snapshot()
+        // Handles cloned under one short registry lock, described
+        // after it drops — an entry's `inner` lock is never taken
+        // while the registry lock is held. `(name, id)` order comes
+        // from the name index; a rename that lands between the clone
+        // and `describe_entry` changes the row's name but not its
+        // place in this listing, the same lag a paged listing has.
+        let handles: Vec<(String, Arc<Entry>)> = {
+            let registry = self.0.registry.read();
+            registry
+                .iter_named()
+                .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
+                .collect()
+        };
+        handles
             .into_iter()
             .filter_map(|(name, entry)| describe_entry(name, &entry))
             .collect()
@@ -59,11 +72,7 @@ impl AppState {
                     Some(after) => Bound::Excluded(after.as_str()),
                     None => Bound::Unbounded,
                 };
-                let slice: Vec<(String, Arc<Entry>)> = registry
-                    .range::<str, _>((start, Bound::Unbounded))
-                    .take(limit)
-                    .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
-                    .collect();
+                let slice: Vec<(String, Arc<Entry>)> = registry.range_named(start, limit);
                 (registry.len(), slice)
             };
             let Some(last_seeked) = slice.last().map(|(name, _)| name.clone()) else {
@@ -118,8 +127,8 @@ impl AppState {
         name: &str,
         deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
-        let stem = file_stem(name);
+        let entry = self.lookup_resolved(name)?;
+        let stem = entry.id.clone();
         // Fast path: already resident, shared lock (mirrors read_context).
         {
             let inner = entry.inner.read();
@@ -143,7 +152,7 @@ impl AppState {
                     // because it happened to already be hot.
                     let snapshot = snapshot?;
                     self.touch(&entry);
-                    self.enforce_budget(name);
+                    self.enforce_budget(&entry.id);
                     return Ok(snapshot);
                 }
                 Slot::Deleted => return Err(AccessError::NotFound),
@@ -158,6 +167,7 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 name,
                 &mut inner,
                 &self.0.metrics,
@@ -175,7 +185,7 @@ impl AppState {
             )
         })?;
         self.touch(&entry);
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         Ok(snapshot)
     }
 
@@ -235,11 +245,12 @@ impl AppState {
         name: &str,
         deadline: Deadline,
     ) -> Result<CompactOutcome, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let entry = self.lookup_resolved(name)?;
         let (bytes_before, bytes_after, stats) = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 name,
                 &mut inner,
                 &self.0.metrics,
@@ -322,7 +333,7 @@ impl AppState {
             passages_compacted,
         };
         self.touch(&entry);
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         Ok(outcome)
     }
 
@@ -373,7 +384,7 @@ impl AppState {
         name: &str,
         compact: impl FnOnce(&crate::passages::PassageStore) -> io::Result<bool>,
     ) -> bool {
-        match self.entry_passages(entry, &file_stem(name)) {
+        match self.entry_passages(entry, &entry.id) {
             Ok(store) if store.watermark() > 0 => match compact(&store) {
                 Ok(ran) => ran,
                 Err(error) => {
@@ -412,8 +423,9 @@ impl AppState {
         let mut candidates: Vec<(String, f64)> = self
             .snapshot()
             .into_iter()
-            .filter_map(|(name, entry)| {
+            .filter_map(|entry| {
                 let inner = entry.inner.read();
+                let name = inner.name.clone();
                 let ratio = match &inner.slot {
                     Slot::Hot(context) => context.dead_ratio(),
                     Slot::Cold => inner.stats.dead_ratio(),
@@ -487,6 +499,9 @@ impl AppState {
                     // only found by grepping this warn line.
                     let message = match &error {
                         AccessError::NotFound => "no such context".to_string(),
+                        AccessError::AmbiguousName(count) => {
+                            format!("context name is ambiguous ({count} contexts share it)")
+                        }
                         AccessError::Load(message) => message.clone(),
                         AccessError::Unpersisted(message) => message.clone(),
                         AccessError::QuotaExceeded(message) => message.clone(),
@@ -531,7 +546,7 @@ mod tests {
         AliasInput, AssocInput, RetractionInput, config as proptest_config,
         json_roundtrip_f64_strategy, scenario_strategy,
     };
-    use crate::registry::test_support::{assoc_op, plain, scratch_dir};
+    use crate::registry::test_support::{assoc_op, plain, scratch_dir, stem_on_disk};
     use proptest::prelude::*;
 
     /// The three revision counters move on exactly their own lane —
@@ -857,7 +872,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let wal_path = passages_wal_path(&dir, &file_stem("sake"));
+        let wal_path = passages_wal_path(&dir, &stem_on_disk(&dir, "sake"));
         let before = fs::metadata(&wal_path).unwrap().len();
         assert!(before > 0, "sanity: the store has a pending log");
 
@@ -925,11 +940,11 @@ mod tests {
 
         assert!(!state.compact_passages_if_worthwhile("sake", 0));
         assert!(
-            !passages_path(&dir, &file_stem("sake")).exists(),
+            !passages_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "a declined compaction on an empty store must write nothing"
         );
         assert!(
-            !passages_wal_path(&dir, &file_stem("sake")).exists(),
+            !passages_wal_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "a store that was never written to must never be touched on disk"
         );
         let _ = fs::remove_dir_all(dir);
@@ -954,7 +969,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let wal_path = passages_wal_path(&dir, &file_stem("sake"));
+        let wal_path = passages_wal_path(&dir, &state.stem_of("sake").unwrap());
         let pending = fs::metadata(&wal_path).unwrap().len();
         assert!(pending > 0, "sanity: the store has a pending log");
 
@@ -1251,7 +1266,7 @@ mod tests {
                     assert_eq!(context.dice_floor(), expected_floor);
                 })
                 .unwrap();
-            let disk_image = fs::read(image_path(&dir, &file_stem("generated"))).unwrap();
+            let disk_image = fs::read(image_path(&dir, &state.stem_of("generated").unwrap())).unwrap();
             prop_assert_eq!(&disk_image, &expected_image);
 
             let second = state
@@ -1627,7 +1642,7 @@ mod tests {
         // `fs::read` fails without ever reaching the parser, the same
         // technique the rename/sweep tests elsewhere in this crate use
         // to force a deterministic, real (not injected) I/O failure.
-        let image = image_path(&dir, &file_stem("sake"));
+        let image = image_path(&dir, &state.stem_of("sake").unwrap());
         fs::remove_file(&image).unwrap();
         fs::create_dir_all(&image).unwrap();
 
@@ -1728,7 +1743,7 @@ mod tests {
         // on it.
         {
             let registry = state.0.registry.read();
-            let entry = registry.get("apple").unwrap();
+            let entry = registry.unique("apple").unwrap();
             entry.inner.write().slot = Slot::Deleted;
         }
 

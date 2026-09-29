@@ -63,8 +63,7 @@ use crate::schema;
 #[cfg(test)]
 use crate::storage::{clear_persistence_fault, fail_persistence_ops_after, write_atomic_private};
 use crate::storage::{
-    commit_staged, fsync_dir, lock_data_dir, offload, remove_persisted_file, rename_persisted_file,
-    stage_bytes, write_atomic,
+    commit_staged, lock_data_dir, offload, remove_persisted_file, stage_bytes, write_atomic,
 };
 use crate::wal::{self, WalOp};
 
@@ -117,15 +116,21 @@ pub use changes::{ChangeEvent, ChangeKind, ChangesOutcome};
 pub use passages::PassagesWriteError;
 
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
-use meta_io::{MetaFile, move_context_files, read_meta_file, save_files, write_meta};
+#[allow(unused_imports)] // consumed by the taguru-code binary only
+pub(crate) use meta_io::stems_named;
+use meta_io::{MetaFile, read_meta_file, save_files, write_meta};
+pub(crate) use meta_io::{ScannedMeta, read_scanned_meta};
 pub(crate) use meta_io::{context_files, schema_digest_of};
+use paths::wal_lane_bytes;
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
-    file_stem, image_path, import_marker_path, import_marker_paths, meta_path, name_from_stem,
-    passages_path, passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers,
+    file_stem, image_path, import_marker_path, import_marker_paths, meta_path, mint_context_id,
+    name_from_stem, passages_path, passages_wal_path, pvectors_path, resume_rename_markers,
     schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
 };
-use paths::{rename_markers_targeting, wal_lane_bytes, write_rename_marker};
+// Still used by the `group` rename path (groups keep name-derived
+// stems and durable rename markers until #965).
+use paths::{rename_markers_targeting, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::{SemanticFill, SemanticServe};
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
@@ -439,6 +444,11 @@ enum Slot {
 }
 
 pub struct Entry {
+    /// The `context`'s id (ADR 0045): the UUID minted at create, and
+    /// the stem every file in its family sits under. Immutable for
+    /// the entry's whole life — the one identity a rename never
+    /// touches — so path derivation needs no lock.
+    id: String,
     inner: RwLock<EntryInner>,
     /// Set on every write; cleared by a flush the moment it CLAIMS the
     /// entry — under `inner`, before the image is staged, not after it
@@ -629,6 +639,8 @@ struct ContextDiskUsage {
 impl Entry {
     #[allow(clippy::too_many_arguments)] // every cold-load/register call site, not an API
     fn new(
+        id: String,
+        name: String,
         meta: ContextMeta,
         stats: ContextStats,
         slot: Slot,
@@ -640,7 +652,9 @@ impl Entry {
         schema: Option<Arc<crate::schema::InstalledSchema>>,
     ) -> Self {
         Self {
+            id,
             inner: RwLock::new(EntryInner {
+                name,
                 meta,
                 stats,
                 slot,
@@ -683,23 +697,30 @@ impl Entry {
 
     /// The Cold-slot constructor every register-from-sidecar path
     /// shares: boot's hydrator registration and `scan_data_dir`
-    /// (`boot.rs`), `replica_register` (`replication.rs`), and the
-    /// rename's re-register (`lifecycle.rs`). All four land a `Cold`
-    /// slot seeded straight from [`read_meta_file`]'s [`MetaFile`], so
-    /// they cannot disagree about which sidecar field feeds which
-    /// entry field. `wal_bytes`/`passages_wal_bytes` are the caller's
-    /// own measurement ([`wal_lane_bytes`] for the two that stat, `0`
-    /// for the two that register from a meta alone with no family
-    /// local yet), and `schema` is `None` for every path whose family
-    /// is not yet known to be local — `ensure_hot` resolves it lazily
-    /// on first load.
+    /// (`boot.rs`), and `replica_register` (`replication.rs`). All
+    /// three land a `Cold` slot seeded straight from
+    /// [`read_meta_file`]'s [`MetaFile`], so they cannot disagree
+    /// about which sidecar field feeds which entry field. `id` and
+    /// `name` are passed resolved rather than read from the file —
+    /// the caller owns the fallback posture for a sidecar that lacks
+    /// them (see `scan_data_dir`), so the sidecar's own copies are
+    /// deliberately dropped here. `wal_bytes`/`passages_wal_bytes`
+    /// are the caller's own measurement ([`wal_lane_bytes`] for the
+    /// path that stats, `0` for the two that register from a meta
+    /// alone with no family local yet), and `schema` is `None` for
+    /// every path whose family is not yet known to be local —
+    /// `ensure_hot` resolves it lazily on first load.
     fn cold_from_meta(
+        id: String,
+        name: String,
         meta_file: MetaFile,
         wal_bytes: u64,
         passages_wal_bytes: u64,
         schema: Option<Arc<crate::schema::InstalledSchema>>,
     ) -> Self {
         let MetaFile {
+            id: _,
+            name: _,
             meta,
             stats,
             usage,
@@ -707,6 +728,8 @@ impl Entry {
             schema_digest,
         } = meta_file;
         Self::new(
+            id,
+            name,
             meta,
             stats,
             Slot::Cold,
@@ -847,6 +870,11 @@ impl Entry {
 }
 
 struct EntryInner {
+    /// The `context`'s display name (ADR 0045): a free string, not
+    /// unique (issue #961 decision 1), mutable under this lock — a
+    /// rename is now just this field, its sidecar write, and the name
+    /// index ([`ContextTable::by_name`]) moving one id between sets.
+    name: String,
     meta: ContextMeta,
     stats: ContextStats,
     slot: Slot,
@@ -965,10 +993,9 @@ fn next_cache_identity() -> u64 {
 pub enum CreateError {
     AlreadyExists,
     /// The name is not usable as a `context` — currently only the empty
-    /// string, which would `file_stem` to `""` and land as a bare
-    /// `.ctx` file that `scan_data_dir` (keying on the `ctx` extension,
-    /// which a leading-dot name has none of) never rediscovers: a
-    /// `context` that vanishes on the next restart.
+    /// string. The stem is the id now, so an empty name no longer
+    /// endangers the files; it is refused because it is unaddressable
+    /// on a wire that reaches `contexts` by name.
     InvalidName,
     Io(io::Error),
 }
@@ -982,6 +1009,12 @@ pub enum CreateError {
 #[derive(Debug)]
 pub enum DeleteError {
     MidRename,
+    /// Several `contexts` share the name (possible only in a
+    /// hand-assembled data directory while the wire still addresses
+    /// `contexts` by name, see [`ContextTable`]): nothing was deleted,
+    /// and the caller must say which — which it cannot until paths
+    /// take ids (#964) — so the refusal names the collision count.
+    AmbiguousName(usize),
     Io(io::Error),
 }
 
@@ -1038,23 +1071,17 @@ pub enum UpdateGroupError {
 #[derive(Debug)]
 pub enum RenameContextError {
     NotFound,
-    /// Same trap as [`CreateError::InvalidName`]: an empty destination
-    /// would persist as a bare `.ctx` the boot scan never rediscovers.
+    /// Same posture as [`CreateError::InvalidName`]: an empty name is
+    /// unaddressable on a wire that reaches `contexts` by name.
     InvalidName,
     AlreadyExists,
     /// `from` or `to` is reserved by a create, delete, or another
     /// rename already in flight — retry once it settles.
     Busy,
+    /// Several `contexts` share `from` — same refusal as
+    /// [`DeleteError::AmbiguousName`], for the same reason.
+    AmbiguousName(usize),
     Io(io::Error),
-}
-
-/// [`AppState::rename_context_locked`]'s result: whether a failure left
-/// `from` safely free again or stuck pending a boot resume. See that
-/// function's doc for the full reasoning.
-enum RenameOutcome {
-    Ok,
-    RolledBack(RenameContextError),
-    Stuck(RenameContextError),
 }
 
 /// Why a `PUT /contexts/{name}/schema` (#380) did not persist.
@@ -1319,6 +1346,11 @@ pub struct MaintenanceCompactionOutcome {
 #[derive(Debug)]
 pub enum AccessError {
     NotFound,
+    /// Several `contexts` share the requested name (a hand-assembled
+    /// data directory; see [`ContextTable`]) — refused explicitly
+    /// rather than served from one of them by coin flip. Carries the
+    /// collision count for the message.
+    AmbiguousName(usize),
     /// The `context` exists but its image could not be loaded from disk.
     Load(String),
     /// The write-ahead log could not durably record the operation;
@@ -2274,6 +2306,196 @@ struct PendingNames {
     renames: HashSet<String>,
 }
 
+/// The in-memory `context` table: entries keyed by id, plus the name
+/// index the wire — which still addresses `contexts` by name until
+/// #964 — resolves through. Names are display strings and NOT unique
+/// (issue #961 decision 1): the index holds every id a name maps to,
+/// and [`ContextTable::resolve`] refuses an ambiguous name explicitly
+/// rather than picking one. Duplicate names cannot arise through the
+/// API while creates are name-addressed, but the boot scan tolerates
+/// them (two sidecars are free to record the same display name), so
+/// this table must represent them. Both maps are BTreeMaps so the
+/// directory listing (and `directory_page`'s keyset seek) stays in
+/// name order for free — ties broken by id, deterministically.
+#[derive(Default)]
+struct ContextTable {
+    by_id: BTreeMap<String, Arc<Entry>>,
+    /// name → the ids carrying it. Invariant: never holds an empty
+    /// set — a remove that drains a name removes the name.
+    by_name: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// [`ContextTable::resolve`]'s outcome: a name maps to one `context`,
+/// none, or — reachable only from a hand-assembled data directory
+/// while the wire still addresses `contexts` by name — several.
+enum NameResolution<'table> {
+    One(&'table Arc<Entry>),
+    None,
+    /// How many `contexts` share the name. The caller reports it as an
+    /// explicit refusal, never as a plain "not found" and never by
+    /// picking one.
+    Ambiguous(usize),
+}
+
+impl ContextTable {
+    /// Registers `entry` under its own id and `name`. The id must not
+    /// already be present (ids are minted, never reused).
+    fn insert(&mut self, name: &str, entry: Arc<Entry>) {
+        let id = entry.id.clone();
+        self.by_name
+            .entry(name.to_string())
+            .or_default()
+            .insert(id.clone());
+        self.by_id.insert(id, entry);
+    }
+
+    /// The exactly-one entry `name` maps to, or why there is no such
+    /// thing. Every by-name access path goes through this, so no call
+    /// site can quietly pick one of several same-named `contexts`.
+    fn resolve(&self, name: &str) -> NameResolution<'_> {
+        let Some(ids) = self.by_name.get(name) else {
+            return NameResolution::None;
+        };
+        match ids.len() {
+            0 => NameResolution::None,
+            1 => {
+                let id = ids.iter().next().expect("len checked");
+                match self.by_id.get(id) {
+                    Some(entry) => NameResolution::One(entry),
+                    None => NameResolution::None,
+                }
+            }
+            several => NameResolution::Ambiguous(several),
+        }
+    }
+
+    /// [`Self::resolve`] flattened to the unambiguous hit — the shape
+    /// most internal callers want, with the ambiguous case logged
+    /// (once per call) instead of silently folded into "not found".
+    fn unique(&self, name: &str) -> Option<&Arc<Entry>> {
+        match self.resolve(name) {
+            NameResolution::One(entry) => Some(entry),
+            NameResolution::None => None,
+            NameResolution::Ambiguous(count) => {
+                tracing::warn!(
+                    name,
+                    count,
+                    "context name is ambiguous; refusing to pick one (addressable again once \
+                     paths take ids, #964)"
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether any `context` carries `name` — the create-path
+    /// "name taken" check (the wire's create is still name-addressed,
+    /// so a second create of a live name refuses exactly as before).
+    fn contains_name(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    /// Unregisters the exactly-one entry `name` maps to and returns
+    /// it; `None` for a missing OR ambiguous name (the caller's
+    /// `resolve` distinguishes them when it needs to refuse loudly).
+    fn remove_unique(&mut self, name: &str) -> Option<Arc<Entry>> {
+        let id = match self.resolve(name) {
+            NameResolution::One(entry) => entry.id.clone(),
+            _ => return None,
+        };
+        self.unindex(name, &id);
+        self.by_id.remove(&id)
+    }
+
+    /// The entry registered under `id`, if any — the replica tailer's
+    /// lookup (its manifest speaks stems, which ARE ids).
+    fn get_id(&self, id: &str) -> Option<&Arc<Entry>> {
+        self.by_id.get(id)
+    }
+
+    /// Unregisters `id`, unindexing it from `name` (the caller's
+    /// current reading of the entry's display name). Falls back to a
+    /// scan when `name` does not index `id` — a rename racing the
+    /// caller's read — so a removed entry can never leak an index row.
+    fn remove_id(&mut self, id: &str, name: &str) -> Option<Arc<Entry>> {
+        let entry = self.by_id.remove(id)?;
+        let indexed_under_name = self.by_name.get(name).is_some_and(|ids| ids.contains(id));
+        if indexed_under_name {
+            self.unindex(name, id);
+        } else if let Some(actual) = self
+            .by_name
+            .iter()
+            .find_map(|(name, ids)| ids.contains(id).then(|| name.clone()))
+        {
+            self.unindex(&actual, id);
+        }
+        Some(entry)
+    }
+
+    /// Drops `id` from `name`'s index set, dropping the set when it
+    /// drains — the shared bookkeeping half of remove and rename.
+    fn unindex(&mut self, name: &str, id: &str) {
+        if let Some(ids) = self.by_name.get_mut(name) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_name.remove(name);
+            }
+        }
+    }
+
+    /// Moves `id` from `from`'s index set to `to`'s — the rename's
+    /// whole in-memory footprint besides `EntryInner::name` itself.
+    fn reindex(&mut self, id: &str, from: &str, to: &str) {
+        self.unindex(from, id);
+        self.by_name
+            .entry(to.to_string())
+            .or_default()
+            .insert(id.to_string());
+    }
+
+    fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// Every entry in `(name, id)` order — the directory listing's
+    /// iteration. The name is the index's copy, which agrees with
+    /// `EntryInner::name` for any caller holding this table's lock
+    /// (renames update both under it).
+    fn iter_named(&self) -> impl Iterator<Item = (&String, &Arc<Entry>)> {
+        let by_id = &self.by_id;
+        self.by_name.iter().flat_map(move |(name, ids)| {
+            ids.iter()
+                .filter_map(move |id| by_id.get(id).map(|entry| (name, entry)))
+        })
+    }
+
+    /// Every entry, id-keyed and unordered by name — for sweeps that
+    /// touch all entries without caring what they are called.
+    fn values(&self) -> impl Iterator<Item = &Arc<Entry>> {
+        self.by_id.values()
+    }
+
+    /// One keyset page: up to `limit` entries whose name is inside
+    /// `(start, ∞)`, in `(name, id)` order — `directory_page`'s seek.
+    /// The wire cursor is still a bare name (#964 moves paging to
+    /// `(name, id)`), so with duplicate names a cursor that lands ON
+    /// a shared name skips the whole name group — the same "possible
+    /// only from a hand-assembled directory" caveat every ambiguity
+    /// path in this table carries.
+    fn range_named(&self, start: std::ops::Bound<&str>, limit: usize) -> Vec<(String, Arc<Entry>)> {
+        let by_id = &self.by_id;
+        self.by_name
+            .range::<str, _>((start, std::ops::Bound::Unbounded))
+            .flat_map(move |(name, ids)| {
+                ids.iter().filter_map(move |id| {
+                    by_id.get(id).map(|entry| (name.clone(), Arc::clone(entry)))
+                })
+            })
+            .take(limit)
+            .collect()
+    }
+}
+
 struct StateInner {
     data_dir: PathBuf,
     /// The advisory exclusive lock that makes this process the data
@@ -2286,10 +2508,7 @@ struct StateInner {
     /// most recently used `context` is never evicted, so one `context`
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
-    /// BTreeMap keeps the directory listing (and `directory_page`'s
-    /// keyset seek) in name order for free — the same reason `groups`
-    /// below does.
-    registry: RwLock<BTreeMap<String, Arc<Entry>>>,
+    registry: RwLock<ContextTable>,
     /// Groups: bundles of `context` names and child-`group` names (a
     /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] `groups` tall and
     /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
@@ -2974,7 +3193,8 @@ impl AppState {
         }
         if let Err(error) = write_meta(
             &self.0.data_dir,
-            &file_stem(name),
+            &entry.id,
+            &inner.name,
             &inner.meta,
             &inner.stats,
             &entry.usage.snapshot(),
@@ -3001,7 +3221,7 @@ impl AppState {
         name: &str,
         operate: impl FnOnce(&Context) -> T,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let entry = self.lookup_resolved(name)?;
         // Fast path: already resident, shared lock, no exclusivity.
         {
             let inner = entry.inner.read();
@@ -3011,7 +3231,7 @@ impl AppState {
                     let result = operate(context);
                     drop(inner);
                     self.touch(&entry);
-                    self.enforce_budget(name);
+                    self.enforce_budget(&entry.id);
                     return Ok(result);
                 }
                 Slot::Deleted => return Err(AccessError::NotFound),
@@ -3025,6 +3245,7 @@ impl AppState {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 name,
                 &mut inner,
                 &self.0.metrics,
@@ -3035,7 +3256,7 @@ impl AppState {
             Ok(operate(hot_context(&inner)))
         })?;
         self.touch(&entry);
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         Ok(result)
     }
 
@@ -3079,11 +3300,12 @@ impl AppState {
         name: &str,
         operate: impl FnOnce(&mut Context) -> T,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
+        let entry = self.lookup_resolved(name)?;
         let result = {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
+                &entry.id,
                 name,
                 &mut inner,
                 &self.0.metrics,
@@ -3096,21 +3318,56 @@ impl AppState {
             result
         };
         self.touch(&entry);
-        self.enforce_budget(name);
+        self.enforce_budget(&entry.id);
         Ok(result)
     }
 
     fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
-        self.0.registry.read().get(name).cloned()
+        self.0.registry.read().unique(name).cloned()
     }
 
-    fn snapshot(&self) -> Vec<(String, Arc<Entry>)> {
-        self.0
-            .registry
-            .read()
-            .iter()
-            .map(|(name, entry)| (name.clone(), Arc::clone(entry)))
-            .collect()
+    /// [`Self::lookup`] for the data paths that report through
+    /// [`AccessError`]: a missing name is `NotFound`, an ambiguous one
+    /// is its own explicit refusal (issue #961 decision 1) — never
+    /// folded into "not found", never resolved by picking a claimant.
+    fn lookup_resolved(&self, name: &str) -> Result<Arc<Entry>, AccessError> {
+        let registry = self.0.registry.read();
+        match registry.resolve(name) {
+            NameResolution::One(entry) => Ok(Arc::clone(entry)),
+            NameResolution::None => Err(AccessError::NotFound),
+            NameResolution::Ambiguous(count) => Err(AccessError::AmbiguousName(count)),
+        }
+    }
+
+    /// The id — and so the file stem — of the `context` `name`
+    /// resolves to. The bridge from wire names to file families for
+    /// tests locating sidecars; `None` for a missing or ambiguous
+    /// name.
+    #[cfg(test)]
+    pub(crate) fn stem_of(&self, name: &str) -> Option<String> {
+        self.lookup(name).map(|entry| entry.id.clone())
+    }
+
+    /// The display name of the `context` whose id is `stem`, falling
+    /// back to the stem itself when nothing is registered under it (a
+    /// vanished lane, a stem mid-hydration) — the replication metric
+    /// labels' bridge back from file stems to the names operators
+    /// know (`taguru_replica_behind_seconds{context=...}` and its
+    /// shipper-side twins).
+    pub(crate) fn name_of_stem(&self, stem: &str) -> String {
+        let registry = self.0.registry.read();
+        registry
+            .get_id(stem)
+            .map(|entry| entry.inner.read().name.clone())
+            .unwrap_or_else(|| stem.to_string())
+    }
+
+    /// Every entry, cloned out under one short read lock — the sweeps'
+    /// (flusher, evictor, gauges) iteration snapshot. Id-ordered; a
+    /// sweep that wants a display name reads `EntryInner::name` under
+    /// the entry lock it takes anyway.
+    fn snapshot(&self) -> Vec<Arc<Entry>> {
+        self.0.registry.read().values().cloned().collect()
     }
 
     /// Stamps the LRU clock on an entry after an operation.
@@ -3188,10 +3445,12 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
     })
 }
 
-/// The scan-side decode shared by the `context` and `group` sweeps: a
-/// discovered file's stem and the entity name it encodes, or `None`
-/// (logged) when the name does not decode — one function, so the two
-/// scans cannot drift on what "undecodable" means.
+/// The scan-side decode for `group` sweeps (`groups::scan_groups`,
+/// the replica's group reload, `taguru inspect`): a discovered
+/// file's stem and the group name it encodes, or `None` (logged)
+/// when the name does not decode. `context` scans stopped decoding
+/// anything — their stems are ids, and the name lives in the meta
+/// sidecar (ADR 0045).
 pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
     let stem = path.file_stem().and_then(|s| s.to_str())?;
     match name_from_stem(stem) {
@@ -3323,6 +3582,7 @@ fn width_observation_fresh(observed_at: &std::time::Instant) -> bool {
 /// files and the next retry loads, or DELETE the `context`.
 fn ensure_hot(
     data_dir: &Path,
+    stem: &str,
     name: &str,
     inner: &mut EntryInner,
     metrics: &Metrics,
@@ -3346,13 +3606,12 @@ fn ensure_hot(
             LOAD_FAILURE_RETRY.as_secs()
         ));
     }
-    let stem = file_stem(name);
     // A lazy bucket boot materializes the family before its first
     // load; hydrated families return instantly. A family that cannot
     // be materialized cannot be loaded: same failure, same quarantine
     // (and the same retry cadence once the bucket recovers).
     if let Some(hydrator) = hydrator
-        && let Err(error) = hydrator.ensure_context(&stem)
+        && let Err(error) = hydrator.ensure_context(stem)
     {
         let error = format!("context '{name}' hydration failed: {error}");
         metrics.record_cache_load(false);
@@ -3369,7 +3628,7 @@ fn ensure_hot(
     // one already passed the same check to get this far) but the only
     // check the replica path gets, so it always runs rather than only
     // when a hydrator is present.
-    match schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref(), true) {
+    match schema::load_schema(data_dir, stem, inner.schema_digest.as_deref(), true) {
         Ok(schema) => inner.schema = schema.map(Arc::new),
         Err(error) => {
             let error = format!("context '{name}': {error}");
@@ -3378,7 +3637,7 @@ fn ensure_hot(
             return Err(error);
         }
     }
-    let loaded = fs::read(image_path(data_dir, &stem))
+    let loaded = fs::read(image_path(data_dir, stem))
         .map_err(|e| format!("context '{name}' image unreadable: {e}"))
         .and_then(|bytes| {
             Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))
@@ -3393,7 +3652,7 @@ fn ensure_hot(
             // so a panic in either half quarantines the context
             // instead of crash-looping every subsequent access.
             let top = replay_wal_guarded(
-                &wal_path(data_dir, &stem),
+                &wal_path(data_dir, stem),
                 context.applied_seq(),
                 &mut context,
             )
@@ -3423,7 +3682,7 @@ fn ensure_hot(
     inner.graph_revision = inner.graph_revision.max(top);
     // Re-stat rather than trust the registration-time size: appends
     // and truncations may have happened while this entry sat cold.
-    inner.wal_bytes = fs::metadata(wal_path(data_dir, &stem))
+    inner.wal_bytes = fs::metadata(wal_path(data_dir, stem))
         .map(|meta| meta.len())
         .unwrap_or(0);
     Ok(())

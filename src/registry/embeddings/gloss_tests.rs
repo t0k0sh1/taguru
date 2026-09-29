@@ -9,11 +9,10 @@ mod tests {
 
     use crate::embedding::{EmbedPurpose, EmbeddingProvider, VectorStore};
     use crate::registry::test_support::{
-        MockEmbeddings, SlowEmbeddings, assoc_op, rendered, scratch_dir,
+        MockEmbeddings, SlowEmbeddings, assoc_op, rendered, scratch_dir, stem_on_disk,
     };
     use crate::registry::{
-        AppState, BootOptions, ContextMeta, GlossLaneReport, SEMANTIC_RESOLVE_LIMIT, file_stem,
-        vectors_path,
+        AppState, BootOptions, ContextMeta, GlossLaneReport, SEMANTIC_RESOLVE_LIMIT, vectors_path,
     };
 
     /// An embedding refresh that published something bumps the config
@@ -582,7 +581,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (3, 3));
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("w").unwrap()));
         assert!(
             store
                 .concepts
@@ -765,7 +764,7 @@ mod tests {
             (3, 3),
             "the aged-out observation must not suppress detection forever"
         );
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("w").unwrap()));
         assert!(
             store
                 .concepts
@@ -957,7 +956,7 @@ mod tests {
             "c/d bought once, before the mismatch was even noticed, must not \
              be bought again by the redo it triggers"
         );
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("w").unwrap()));
         assert!(
             store
                 .concepts
@@ -995,7 +994,7 @@ mod tests {
         }
 
         let dir = scratch_dir("label-only-width-drift");
-        let path = vectors_path(&dir, &file_stem("w"));
+        let path;
         {
             let embedder = Some(Arc::new(FixedWidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
             let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
@@ -1014,6 +1013,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
+            path = vectors_path(&dir, &state.stem_of("w").unwrap());
         }
 
         // Shrink only the label table's vectors in place, keeping their
@@ -1112,7 +1112,7 @@ mod tests {
             "only the width probe's one call, not a re-embed of the cached rows"
         );
 
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("fruit").unwrap()));
         assert_eq!(
             store.concepts.len() + store.labels.len(),
             total,
@@ -1185,7 +1185,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("fruit").unwrap()));
         assert_eq!(
             store.concepts.len(),
             128,
@@ -1234,7 +1234,7 @@ mod tests {
             .refresh_embeddings("fruit", Deadline::unbounded())
             .unwrap()
             .unwrap();
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("fruit").unwrap()));
         assert!(
             store.concepts.len() > 128,
             "the previously dropped remainder must still be stale and get embedded now"
@@ -1295,7 +1295,7 @@ mod tests {
             total, 3,
             "the vanished concept 旧銘 and label 廃止銘柄 must not linger as ghost rows"
         );
-        let sidecar = VectorStore::load(&vectors_path(&dir, &file_stem("sake")));
+        let sidecar = VectorStore::load(&vectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert!(
             !sidecar.concepts.contains_key("旧銘"),
             "the dropped concept's row reached neither memory nor disk"
@@ -1359,7 +1359,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
-        let sidecar = VectorStore::load(&vectors_path(&dir, &file_stem("sake")));
+        let sidecar = VectorStore::load(&vectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(
             sidecar.concepts.len(),
             2,
@@ -1466,7 +1466,7 @@ mod tests {
             (6, 6),
             "the reconciliation retry re-embeds everything, old and new alike, and succeeds"
         );
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("w").unwrap()));
         assert!(
             store
                 .concepts
@@ -1831,7 +1831,7 @@ mod tests {
 
         // The sidecar is held in memory after first use: even with the
         // file gone, the same query keeps answering.
-        fs::remove_file(vectors_path(&dir, &file_stem("fruit"))).unwrap();
+        fs::remove_file(vectors_path(&dir, &state.stem_of("fruit").unwrap())).unwrap();
         let held = state
             .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
             .unwrap()
@@ -2065,7 +2065,7 @@ mod tests {
             .concepts
             .insert("直交".to_string(), (3, vec![0.0, 1.0]));
         store
-            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .save(&vectors_path(&dir, &state.stem_of("fruit").unwrap()))
             .unwrap();
 
         let (concepts, labels, note) = state
@@ -2110,7 +2110,7 @@ mod tests {
                 (u64::from(i), vec![angle.cos(), angle.sin()]),
             );
         }
-        let path = vectors_path(&dir, &file_stem("fruit"));
+        let path = vectors_path(&dir, &state.stem_of("fruit").unwrap());
         store.save(&path).unwrap();
 
         let (_, _, note) = state
@@ -2184,7 +2184,7 @@ mod tests {
             .concepts
             .insert("bbb".to_string(), (2, vec![1.0, 0.0]));
         store
-            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .save(&vectors_path(&dir, &state.stem_of("fruit").unwrap()))
             .unwrap();
 
         let explain = |expected: &str| {
@@ -2295,7 +2295,7 @@ mod tests {
             );
             state.flush_dirty();
         }
-        let path = vectors_path(&dir, &file_stem("fruit"));
+        let path = vectors_path(&dir, &stem_on_disk(&dir, "fruit"));
         let carried = VectorStore::load(&path);
         assert!(carried.concepts.is_empty(), "{:?}", carried.concepts.keys());
         assert_eq!(carried.labels.len(), 1, "{:?}", carried.labels.keys());
@@ -2365,7 +2365,7 @@ mod tests {
             .refresh_embeddings("fruit", Deadline::unbounded())
             .unwrap()
             .unwrap();
-        let path = vectors_path(&dir, &file_stem("fruit"));
+        let path = vectors_path(&dir, &state.stem_of("fruit").unwrap());
         let before = fs::metadata(&path).unwrap().ino();
 
         assert_eq!(
@@ -2433,7 +2433,7 @@ mod tests {
             (0, 3),
             "a, b and l1 survive; nothing re-embeds"
         );
-        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("fruit").unwrap()));
         assert!(
             !store.concepts.contains_key("c") && !store.concepts.contains_key("d"),
             "retracted concepts survived on disk: {:?}",
@@ -2519,7 +2519,7 @@ mod tests {
             scores.push(cosine);
         }
         store
-            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .save(&vectors_path(&dir, &state.stem_of("fruit").unwrap()))
             .unwrap();
 
         let (concepts, labels, note) = state
@@ -2721,7 +2721,7 @@ mod tests {
         // unlike a permission bit, which root or `CAP_DAC_OVERRIDE`
         // (common in CI containers) simply ignores, making that
         // approach non-deterministic (CodeRabbit, PR #689).
-        let path = vectors_path(&dir, &file_stem("fruit"));
+        let path = vectors_path(&dir, &stem_on_disk(&dir, "fruit"));
         let healthy = fs::read(&path).unwrap();
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
@@ -2732,7 +2732,7 @@ mod tests {
         // Unreadable: an empty store, degraded rather than a panic or
         // a propagated error — but NOT cached, unlike a genuinely
         // empty context.
-        let degraded = state.entry_vectors(&entry, &file_stem("fruit"));
+        let degraded = state.entry_vectors(&entry, &state.stem_of("fruit").unwrap());
         assert!(degraded.concepts.is_empty() && degraded.labels.is_empty());
         assert!(
             entry.vectors.lock().is_none(),
@@ -2745,11 +2745,11 @@ mod tests {
         // Still within the quarantine window: the disk is not re-read
         // yet even though it has already recovered — same posture as
         // `entry_passages`.
-        let still_degraded = state.entry_vectors(&entry, &file_stem("fruit"));
+        let still_degraded = state.entry_vectors(&entry, &state.stem_of("fruit").unwrap());
         assert!(still_degraded.concepts.is_empty() && still_degraded.labels.is_empty());
 
         state.age_load_failures("fruit", crate::registry::LOAD_FAILURE_RETRY);
-        let recovered = state.entry_vectors(&entry, &file_stem("fruit"));
+        let recovered = state.entry_vectors(&entry, &state.stem_of("fruit").unwrap());
         assert!(
             !recovered.concepts.is_empty() || !recovered.labels.is_empty(),
             "the quarantine window passing must trigger a real retry, not stay stuck empty forever"

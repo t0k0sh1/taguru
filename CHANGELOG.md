@@ -9,6 +9,25 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (on-disk format) — a `context`'s files are named by a
+  server-minted id, not its name** (#963, ADR 0045): every `context`
+  gets a UUID v4 at create; the data directory's file stems are that
+  id, and the display name lives in `{id}.meta.json` (`id` and `name`
+  fields, recorded on every sidecar write). A data directory written
+  by an earlier release is refused at boot with a migration message —
+  export with the release that wrote it, then import here (§2.7: no
+  compatibility). The wire is unchanged in this step: every route
+  still addresses contexts by name, resolved through an in-memory
+  name index. Names are display strings and no longer unique by
+  construction (issue #961 decision 1) — duplicates can only arise
+  from a hand-assembled directory while creates are name-addressed,
+  and every name-addressed operation refuses an ambiguous name as a
+  409 conflict instead of picking a claimant. `POST
+  /contexts/{name}/rename` is now a sidecar write plus an index move:
+  no file moves, no durable rename marker, no boot resume, and a
+  renamed context stays loaded. `taguru inspect` reports the id/name
+  sidecar states (a pre-id or copied-family sidecar is a failure; a
+  missing one degrades to the stem as a display fallback).
 - **Breaking — the per-key grants environment variable is
   `TAGURU_KEY_GRANTS`, not `TAGURU_KEY_SCOPES`** (#959): the value
   shape is unchanged (`{"name": "role" | {"role": …, "contexts":

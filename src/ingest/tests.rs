@@ -616,7 +616,7 @@ fn apply_batch_threads_the_deadline_into_association_writes() {
     // passage already ran) — the marker must survive it, saying the
     // source may be half-applied until the documented repair runs.
     assert_eq!(
-        crate::registry::import_marker_paths(&dir, "sake").len(),
+        crate::registry::import_marker_paths(&dir, &state.stem_of("sake").unwrap()).len(),
         1,
         "a deadline refusal mid-batch keeps its import marker"
     );
@@ -627,7 +627,7 @@ fn apply_batch_threads_the_deadline_into_association_writes() {
     let applied = apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
     assert_eq!(applied.associations, 1);
     assert!(
-        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        crate::registry::import_marker_paths(&dir, &state.stem_of("sake").unwrap()).is_empty(),
         "the completed retry clears the marker"
     );
 
@@ -1090,8 +1090,9 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     )
     .unwrap();
     apply_batch(&state, &happy, Deadline::unbounded()).unwrap();
+    let stem = state.stem_of("sake").unwrap();
     assert!(
-        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        crate::registry::import_marker_paths(&dir, &stem).is_empty(),
         "a completed batch clears its marker"
     );
 
@@ -1107,7 +1108,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     let refusal = apply_batch(&state, &torn, Deadline::unbounded()).unwrap_err();
     assert!(matches!(refusal, ApplyRefusal::Rejected(_)));
     assert_eq!(
-        crate::registry::import_marker_paths(&dir, "sake").len(),
+        crate::registry::import_marker_paths(&dir, &stem).len(),
         0,
         "a predicted rejection opens no marker"
     );
@@ -1123,7 +1124,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     .unwrap();
     apply_batch(&state, &fixed, Deadline::unbounded()).unwrap();
     assert!(
-        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        crate::registry::import_marker_paths(&dir, &stem).is_empty(),
         "a normal import leaves no marker"
     );
 
@@ -1155,16 +1156,26 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
     )
     .unwrap();
 
+    // The context first (markers disabled, so this leaves no marker
+    // of its own) — the stale marker below must sit at ITS stem, the
+    // same file family an earlier marker-enabled run of this same
+    // context would have written into.
+    state
+        .create("sake", crate::registry::ContextMeta::default())
+        .map_err(|_| "create")
+        .unwrap();
+    let stem = state.stem_of("sake").unwrap();
+
     // The open is the gated half: an explicit call lands no file.
     state.open_import_marker("sake", "doc-1").unwrap();
     assert!(
-        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        crate::registry::import_marker_paths(&dir, &stem).is_empty(),
         "a disabled marker must not touch the disk"
     );
 
     // A stale marker from an earlier marker-enabled run: the batch
     // that re-imports its source must still clear it.
-    let stale = crate::registry::import_marker_path(&dir, "sake", "doc-1");
+    let stale = crate::registry::import_marker_path(&dir, &stem, "doc-1");
     fs::write(&stale, "{\"context\": \"sake\", \"source\": \"doc-1\"}").unwrap();
     let batch = parse(
         "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
@@ -1223,7 +1234,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         {
             saw_the_refusal = true;
             assert_eq!(
-                crate::registry::import_marker_paths(&dir, "sake").len(),
+                crate::registry::import_marker_paths(&dir, &state.stem_of("sake").unwrap()).len(),
                 1,
                 "step {failure}: refusing to retract an unreplaced passage still \
                  cleared the marker"
@@ -1396,20 +1407,25 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
         crate::storage::fail_persistence_ops_after(failure);
         let first = apply_batch(&state, &batch, Deadline::unbounded());
         let past_end = crate::storage::clear_persistence_fault();
-        let marker = crate::registry::import_marker_path(&dir, "sake", "doc-1");
+        // The marker sits in the context's id-stem family; a failure
+        // early enough that no context registered also means no
+        // marker could have been opened.
+        let marker = state
+            .stem_of("sake")
+            .map(|stem| crate::registry::import_marker_path(&dir, &stem, "doc-1"));
+        let marker_exists = marker.as_ref().is_some_and(|marker| marker.exists());
 
         if past_end {
             assert!(
                 first.is_ok(),
                 "the past-end attempt must complete: {first:?}"
             );
-            assert!(!marker.exists());
+            assert!(!marker_exists);
         } else {
             if let Err(refusal) = &first {
                 let before_marker = refusal.text().contains("marker not persisted");
                 assert_eq!(
-                    marker.exists(),
-                    !before_marker,
+                    marker_exists, !before_marker,
                     "a stopped batch at step {failure} lost its tear witness: {refusal:?}"
                 );
                 if let ApplyRefusal::Partial { applied, .. } = refusal {
@@ -1425,6 +1441,8 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
             // when the injected error was swallowed after a fully
             // superseding write or only prevented marker cleanup.
             apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
+            let marker =
+                crate::registry::import_marker_path(&dir, &state.stem_of("sake").unwrap(), "doc-1");
             assert!(
                 !marker.exists(),
                 "repair did not clear failure step {failure}"

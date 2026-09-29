@@ -83,3 +83,33 @@ pub fn read_listen_line(
     };
     (addr, lines)
 }
+
+/// The file stem (the `context`'s id, ADR 0045) of the context named
+/// `name` in `data_dir`, read from the sidecar metas — integration
+/// tests address files through this since stems stopped encoding
+/// names. Panics when no sidecar records the name.
+#[allow(dead_code)] // not every integration target reaches into the data dir
+pub fn context_stem(data_dir: &std::path::Path, name: &str) -> String {
+    for entry in std::fs::read_dir(data_dir).expect("data dir must list") {
+        let path = entry.expect("entry must read").path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value.get("name").and_then(|v| v.as_str()) == Some(name) {
+            return stem.to_string();
+        }
+    }
+    panic!(
+        "no sidecar in {} records the name '{name}'",
+        data_dir.display()
+    );
+}
