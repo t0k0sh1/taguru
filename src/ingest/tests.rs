@@ -1245,7 +1245,8 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
             // now cleared.
             apply_batch(&state, &reimport, Deadline::unbounded()).unwrap();
             assert!(
-                crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+                crate::registry::import_marker_paths(&dir, &state.stem_of("sake").unwrap())
+                    .is_empty(),
                 "step {failure}: repair did not clear the marker"
             );
         }

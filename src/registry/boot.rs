@@ -57,8 +57,12 @@ impl AppState {
                 }
                 // The name lives in the sidecar the shared hydration
                 // already landed; the stem is the id (ADR 0045). The
-                // stem fallback is the boot scan's degraded posture.
-                let meta_file = read_meta_file(&data_dir, &stem);
+                // stem fallback is the boot scan's degraded posture,
+                // and the scan's two refusals apply here identically —
+                // a pre-id or copied-family sidecar registered from a
+                // bucket would otherwise be stamped with `id: <stem>`
+                // by the first flush.
+                let meta_file = scanned_meta_or_refuse(&data_dir, &stem)?;
                 let name = meta_file.name.clone().unwrap_or_else(|| stem.clone());
                 // Not schema-verified here (see the comment above):
                 // the family is not local yet, so there is nothing to
@@ -299,6 +303,36 @@ fn passage_vector_limit_leaves_ann_dormant(
     embed_passages && passage_vector_limit < crate::embedding::PASSAGE_ANN_THRESHOLD
 }
 
+/// [`read_scanned_meta`] with the two refused shapes mapped to the
+/// boot refusal they mean — shared by the `.ctx` scan and the lazy
+/// bucket registration (`boot_with`'s hydrator loop), so neither path
+/// can register a pre-id or copied-family sidecar that a later flush
+/// would then stamp with `id: <stem>`, laundering it into the current
+/// format. `Degraded` (missing or unreadable) passes through: for the
+/// hydrator path a not-yet-hydrated sidecar is the ordinary case.
+fn scanned_meta_or_refuse(data_dir: &Path, stem: &str) -> io::Result<MetaFile> {
+    match read_scanned_meta(data_dir, stem) {
+        ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => Ok(meta_file),
+        ScannedMeta::PreId => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar '{stem}.meta.json' records no context id: this data \
+                 directory was written before contexts had ids (ADR 0045) and \
+                 this build does not read it — export with the release that \
+                 wrote it, then import here"
+            ),
+        )),
+        ScannedMeta::ForeignId(id) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar '{stem}.meta.json' records id '{id}', not its own \
+                 stem: the family was copied or hand-edited — restore it \
+                 under its original stem"
+            ),
+        )),
+    }
+}
+
 /// One boot-time pass over the data directory: crash leftovers of
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every `context` image found is
@@ -407,36 +441,9 @@ fn scan_data_dir(
             // read (never derived) — see `ScannedMeta` for the two
             // refused shapes (a pre-id directory, a copied family)
             // and the tolerated degraded ones.
-            let meta_file = match read_scanned_meta(data_dir, stem) {
-                ScannedMeta::Current(meta_file) => meta_file,
-                ScannedMeta::PreId => {
-                    return (
-                        index,
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "sidecar '{stem}.meta.json' records no context id: this data \
-                                 directory was written before contexts had ids (ADR 0045) and \
-                                 this build does not read it — export with the release that \
-                                 wrote it, then import here"
-                            ),
-                        )),
-                    );
-                }
-                ScannedMeta::ForeignId(id) => {
-                    return (
-                        index,
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "sidecar '{stem}.meta.json' records id '{id}', not its own \
-                                 stem: the family was copied or hand-edited — restore it \
-                                 under its original stem"
-                            ),
-                        )),
-                    );
-                }
-                ScannedMeta::Degraded(meta_file) => meta_file,
+            let meta_file = match scanned_meta_or_refuse(data_dir, stem) {
+                Ok(meta_file) => meta_file,
+                Err(error) => return (index, Err(error)),
             };
             let name = meta_file.name.clone().unwrap_or_else(|| stem.to_string());
             let name = name.as_str();

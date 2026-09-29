@@ -5,8 +5,14 @@
 
 /// One log lane's shipping lag as the dashboard sees it: records not
 /// yet in the bucket, and how long the oldest of them has waited.
-#[derive(Clone, Copy, Default)]
+/// `label` is the context's display name as of the last note — kept
+/// as a VALUE, not the key: the key is the stem (the context's id),
+/// which no rename or delete can shift out from under the row, so a
+/// forget always finds what a note recorded and a rename rotates the
+/// rendered label instead of leaking a second series.
+#[derive(Clone, Default)]
 pub(super) struct ReplicationLag {
+    pub(super) label: String,
     pub(super) behind_records: u64,
     pub(super) age_secs: u64,
 }
@@ -14,8 +20,10 @@ pub(super) struct ReplicationLag {
 /// One log lane's tail lag as a replica sees it: the record seq its
 /// local materialization carries vs the newest the manifest ships,
 /// and (unix seconds, 0 = caught up) since when it has been behind.
-#[derive(Clone, Copy, Default)]
+/// `label` follows [`ReplicationLag`]'s stem-keyed posture.
+#[derive(Clone, Default)]
 pub(super) struct ReplicaLag {
+    pub(super) label: String,
     pub(super) applied_seq: u64,
     pub(super) shipped_seq: u64,
     pub(super) behind_since_epoch: u64,

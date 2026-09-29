@@ -594,7 +594,7 @@ mod tests {
         // not have boot report a tear in a context that is gone.
         state.delete("sake").unwrap().unwrap();
         assert!(
-            import_marker_paths(&dir, "sake").is_empty(),
+            import_marker_paths(&dir, &stem).is_empty(),
             "delete sweeps markers"
         );
         let _ = fs::remove_dir_all(&dir);

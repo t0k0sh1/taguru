@@ -16,22 +16,46 @@ impl AppState {
     /// the sidecar meta is already local (the shared hydration pass
     /// lands every meta before families are touched).
     /// Returns the display name the `context` registered (or was
-    /// already registered) under — the tailer's log label.
-    pub(crate) fn replica_register(&self, stem: &str) -> String {
+    /// already registered) under — the tailer's log label — or `None`
+    /// for a sidecar the boot scan would refuse (pre-id, or recording
+    /// a foreign id): registering one would let a later local write
+    /// stamp it with `id: <stem>`, laundering it into the current
+    /// format, so the tailer treats the stem as failed instead. A
+    /// replica cannot refuse its whole poll the way boot refuses a
+    /// directory — it is already serving.
+    pub(crate) fn replica_register(&self, stem: &str) -> Option<String> {
         {
             let registry = self.0.registry.read();
             if let Some(entry) = registry.get_id(stem) {
-                return entry.inner.read().name.clone();
+                return Some(entry.inner.read().name.clone());
             }
         }
-        let meta_file = read_meta_file(&self.0.data_dir, stem);
+        let meta_file = match read_scanned_meta(&self.0.data_dir, stem) {
+            ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => meta_file,
+            ScannedMeta::PreId => {
+                tracing::warn!(
+                    stem,
+                    "tailed sidecar records no context id (pre-ADR 0045); the stem is \
+                     not registered — the lineage needs an export → import migration"
+                );
+                return None;
+            }
+            ScannedMeta::ForeignId(id) => {
+                tracing::warn!(
+                    stem,
+                    recorded_id = %id,
+                    "tailed sidecar records another stem's id; the stem is not registered"
+                );
+                return None;
+            }
+        };
         // The name lives in the sidecar (ADR 0045); a writer of this
         // build always records it, so the fallback to the stem is the
         // same degraded-sidecar posture the boot scan takes.
         let name = meta_file.name.clone().unwrap_or_else(|| stem.to_string());
         let mut registry = self.0.registry.write();
         if let Some(entry) = registry.get_id(stem) {
-            return entry.inner.read().name.clone();
+            return Some(entry.inner.read().name.clone());
         }
         // Not schema-verified here, same asymmetry as boot's
         // hydrator registration (`boot_with`): the family this
@@ -49,7 +73,7 @@ impl AppState {
                 None,
             )),
         );
-        name
+        Some(name)
     }
 
     /// Replica tailer: the in-memory half of applying one tailed
@@ -633,7 +657,11 @@ mod tests {
         .unwrap();
         let before = state.context_count();
         let name = state.replica_register("some-fresh-stem");
-        assert_eq!(name, "some-fresh-stem", "the fallback name is the stem");
+        assert_eq!(
+            name.as_deref(),
+            Some("some-fresh-stem"),
+            "the fallback name is the stem"
+        );
         assert_eq!(
             state.context_count(),
             before + 1,

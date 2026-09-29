@@ -696,10 +696,10 @@ impl Metrics {
                 "gauge",
                 "Acknowledged log records not yet in the bucket, per context and lane.",
             );
-            for ((context, lane), entry) in lag.iter() {
+            for ((_, lane), entry) in lag.iter() {
                 out.push_str(&format!(
                     "taguru_replication_lag_records{{context=\"{}\",lane=\"{lane}\"}} {}\n",
-                    escape_label(context),
+                    escape_label(&entry.label),
                     entry.behind_records
                 ));
             }
@@ -709,10 +709,10 @@ impl Metrics {
                 "gauge",
                 "Age of the oldest unshipped record, per context and lane (0 = caught up).",
             );
-            for ((context, lane), entry) in lag.iter() {
+            for ((_, lane), entry) in lag.iter() {
                 out.push_str(&format!(
                     "taguru_replication_lag_seconds{{context=\"{}\",lane=\"{lane}\"}} {}\n",
-                    escape_label(context),
+                    escape_label(&entry.label),
                     entry.age_secs
                 ));
             }
@@ -760,10 +760,10 @@ impl Metrics {
                 "gauge",
                 "Highest record seq this replica has applied, per context and lane.",
             );
-            for ((context, lane), entry) in lag.iter() {
+            for ((_, lane), entry) in lag.iter() {
                 out.push_str(&format!(
                     "taguru_replica_applied_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
-                    escape_label(context),
+                    escape_label(&entry.label),
                     entry.applied_seq
                 ));
             }
@@ -773,10 +773,10 @@ impl Metrics {
                 "gauge",
                 "Newest record seq the bucket ships, per context and lane; minus applied_seq = the promotion-time RPO in records.",
             );
-            for ((context, lane), entry) in lag.iter() {
+            for ((_, lane), entry) in lag.iter() {
                 out.push_str(&format!(
                     "taguru_replica_shipped_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
-                    escape_label(context),
+                    escape_label(&entry.label),
                     entry.shipped_seq
                 ));
             }
@@ -787,14 +787,14 @@ impl Metrics {
                 "How long the lane has been behind the shipped stream (0 = caught up).",
             );
             let now = Self::unix_now();
-            for ((context, lane), entry) in lag.iter() {
+            for ((_, lane), entry) in lag.iter() {
                 let behind = match entry.behind_since_epoch {
                     0 => 0,
                     since => now.saturating_sub(since),
                 };
                 out.push_str(&format!(
                     "taguru_replica_behind_seconds{{context=\"{}\",lane=\"{lane}\"}} {behind}\n",
-                    escape_label(context),
+                    escape_label(&entry.label),
                 ));
             }
         }

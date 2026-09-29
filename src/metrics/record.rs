@@ -403,17 +403,23 @@ impl Metrics {
         self.replication_fenced.store(true, Ordering::Relaxed);
     }
 
-    /// Refreshes one lane's lag series, keyed (`context`, lane).
+    /// Refreshes one lane's lag series, keyed (stem, lane) — the
+    /// context's id, which no rename can shift — with `label` (the
+    /// display name as of this note) carried as the row's rendered
+    /// `context` label. A rename thus rotates the label in place; it
+    /// never strands a series under the old name.
     pub fn note_replication_lane(
         &self,
-        context: &str,
+        stem: &str,
+        label: &str,
         lane: &'static str,
         behind_records: u64,
         age_secs: u64,
     ) {
         self.replication_lag.lock().insert(
-            (context.to_string(), lane),
+            (stem.to_string(), lane),
             ReplicationLag {
+                label: label.to_string(),
                 behind_records,
                 age_secs,
             },
@@ -421,11 +427,13 @@ impl Metrics {
     }
 
     /// Drops a deleted `context`'s lane series so the scrape does not
-    /// carry ghost labels forever.
-    pub fn forget_replication_lane(&self, context: &str, lane: &'static str) {
+    /// carry ghost labels forever — by stem, so it finds the row even
+    /// after the registry entry (and with it the display name) is
+    /// already gone.
+    pub fn forget_replication_lane(&self, stem: &str, lane: &'static str) {
         self.replication_lag
             .lock()
-            .remove(&(context.to_string(), lane));
+            .remove(&(stem.to_string(), lane));
     }
 
     pub(super) fn unix_now() -> u64 {
@@ -473,16 +481,20 @@ impl Metrics {
         self.replica_manifest_epoch.store(epoch, Ordering::Relaxed);
     }
 
-    /// One lane fully applied: applied == shipped, gap closed.
+    /// One lane fully applied: applied == shipped, gap closed. Keyed
+    /// by stem with the display name as a rotating label, like
+    /// [`Self::note_replication_lane`].
     pub fn note_replica_lane(
         &self,
-        context: &str,
+        stem: &str,
+        label: &str,
         lane: &'static str,
         applied_seq: u64,
         shipped_seq: u64,
     ) {
         let mut lag = self.replica_lag.lock();
-        let entry = lag.entry((context.to_string(), lane)).or_default();
+        let entry = lag.entry((stem.to_string(), lane)).or_default();
+        entry.label = label.to_string();
         entry.applied_seq = applied_seq;
         entry.shipped_seq = shipped_seq;
         entry.behind_since_epoch = if applied_seq >= shipped_seq {
@@ -497,9 +509,16 @@ impl Metrics {
     /// The shipped side alone — for a lane whose family could not be
     /// applied this poll: the applied seq stays where it was (or at 0
     /// for a lane never applied), and the age starts counting.
-    pub fn note_replica_shipped(&self, context: &str, lane: &'static str, shipped_seq: u64) {
+    pub fn note_replica_shipped(
+        &self,
+        stem: &str,
+        label: &str,
+        lane: &'static str,
+        shipped_seq: u64,
+    ) {
         let mut lag = self.replica_lag.lock();
-        let entry = lag.entry((context.to_string(), lane)).or_default();
+        let entry = lag.entry((stem.to_string(), lane)).or_default();
+        entry.label = label.to_string();
         entry.shipped_seq = shipped_seq;
         // Same three-way move as `note_replica_lane`: today shipped
         // seqs only grow within a lineage, so the caught-up arm can't
@@ -513,11 +532,12 @@ impl Metrics {
         };
     }
 
-    /// Drops a vanished `context`'s replica lag rows (both lanes).
-    pub fn forget_replica_context(&self, context: &str) {
+    /// Drops a vanished `context`'s replica lag rows (both lanes) —
+    /// by stem, for the same reason `forget_replication_lane` is.
+    pub fn forget_replica_context(&self, stem: &str) {
         let mut lag = self.replica_lag.lock();
-        lag.remove(&(context.to_string(), "graph"));
-        lag.remove(&(context.to_string(), "passages"));
+        lag.remove(&(stem.to_string(), "graph"));
+        lag.remove(&(stem.to_string(), "passages"));
     }
 
     /// Clears every replica lag row — the tailer's move on a

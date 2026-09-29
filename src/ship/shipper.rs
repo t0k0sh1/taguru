@@ -353,10 +353,13 @@ impl Shipper {
             self.lanes.remove(name);
             self.manifest_dirty = true;
             self.progress.forget(&self.data_dir.join(name));
-            let (context, lane_kind) = lane_metric_labels(&self.state, name);
+            // By stem, not display name: the registry entry (and its
+            // name) is usually already gone by the time the lane
+            // retires, and the row's key never moved.
+            let (_, lane_kind) = lane_metric_labels(&self.state, name);
             self.state
                 .metrics()
-                .forget_replication_lane(&context, lane_kind);
+                .forget_replication_lane(lane_stem(name), lane_kind);
         } else {
             let key = generation_root.join("files").join(name);
             match self.store.delete(&key).await {
@@ -527,6 +530,7 @@ impl Shipper {
             .unwrap_or(0);
         let (context, lane_kind) = lane_metric_labels(&self.state, name);
         self.state.metrics().note_replication_lane(
+            lane_stem(name),
             &context,
             lane_kind,
             lane.local_seq.saturating_sub(lane.shipped_seq),

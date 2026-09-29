@@ -448,8 +448,12 @@ impl Tailer {
         for stem in &report.vanished {
             if let Some(name) = self.state.replica_deregister(stem) {
                 tracing::info!(context = %name, "the lineage no longer carries this context; dropping it");
-                self.state.metrics().forget_replica_context(&name);
             }
+            // By stem, and outside the deregister guard: the lag rows
+            // are keyed on the stem and may exist even for a stem
+            // that never registered (a failed lane still notes its
+            // shipped side).
+            self.state.metrics().forget_replica_context(stem);
             self.pending_refresh.remove(stem);
         }
         // Shared files (groups, the grant store, every sidecar meta)
@@ -464,7 +468,15 @@ impl Tailer {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let name = self.state.replica_register(stem);
+            let Some(name) = self.state.replica_register(stem) else {
+                // A sidecar the boot scan would refuse (pre-id, or a
+                // foreign id — `replica_register` already warned):
+                // never hydrated, never refreshed, and it must count
+                // as failed or the per-lane metrics below (keyed on
+                // `failed`) would report this lane as fully caught up.
+                failed.insert(stem.as_str());
+                continue;
+            };
             if let Err(error) = self.hydrator.ensure_context(stem) {
                 tracing::warn!(
                     context = %name,
@@ -504,11 +516,11 @@ impl Tailer {
             if failed.contains(stem) {
                 self.state
                     .metrics()
-                    .note_replica_shipped(&context, lane_label, lane.seq);
+                    .note_replica_shipped(stem, &context, lane_label, lane.seq);
             } else {
                 self.state
                     .metrics()
-                    .note_replica_lane(&context, lane_label, lane.seq, lane.seq);
+                    .note_replica_lane(stem, &context, lane_label, lane.seq, lane.seq);
             }
         }
         if !failed.is_empty() {
