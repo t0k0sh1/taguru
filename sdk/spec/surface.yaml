@@ -1,7 +1,8 @@
 # The cross-language surface spec: one entry per logical operation.
 #
 # Both SDKs must expose exactly this surface. Python names are canonical;
-# TypeScript method names are derived mechanically (snake_case → camelCase).
+# TypeScript method and positional-parameter names are derived mechanically
+# (snake_case → camelCase).
 # `args` are positional parameters; `options` are Python keyword-only
 # parameters / TypeScript trailing-options-object keys (snake_case in both).
 # `route` is documentation. Checked in CI by check_python.py and
@@ -21,7 +22,7 @@ classes:
     import_batches: { route: "POST /import", args: [data] }
     import_file: { route: "POST /import", args: [path] }
     wait_until_ready: { options: [timeout, interval] }
-    context: { args: [name] }
+    context: { args: [context_id] }
     recall:
       route: "POST /recall"
       args: [cue]

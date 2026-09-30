@@ -582,18 +582,18 @@ export class Contexts {
    * One directory page, sorted by `(name, id)`.
    *
    * The keyset cursor is the last row shown: `after` its `name` and
-   * `afterId` its `id` (names are not unique, so the id breaks ties).
+   * `after_id` its `id` (names are not unique, so the id breaks ties).
    * `pinned` narrows to that pinned state; unlike the cursor, it counts
    * toward `total`.
    */
   async list(
-    options: { limit?: number; after?: string; afterId?: string; pinned?: boolean } = {},
+    options: { limit?: number; after?: string; after_id?: string; pinned?: boolean } = {},
   ): Promise<ContextPage> {
     const result = await this.client.requestJson("GET", "/contexts", {
       params: {
         limit: options.limit,
         after: options.after,
-        after_id: options.afterId,
+        after_id: options.after_id,
         pinned: options.pinned,
       },
     });
@@ -610,7 +610,7 @@ export class Contexts {
       const page = await this.list({
         limit: options.limit,
         after,
-        afterId,
+        after_id: afterId,
         pinned: options.pinned,
       });
       if (page.contexts.length === 0) {
