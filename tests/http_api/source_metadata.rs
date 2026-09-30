@@ -532,14 +532,22 @@ fn explain_names_filtered_out_before_the_lanes() {
         "{filtered}"
     );
 
-    // Empty-read accounting: the served explanation above reached
-    // scoring (productive), the filtered_out one never did — exactly
-    // one of the two explains so far counts toward `usage.empty_reads`.
+    // Empty-read accounting, counted ASYMMETRICALLY on purpose (one
+    // served, two filtered_out): the served explanation reached
+    // scoring (productive), the filtered_out ones never did — so the
+    // counter must read exactly 2. A flipped flag would read 1, the
+    // same total a symmetric fixture could not tell apart.
+    let second = server.ok(
+        "POST",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
+        Some(json!({"query": "共通語の資料", "source": "b.md", "tags": ["酒"]})),
+    );
+    assert_eq!(second["verdict"], "filtered_out", "{second}");
     let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(
         row["usage"]["empty_reads"],
-        json!(1),
-        "one unproductive explain (filtered_out), one productive (served): {row}"
+        json!(2),
+        "two unproductive explains (filtered_out), one productive (served): {row}"
     );
 
     // An eligible target under the same filter is ranked against the

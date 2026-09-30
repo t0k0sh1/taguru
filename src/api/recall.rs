@@ -269,10 +269,10 @@ pub(super) struct CrossTargets {
 /// The cross pool's trim threshold: double the page, so the trim keeps
 /// the top `limit` with slack. Any threshold at or above `limit` keeps
 /// results identical (the trim itself preserves the top of the pool),
-/// which makes the factor invisible to output tests — the unit pin in
-/// this file's tests is what holds it in place.
-pub(crate) fn cross_pool_high_water(limit: usize) -> usize {
-    limit * 2
+/// which makes the whole predicate invisible to output tests — the
+/// unit pin in this file's tests is what holds it in place.
+pub(crate) fn cross_pool_needs_trim(pool_len: usize, limit: usize) -> bool {
+    pool_len >= limit * 2
 }
 
 impl CrossTargets {
@@ -472,7 +472,7 @@ async fn cross_matches(
                 empties.push(matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
-                if pool.len() >= cross_pool_high_water(limit) {
+                if cross_pool_needs_trim(pool.len(), limit) {
                     pool = cross_page_by(pool, Some(limit), after, names).1;
                 }
             }
@@ -1163,13 +1163,15 @@ mod tests {
     use super::*;
     use crate::registry::ContextMeta;
 
-    /// The cross pool's trim threshold, pinned literally: any factor at
-    /// or above 1× keeps results identical (the trim preserves the top
-    /// of the pool), so no output test can hold the 2× slack in place.
+    /// The cross pool's trim predicate, pinned literally: any threshold
+    /// at or above 1× keeps results identical (the trim preserves the
+    /// top of the pool), so no output test can hold the 2× slack — or
+    /// the comparison's direction — in place.
     #[test]
-    fn the_cross_pool_high_water_is_double_the_page() {
-        assert_eq!(cross_pool_high_water(5), 10);
-        assert_eq!(cross_pool_high_water(0), 0);
+    fn the_cross_pool_trims_at_double_the_page() {
+        assert!(cross_pool_needs_trim(10, 5));
+        assert!(!cross_pool_needs_trim(9, 5));
+        assert!(cross_pool_needs_trim(0, 0));
     }
 
     /// A fresh, on-disk-backed [`AppState`] — the same construction

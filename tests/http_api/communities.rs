@@ -1327,15 +1327,20 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         "levels": 1,
         "communities": [
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
-            {"id": "L0-1", "level": 0, "fingerprint": "00bb00bb00bb00bb", "concept_count": 2},
         ],
     });
+    // The manifest text carries the query's full bigram run (inside
+    // `source_context`); the community summary shares only its first
+    // two bigrams and dilutes them in filler — so for this query the
+    // manifest OUTRANKS the community, and only the extra slot keeps
+    // the community reachable at all.
     server.ok(
         "POST",
         &format!("/contexts/{derived_id}/sources"),
         Some(json!({"passages": {
-            "community:L0-0": "酒造りの記録のうち、蔵の共同体の要約。",
-            "community:L0-1": "酒造りの記録のうち、杜氏の共同体の要約。",
+            "community:L0-0": "酒造りについて。蔵人は冬の朝に井戸の水を汲み、\
+                               米を蒸し、麹室で麹を育て、槽で搾るまでの永い\
+                               仕事を淡々と続けた。",
             "communities:manifest": manifest.to_string(),
         }})),
     );
@@ -1344,14 +1349,13 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         &format!("/contexts/{derived_id}/associations"),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 2.0},
-            {"subject": "community:L0-1", "label": "contains", "object": "a2", "weight": 2.0},
         ])),
     );
 
     let page = server.ok(
         "POST",
         &format!("/contexts/{source_id}/communities/search"),
-        Some(json!({"query": "酒造りの記録", "limit": 2})),
+        Some(json!({"query": "酒造りの記録", "limit": 1})),
     );
     let communities: Vec<&str> = page["hits"]
         .as_array()
@@ -1360,9 +1364,9 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         .map(|hit| hit["community"].as_str().unwrap())
         .collect();
     assert_eq!(
-        communities.len(),
-        2,
-        "both communities must fill the page — the manifest's rank is absorbed \
-         by the extra slot, never at a community's expense: {page}"
+        communities,
+        vec!["L0-0"],
+        "the community must fill the page — the manifest's higher rank is \
+         absorbed by the extra slot, never at the community's expense: {page}"
     );
 }
