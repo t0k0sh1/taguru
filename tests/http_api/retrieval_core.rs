@@ -66,10 +66,10 @@ fn sigterm_drains_promptly_past_an_in_flight_embed() {
             ("TAGURU_REQUEST_TIMEOUT_SECS", "60"),
         ],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/aomine.md": "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
         }})),
@@ -78,12 +78,13 @@ fn sigterm_drains_promptly_past_an_in_flight_embed() {
     // The vector lane embeds the query before anything else, so this
     // search blocks inside the black-holed provider call.
     let base = server.base.clone();
+    let sake = server.cx("sake");
     let searcher = std::thread::spawn(move || {
         let response = test_agent()
-            .post(format!("{base}/contexts/sake/sources/search"))
+            .post(format!("{base}/contexts/{sake}/sources/search"))
             .header("Content-Type", "application/json")
             .send(r#"{"query": "精米歩合", "limit": 3}"#);
-        finish(response, "POST", "/contexts/sake/sources/search")
+        finish(response, "POST", "/contexts/{id}/sources/search")
     });
     // Only signal once the search is provably blocked in the provider.
     provider_reached
@@ -145,21 +146,34 @@ fn full_retrieval_loop_over_http() {
     assert_eq!(directory["total"], json!(0));
     assert_eq!(directory["contexts"], json!([]));
 
-    // Create; duplicates conflict; unknown contexts 404.
-    server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識", "dice_floor": 0.3})),
+    // Create; a duplicate name mints a second, distinct context
+    // (issue #961 decision 1 — names are not unique); unknown ids 404.
+    let first = server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.3})),
     );
-    let (status, _) = server.call("PUT", "/contexts/sake", Some(json!({})));
-    assert_eq!(status, 409);
-    let (status, _) = server.call("POST", "/contexts/nope/recall", Some(json!({"cue": "x"})));
+    let (status, twin) = server.call("POST", "/contexts", Some(json!({"name": "sake", })));
+    assert_eq!(status, 200, "{twin}");
+    assert_ne!(twin["result"]["id"], first["id"], "{twin}");
+    // Deleted again so the rest of the loop addresses ONE sake.
+    let (status, _) = server.call(
+        "DELETE",
+        &format!("/contexts/{}", twin["result"]["id"].as_str().unwrap()),
+        None,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = server.call(
+        "POST",
+        "/contexts/00000000-0000-4000-8000-00000000dead/recall",
+        Some(json!({"cue": "x"})),
+    );
     assert_eq!(status, 404);
 
     // Ingest a batch plus its passage.
     let applied = server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
@@ -172,12 +186,16 @@ fn full_retrieval_loop_over_http() {
     assert_eq!(applied, json!(6));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
     );
-    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(sources["total"], json!(1));
     assert_eq!(sources["sources"], json!(["第2段落"]));
     // The listing's metadata view (#167): same page, name plus the
@@ -188,7 +206,7 @@ fn full_retrieval_loop_over_http() {
     // recall/query pages carry totals; query takes OR-sets per position.
     let page = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "limit": 3})),
     );
     assert_eq!(page["total"], json!(4));
@@ -197,7 +215,7 @@ fn full_retrieval_loop_over_http() {
     assert_eq!(page["matches"][0]["label"], json!("杜氏"));
     let narrowed = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": ["代表銘柄", "杜氏"]})),
     );
     assert_eq!(narrowed["total"], json!(2));
@@ -206,13 +224,13 @@ fn full_retrieval_loop_over_http() {
     // attributions through query.
     let outline = server.ok(
         "POST",
-        "/contexts/sake/describe",
+        &format!("/contexts/{}/describe", server.cx("sake")),
         Some(json!({"concept": "青嶺酒造"})),
     );
     assert_eq!(outline["as_subject"][0]["label"], json!("代表銘柄")); // count ties -> label insertion order
     let water = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "仕込み水"})),
     );
     // Two sources each asserting 1.0 average to 1.0 — corroboration is
@@ -232,20 +250,20 @@ fn full_retrieval_loop_over_http() {
     // tier; the per-call floor tightens it away.
     let exact = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(exact[0]["tier"], json!("lexical"));
     assert_eq!(exact[0]["score"], json!(1.0));
     let typo = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "青嶺酒蔵"})),
     );
     assert_eq!(typo[0]["name"], json!("青嶺酒造"));
     let strict = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "青嶺酒蔵", "dice_floor": 0.9})),
     );
     assert!(
@@ -260,14 +278,14 @@ fn full_retrieval_loop_over_http() {
     // outranks weight-1 facts).
     let ranked = server.ok(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "limit": 3})),
     );
     assert_eq!(ranked["matches"][0]["association"]["label"], json!("杜氏"));
     assert_eq!(ranked["matches"][0]["path"], json!(["青嶺酒造"]));
     let walked = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "max_depth": 2})),
     );
     assert!(
@@ -281,7 +299,7 @@ fn full_retrieval_loop_over_http() {
     // every association along it, in walk order.
     let threads = server.ok(
         "POST",
-        "/contexts/sake/paths",
+        &format!("/contexts/{}/paths", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "targets": ["南部杜氏"]})),
     );
     assert_eq!(threads["total"], json!(1));
@@ -304,21 +322,21 @@ fn full_retrieval_loop_over_http() {
     // refuse to shadow existing spellings.
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(
             json!({"concepts": {"Aomine Brewery": "青嶺酒造"}, "labels": {"蔵元の責任者": "杜氏"}}),
         ),
     );
     let via_alias = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "Aomine Brewery", "label": "蔵元の責任者"})),
     );
     assert_eq!(via_alias["matches"][0]["subject"], json!("青嶺酒造"));
     assert_eq!(via_alias["matches"][0]["object"], json!("高瀬"));
     let (status, _) = server.call(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"青嶺": "青嶺酒造"}})),
     );
     assert_eq!(status, 409, "shadowing an existing concept must conflict");
@@ -326,13 +344,13 @@ fn full_retrieval_loop_over_http() {
     // Coverage audit, passage lookup and search, retraction.
     let orphans = server.ok(
         "POST",
-        "/contexts/sake/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     assert_eq!(orphans, json!({"total": 0, "matches": []}));
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["第2段落", "第9段落"]})),
     );
     assert!(
@@ -344,19 +362,19 @@ fn full_retrieval_loop_over_http() {
     assert_eq!(passages["missing"], json!(["第9段落"]));
     let hits = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "仕込み水はどこの水?"})),
     );
     assert_eq!(hits["hits"][0]["source"], json!("第2段落"));
     let retracted = server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "第5段落"})),
     );
     assert_eq!(retracted["associations_touched"], json!(1));
     let water = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "仕込み水"})),
     );
     assert_eq!(water["matches"][0]["weight"], json!(1.0));
@@ -365,7 +383,7 @@ fn full_retrieval_loop_over_http() {
     // provider are refused as unimplemented.
     server.ok(
         "PATCH",
-        "/contexts/sake",
+        &format!("/contexts/{}", server.cx("sake")),
         Some(json!({"pinned": true, "semantic_floor": 0.2})),
     );
     let listed = server.ok("GET", "/contexts", None)["contexts"].clone();
@@ -379,15 +397,21 @@ fn full_retrieval_loop_over_http() {
         json!({"label": "青嶺酒造", "count": 4})
     );
     // The single-context row says the same thing without the listing.
-    let single = server.ok("GET", "/contexts/sake", None);
-    assert_eq!(single["id"], json!("sake"));
+    let single = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
+    assert_eq!(single["id"], json!(server.cx("sake")));
+    assert_eq!(single["name"], json!("sake"));
     assert_eq!(single["stats"]["associations"], json!(5));
-    let (status, _) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
+    let (status, _) = server.call(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 501);
 
     // Deletion removes the context and its files.
-    server.ok("DELETE", "/contexts/sake", None);
+    let sake = server.cx("sake");
+    server.ok("DELETE", &format!("/contexts/{sake}"), None);
     assert_eq!(server.ok("GET", "/contexts", None)["total"], json!(0));
-    let (status, _) = server.call("GET", "/contexts/sake", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{sake}"), None);
     assert_eq!(status, 404);
 }

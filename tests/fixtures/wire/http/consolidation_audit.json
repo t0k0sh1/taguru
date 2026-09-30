@@ -119,6 +119,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/consolidation/audit",
+  "route": "/contexts/{id}/consolidation/audit",
   "status": 200
 }

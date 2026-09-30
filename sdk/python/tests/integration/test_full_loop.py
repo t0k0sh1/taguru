@@ -22,9 +22,10 @@ AOMINE_DOC = """青嶺酒造は1907年創業の架空の酒蔵である。代表
 青嶺酒造は大量生産を行わない。"""
 
 
-def seed(client: Taguru, name: str) -> None:
-    client.contexts.create(name, description="青嶺酒造という架空の酒蔵の知識")
-    ctx = client.context(name)
+def seed(client: Taguru, name: str) -> str:
+    """Creates and seeds a context named ``name``, returning its id."""
+    row = client.contexts.create(name, description="青嶺酒造という架空の酒蔵の知識")
+    ctx = client.context(row.id)
     ctx.add_associations(
         [
             {
@@ -70,43 +71,47 @@ def seed(client: Taguru, name: str) -> None:
         ]
     )
     ctx.store_passages({"docs/aomine.md": AOMINE_DOC})
+    return row.id
 
 
 def test_context_lifecycle(client: Taguru, fresh_name: str) -> None:
-    assert not client.contexts.exists(fresh_name)
-    assert client.contexts.create(fresh_name, description="d", pinned=False)
-    with pytest.raises(ConflictError) as conflict:
-        client.contexts.create(fresh_name)
-    assert conflict.value.code == "already_exists"
-    entry = client.contexts.get(fresh_name)
-    assert entry.id == fresh_name
+    row = client.contexts.create(fresh_name, description="d", pinned=False)
+    assert client.contexts.exists(row.id)
+    assert row.name == fresh_name
+    # Names are not unique (#964, issue #961 decision 1): a duplicate
+    # create mints a second, distinct context rather than conflicting.
+    twin = client.contexts.create(fresh_name)
+    assert twin.id != row.id
+    assert twin.name == fresh_name
+    assert client.contexts.delete(twin.id)
+    entry = client.contexts.get(row.id)
+    assert entry.id == row.id
     assert entry.description == "d"
 
-    meta = client.contexts.update(fresh_name, description="d2", dice_floor=0.25)
+    meta = client.contexts.update(row.id, description="d2", dice_floor=0.25)
     assert meta.description == "d2"
     assert meta.dice_floor == 0.25
 
-    names = [e.id for e in client.contexts.iter(limit=2)]
-    assert fresh_name in names
+    ids = [e.id for e in client.contexts.iter(limit=2)]
+    assert row.id in ids
 
     renamed = f"{fresh_name}-renamed"
-    assert client.contexts.rename(fresh_name, renamed)
-    with pytest.raises(NotFoundError) as renamed_away:
-        client.contexts.get(fresh_name)
-    assert renamed_away.value.code == "no_context"
-    entry = client.contexts.get(renamed)
+    assert client.contexts.rename(row.id, renamed)
+    # The id — and so the path — never moves; only the name column does.
+    entry = client.contexts.get(row.id)
+    assert entry.name == renamed
     assert entry.description == "d2"
     assert entry.dice_floor == 0.25
 
-    assert client.contexts.delete(renamed)
+    assert client.contexts.delete(row.id)
     with pytest.raises(NotFoundError) as missing:
-        client.contexts.get(renamed)
+        client.contexts.get(row.id)
     assert missing.value.code == "no_context"
 
 
 def test_associations_accumulate_weight_and_validate(client: Taguru, fresh_name: str) -> None:
-    client.contexts.create(fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = client.contexts.create(fresh_name).id
+    ctx = client.context(context_id)
     op = {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a"}
     assert ctx.add_associations([op]).applied == 1
     assert ctx.add_associations([{**op, "source": "b"}]).applied == 1
@@ -127,12 +132,12 @@ def test_associations_accumulate_weight_and_validate(client: Taguru, fresh_name:
     with pytest.raises(ValidationError) as too_many:
         ctx.add_associations([{**op, "subject": f"s{index}"} for index in range(10_001)])
     assert too_many.value.code == "over_limit"
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_graph_reads(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     recall = ctx.recall("青嶺酒造")
     assert recall.total >= 4
@@ -182,12 +187,12 @@ def test_graph_reads(client: Taguru, fresh_name: str) -> None:
     assert not page.more
     assert ctx.changes(since=page.next).events == []
 
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_resolve_tiers_and_floors(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     exact = ctx.resolve("青嶺酒造")
     assert exact[0].name == "青嶺酒造"
@@ -205,12 +210,12 @@ def test_resolve_tiers_and_floors(client: Taguru, fresh_name: str) -> None:
 
     label = ctx.resolve_label("杜氏")
     assert label[0].name == "杜氏"
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_aliases_roundtrip_and_reregistration_semantics(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     assert ctx.add_aliases(concepts={"Aomine Brewery": "青嶺酒造"}, labels={"brewer": "杜氏"}) == 2
     page = ctx.get_aliases()
@@ -233,12 +238,12 @@ def test_aliases_roundtrip_and_reregistration_semantics(client: Taguru, fresh_na
 
     assert ctx.remove_aliases(concepts=["Aomine Brewery"], labels=["brewer"]) == 2
     assert ctx.get_aliases().concepts == {}
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     stored = ctx.store_passages(
         {"docs/extra.md": "第一段落。\n\n第二段落。"},
@@ -293,15 +298,15 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
     retracted = ctx.retract_source("docs/extra.md")
     assert retracted.passage_removed
     assert "docs/extra.md" not in ctx.list_sources().sources
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_name: str) -> None:
     """Source metadata (#167): tags/dates ride the store, list back
     under ``entries`` beside the server's stamp, and pre-filter search
     with an honest plan — including the ``filtered_out`` explain verdict."""
-    client.contexts.create(fresh_name, description="metadata")
-    ctx = client.context(fresh_name)
+    context_id = client.contexts.create(fresh_name, description="metadata").id
+    ctx = client.context(context_id)
     ctx.store_passages(
         {
             "a.md": "共通語の資料。\n\n酒の由来について。",
@@ -339,30 +344,30 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
     assert {hit.source for hit in cross.hits} == {"a.md"}
     cross_plan = cross.plan.contexts[0].filter
     assert cross_plan is not None and cross_plan.eligible_sources == 1
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_embeddings_refresh_501_without_provider(client: Taguru, fresh_name: str) -> None:
-    client.contexts.create(fresh_name)
+    context_id = client.contexts.create(fresh_name).id
     with pytest.raises(EmbeddingUnavailableError) as excinfo:
-        client.context(fresh_name).refresh_embeddings()
+        client.context(context_id).refresh_embeddings()
     assert excinfo.value.reason == "not_configured"
     assert excinfo.value.code == "embeddings_unconfigured"
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_embeddings_status_reports_no_provider_configured(client: Taguru, fresh_name: str) -> None:
-    client.contexts.create(fresh_name)
-    status = client.context(fresh_name).embeddings_status()
+    context_id = client.contexts.create(fresh_name).id
+    status = client.context(context_id).embeddings_status()
     assert status.provider_model is None
     assert status.glosses is None
     assert status.passages is None
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_vocabulary_audit_surfaces_lexical_twins(client: Taguru, fresh_name: str) -> None:
-    client.contexts.create(fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = client.contexts.create(fresh_name).id
+    ctx = client.context(context_id)
     ctx.add_associations(
         [
             {"subject": "株式会社青嶺", "label": "kind", "object": "会社", "weight": 1.0},
@@ -373,14 +378,14 @@ def test_vocabulary_audit_surfaces_lexical_twins(client: Taguru, fresh_name: str
     assert any(
         {pair.a, pair.b} == {"株式会社青嶺", "青嶺株式会社"} for pair in audit.lexical_concepts
     )
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_drift_audit_surfaces_unsourced_weight_and_dead_aliases(
     client: Taguru, fresh_name: str
 ) -> None:
-    client.contexts.create(fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = client.contexts.create(fresh_name).id
+    ctx = client.context(context_id)
     # No `source`: this weight lands unexplained by any named source.
     ctx.add_associations(
         [{"subject": "青嶺酒造", "label": "kind", "object": "会社", "weight": 1.0}]
@@ -412,46 +417,46 @@ def test_drift_audit_surfaces_unsourced_weight_and_dead_aliases(
 
     with_twins = ctx.audit_drift(include_twins=True, dice_floor=0.4)
     assert with_twins.twins is not None
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_compact_reports_shed_bytes(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
     ctx.retract_source("docs/aomine.md")
     outcome = ctx.compact()
     assert outcome.bytes_after <= outcome.bytes_before
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_promote_moves_a_source_and_previews_with_dry_run(client: Taguru, fresh_name: str) -> None:
     destination = f"{fresh_name}-dest"
-    seed(client, fresh_name)
-    client.contexts.create(destination)
-    scratch = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    destination_id = client.contexts.create(destination).id
+    scratch = client.context(context_id)
 
     preview = scratch.promote(destination, ["docs/aomine.md"], dry_run=True)
     assert len(preview.batches) == 1
     assert preview.audit is None
     # A dry run writes nothing.
-    assert client.context(destination).list_sources().total == 0
+    assert client.context(destination_id).list_sources().total == 0
 
     outcome = scratch.promote(destination, ["docs/aomine.md"])
     assert outcome.batches[0].source == "docs/aomine.md"
     assert outcome.batches[0].context == destination
     assert outcome.audit is not None
     assert outcome.audit["detector"] == "consolidation/1"
-    assert client.context(destination).list_sources().total == 1
+    assert client.context(destination_id).list_sources().total == 1
 
-    client.contexts.delete(destination)
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(destination_id)
+    client.contexts.delete(context_id)
 
 
 def test_flush_names_dirty_contexts(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
+    context_id = seed(client, fresh_name)
     flushed = client.flush()
     assert fresh_name in flushed
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_search_communities_verdicts_staleness_over_an_artifact(
@@ -460,8 +465,8 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     """The artifact is normally built by `taguru communities`; this builds
     the same shapes by hand through the API, which is exactly what makes
     them an ordinary context."""
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     # No artifact: a refusal naming the build command, not an empty page.
     with pytest.raises(NotFoundError) as refused:
@@ -469,8 +474,8 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     assert "taguru communities" in str(refused.value)
 
     derived = f"{fresh_name}::communities"
-    client.contexts.create(derived)
-    revision = client.contexts.get(fresh_name).revision
+    derived_id = client.contexts.create(derived).id
+    revision = client.contexts.get(context_id).revision
     manifest = {
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -485,7 +490,7 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 3},
         ],
     }
-    dctx = client.context(derived)
+    dctx = client.context(derived_id)
     dctx.store_passages(
         {
             "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
@@ -515,15 +520,15 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     assert page.stale is True
     assert page.revision.current_graph > page.revision.recorded_graph
 
-    client.contexts.delete(derived)
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(derived_id)
+    client.contexts.delete(context_id)
 
 
 def test_analyze_communities_returns_ndjson_with_a_header_line(
     client: Taguru, fresh_name: str
 ) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     body = ctx.analyze_communities()
     lines = body.splitlines()
@@ -533,12 +538,12 @@ def test_analyze_communities_returns_ndjson_with_a_header_line(
     assert header["version"] == "2026-09-17"
     assert header["context"] == fresh_name
 
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_retrieve_end_to_end(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     result = ctx.retrieve("青嶺酒造", text_fallback_query="杜氏は高瀬である")
     assert result.resolved["青嶺酒造"][0].kind == "exact"
@@ -555,12 +560,12 @@ def test_retrieve_end_to_end(client: Taguru, fresh_name: str) -> None:
     # qa_recall-style question: who is the 杜氏? Answerable from the result.
     toji = [a for a in result.associations if a.label == "杜氏"]
     assert toji and toji[0].object == "高瀬"
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_assemble_evidence_end_to_end(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     package = ctx.assemble_evidence("青嶺酒造", text_fallback_query="杜氏は高瀬である")
     assert package.items
@@ -580,7 +585,7 @@ def test_assemble_evidence_end_to_end(client: Taguru, fresh_name: str) -> None:
     if tight.omitted_total:
         assert sum(tight.omitted_by_reason.values()) == tight.omitted_total
 
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 async def test_async_client_full_smoke(server, fresh_name: str) -> None:
@@ -590,24 +595,24 @@ async def test_async_client_full_smoke(server, fresh_name: str) -> None:
 
     async with AsyncTaguru(server.base_url, ADMIN_TOKEN) as aclient:
         await aclient.wait_until_ready(timeout=30)
-        await aclient.contexts.create(fresh_name, description="async smoke")
-        ctx = aclient.context(fresh_name)
+        row = await aclient.contexts.create(fresh_name, description="async smoke")
+        ctx = aclient.context(row.id)
         await ctx.add_associations(
             [{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a"}]
         )
         await ctx.store_passages({"a": "本文。"})
         page = await ctx.recall("s")
         assert page.total == 1
-        names = [e.id async for e in aclient.contexts.iter()]
+        names = [e.name async for e in aclient.contexts.iter()]
         assert fresh_name in names
         exported = await ctx.export()
         assert '"type":"source"' in exported
-        await aclient.contexts.delete(fresh_name)
+        await aclient.contexts.delete(row.id)
 
 
 def test_retract_association_withdraws_one_edge(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
 
     outcome = ctx.retract_association("青嶺酒造", "代表銘柄", "青嶺")
     assert outcome.retracted
@@ -623,4 +628,4 @@ def test_retract_association_withdraws_one_edge(client: Taguru, fresh_name: str)
     dead = ctx.query(subject="青嶺酒造", label="代表銘柄")
     assert dead.matches[0].weight == 0.0
     assert dead.matches[0].count == 0
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)

@@ -252,7 +252,7 @@ pub(crate) enum ErrorCode {
     NoSource,
     NoParagraph,
     NoGroup,
-    /// `GET /contexts/{name}/schema` on a `context` that exists but never
+    /// `GET /contexts/{id}/schema` on a `context` that exists but never
     /// installed one — distinct from `NoContext` (ADR 0009 §6.3
     /// deliberately keeps "never had a schema" and "`context` itself is
     /// missing" apart, the way `NoGroup` already stays apart from
@@ -1187,6 +1187,42 @@ where
     }
 }
 
+/// The `{id}` segment of every `/contexts/{id}/…` route: a `context`
+/// id in the canonical text form ADR 0045 mints (lowercase hyphenated
+/// UUID). Validated by parse plus exact round-trip, so an alternate
+/// spelling of the same UUID (braced, uppercase, un-hyphenated —
+/// all of which `uuid` parses) cannot address one `context` under
+/// several path strings; anything else answers 400 in the shared
+/// error shape, before any registry lookup. Group routes keep the
+/// plain [`AppPath`]: their `{name}` really is a name.
+pub struct ContextIdPath(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for ContextIdPath
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let AppPath(id) = AppPath::<String>::from_request_parts(parts, state).await?;
+        match uuid::Uuid::try_parse(&id) {
+            Ok(parsed) if parsed.to_string() == id => Ok(Self(id)),
+            _ => Err(coded(
+                axum::http::StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidArgument,
+                format!(
+                    "'{id}' is not a context id: paths take the id column of GET /contexts \
+                     (a lowercase hyphenated UUID), not the context's name"
+                ),
+                Instant::now(),
+            )),
+        }
+    }
+}
+
 /// The router-wide 404: paths outside the API answer in the error
 /// shape too, with a pointer at the self-describing endpoint.
 pub async fn unknown_path(method: Method, uri: Uri) -> Response {
@@ -1234,7 +1270,7 @@ fn search_log_enabled() -> bool {
 fn replay_cached_search(state: &AppState, key: &RetrievalKey, found: &CachedRetrieval) {
     let op = key.op.search_op();
     for (target, empty) in key.targets.iter().zip(found.target_empty.iter()) {
-        state.note_search(op, &target.name, *empty);
+        state.note_search(op, &target.id, *empty);
     }
     let [bm25_only, both_lanes, vector_only] = found.lane_hits;
     if bm25_only > 0 || both_lanes > 0 || vector_only > 0 {
@@ -1471,9 +1507,10 @@ pub(crate) const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
 /// the cache budget).
 pub(crate) const MAX_NAME_BYTES: usize = 1024;
 
-/// Byte cap on a `context` name: it becomes a file stem, percent-encoded
-/// at up to 3× — 64 bytes keeps the longest sidecar filename well
-/// under every filesystem's 255-byte limit.
+/// Byte cap on a `context` display name. File stems are server-minted
+/// ids now (#964, ADR 0045), so the old 3×-percent-encoding filesystem
+/// bound no longer applies — the cap survives because the name rides
+/// in every directory row, group projection, and grant allow-list.
 pub(crate) const MAX_CONTEXT_NAME_BYTES: usize = 64;
 
 /// Byte cap on a `context` description — it too rides in every
@@ -1592,7 +1629,7 @@ pub(crate) fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usi
 }
 
 /// [`clamp`] with a floor of one, for every `KeysetQuery`-driven
-/// listing (`GET /contexts`, `/groups`, `/contexts/{name}/labels`,
+/// listing (`GET /contexts`, `/groups`, `/contexts/{id}/labels`,
 /// `/sources`, `/aliases`). Those endpoints define "no more pages" as
 /// an empty response, a contract the SDKs' `iter` helpers rely on
 /// (`AsyncIterator`/`Iterator` loops that stop the first time a page
@@ -2094,12 +2131,8 @@ fn locator_keys<'a>(
 /// convert each to its wire shape — the `resolve_markers` +
 /// `locator_keys` + map sequence every association-returning endpoint
 /// needs.
-fn associations_out(
-    state: &AppState,
-    name: &str,
-    matches: Vec<Association>,
-) -> Vec<AssociationOut> {
-    let markers = state.resolve_markers(name, locator_keys(matches.iter()));
+fn associations_out(state: &AppState, id: &str, matches: Vec<Association>) -> Vec<AssociationOut> {
+    let markers = state.resolve_markers(id, locator_keys(matches.iter()));
     matches
         .into_iter()
         .map(|association| association_out(association, &markers))
@@ -2109,11 +2142,11 @@ fn associations_out(
 /// Same as [`associations_out`], for recollections (explore's results).
 fn recollections_out(
     state: &AppState,
-    name: &str,
+    id: &str,
     matches: Vec<Recollection>,
 ) -> Vec<RecollectionOut> {
     let markers = state.resolve_markers(
-        name,
+        id,
         locator_keys(matches.iter().map(|recollection| &recollection.association)),
     );
     matches
@@ -2131,6 +2164,7 @@ fn recollections_out(
 /// resulting empty key set, so that call costs nothing.
 fn cross_associations_out(
     state: &AppState,
+    id_of_name: &BTreeMap<&str, &str>,
     page: Vec<(String, Association)>,
 ) -> Vec<CrossMatch<AssociationOut>> {
     let mut locators: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
@@ -2143,7 +2177,12 @@ fn cross_associations_out(
     let markers: BTreeMap<String, HashMap<(String, u32), crate::registry::Markers>> = locators
         .into_iter()
         .map(|(context, keys)| {
-            let resolved = state.resolve_markers(&context, keys.into_iter());
+            // Page entries are tagged with display names (the wire's
+            // `context` value until #965); the marker read is
+            // id-keyed. A name the map does not know (a target
+            // deleted mid-response) resolves no markers.
+            let context_id = id_of_name.get(context.as_str()).copied().unwrap_or("");
+            let resolved = state.resolve_markers(context_id, keys.into_iter());
             (context, resolved)
         })
         .collect();
@@ -2168,9 +2207,9 @@ pub struct TrailOut {
 /// Same as [`associations_out`], for trails (paths' results) — one
 /// `resolve_markers` call across every association of every trail on
 /// the page, not one per trail.
-fn trails_out(state: &AppState, name: &str, matches: Vec<Trail>) -> Vec<TrailOut> {
+fn trails_out(state: &AppState, id: &str, matches: Vec<Trail>) -> Vec<TrailOut> {
     let markers = state.resolve_markers(
-        name,
+        id,
         locator_keys(matches.iter().flat_map(|trail| trail.associations.iter())),
     );
     matches
@@ -2189,9 +2228,9 @@ fn trails_out(state: &AppState, name: &str, matches: Vec<Trail>) -> Vec<TrailOut
 }
 
 /// Same as [`associations_out`], for activations (activate's results).
-fn activations_out(state: &AppState, name: &str, matches: Vec<Activation>) -> Vec<ActivationOut> {
+fn activations_out(state: &AppState, id: &str, matches: Vec<Activation>) -> Vec<ActivationOut> {
     let markers = state.resolve_markers(
-        name,
+        id,
         locator_keys(matches.iter().map(|activation| &activation.association)),
     );
     matches
@@ -3129,21 +3168,22 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        state.create("sake", ContextMeta::default()).unwrap();
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
 
         let limiter = HeavyOpsLimiter::new(1);
         let held = limiter.try_acquire().unwrap();
 
         let app = Router::new()
-            .route("/contexts/{name}/drift/audit", post(audit_drift))
+            .route("/contexts/{id}/drift/audit", post(audit_drift))
             .layer(axum::Extension(limiter))
             .layer(axum::Extension(Deadline::unbounded()))
             .with_state(state);
 
-        let request = |body: &'static str| {
+        let uri = format!("/contexts/{sake}/drift/audit");
+        let request = move |body: &'static str| {
             HttpRequest::builder()
                 .method("POST")
-                .uri("/contexts/sake/drift/audit")
+                .uri(uri.clone())
                 .body(Body::from(body))
                 .unwrap()
         };
@@ -3268,12 +3308,13 @@ mod tests {
             })
             .unwrap();
         state
-            .refresh_embeddings("ctx", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("ctx"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
+        let ctx = state.id_of("ctx");
         let app = Router::new()
-            .route("/contexts/{name}/resolve/explain", post(explain_resolve))
+            .route("/contexts/{id}/resolve/explain", post(explain_resolve))
             .layer(axum::Extension(Deadline::unbounded()))
             .with_state(state);
 
@@ -3281,7 +3322,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .method("POST")
-                    .uri("/contexts/ctx/resolve/explain")
+                    .uri(format!("/contexts/{ctx}/resolve/explain"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"cue": "AAA", "expected": "AAA0012", "limit": 12}"#,

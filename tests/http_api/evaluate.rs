@@ -37,10 +37,11 @@ fn seed_context(server: &Server, context: &str, token: Option<&str>) {
         assert_eq!(status, 200, "{method} {path} -> {parsed}");
     };
     call(
-        "PUT",
-        format!("/contexts/{context}"),
-        json!({"description": "d"}),
+        "POST",
+        "/contexts".to_string(),
+        json!({"name": context, "description": "d"}),
     );
+    let context = &server.cx(context);
     call(
         "POST",
         format!("/contexts/{context}/sources"),
@@ -92,7 +93,7 @@ fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -210,7 +211,7 @@ fn evaluate_completes_on_a_read_only_api_key() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -243,7 +244,7 @@ fn evaluate_refuses_an_expected_source_the_context_does_not_carry() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -268,10 +269,14 @@ fn evaluate_marks_an_ambiguous_position_and_never_calls_query_for_it() {
     // Same lookalike pair `resolve_match.rs` uses: "京都" is both a
     // stored concept in its own right and a substring of "東京都" —
     // resolving cue "京都" surfaces both at the lexical tier.
-    server.ok("PUT", "/contexts/looks", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/looks/associations",
+        "/contexts",
+        Some(json!({"name": "looks", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("looks")),
         Some(json!([
             {"subject": "京都", "label": "位置", "object": "関西", "weight": 1.0},
             {"subject": "東京都", "label": "分類", "object": "日本の首都", "weight": 1.0},
@@ -292,7 +297,7 @@ fn evaluate_marks_an_ambiguous_position_and_never_calls_query_for_it() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "looks",
+            &server.cx("looks"),
             "--url",
             &server.base,
             "--out",
@@ -351,7 +356,7 @@ fn evaluate_runs_the_citation_lane_without_preflighting_it_and_distinguishes_no_
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -425,7 +430,7 @@ fn evaluate_exits_0_and_records_a_passing_thresholds_block_when_every_bound_is_s
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -526,7 +531,7 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -606,7 +611,7 @@ fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -645,7 +650,7 @@ fn evaluate_rejects_a_url_carrying_userinfo() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            "00000000-0000-4000-8000-00000000dead",
             "--url",
             "https://user:token@example.invalid",
             "--out",
@@ -682,7 +687,7 @@ fn evaluate_rejects_an_unparsable_url() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            "00000000-0000-4000-8000-00000000dead",
             "--url",
             "not a url",
             "--out",
@@ -712,7 +717,7 @@ fn evaluate_exits_1_when_the_server_is_unreachable() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            "00000000-0000-4000-8000-00000000dead",
             "--url",
             "http://127.0.0.1:1",
             "--out",

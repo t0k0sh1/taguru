@@ -39,13 +39,17 @@ fn off_document() -> serde_json::Value {
 #[test]
 fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_traversal() {
     let server = Server::start("schema-type-label-explore");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     // Two concepts, connected only through a `schema:type` edge to a
     // shared type object — nothing else links them.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -54,7 +58,11 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
         ])),
     );
 
-    let labels = server.ok("GET", "/contexts/sake/labels", None);
+    let labels = server.ok(
+        "GET",
+        &format!("/contexts/{}/labels", server.cx("sake")),
+        None,
+    );
     assert!(
         labels["labels"]
             .as_array()
@@ -68,7 +76,7 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
     let reaches_the_other_brewery = |server: &Server| {
         let explored = server.ok(
             "POST",
-            "/contexts/sake/explore",
+            &format!("/contexts/{}/explore", server.cx("sake")),
             Some(json!({"origins": ["青嶺酒造"], "max_depth": 2})),
         );
         explored["matches"]
@@ -90,9 +98,17 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
     // the gate flip.
 
     // The gate flip — installed in `off` mode, deliberately.
-    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off_document()),
+    );
 
-    let labels = server.ok("GET", "/contexts/sake/labels", None);
+    let labels = server.ok(
+        "GET",
+        &format!("/contexts/{}/labels", server.cx("sake")),
+        None,
+    );
     assert!(
         !labels["labels"]
             .as_array()
@@ -107,7 +123,11 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
         total_before - 1,
         "{labels}"
     );
-    let prefixed = server.ok("GET", "/contexts/sake/labels?prefix=schema:", None);
+    let prefixed = server.ok(
+        "GET",
+        &format!("/contexts/{}/labels?prefix=schema:", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         prefixed["labels"],
         json!([]),
@@ -124,7 +144,7 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
     // instructing a rename.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"labels": {"種類": "schema:type"}})),
     );
     assert_eq!(status, 400, "{body}");
@@ -140,10 +160,14 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
 #[test]
 fn paths_never_threads_through_schema_type_once_a_schema_exists() {
     let server = Server::start("schema-type-label-paths");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -153,16 +177,28 @@ fn paths_never_threads_through_schema_type_once_a_schema_exists() {
     );
 
     let request = json!({"origins": ["青嶺酒造"], "targets": ["旧銘酒造"]});
-    let before = server.ok("POST", "/contexts/sake/paths", Some(request.clone()));
+    let before = server.ok(
+        "POST",
+        &format!("/contexts/{}/paths", server.cx("sake")),
+        Some(request.clone()),
+    );
     assert_eq!(
         before["total"],
         json!(1),
         "before a schema exists, schema:type threads like any label: {before}"
     );
 
-    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off_document()),
+    );
 
-    let after = server.ok("POST", "/contexts/sake/paths", Some(request));
+    let after = server.ok(
+        "POST",
+        &format!("/contexts/{}/paths", server.cx("sake")),
+        Some(request),
+    );
     assert_eq!(
         after["total"],
         json!(0),
@@ -191,10 +227,14 @@ fn paths_never_threads_through_schema_type_once_a_schema_exists() {
 #[test]
 fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
     let server = Server::start("schema-type-label-activate");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -210,7 +250,7 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
     let activate = |server: &Server| {
         server.ok(
             "POST",
-            "/contexts/sake/activate",
+            &format!("/contexts/{}/activate", server.cx("sake")),
             Some(json!({"origins": ["青嶺酒造"]})),
         )
     };
@@ -239,7 +279,11 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
     let diluted_strength =
         two_hop_strength(&before).expect("中国地方 is reachable in two hops: {before}");
 
-    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off_document()),
+    );
 
     let after = activate(&server);
     assert!(
@@ -270,10 +314,14 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
 #[test]
 fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
     let server = Server::start("schema-type-label-coverage");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "銘柄", "object": "青嶺",
              "weight": 1.0, "source": "a.md"},
@@ -291,7 +339,7 @@ fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
     let audit = |server: &Server| {
         server.ok(
             "POST",
-            "/contexts/sake/unreachable_from",
+            &format!("/contexts/{}/unreachable_from", server.cx("sake")),
             Some(json!({"origins": ["蔵"]})),
         )
     };
@@ -304,7 +352,11 @@ fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
          counts as covered: {before}"
     );
 
-    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off_document()),
+    );
 
     let after = audit(&server);
     assert_eq!(
@@ -326,20 +378,20 @@ fn the_reserved_alias_refusal_fires_in_warn_and_strict_too() {
     for (tag, mode) in [("warn", "warn"), ("strict", "strict")] {
         let context = format!("sake-{tag}");
         server.ok(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
         );
         let mut document = off_document();
         document["mode"] = json!(mode);
         server.ok(
             "PUT",
-            &format!("/contexts/{context}/schema"),
+            &format!("/contexts/{}/schema", server.cx(&context)),
             Some(document),
         );
         let (status, body) = server.call(
             "POST",
-            &format!("/contexts/{context}/aliases"),
+            &format!("/contexts/{}/aliases", server.cx(&context)),
             Some(json!({"labels": {"型": "schema:type"}})),
         );
         assert_eq!(status, 400, "mode {mode}: {body}");
@@ -353,10 +405,14 @@ fn the_reserved_alias_refusal_fires_in_warn_and_strict_too() {
 #[test]
 fn type_name_concepts_are_excluded_from_the_vocabulary_twin_audit_once_a_schema_exists() {
     let server = Server::start("schema-type-label-twin-audit");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "山田商店", "label": "schema:type", "object": "Organization",
              "weight": 1.0, "source": "a.md"},
@@ -376,16 +432,28 @@ fn type_name_concepts_are_excluded_from_the_vocabulary_twin_audit_once_a_schema_
             })
     };
 
-    let before = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
+    let before = server.ok(
+        "POST",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
+        None,
+    );
     assert!(
         has_pair(&before, "Organization", "Organisation"),
         "guard 1 (no schema yet): a type-name concept is an ordinary twin candidate: \
          {before}"
     );
 
-    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off_document()),
+    );
 
-    let after = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
+    let after = server.ok(
+        "POST",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
+        None,
+    );
     assert!(
         !has_pair(&after, "Organization", "Organisation"),
         "once a schema exists, a type name must never be proposed as a spelling-drift \

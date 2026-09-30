@@ -511,25 +511,25 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let server = Server::start_on("extract-serve", data_dir);
     let brewer = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "Aomine", "label": "杜氏"})),
     );
     assert_eq!(brewer["matches"][0]["object"], json!("高瀬"));
     let negated = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "行う"})),
     );
     assert_eq!(negated["matches"][0]["weight"], json!(-1.0));
     let membership = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "高瀬", "label": "所属"})),
     );
     assert_eq!(membership["matches"][0]["weight"], json!(1.0));
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": [aomine_src]})),
     );
     assert_eq!(

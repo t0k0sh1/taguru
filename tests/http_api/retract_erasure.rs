@@ -8,10 +8,10 @@ use serde_json::json;
 use crate::support::*;
 
 fn seed(server: &Server) {
-    server.ok("PUT", "/contexts/sake", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0,
              "source": "doc.md"},
@@ -21,7 +21,7 @@ fn seed(server: &Server) {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"doc.md": "青嶺酒造の紹介。"}})),
     );
 }
@@ -30,12 +30,19 @@ fn seed(server: &Server) {
 fn dry_run_reports_the_real_footprint_and_writes_nothing() {
     let server = Server::start("retract-dry-run");
     seed(&server);
-    let tail = server.ok("GET", "/contexts/sake/changes", None);
+    let tail = server.ok(
+        "GET",
+        &format!("/contexts/{}/changes", server.cx("sake")),
+        None,
+    );
     let cursor = tail["next"].as_str().unwrap().to_string();
 
     let preview = server.ok(
         "POST",
-        "/contexts/sake/sources/retract?dry_run=true",
+        &format!(
+            "/contexts/{}/sources/retract?dry_run=true",
+            server.cx("sake")
+        ),
         Some(json!({"source": "doc.md"})),
     );
     assert_eq!(preview["associations_touched"], json!(2), "{preview}");
@@ -45,15 +52,19 @@ fn dry_run_reports_the_real_footprint_and_writes_nothing() {
     // listed, and the change feed heard nothing.
     let recall = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(recall["total"], json!(2), "{recall}");
-    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(sources["sources"], json!(["doc.md"]), "{sources}");
     let feed = server.ok(
         "GET",
-        &format!("/contexts/sake/changes?since={cursor}"),
+        &format!("/contexts/{}/changes?since={cursor}", server.cx("sake")),
         None,
     );
     assert_eq!(feed["events"], json!([]), "{feed}");
@@ -61,7 +72,7 @@ fn dry_run_reports_the_real_footprint_and_writes_nothing() {
     // The real retraction then reports exactly what the preview said.
     let real = server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "doc.md"})),
     );
     assert_eq!(
@@ -77,7 +88,10 @@ fn dry_run_on_an_unknown_source_previews_zero() {
     seed(&server);
     let preview = server.ok(
         "POST",
-        "/contexts/sake/sources/retract?dry_run=true",
+        &format!(
+            "/contexts/{}/sources/retract?dry_run=true",
+            server.cx("sake")
+        ),
         Some(json!({"source": "never-stored.md"})),
     );
     assert_eq!(preview["associations_touched"], json!(0));
@@ -85,7 +99,10 @@ fn dry_run_on_an_unknown_source_previews_zero() {
 
     let (status, _) = server.call(
         "POST",
-        "/contexts/nope/sources/retract?dry_run=true",
+        &format!(
+            "/contexts/{}/sources/retract?dry_run=true",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"source": "doc.md"})),
     );
     assert_eq!(status, 404);
@@ -97,24 +114,36 @@ fn compact_rewrites_the_passage_log_when_one_exists() {
     seed(&server);
     server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "doc.md"})),
     );
 
-    let outcome = server.ok("POST", "/contexts/sake/compact", None);
+    let outcome = server.ok(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("sake")),
+        None,
+    );
     assert_eq!(outcome["passages_compacted"], json!(true), "{outcome}");
     // The passage stays gone after the rewrite.
-    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(sources["total"], json!(0), "{sources}");
 
     // A context with no passage history has no log to rewrite — the
     // guard must not mint store files just to compact nothing.
-    server.ok("PUT", "/contexts/graph-only", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "graph-only"})));
     server.ok(
         "POST",
-        "/contexts/graph-only/associations",
+        &format!("/contexts/{}/associations", server.cx("graph-only")),
         Some(json!([{"subject": "a", "label": "r", "object": "b", "weight": 1.0}])),
     );
-    let outcome = server.ok("POST", "/contexts/graph-only/compact", None);
+    let outcome = server.ok(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("graph-only")),
+        None,
+    );
     assert_eq!(outcome["passages_compacted"], json!(false), "{outcome}");
 }

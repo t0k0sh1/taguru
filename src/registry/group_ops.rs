@@ -871,7 +871,7 @@ mod tests {
                 .unwrap();
         }
 
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
 
         for group in ["drinks", "fermented"] {
             assert_eq!(

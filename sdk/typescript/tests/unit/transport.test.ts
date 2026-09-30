@@ -21,7 +21,8 @@ import {
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
 const DIRECTORY_ROW = {
-  id: "sake",
+  id: "00000000-0000-4000-8000-000000000001",
+  name: "sake",
   description: "酒蔵の知識",
   pinned: false,
   loaded: true,
@@ -50,8 +51,9 @@ describe("envelope and raw-body handling", () => {
   it("tolerates unknown fields (additive evolution)", async () => {
     const row = { ...DIRECTORY_ROW, brand_new_field: { nested: true } };
     const client = stubClient(() => okBody(row));
-    const entry = await client.contexts.get("sake");
-    expect(entry.id).toBe("sake");
+    const entry = await client.contexts.get("00000000-0000-4000-8000-000000000001");
+    expect(entry.id).toBe("00000000-0000-4000-8000-000000000001");
+    expect(entry.name).toBe("sake");
   });
 
   it("describe null result is null, not an error", async () => {
@@ -436,11 +438,13 @@ describe("header normalization", () => {
 
 describe("pagination iterators", () => {
   it("walks directory pages with the keyset cursor", async () => {
-    const cursors: Array<string | null> = [];
-    const rowFor = (id: string) => ({ ...DIRECTORY_ROW, id });
+    const cursors: Array<[string | null, string | null]> = [];
+    const rowFor = (name: string) => ({ ...DIRECTORY_ROW, id: `id-${name}`, name });
     const client = stubClient((req) => {
-      const after = new URL(req.url).searchParams.get("after");
-      cursors.push(after);
+      const url = new URL(req.url);
+      const after = url.searchParams.get("after");
+      const afterId = url.searchParams.get("after_id");
+      cursors.push([after, afterId]);
       if (after === null) return okBody({ total: 4, contexts: [rowFor("a"), rowFor("b")] });
       // A short page (fewer rows than the limit) is not the last one — the
       // walk keeps paging, or a server-clamped limit would drop later rows.
@@ -451,10 +455,16 @@ describe("pagination iterators", () => {
     });
     const names: string[] = [];
     for await (const entry of client.contexts.iter({ limit: 2 })) {
-      names.push(entry.id);
+      names.push(entry.name);
     }
     expect(names).toEqual(["a", "b", "c", "d"]);
-    expect(cursors).toEqual([null, "b", "c", "d"]);
+    // The cursor carries the (name, id) pair — names are not unique (#964).
+    expect(cursors).toEqual([
+      [null, null],
+      ["b", "id-b"],
+      ["c", "id-c"],
+      ["d", "id-d"],
+    ]);
   });
 
   it("flattens both alias namespaces and advances the two-namespace cursor", async () => {

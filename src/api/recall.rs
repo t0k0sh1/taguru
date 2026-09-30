@@ -11,16 +11,16 @@ use taguru::context::{Association, Context};
 use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
-use crate::registry::AppState;
+use crate::registry::{AccessError, AppState};
 use crate::schema::InstalledSchema;
 
 use super::aliases::{OneOrMany, as_refs, validate_positions};
 use super::groups::{scope_allows, scope_refusal};
 use super::{
-    AppJson, AppPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, MatchCursor,
-    MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map, cache_and_serve,
-    clamp, cross_associations_out, cross_job_panic, cross_search_concurrency, deadline_exceeded,
-    error, group_not_found, not_found, ok, overlong, page, replay_cached_search,
+    AppJson, ContextIdPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT,
+    MatchCursor, MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map,
+    cache_and_serve, clamp, cross_associations_out, cross_job_panic, cross_search_concurrency,
+    deadline_exceeded, error, group_not_found, not_found, ok, overlong, page, replay_cached_search,
     search_log_enabled,
 };
 
@@ -65,7 +65,7 @@ fn graph_cache_probe(
 
 pub async fn recall(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RecallRequest>,
 ) -> Response {
@@ -80,7 +80,7 @@ pub async fn recall(
     // entry.
     let key = state.retrieval_key(
         RetrievalCacheOp::Recall,
-        std::slice::from_ref(&name),
+        std::slice::from_ref(&id),
         serde_json::to_string(&(
             "recall",
             &request.cue,
@@ -98,7 +98,7 @@ pub async fn recall(
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
-                context = %name,
+                context = %id,
                 op = "recall",
                 cue = %request.cue,
                 hits = found.log_hits,
@@ -108,17 +108,13 @@ pub async fn recall(
         }
         return ok(found.payload.as_ref(), started_at);
     }
-    let window_names = match super::sources::resolve_window(
-        &state,
-        &name,
-        request.since,
-        request.until,
-        started_at,
-    ) {
-        Ok(names) => names,
-        Err(refusal) => return *refusal,
-    };
-    match state.read_context(&name, |context| match &window_names {
+    let window_names =
+        match super::sources::resolve_window(&state, &id, request.since, request.until, started_at)
+        {
+            Ok(names) => names,
+            Err(refusal) => return *refusal,
+        };
+    match state.read_context(&id, |context| match &window_names {
         None => context.recall(&request.cue),
         Some(names) => {
             let window = context.source_window(names.iter().map(String::as_str));
@@ -127,18 +123,18 @@ pub async fn recall(
     }) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
-            state.note_search(SearchOp::Recall, &name, total == 0);
+            state.note_search(SearchOp::Recall, &id, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "recall",
                     cue = %request.cue,
                     hits = total,
                     "search",
                 );
             }
-            let matches = associations_out(&state, &name, matches);
+            let matches = associations_out(&state, &id, matches);
             cache_and_serve(
                 &state,
                 key,
@@ -146,7 +142,7 @@ pub async fn recall(
                     total,
                     matches,
                     plan: Some(MatchPlan {
-                        contexts: vec![name.clone()],
+                        contexts: vec![state.name_of_stem(&id)],
                     }),
                 },
                 vec![total == 0],
@@ -157,7 +153,7 @@ pub async fn recall(
                 started_at,
             )
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -194,7 +190,7 @@ pub(super) fn cross_targets(
     contexts: Vec<String>,
     groups: Vec<String>,
     started_at: Instant,
-) -> Result<Arc<[String]>, Box<Response>> {
+) -> Result<CrossTargets, Box<Response>> {
     if contexts.is_empty() && groups.is_empty() {
         return Err(Box::new(error(
             ErrorCode::InvalidArgument,
@@ -215,12 +211,17 @@ pub(super) fn cross_targets(
     if let Some(refusal) = scope_refusal(grant, key, &targets, started_at) {
         return Err(Box::new(refusal));
     }
-    if let Some(missing) = targets.iter().find(|name| !state.context_exists(name)) {
-        return Err(Box::new(error(
-            ErrorCode::NoContext,
-            format!("context '{missing}' not found"),
-            started_at,
-        )));
+    // The body names targets (until #965); the data paths below are
+    // id-keyed, so each name resolves here, once. A missing listed
+    // context refuses now, exactly as the old existence snapshot did,
+    // and an ambiguous one — several contexts share the name (issue
+    // #961 decision 1) — is its own conflict, never a coin flip.
+    let mut ids: Vec<String> = Vec::with_capacity(targets.len());
+    for name in &targets {
+        match state.resolve_wire_name(name) {
+            Ok(id) => ids.push(id),
+            Err(failure) => return Err(Box::new(access_error(state, failure, name, started_at))),
+        }
     }
     // Resolution is skipped outright when no groups were named: a
     // context-only search must never queue behind a group write's
@@ -230,13 +231,52 @@ pub(super) fn cross_targets(
             Ok(resolved) => resolved,
             Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
         };
-        targets.extend(
-            resolved
-                .into_iter()
-                .filter(|name| scope_allows(grant, name) && seen.insert(name.clone())),
-        );
+        for name in resolved {
+            if !(scope_allows(grant, &name) && seen.insert(name.clone())) {
+                continue;
+            }
+            match state.resolve_wire_name(&name) {
+                Ok(id) => ids.push(id),
+                // A member deleted since the group record was read:
+                // keep the name itself as the id so the per-target
+                // fetch stays the authoritative "not found" (the
+                // window this function's doc describes) — a UUID can
+                // never collide with a display name that failed to
+                // resolve to one.
+                Err(AccessError::NotFound) => ids.push(name.clone()),
+                Err(failure) => {
+                    return Err(Box::new(access_error(state, failure, &name, started_at)));
+                }
+            }
+            targets.push(name);
+        }
     }
-    Ok(targets.into())
+    Ok(CrossTargets {
+        names: targets.into(),
+        ids: ids.into(),
+    })
+}
+
+/// [`cross_targets`]'s answer: the effective target list, resolved
+/// and scope-filtered — display names for the wire (rows, logs, the
+/// retrieval-cache key) aligned index-for-index with the ids the
+/// id-keyed data paths take.
+pub(super) struct CrossTargets {
+    pub(super) names: Arc<[String]>,
+    pub(super) ids: Arc<[String]>,
+}
+
+impl CrossTargets {
+    /// name → id over the aligned lists — names are unique within one
+    /// resolved request (the dedup + ambiguity refusal in
+    /// [`cross_targets`]), so the map loses nothing.
+    pub(super) fn id_of_name(&self) -> BTreeMap<&str, &str> {
+        self.names
+            .iter()
+            .map(String::as_str)
+            .zip(self.ids.iter().map(String::as_str))
+            .collect()
+    }
 }
 
 /// One cross-`context` result page: the pre-cut total, the surviving
@@ -382,20 +422,24 @@ pub(super) fn cross_page_by(
 /// `Err(panicked)` arm).
 async fn cross_matches(
     state: &AppState,
-    targets: &Arc<[String]>,
+    targets: &CrossTargets,
     op: SearchOp,
     limit: Option<usize>,
     after: Option<&CrossMatchCursor>,
     search: impl Fn(&str, &Context) -> Vec<Association> + Send + Sync + 'static,
     started_at: Instant,
 ) -> Result<CrossPage, Box<Response>> {
+    let names = &targets.names;
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    let permits = cross_search_concurrency().min(targets.len().max(1));
-    let owned_targets = Arc::clone(targets);
+    let permits = cross_search_concurrency().min(names.len().max(1));
+    let owned_names = Arc::clone(names);
+    let owned_ids = Arc::clone(&targets.ids);
     let job_state = state.clone();
-    let fetched = match bounded_parallel_map(targets.len(), permits, move |index| {
-        let name = &owned_targets[index];
-        job_state.read_context(name, |context| search(name, context))
+    let fetched = match bounded_parallel_map(names.len(), permits, move |index| {
+        // The id addresses; the name rides along for the wire rows
+        // and the search closure's reporting.
+        let name = &owned_names[index];
+        job_state.read_context(&owned_ids[index], |context| search(name, context))
     })
     .await
     {
@@ -403,7 +447,7 @@ async fn cross_matches(
         Err(panicked) => {
             return Err(Box::new(cross_job_panic(
                 state,
-                &targets[panicked.index],
+                &names[panicked.index],
                 started_at,
             )));
         }
@@ -411,32 +455,32 @@ async fn cross_matches(
 
     let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
-    let mut empties = Vec::with_capacity(targets.len());
+    let mut empties = Vec::with_capacity(names.len());
     for (index, outcome) in fetched.into_iter().enumerate() {
         match outcome {
             Ok(matches) => {
-                state.note_search(op, &targets[index], matches.is_empty());
+                state.note_search(op, &targets.ids[index], matches.is_empty());
                 empties.push(matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
                 if pool.len() >= limit * 2 {
-                    pool = cross_page_by(pool, Some(limit), after, targets).1;
+                    pool = cross_page_by(pool, Some(limit), after, names).1;
                 }
             }
             Err(failure) => {
                 return Err(Box::new(access_error(
                     state,
                     failure,
-                    &targets[index],
+                    &names[index],
                     started_at,
                 )));
             }
         }
     }
-    let (_, pool) = cross_page_by(pool, Some(limit), after, targets);
+    let (_, pool) = cross_page_by(pool, Some(limit), after, names);
     let tagged = pool
         .into_iter()
-        .map(|(index, association)| (targets[index].clone(), association))
+        .map(|(index, association)| (names[index].clone(), association))
         .collect();
     Ok((total, tagged, empties))
 }
@@ -510,12 +554,12 @@ fn refuse_cross_window(
 /// to hold, for a case this loop already runs infrequently.
 fn resolve_cross_type_schemas(
     state: &AppState,
-    targets: &[String],
+    targets: &CrossTargets,
     started_at: Instant,
 ) -> Result<BTreeMap<String, Arc<InstalledSchema>>, Box<Response>> {
     let mut schemas = BTreeMap::new();
-    for name in targets {
-        match tokio::task::block_in_place(|| state.schema_of(name)) {
+    for (name, id) in targets.names.iter().zip(targets.ids.iter()) {
+        match tokio::task::block_in_place(|| state.schema_of(id)) {
             None | Some(Ok(None)) => {}
             Some(Ok(Some(schema))) => {
                 schemas.insert(name.clone(), schema);
@@ -589,7 +633,7 @@ pub async fn cross_recall(
     // when sharing is safe.
     let key = state.retrieval_key(
         RetrievalCacheOp::Recall,
-        &targets,
+        &targets.ids,
         serde_json::to_string(&(
             "cross_recall",
             &request.cue,
@@ -602,7 +646,7 @@ pub async fn cross_recall(
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
-                contexts = %targets.join(","),
+                contexts = %targets.names.join(","),
                 op = "recall",
                 cue = %request.cue,
                 hits = found.log_hits,
@@ -631,14 +675,14 @@ pub async fn cross_recall(
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
-            contexts = %targets.join(","),
+            contexts = %targets.names.join(","),
             op = "recall",
             cue = %cue_log,
             hits = total,
             "search",
         );
     }
-    let matches = cross_associations_out(&state, page);
+    let matches = cross_associations_out(&state, &targets.id_of_name(), page);
     cache_and_serve(
         &state,
         key,
@@ -646,7 +690,7 @@ pub async fn cross_recall(
             total,
             matches,
             plan: Some(MatchPlan {
-                contexts: targets.to_vec(),
+                contexts: targets.names.to_vec(),
             }),
         },
         target_empty,
@@ -760,7 +804,7 @@ fn type_filter(
 
 pub async fn query(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<QueryRequest>,
 ) -> Response {
@@ -787,7 +831,7 @@ pub async fn query(
     // call for identical positions must never share a cached page.
     let key = state.retrieval_key(
         RetrievalCacheOp::Query,
-        std::slice::from_ref(&name),
+        std::slice::from_ref(&id),
         serde_json::to_string(&(
             "query",
             as_refs(&request.subject),
@@ -807,7 +851,7 @@ pub async fn query(
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
-                context = %name,
+                context = %id,
                 op = "query",
                 subject = %as_refs(&request.subject).join(","),
                 label = %as_refs(&request.label).join(","),
@@ -825,8 +869,8 @@ pub async fn query(
     // which a `read_context` closure already holds the read side of.
     // Skipped entirely when neither filter was asked for.
     let schema = if has_type_filter(&request.subject_types, &request.object_types) {
-        match tokio::task::block_in_place(|| state.schema_of(&name)) {
-            None => return not_found(&name, started_at),
+        match tokio::task::block_in_place(|| state.schema_of(&id)) {
+            None => return not_found(&id, started_at),
             Some(Ok(schema)) => schema,
             Some(Err(message)) => {
                 // ADR 0008 §7: no span-event field is ever named `error`
@@ -835,11 +879,11 @@ pub async fn query(
                 // detail (which can name a filesystem path) rides the
                 // message text instead, matching the interpolated style
                 // `resolve.rs`'s own provider-failure log already uses.
-                tracing::warn!(context = %name, "schema load failed: {message}");
+                tracing::warn!(context = %id, "schema load failed: {message}");
                 state.metrics().record_error(ErrorKind::Load);
                 return error(
                     ErrorCode::Internal,
-                    format!("context '{name}' schema could not be loaded — see server logs"),
+                    format!("context '{id}' schema could not be loaded — see server logs"),
                     started_at,
                 );
             }
@@ -847,17 +891,13 @@ pub async fn query(
     } else {
         None
     };
-    let window_names = match super::sources::resolve_window(
-        &state,
-        &name,
-        request.since,
-        request.until,
-        started_at,
-    ) {
-        Ok(names) => names,
-        Err(refusal) => return *refusal,
-    };
-    match state.read_context(&name, |context| {
+    let window_names =
+        match super::sources::resolve_window(&state, &id, request.since, request.until, started_at)
+        {
+            Ok(names) => names,
+            Err(refusal) => return *refusal,
+        };
+    match state.read_context(&id, |context| {
         let matches = match &window_names {
             None => context.query_any(
                 &as_refs(&request.subject),
@@ -884,11 +924,11 @@ pub async fn query(
     }) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
-            state.note_search(SearchOp::Query, &name, total == 0);
+            state.note_search(SearchOp::Query, &id, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "query",
                     subject = %as_refs(&request.subject).join(","),
                     label = %as_refs(&request.label).join(","),
@@ -897,7 +937,7 @@ pub async fn query(
                     "search",
                 );
             }
-            let matches = associations_out(&state, &name, matches);
+            let matches = associations_out(&state, &id, matches);
             cache_and_serve(
                 &state,
                 key,
@@ -905,7 +945,7 @@ pub async fn query(
                     total,
                     matches,
                     plan: Some(MatchPlan {
-                        contexts: vec![name.clone()],
+                        contexts: vec![state.name_of_stem(&id)],
                     }),
                 },
                 vec![total == 0],
@@ -916,7 +956,7 @@ pub async fn query(
                 started_at,
             )
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -1004,7 +1044,7 @@ pub async fn cross_query(
     // do in `query`.
     let key = state.retrieval_key(
         RetrievalCacheOp::Query,
-        &targets,
+        &targets.ids,
         serde_json::to_string(&(
             "cross_query",
             as_refs(&request.subject),
@@ -1021,7 +1061,7 @@ pub async fn cross_query(
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
-                contexts = %targets.join(","),
+                contexts = %targets.names.join(","),
                 op = "query",
                 subject = %as_refs(&request.subject).join(","),
                 label = %as_refs(&request.label).join(","),
@@ -1080,7 +1120,7 @@ pub async fn cross_query(
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
-            contexts = %targets.join(","),
+            contexts = %targets.names.join(","),
             op = "query",
             subject = %subject_log,
             label = %label_log,
@@ -1089,7 +1129,7 @@ pub async fn cross_query(
             "search",
         );
     }
-    let matches = cross_associations_out(&state, page);
+    let matches = cross_associations_out(&state, &targets.id_of_name(), page);
     cache_and_serve(
         &state,
         key,
@@ -1097,7 +1137,7 @@ pub async fn cross_query(
             total,
             matches,
             plan: Some(MatchPlan {
-                contexts: targets.to_vec(),
+                contexts: targets.names.to_vec(),
             }),
         },
         target_empty,
@@ -1224,8 +1264,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cross_matches_names_a_target_that_does_not_exist() {
         let state = scratch_state("missing-target");
-        state.create("alive", ContextMeta::default()).unwrap();
-        let targets: Arc<[String]> = Arc::from(vec!["alive".to_string(), "ghost".to_string()]);
+        let alive = state.create("alive", ContextMeta::default()).unwrap();
+        let targets = CrossTargets {
+            names: Arc::from(vec!["alive".to_string(), "ghost".to_string()]),
+            // "ghost" resolved to nothing — `cross_targets` keeps the
+            // name itself as the id so this fetch stays the
+            // authoritative not-found.
+            ids: Arc::from(vec![alive, "ghost".to_string()]),
+        };
 
         let outcome = cross_matches(
             &state,

@@ -385,7 +385,20 @@ pub(super) fn run_local(
     let mut embed_failures = 0;
     if state.embeddings_configured() {
         for name in &touched {
-            match state.refresh_embeddings(name, Deadline::unbounded()) {
+            // `touched` carries the stream's display names; the
+            // refresh calls are id-keyed (#964). A name that no longer
+            // resolves (deleted or made ambiguous since its batch
+            // applied) is a counted failure, never a silent skip.
+            let Some(id) = state.context_id_of(name) else {
+                eprintln!(
+                    "taguru: import: {name}: embedding refresh skipped — the name no \
+                     longer resolves to one context; refresh by id via POST \
+                     /contexts/{{id}}/embeddings/refresh"
+                );
+                embed_failures += 1;
+                continue;
+            };
+            match state.refresh_embeddings(&id, Deadline::unbounded()) {
                 None | Some(Ok((0, _))) => {}
                 Some(Ok((embedded, _))) => {
                     if !as_json {
@@ -396,7 +409,7 @@ pub(super) fn run_local(
                     eprintln!(
                         "taguru: import: {name}: embedding refresh failed ({error}) — the \
                          graph is imported and durable; refresh later via POST \
-                         /contexts/{name}/embeddings/refresh"
+                         /contexts/{id}/embeddings/refresh"
                     );
                     embed_failures += 1;
                 }
@@ -406,7 +419,7 @@ pub(super) fn run_local(
             // the glosses above embed automatically left the vector
             // lane silently absent until a manual refresh (#479).
             if state.passage_embedding_enabled() {
-                match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
+                match state.refresh_passage_embeddings(&id, Deadline::unbounded()) {
                     None | Some(Ok(crate::registry::PassageRefreshOutcome { embedded: 0, .. })) => {
                     }
                     Some(Ok(outcome)) => {
@@ -418,7 +431,7 @@ pub(super) fn run_local(
                         eprintln!(
                             "taguru: import: {name}: passage embedding refresh failed \
                              ({error}) — the passages are imported and durable; refresh \
-                             later via POST /contexts/{name}/embeddings/refresh"
+                             later via POST /contexts/{id}/embeddings/refresh"
                         );
                         embed_failures += 1;
                     }

@@ -16,9 +16,9 @@ use crate::registry::{AccessError, AppState};
 
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
-    AppBytes, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, access_error_noted,
-    collected_validation_message, deadline_exceeded, error, group_not_found, key_name,
-    nesting_error_code, ok, ok_with_issues_total, truncate_issues, validation_error,
+    AppBytes, AppPath, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
+    access_error_noted, collected_validation_message, deadline_exceeded, error, group_not_found,
+    key_name, nesting_error_code, ok, ok_with_issues_total, truncate_issues, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -773,7 +773,7 @@ pub(super) fn quota_refusal_from_apply(
 
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
-/// as `GET /contexts/{name}/export` renders — applied to the live
+/// as `GET /contexts/{id}/export` renders — applied to the live
 /// server with the same validate-first, retract-then-apply semantics
 /// as `taguru import`. Each batch states one source's complete truth,
 /// so bulk loads and restores reach a running server without a
@@ -1182,7 +1182,7 @@ pub async fn import_batch(
     )
 }
 
-/// `POST /contexts/{name}/compact` — rebuild the image without the
+/// `POST /contexts/{id}/compact` — rebuild the image without the
 /// dead weight the append-only format accumulates (retracted edges,
 /// unlinked attributions, arena slack), then try to persist the
 /// result before answering — a flush that can't publish still leaves
@@ -1194,7 +1194,7 @@ pub async fn import_batch(
 /// what was shed and what the footprint became.
 pub async fn compact_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
@@ -1202,14 +1202,14 @@ pub async fn compact_context(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match tokio::task::block_in_place(|| state.compact_context(&name, deadline)) {
+    match tokio::task::block_in_place(|| state.compact_context(&id, deadline)) {
         Ok(outcome) => {
             // Maintenance that rewrites the image is audit-worthy even
             // though no knowledge changes.
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                context = %name,
+                context = %id,
                 bytes_before = outcome.bytes_before,
                 bytes_after = outcome.bytes_after,
                 dead_edges = outcome.dead_edges,
@@ -1219,11 +1219,11 @@ pub async fn compact_context(
             );
             ok(outcome, started_at)
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
-/// `GET /contexts/{name}/export` — the `context` back out as the import
+/// `GET /contexts/{id}/export` — the `context` back out as the import
 /// batch stream (docs/import.html): one batch per source in source-id
 /// order, the create block on the first, the alias table on the last,
 /// sourceless weight in a reserved `export:unsourced` batch. The
@@ -1235,19 +1235,22 @@ pub async fn compact_context(
 /// runtime, the way vocabulary/audit steps aside.
 pub async fn export_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // The stream's `context` fields carry the DISPLAY name, not the
+    // path's id: import headers stay name-addressed until #965, so an
+    // exported stream must round-trip through `POST /import` as-is.
     let rendered = tokio::task::block_in_place(|| {
         state
-            .export_context(&name, deadline)
-            .map(|snapshot| crate::export::render(&name, &snapshot, deadline))
+            .export_context(&id, deadline)
+            .map(|snapshot| crate::export::render(&state.name_of_stem(&id), &snapshot, deadline))
     });
-    export_response(&state, &name, rendered, deadline, started_at)
+    export_response(&state, &id, rendered, deadline, started_at)
 }
 
 /// Maps [`export_context`]'s materialize-and-render outcome onto the
@@ -1372,7 +1375,7 @@ mod tests {
     /// two, since every scenario these tests build already knows which
     /// `contexts` exist.
     fn has_installed_schema(state: &AppState, context: &str) -> bool {
-        matches!(state.schema_of(context), Some(Ok(Some(_))))
+        matches!(state.schema_of(&state.id_of(context)), Some(Ok(Some(_))))
     }
 
     /// issue #620 (所見5): a budget spent partway through the

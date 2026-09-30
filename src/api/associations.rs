@@ -14,7 +14,7 @@ use crate::registry::{AppState, AssocOp};
 use crate::schema::{IssuePath, SchemaCheckInput, SchemaEnv, SchemaMode, schema_issues};
 
 use super::{
-    AppJson, AppPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
+    AppJson, ContextIdPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
     MAX_NAME_BYTES, RefusalDetail, access_error, check_bounded_len, collected_validation_message,
     deadline_exceeded, describe_value, empty, error, interpret_bounded_text, key_name, ok,
     ok_with_issues, oversized, partial_write_error, truncate_issues, validation_error,
@@ -166,7 +166,7 @@ fn interpret_associations(value: &Value) -> Result<Vec<AssocOp>, Vec<Issue>> {
 /// one request, one lock acquisition, one WAL fsync.
 pub async fn add_associations(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(body): AppJson<Value>,
 ) -> Response {
@@ -204,7 +204,7 @@ pub async fn add_associations(
     // write lock, which would deadlock under `read_context`'s own read
     // lock (`AppState::hidden_label`'s own doc), so the ordering here
     // mirrors `audit_vocabulary` (`src/api/vocabulary.rs:97-115`).
-    let schema = tokio::task::block_in_place(|| state.schema_of(&name));
+    let schema = tokio::task::block_in_place(|| state.schema_of(&id));
     let installed = match schema {
         // No such context, or a context that has never installed a
         // schema — the overwhelming common case. Skip the check
@@ -219,11 +219,11 @@ pub async fn add_associations(
         // enforcement because a read failed. Unlike a schema violation,
         // no correction on the caller's side fixes this.
         Some(Err(message)) => {
-            tracing::warn!(context = %name, error = %message, "schema load failed");
+            tracing::warn!(context = %id, error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             return validation_error(
                 ErrorCode::Internal,
-                format!("context '{name}' schema could not be loaded — see server logs"),
+                format!("context '{id}' schema could not be loaded — see server logs"),
                 RefusalDetail {
                     integrity: Some("nothing_written"),
                     retryable_after_correction: Some(false),
@@ -240,7 +240,7 @@ pub async fn add_associations(
         // carries its own optional `source` (§7.3's "there is no
         // source retraction on this path").
         let declared_labels = BTreeMap::new();
-        let env = match state.read_context(&name, |context| {
+        let env = match state.read_context(&id, |context| {
             SchemaEnv::build(
                 context,
                 SchemaCheckInput {
@@ -252,7 +252,7 @@ pub async fn add_associations(
             )
         }) {
             Ok(env) => env,
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         };
         let check = schema_issues(&env, &associations, IssuePath::Request { prefix: "" });
         let mode = installed.document().mode;
@@ -260,7 +260,7 @@ pub async fn add_associations(
         // two write entrances a schema actually gates (the other is
         // `predicted_schema_rejection`'s `Apply` purpose), so it — and
         // only it — feeds `taguru_schema_checks_total`.
-        state.note_schema_check(&name, check.outcome(mode), check.violations.len());
+        state.note_schema_check(&id, check.outcome(mode), check.violations.len());
         // ADR 0009 §6.3 guard 2: a reserved-label conflict refuses
         // regardless of mode — this route has no inline `labels`
         // declaration today, so `reserved` is always empty in
@@ -280,14 +280,14 @@ pub async fn add_associations(
     let total = associations.len();
     // The write stages ops in the WAL and fsyncs before returning, so
     // keep it off the async worker like `store_passages` and the flush.
-    match tokio::task::block_in_place(|| state.add_associations(&name, associations, deadline)) {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+    match tokio::task::block_in_place(|| state.add_associations(&id, associations, deadline)) {
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(Ok(applied)) => {
             // An empty batch reaches here as `applied == 0`: nothing
             // was written, so the counter must not move either — the
             // same rule the partial-write arm below already applies.
             if applied > 0 {
-                state.note_write(&name);
+                state.note_write(&id);
             }
             if warn_issues.is_empty() {
                 ok(applied, started_at)
@@ -300,7 +300,7 @@ pub async fn add_associations(
         // Association writes only fail on capacity today, but the
         // shared mapping must not assume that.
         Ok(Err(partial)) => {
-            partial_write_error(&state, &name, partial, started_at, |applied, message| {
+            partial_write_error(&state, &id, partial, started_at, |applied, message| {
                 format!("applied {applied} of {total} associations, then: {message}")
             })
         }
@@ -356,7 +356,7 @@ pub struct RetractAssociationOutcome {
 /// negative-weight assertion instead, which preserves the dispute.
 pub async fn retract_association(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RetractAssociationRequest>,
@@ -380,10 +380,10 @@ pub async fn retract_association(
     // The write stages a WAL op and fsyncs before returning; keep it
     // off the async worker like every other write path.
     let outcome = tokio::task::block_in_place(|| {
-        state.retract_association(&name, &request.subject, &request.label, &request.object)
+        state.retract_association(&id, &request.subject, &request.label, &request.object)
     });
     match outcome {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(unlinked) => {
             // The retracted TRIPLE lives in the body, so the access log
             // alone cannot say what was withdrawn — the audit line can
@@ -391,7 +391,7 @@ pub async fn retract_association(
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                context = %name,
+                context = %id,
                 subject = %request.subject,
                 label = %request.label,
                 object = %request.object,
@@ -402,7 +402,7 @@ pub async fn retract_association(
             // A retraction that found nothing changed nothing; only an
             // effective one counts as a write.
             if unlinked.is_some() {
-                state.note_write(&name);
+                state.note_write(&id);
             }
             ok(
                 RetractAssociationOutcome {

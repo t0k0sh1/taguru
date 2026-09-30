@@ -102,7 +102,7 @@
       <code>mode</code> is one of <code>"off"</code>, <code>"warn"</code>, or
       <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every other top-level
       field is required and unknown fields are refused, both on the wire
-      (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
+      (<code>PUT /contexts/{id}/schema</code>) and at rest (the persisted
       <code>{stem}.schema.json</code>): unlike the source stream's <code>group</code> record, nothing here defaults,
       because a silently-dropped field would be indistinguishable from under-enforcing
       <code>strict</code>. <code>types</code> maps a type name to its declared parents
@@ -125,7 +125,7 @@
     <p class="note">
       A schema document that fails these checks — including a cycle in <code>is_a</code>, or a
       relation named the reserved <code>schema:type</code> label — refuses at
-      <code>PUT /contexts/{name}/schema</code> before anything installs; the <code>context</code>'s previous
+      <code>PUT /contexts/{id}/schema</code> before anything installs; the <code>context</code>'s previous
       schema (if any) is untouched. A schema recorded on disk but currently unreadable is never
       treated as schema-free — every write entrance refuses conservatively rather than silently
       skipping enforcement.
@@ -138,8 +138,8 @@
     <p>
       <code>mode</code> lives <b>inside</b> the schema document, not on
       <code>ContextMeta</code>: a mode without a document to enforce is meaningless, and
-      <code>PATCH /contexts/{name}</code> (the ordinary metadata endpoint) cannot flip it —
-      changing mode is always a full <code>PUT /contexts/{name}/schema</code>.
+      <code>PATCH /contexts/{id}</code> (the ordinary metadata endpoint) cannot flip it —
+      changing mode is always a full <code>PUT /contexts/{id}/schema</code>.
     </p>
     <ul>
       <li><b><code>off</code></b> (the default) — the document may exist and be edited, but no
@@ -153,9 +153,9 @@
     <p class="note warn">
       <b><code>strict</code> means "from now on," not "from the beginning."</b> Turning a <code>context</code>
       strict never sweeps the graph — existing associations that would violate the new schema are
-      grandfathered, untouched and unflagged. <code>PUT /contexts/{name}/schema</code> only ever
+      grandfathered, untouched and unflagged. <code>PUT /contexts/{id}/schema</code> only ever
       changes what future writes are judged against; use
-      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a> to find what already
+      <a href="#audit"><code>POST /contexts/{id}/schema/audit</code></a> to find what already
       disagrees with a schema you are about to tighten.
     </p>
   </section>
@@ -187,10 +187,10 @@
         just another fact, judged by nothing.</li>
       <li>No alias path may ever resolve any spelling to <code>schema:type</code> once a schema
         exists — <code>add_label_alias</code>, an import source's own inline <code>labels</code>
-        declaration, and a <code>PUT /contexts/{name}/schema</code>-time check over
+        declaration, and a <code>PUT /contexts/{id}/schema</code>-time check over
         already-persisted aliases all enforce it. This refusal fires regardless of mode, even <code>off</code>: it is a
         namespace-ownership rule, not something enforcement toggles.</li>
-      <li><code>PUT /contexts/{name}/schema</code> itself refuses a document whose
+      <li><code>PUT /contexts/{id}/schema</code> itself refuses a document whose
         <code>relations</code> declares an entry named <code>schema:type</code>.</li>
     </ol>
     <p>
@@ -215,7 +215,7 @@
     <h2>What happens at write time</h2>
     <p class="section-sub">Every write entrance shares one judgment function, so they cannot drift apart.</p>
     <p>
-      <code>POST /contexts/{name}/associations</code>, <code>POST /import</code> /
+      <code>POST /contexts/{id}/associations</code>, <code>POST /import</code> /
       <code>taguru import</code>, and <code>?dry_run=true</code>/preview all run the identical
       check — the union of live graph state and this write's own operations, judged once. A
       <code>strict</code> refusal happens before a single byte writes
@@ -247,10 +247,10 @@
       <table>
         <thead><tr><th>Route</th><th>Role</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td><code>GET /contexts/{name}/schema</code></td><td>Read</td><td>Returns the installed document, or 404 if none.</td></tr>
-          <tr><td><code>PUT /contexts/{name}/schema</code></td><td>Write</td><td>Installs (or replaces) the document — refuses on any of the caps or shape checks above.</td></tr>
-          <tr><td><code>POST /contexts/{name}/schema/validate</code></td><td>Read</td><td>Dry-runs a <b>proposed</b> document against the live graph without installing it — the way to see what tightening a schema would break before committing to it.</td></tr>
-          <tr><td><code>POST /contexts/{name}/schema/audit</code></td><td>Read</td><td>Judges the graph as it stands today against the <b>installed</b> document — reads as <code>strict</code> even when the document's own <code>mode</code> is <code>off</code>, so a draft schema's real-world fit is visible before enforcement is ever turned on.</td></tr>
+          <tr><td><code>GET /contexts/{id}/schema</code></td><td>Read</td><td>Returns the installed document, or 404 if none.</td></tr>
+          <tr><td><code>PUT /contexts/{id}/schema</code></td><td>Write</td><td>Installs (or replaces) the document — refuses on any of the caps or shape checks above.</td></tr>
+          <tr><td><code>POST /contexts/{id}/schema/validate</code></td><td>Read</td><td>Dry-runs a <b>proposed</b> document against the live graph without installing it — the way to see what tightening a schema would break before committing to it.</td></tr>
+          <tr><td><code>POST /contexts/{id}/schema/audit</code></td><td>Read</td><td>Judges the graph as it stands today against the <b>installed</b> document — reads as <code>strict</code> even when the document's own <code>mode</code> is <code>off</code>, so a draft schema's real-world fit is visible before enforcement is ever turned on.</td></tr>
         </tbody>
       </table>
     </div>
@@ -315,7 +315,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       <code>taguru_schema_checks_total{outcome}</code> is a fixed three-label counter
       (<code>ok</code> / <code>warned</code> / <code>refused</code>, always rendered even at
       zero) counted only at the entrances that actually gate a write —
-      <code>POST /contexts/{name}/associations</code> and a real (non-preview)
+      <code>POST /contexts/{id}/associations</code> and a real (non-preview)
       <code>POST /import</code>/<code>taguru import</code> apply — for a <code>context</code> that has an
       installed schema document. A schema-free <code>context</code> never touches it, so <code>ok</code>
       means "checked, no violation," not "no schema." <code>?dry_run=true</code>/preview and the
@@ -336,7 +336,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       <code>taguru inspect</code> only ever raises a notice for the schema <b>file's</b> own
       health — corrupt bytes, a digest mismatch, a version this build cannot read. It never
       reports graph-level violations; that is what the two families above, and
-      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a>, are for.
+      <a href="#audit"><code>POST /contexts/{id}/schema/audit</code></a>, are for.
     </p>
     <p>
       The schema document rides in <code>context_files</code> like every other per-<code>context</code> file

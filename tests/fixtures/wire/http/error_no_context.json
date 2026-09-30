@@ -9,10 +9,10 @@
   },
   "response": {
     "code": "no_context",
-    "error": "context 'does-not-exist' not found",
+    "error": "context '00000000-0000-4000-8000-00000000dead' not found",
     "status": "error",
     "time": 0.0
   },
-  "route": "/contexts/{name}/evidence",
+  "route": "/contexts/{id}/evidence",
   "status": 404
 }

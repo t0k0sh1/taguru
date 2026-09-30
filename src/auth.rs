@@ -784,62 +784,62 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::GET, "/groups")
         | (&Method::GET, "/groups/{name}")
         | (&Method::GET, "/groups/{name}/export")
-        | (&Method::GET, "/contexts/{name}")
-        | (&Method::GET, "/contexts/{name}/labels")
-        | (&Method::GET, "/contexts/{name}/schema")
-        | (&Method::GET, "/contexts/{name}/aliases")
-        | (&Method::GET, "/contexts/{name}/sources")
-        | (&Method::GET, "/contexts/{name}/embeddings")
-        | (&Method::GET, "/contexts/{name}/export")
+        | (&Method::GET, "/contexts/{id}")
+        | (&Method::GET, "/contexts/{id}/labels")
+        | (&Method::GET, "/contexts/{id}/schema")
+        | (&Method::GET, "/contexts/{id}/aliases")
+        | (&Method::GET, "/contexts/{id}/sources")
+        | (&Method::GET, "/contexts/{id}/embeddings")
+        | (&Method::GET, "/contexts/{id}/export")
         | (&Method::GET, "/protocol")
         | (&Method::POST, "/recall")
         | (&Method::POST, "/query")
         | (&Method::POST, "/sources/search")
-        | (&Method::POST, "/contexts/{name}/recall")
-        | (&Method::POST, "/contexts/{name}/query")
-        | (&Method::POST, "/contexts/{name}/describe")
-        | (&Method::POST, "/contexts/{name}/explore")
-        | (&Method::POST, "/contexts/{name}/activate")
-        | (&Method::POST, "/contexts/{name}/paths")
-        | (&Method::GET, "/contexts/{name}/changes")
-        | (&Method::POST, "/contexts/{name}/resolve")
-        | (&Method::POST, "/contexts/{name}/resolve/explain")
-        | (&Method::POST, "/contexts/{name}/resolve_label")
-        | (&Method::POST, "/contexts/{name}/resolve_label/explain")
-        | (&Method::POST, "/contexts/{name}/sources/lookup")
-        | (&Method::POST, "/contexts/{name}/sources/search")
-        | (&Method::POST, "/contexts/{name}/sources/search/explain")
-        | (&Method::POST, "/contexts/{name}/citations")
-        | (&Method::POST, "/contexts/{name}/unreachable_from")
-        | (&Method::POST, "/contexts/{name}/vocabulary/audit")
-        | (&Method::POST, "/contexts/{name}/drift/audit")
-        | (&Method::POST, "/contexts/{name}/consolidation/audit")
-        | (&Method::POST, "/contexts/{name}/schema/audit")
-        | (&Method::POST, "/contexts/{name}/schema/validate")
-        | (&Method::GET, "/contexts/{name}/communities")
-        | (&Method::POST, "/contexts/{name}/communities/search")
-        | (&Method::POST, "/contexts/{name}/evidence")
+        | (&Method::POST, "/contexts/{id}/recall")
+        | (&Method::POST, "/contexts/{id}/query")
+        | (&Method::POST, "/contexts/{id}/describe")
+        | (&Method::POST, "/contexts/{id}/explore")
+        | (&Method::POST, "/contexts/{id}/activate")
+        | (&Method::POST, "/contexts/{id}/paths")
+        | (&Method::GET, "/contexts/{id}/changes")
+        | (&Method::POST, "/contexts/{id}/resolve")
+        | (&Method::POST, "/contexts/{id}/resolve/explain")
+        | (&Method::POST, "/contexts/{id}/resolve_label")
+        | (&Method::POST, "/contexts/{id}/resolve_label/explain")
+        | (&Method::POST, "/contexts/{id}/sources/lookup")
+        | (&Method::POST, "/contexts/{id}/sources/search")
+        | (&Method::POST, "/contexts/{id}/sources/search/explain")
+        | (&Method::POST, "/contexts/{id}/citations")
+        | (&Method::POST, "/contexts/{id}/unreachable_from")
+        | (&Method::POST, "/contexts/{id}/vocabulary/audit")
+        | (&Method::POST, "/contexts/{id}/drift/audit")
+        | (&Method::POST, "/contexts/{id}/consolidation/audit")
+        | (&Method::POST, "/contexts/{id}/schema/audit")
+        | (&Method::POST, "/contexts/{id}/schema/validate")
+        | (&Method::GET, "/contexts/{id}/communities")
+        | (&Method::POST, "/contexts/{id}/communities/search")
+        | (&Method::POST, "/contexts/{id}/evidence")
         | (&Method::POST, "/mcp") => Role::Read,
         // The ingest loop — everything the documented agent discipline
         // drives, context creation and per-source re-sync included.
-        (&Method::PUT, "/contexts/{name}")
-        | (&Method::PATCH, "/contexts/{name}")
-        | (&Method::PUT, "/contexts/{name}/schema")
+        (&Method::POST, "/contexts")
+        | (&Method::PATCH, "/contexts/{id}")
+        | (&Method::PUT, "/contexts/{id}/schema")
         | (&Method::PUT, "/groups/{name}")
         | (&Method::PATCH, "/groups/{name}")
-        | (&Method::POST, "/contexts/{name}/associations")
-        | (&Method::POST, "/contexts/{name}/associations/retract")
-        | (&Method::POST, "/contexts/{name}/aliases")
-        | (&Method::DELETE, "/contexts/{name}/aliases")
-        | (&Method::POST, "/contexts/{name}/sources")
-        | (&Method::POST, "/contexts/{name}/sources/retract")
+        | (&Method::POST, "/contexts/{id}/associations")
+        | (&Method::POST, "/contexts/{id}/associations/retract")
+        | (&Method::POST, "/contexts/{id}/aliases")
+        | (&Method::DELETE, "/contexts/{id}/aliases")
+        | (&Method::POST, "/contexts/{id}/sources")
+        | (&Method::POST, "/contexts/{id}/sources/retract")
         // Promotion (ADR 0018) is per-source re-sync between two
         // established contexts — retract_source's classification, not
         // `/import`'s Admin: it cannot create contexts and carries no
         // group or schema records. The destination named in the body
         // is checked against the key's scope in the handler.
-        | (&Method::POST, "/contexts/{name}/promote")
-        | (&Method::POST, "/contexts/{name}/embeddings/refresh") => Role::Write,
+        | (&Method::POST, "/contexts/{id}/promote")
+        | (&Method::POST, "/contexts/{id}/embeddings/refresh") => Role::Write,
         // Operator verbs — and everything unclassified.
         _ => Role::Admin,
     }
@@ -861,6 +861,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// body or the stored record (`/import`, the `group` writes, the
 /// cross-`context` searches).
 pub async fn enforce_authorization(
+    State(state): State<crate::registry::AppState>,
     matched: Option<MatchedPath>,
     request: Request,
     next: Next,
@@ -898,31 +899,43 @@ pub async fn enforce_authorization(
         );
     }
     let (mut parts, body) = request.into_parts();
-    // `{name}` is a CONTEXT name on every route but the two `/groups`
-    // ones below, where it names the group itself: a group's member
-    // contexts live in the body and the stored record, out of this
-    // middleware's reach, so the group handlers judge them
-    // (`api::scope_refusal`) or filter to the grant (the row and the
-    // export). The exclusion names its routes exactly —
-    // deny-by-default safe: a future route whose `{name}` is not a
-    // context and is not listed here mis-answers 403 for scoped keys,
-    // never leaks open (a prefix test would silently swallow future
-    // `/groups/...` sub-routes instead of forcing that decision).
+    // `{id}` is a CONTEXT id on every route that has it; the two
+    // `/groups/{name}` routes below carry the group's own name
+    // instead: a group's member contexts live in the body and the
+    // stored record, out of this middleware's reach, so the group
+    // handlers judge them (`api::scope_refusal`) or filter to the
+    // grant (the row and the export). The exclusion names its routes
+    // exactly — deny-by-default safe: a future route whose parameter
+    // is not a context and is not listed here mis-answers 403 for
+    // scoped keys, never leaks open (a prefix test would silently
+    // swallow future `/groups/...` sub-routes instead of forcing that
+    // decision). Grants still hold display names until #966, so the
+    // path's id maps back to the entry's current name before the
+    // grant is consulted; an id nothing answers to keeps its own
+    // spelling, which no name-listing grant can match — the same 403
+    // an unknown NAME always drew from a scoped key.
     if grant.contexts.is_some()
         && !matches!(
             route.as_str(),
             "/groups/{name}" | "/groups/{name}/export" | "/groups/{name}/rename"
         )
     {
-        let context = api::path_param(&mut parts, "name").await;
-        if let Some(context) = context
-            && !grant.allows_context(&context)
-        {
-            return api::error(
-                api::ErrorCode::Forbidden,
-                format!("key '{}' has no grant on context '{context}'", key.0),
-                started_at,
-            );
+        let context = api::path_param(&mut parts, "id").await;
+        if let Some(context) = context {
+            // Grants list display names until #966; the path carries
+            // the id — the refusal names both so the caller can match
+            // it against either the directory or their grant.
+            let name = state.name_of_stem(&context);
+            if !grant.allows_context(&name) {
+                return api::error(
+                    api::ErrorCode::Forbidden,
+                    format!(
+                        "key '{}' has no grant on context '{name}' ({context})",
+                        key.0
+                    ),
+                    started_at,
+                );
+            }
         }
     }
     // The grant extension came in on the request (the gate stamped
@@ -1664,11 +1677,11 @@ mod tests {
     #[test]
     fn unclassified_routes_demand_admin() {
         assert_eq!(
-            required_role(&Method::POST, "/contexts/{name}/future_thing"),
+            required_role(&Method::POST, "/contexts/{id}/future_thing"),
             Role::Admin
         );
         assert_eq!(
-            required_role(&Method::GET, "/contexts/{name}/export"),
+            required_role(&Method::GET, "/contexts/{id}/export"),
             Role::Read
         );
         assert_eq!(
@@ -1676,19 +1689,19 @@ mod tests {
             Role::Read
         );
         assert_eq!(
-            required_role(&Method::POST, "/contexts/{name}/sources/retract"),
+            required_role(&Method::POST, "/contexts/{id}/sources/retract"),
             Role::Write
         );
         // Promotion (ADR 0018) shares retract_source's classification —
         // per-source re-sync between established contexts, not the
         // context-creating, group-carrying `/import`.
         assert_eq!(
-            required_role(&Method::POST, "/contexts/{name}/promote"),
+            required_role(&Method::POST, "/contexts/{id}/promote"),
             Role::Write
         );
         assert_eq!(required_role(&Method::POST, "/import"), Role::Admin);
         assert_eq!(
-            required_role(&Method::DELETE, "/contexts/{name}"),
+            required_role(&Method::DELETE, "/contexts/{id}"),
             Role::Admin
         );
     }
@@ -1700,11 +1713,11 @@ mod tests {
     #[test]
     fn schema_get_is_read_and_put_is_write() {
         assert_eq!(
-            required_role(&Method::GET, "/contexts/{name}/schema"),
+            required_role(&Method::GET, "/contexts/{id}/schema"),
             Role::Read
         );
         assert_eq!(
-            required_role(&Method::PUT, "/contexts/{name}/schema"),
+            required_role(&Method::PUT, "/contexts/{id}/schema"),
             Role::Write
         );
     }
@@ -1716,11 +1729,11 @@ mod tests {
     #[test]
     fn schema_audit_and_validate_are_read() {
         assert_eq!(
-            required_role(&Method::POST, "/contexts/{name}/schema/audit"),
+            required_role(&Method::POST, "/contexts/{id}/schema/audit"),
             Role::Read
         );
         assert_eq!(
-            required_role(&Method::POST, "/contexts/{name}/schema/validate"),
+            required_role(&Method::POST, "/contexts/{id}/schema/validate"),
             Role::Read
         );
     }
@@ -1732,9 +1745,9 @@ mod tests {
     #[test]
     fn explain_routes_share_their_base_endpoints_role() {
         for route in [
-            "/contexts/{name}/resolve/explain",
-            "/contexts/{name}/resolve_label/explain",
-            "/contexts/{name}/sources/search/explain",
+            "/contexts/{id}/resolve/explain",
+            "/contexts/{id}/resolve_label/explain",
+            "/contexts/{id}/sources/search/explain",
         ] {
             assert_eq!(required_role(&Method::POST, route), Role::Read, "{route}");
         }
@@ -1779,9 +1792,19 @@ mod tests {
 
     /// The authorization layer end to end: role refusals, `context`
     /// grants, and the untouched full-grant default, all in the
-    /// ApiError shape with a 403.
+    /// ApiError shape with a 403. Paths carry ids (#964) while the
+    /// grants still list display names, so the middleware's id→name
+    /// mapping is exactly what these assertions ride through.
     #[tokio::test]
     async fn granted_keys_are_held_to_role_and_context() {
+        let dir = crate::registry::test_support::scratch_dir("auth-grants");
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let sake = state
+            .create("sake", crate::registry::ContextMeta::default())
+            .unwrap();
+        let bunko = state
+            .create("bunko", crate::registry::ContextMeta::default())
+            .unwrap();
         let mut keyring =
             Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
         keyring
@@ -1799,24 +1822,24 @@ mod tests {
             Router::new()
                 .route("/contexts", get(|| async { "rows" }))
                 .route(
-                    "/contexts/{name}/recall",
+                    "/contexts/{id}/recall",
                     axum::routing::post(|| async { "hits" }),
                 )
                 .route(
-                    "/contexts/{name}/associations",
+                    "/contexts/{id}/associations",
                     axum::routing::post(|| async { "landed" }),
                 )
-                .route(
-                    "/contexts/{name}",
-                    axum::routing::delete(|| async { "gone" }),
-                )
+                .route("/contexts/{id}", axum::routing::delete(|| async { "gone" }))
                 // Authorization innermost, the bearer gate outside it —
                 // the same nesting main.rs builds. It judges from the
                 // grant extension the gate stamps, keyring-free.
-                .layer(axum::middleware::from_fn(enforce_authorization))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    enforce_authorization,
+                ))
                 .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
         };
-        let send = |method: &'static str, path: &'static str, token: &'static str| {
+        let send = |method: &'static str, path: String, token: &'static str| {
             let app = app();
             async move {
                 app.oneshot(
@@ -1834,12 +1857,12 @@ mod tests {
 
         // The read key runs the retrieval loop and nothing else.
         assert_eq!(
-            send("POST", "/contexts/sake/recall", "tok-b")
+            send("POST", format!("/contexts/{sake}/recall"), "tok-b")
                 .await
                 .status(),
             200
         );
-        let refused = send("POST", "/contexts/sake/associations", "tok-b").await;
+        let refused = send("POST", format!("/contexts/{sake}/associations"), "tok-b").await;
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
         let bytes = axum::body::to_bytes(refused.into_body(), 4096)
             .await
@@ -1854,12 +1877,12 @@ mod tests {
         // The context-scoped write key writes inside its grant only,
         // and never reaches the admin verbs.
         assert_eq!(
-            send("POST", "/contexts/sake/associations", "tok-c")
+            send("POST", format!("/contexts/{sake}/associations"), "tok-c")
                 .await
                 .status(),
             200
         );
-        let outside = send("POST", "/contexts/bunko/associations", "tok-c").await;
+        let outside = send("POST", format!("/contexts/{bunko}/associations"), "tok-c").await;
         assert_eq!(outside.status(), StatusCode::FORBIDDEN);
         let bytes = axum::body::to_bytes(outside.into_body(), 4096)
             .await
@@ -1869,28 +1892,38 @@ mod tests {
             body["error"]
                 .as_str()
                 .unwrap()
-                .contains("no grant on context 'bunko'"),
+                .contains(&format!("({bunko})")),
             "{body}"
         );
         assert_eq!(
-            send("DELETE", "/contexts/sake", "tok-c").await.status(),
+            send("DELETE", format!("/contexts/{sake}"), "tok-c")
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
 
         // A key with no TAGURU_KEY_GRANTS entry keeps the historical full grant.
         assert_eq!(
-            send("DELETE", "/contexts/sake", "tok-a").await.status(),
+            send("DELETE", format!("/contexts/{sake}"), "tok-a")
+                .await
+                .status(),
             200
         );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The scope check reads the path param through the same decoding
-    /// `AppPath`/`Path` give handlers, not the raw percent-encoded
-    /// segment — a `context` name split across a percent-encoded byte
-    /// must still match the grant it decodes to, not be refused for
-    /// comparing unequal to the still-encoded form.
+    /// `Path` gives handlers, not the raw percent-encoded segment — an
+    /// id split across a percent-encoded byte must still resolve to
+    /// the context (and so to the granted display name), not be
+    /// refused for comparing unequal to the still-encoded form.
     #[tokio::test]
-    async fn scope_check_matches_a_percent_encoded_context_name() {
+    async fn scope_check_matches_a_percent_encoded_context_id() {
+        let dir = crate::registry::test_support::scratch_dir("auth-encoded-id");
+        let state = crate::registry::AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let sake = state
+            .create("sake", crate::registry::ContextMeta::default())
+            .unwrap();
         let mut keyring = Keyring::parse(None, Some("bot:tok-c".to_string())).unwrap();
         keyring
             .apply_grants(Some(r#"{"bot": {"role": "write", "contexts": ["sake"]}}"#))
@@ -1903,18 +1936,23 @@ mod tests {
         });
         let app = Router::new()
             .route(
-                "/contexts/{name}/associations",
+                "/contexts/{id}/associations",
                 axum::routing::post(|| async { "landed" }),
             )
-            .layer(axum::middleware::from_fn(enforce_authorization))
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                enforce_authorization,
+            ))
             .layer(axum::middleware::from_fn_with_state(gate, require_bearer));
 
-        // "sa%6be" decodes to "sake", exactly the granted context.
+        // The first byte percent-encoded: decodes to the minted id,
+        // which resolves to "sake", exactly the granted context.
+        let encoded = format!("%{:02x}{}", sake.as_bytes()[0], &sake[1..]);
         let response = app
             .oneshot(
                 HttpRequest::builder()
                     .method("POST")
-                    .uri("/contexts/sa%6be/associations")
+                    .uri(format!("/contexts/{encoded}/associations"))
                     .header("Authorization", "Bearer tok-c")
                     .body(Body::empty())
                     .unwrap(),
@@ -1922,6 +1960,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// RFC 7230 §3.2.2: a repeated Authorization header is malformed. Rather

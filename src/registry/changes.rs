@@ -1,6 +1,6 @@
 //! The per-`context` change feed's ring (#422): a bounded, in-memory
 //! record of recent content changes, serving `GET
-//! /contexts/{name}/changes?since=` so a polling client (a local cache,
+//! /contexts/{id}/changes?since=` so a polling client (a local cache,
 //! an external index, a communities/evidence recomputation trigger) can
 //! ask "what changed since my cursor" instead of re-listing everything.
 //!
@@ -34,11 +34,11 @@ impl AppState {
     /// which is what makes a tight polling loop affordable.
     pub fn context_changes(
         &self,
-        name: &str,
+        id: &str,
         since: Option<&str>,
         limit: usize,
     ) -> Result<ChangesOutcome, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.resolved_id(id)?;
         let _fence = entry.read_unless_deleted().ok_or(AccessError::NotFound)?;
         let outcome = entry.changes.lock().read(since, limit);
         self.touch(&entry);

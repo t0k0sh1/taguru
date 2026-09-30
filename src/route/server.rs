@@ -354,7 +354,7 @@ fn spawn_route_map_reload_tasks(
     tasks
 }
 
-/// Every route the router answers. The two `/contexts/{name}` entries
+/// Every route the router answers. The two `/contexts/{id}` entries
 /// proxy ANY method so a shard's own 405/404 shapes pass through
 /// untouched — and so `context` verbs added to the server later route
 /// without touching this table.
@@ -373,9 +373,12 @@ fn routes(state: RouterState) -> Router<RouterState> {
         .route("/flush", post(broadcast_flush))
         .route("/maintenance/compact", post(broadcast_maintenance))
         .route("/import", post(route_import))
-        .route("/contexts", get(merge_contexts))
-        .route("/contexts/{name}", any(proxy_context_root))
-        .route("/contexts/{name}/{*rest}", any(proxy_context_sub))
+        .route(
+            "/contexts",
+            get(merge_contexts).post(proxy::route_create_context),
+        )
+        .route("/contexts/{id}", any(proxy_context_root))
+        .route("/contexts/{id}/{*rest}", any(proxy_context_sub))
         .route("/groups", get(merge_groups))
         .route(
             "/groups/{name}",

@@ -51,17 +51,21 @@ fn assoc(subject: &str, label: &str, object: &str) -> Value {
 #[test]
 fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context() {
     let server = Server::start("rcache-recall");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(assoc("蔵", "杜氏", "高瀬")),
     );
 
     let recall = |context: &str| {
         server.ok(
             "POST",
-            &format!("/contexts/{context}/recall"),
+            &format!("/contexts/{}/recall", server.cx(context)),
             Some(json!({"cue": "蔵"})),
         )
     };
@@ -83,7 +87,7 @@ fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context()
     // recomputes and sees the new edge.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(assoc("蔵", "創業", "1832")),
     );
     let third = recall("sake");
@@ -92,10 +96,14 @@ fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context()
     assert_eq!(cache_hits(&server, "recall"), 1);
 
     // A sibling's entries ride out the other context's writes.
-    server.ok("PUT", "/contexts/bunko", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/bunko/associations",
+        "/contexts",
+        Some(json!({"name": "bunko", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("bunko")),
         Some(assoc("蔵", "所蔵", "古文書")),
     );
     recall("bunko");
@@ -103,7 +111,7 @@ fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context()
     assert_eq!(cache_hits(&server, "recall"), 2);
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(assoc("蔵", "銘柄", "青嶺")),
     );
     recall("bunko");
@@ -117,15 +125,23 @@ fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context()
     // its own, and repeating a page hits it.
     let paged = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "limit": 1})),
     );
     let after = &paged["matches"][0];
     let page_two = json!({"cue": "蔵", "limit": 1, "after": {
         "weight": after["weight"], "subject": after["subject"],
         "label": after["label"], "object": after["object"]}});
-    let first_serve = server.ok("POST", "/contexts/sake/recall", Some(page_two.clone()));
-    let second_serve = server.ok("POST", "/contexts/sake/recall", Some(page_two));
+    let first_serve = server.ok(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("sake")),
+        Some(page_two.clone()),
+    );
+    let second_serve = server.ok(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("sake")),
+        Some(page_two),
+    );
     assert_eq!(first_serve, second_serve);
     assert_eq!(cache_hits(&server, "recall"), 4);
 
@@ -143,17 +159,21 @@ fn an_identical_recall_hits_the_cache_and_a_write_invalidates_only_its_context()
 #[test]
 fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     let server = Server::start("rcache-lanes");
-    server.ok("PUT", "/contexts/pass", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/pass/sources",
+        "/contexts",
+        Some(json!({"name": "pass", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("pass")),
         Some(json!({"passages": {"a.md": "青嶺は端麗辛口の酒である。"}})),
     );
 
     let search = || {
         server.ok(
             "POST",
-            "/contexts/pass/sources/search",
+            &format!("/contexts/{}/sources/search", server.cx("pass")),
             Some(json!({"query": "端麗"})),
         )
     };
@@ -174,7 +194,7 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     // A graph write is invisible to the passage lanes.
     server.ok(
         "POST",
-        "/contexts/pass/associations",
+        &format!("/contexts/{}/associations", server.cx("pass")),
         Some(assoc("青嶺", "味", "端麗辛口")),
     );
     search();
@@ -187,7 +207,7 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     // A passage store moves the passages lane...
     server.ok(
         "POST",
-        "/contexts/pass/sources",
+        &format!("/contexts/{}/sources", server.cx("pass")),
         Some(json!({"passages": {"b.md": "端麗な味わいの純米酒。"}})),
     );
     search();
@@ -195,7 +215,7 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     // ...and a config change (the context's own floor) the config lane.
     server.ok(
         "PATCH",
-        "/contexts/pass",
+        &format!("/contexts/{}", server.cx("pass")),
         Some(json!({"semantic_floor": 0.4})),
     );
     search();
@@ -206,7 +226,7 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     let recall = || {
         server.ok(
             "POST",
-            "/contexts/pass/recall",
+            &format!("/contexts/{}/recall", server.cx("pass")),
             Some(json!({"cue": "青嶺"})),
         )
     };
@@ -215,7 +235,7 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     assert_eq!(cache_hits(&server, "recall"), 1);
     server.ok(
         "PATCH",
-        "/contexts/pass",
+        &format!("/contexts/{}", server.cx("pass")),
         Some(json!({"semantic_floor": 0.6})),
     );
     recall();
@@ -237,17 +257,21 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
 #[test]
 fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
     let server = Server::start("rcache-schema-put");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(assoc("青嶺酒造", "杜氏", "高瀬")),
     );
 
     let recall = || {
         server.ok(
             "POST",
-            "/contexts/sake/recall",
+            &format!("/contexts/{}/recall", server.cx("sake")),
             Some(json!({"cue": "青嶺"})),
         )
     };
@@ -257,7 +281,7 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
 
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "off",
@@ -280,7 +304,7 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
     // repeated PUT must not evict the entry the miss just above cached.
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "off",
@@ -322,14 +346,14 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
     };
     for context in ["x", "y"] {
         call(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
             "atok",
         );
         call(
             "POST",
-            &format!("/contexts/{context}/associations"),
+            &format!("/contexts/{}/associations", server.cx(context)),
             Some(assoc("蔵", "在処", context)),
             "atok",
         );
@@ -366,8 +390,18 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
     // Single-context requests pass the middleware's grant check before
     // the handler, so identical requests share safely across keys.
     let single = json!({"cue": "蔵"});
-    call("POST", "/contexts/x/recall", Some(single.clone()), "ntok");
-    call("POST", "/contexts/x/recall", Some(single), "wtok");
+    call(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("x")),
+        Some(single.clone()),
+        "ntok",
+    );
+    call(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("x")),
+        Some(single),
+        "wtok",
+    );
     assert_eq!(
         cache_hits(&server, "recall"),
         3,
@@ -382,13 +416,23 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
 #[test]
 fn a_recreated_context_never_serves_the_old_incarnations_results() {
     let server = Server::start("rcache-recreate");
-    server.ok("PUT", "/contexts/re", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/re/associations",
+        "/contexts",
+        Some(json!({"name": "re", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("re")),
         Some(assoc("蔵", "杜氏", "高瀬")),
     );
-    let recall = || server.ok("POST", "/contexts/re/recall", Some(json!({"cue": "蔵"})));
+    let recall = || {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/recall", server.cx("re")),
+            Some(json!({"cue": "蔵"})),
+        )
+    };
     let cached = recall();
     recall();
     assert_eq!(cached["matches"][0]["object"], "高瀬");
@@ -396,11 +440,15 @@ fn a_recreated_context_never_serves_the_old_incarnations_results() {
 
     // Recreate and drive the graph lane back to the exact value the
     // cached entry was keyed at (one applied op → graph = 1).
-    server.ok("DELETE", "/contexts/re", None);
-    server.ok("PUT", "/contexts/re", Some(json!({"description": "d"})));
+    server.ok("DELETE", &format!("/contexts/{}", server.cx("re")), None);
     server.ok(
         "POST",
-        "/contexts/re/associations",
+        "/contexts",
+        Some(json!({"name": "re", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("re")),
         Some(assoc("蔵", "杜氏", "別人")),
     );
     let fresh = recall();
@@ -419,14 +467,24 @@ fn a_recreated_context_never_serves_the_old_incarnations_results() {
 #[test]
 fn compaction_invalidates_cache_entries_filled_before_it() {
     let server = Server::start("rcache-compact");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(assoc("蔵", "廃止銘柄", "旧銘")),
     );
 
-    let recall = || server.ok("POST", "/contexts/sake/recall", Some(json!({"cue": "蔵"})));
+    let recall = || {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/recall", server.cx("sake")),
+            Some(json!({"cue": "蔵"})),
+        )
+    };
     let filled = recall();
     assert_eq!(
         filled["matches"][0]["object"], "旧銘",
@@ -441,7 +499,7 @@ fn compaction_invalidates_cache_entries_filled_before_it() {
     // present edge.
     server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "a.md"})),
     );
     let retracted = recall();
@@ -452,7 +510,11 @@ fn compaction_invalidates_cache_entries_filled_before_it() {
     // Compaction removes the dead edge outright, with no accompanying
     // write to move the graph lane. The identical recall must not go
     // on serving the pre-compaction (cached) page.
-    let outcome = server.ok("POST", "/contexts/sake/compact", None);
+    let outcome = server.ok(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("sake")),
+        None,
+    );
     assert_eq!(outcome["dead_edges"], 1, "{outcome}");
     let after = recall();
     assert!(
@@ -467,14 +529,26 @@ fn compaction_invalidates_cache_entries_filled_before_it() {
 #[test]
 fn a_zero_budget_disables_the_cache_and_its_counters() {
     let server = Server::start_with_env("rcache-off", &[("TAGURU_RETRIEVAL_CACHE_BYTES", "0")]);
-    server.ok("PUT", "/contexts/off", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/off/associations",
+        "/contexts",
+        Some(json!({"name": "off", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("off")),
         Some(assoc("蔵", "杜氏", "高瀬")),
     );
-    let first = server.ok("POST", "/contexts/off/recall", Some(json!({"cue": "蔵"})));
-    let second = server.ok("POST", "/contexts/off/recall", Some(json!({"cue": "蔵"})));
+    let first = server.ok(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("off")),
+        Some(json!({"cue": "蔵"})),
+    );
+    let second = server.ok(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("off")),
+        Some(json!({"cue": "蔵"})),
+    );
     assert_eq!(first, second, "disabled changes how, never what");
     assert_eq!(cache_hits(&server, "recall"), 0);
     assert_eq!(cache_misses(&server, "recall"), 0);
@@ -490,13 +564,13 @@ fn cross_passage_search_keys_on_target_order() {
     let server = Server::start("rcache-order");
     for context in ["cx", "cy"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
         );
         server.ok(
             "POST",
-            &format!("/contexts/{context}/sources"),
+            &format!("/contexts/{}/sources", server.cx(context)),
             Some(json!({"passages": {"a.md": format!("{context}の蔵は端麗な酒を醸す。")}})),
         );
     }
@@ -531,13 +605,13 @@ fn cross_passage_search_tallies_lane_hits_against_the_served_page_not_every_targ
     let server = Server::start("rcache-lane-overcount");
     for context in ["cx", "cy", "cz"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
         );
         server.ok(
             "POST",
-            &format!("/contexts/{context}/sources"),
+            &format!("/contexts/{}/sources", server.cx(context)),
             Some(json!({
                 "passages": {
                     "a.md": format!(
@@ -608,13 +682,13 @@ fn cross_passage_search_never_caches_a_response_degraded_by_embedding_failure() 
     );
     for context in ["cx", "cy"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
         );
         server.ok(
             "POST",
-            &format!("/contexts/{context}/sources"),
+            &format!("/contexts/{}/sources", server.cx(context)),
             Some(json!({"passages": {"a.md": format!("{context}の蔵は端麗な酒を醸す。")}})),
         );
     }

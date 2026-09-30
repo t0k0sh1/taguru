@@ -14,6 +14,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/aliases",
+  "route": "/contexts/{id}/aliases",
   "status": 200
 }

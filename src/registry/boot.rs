@@ -205,7 +205,7 @@ impl AppState {
             ship_progress: options.ship_progress,
             hydrator: options.hydrator,
             replica: options.replica,
-            pending: Mutex::new(PendingNames::default()),
+            pending_creates: Mutex::new(HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
             budget_saturated: AtomicBool::new(false),
@@ -248,7 +248,6 @@ impl AppState {
             match ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                &name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -532,7 +531,9 @@ fn scan_data_dir(
             );
             continue;
         };
-        if registry.contains_name(&marker.context) {
+        // The marker's `context` is the id (the same stem its file
+        // name carries) now that imports address contexts by id.
+        if registry.get_id(&marker.context).is_some() {
             tracing::warn!(
                 context = %marker.context,
                 source = %marker.source,
@@ -643,7 +644,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                     Deadline::unbounded(),
                 )
@@ -691,7 +692,9 @@ mod tests {
             // ids `open_import_marker` refuses a name it cannot
             // resolve, and a real orphan is a marker whose context
             // was deleted out from under it).
-            state.open_import_marker("sake", "doc-1").unwrap();
+            state
+                .open_import_marker(&state.id_of("sake"), "doc-1")
+                .unwrap();
             fs::write(
                 import_marker_path(&dir, "ghost-stem", "doc-9"),
                 br#"{"context":"ghost","source":"doc-9"}"#,
@@ -903,7 +906,7 @@ mod tests {
             // Churning through the other context must not push the
             // pinned one out.
             state
-                .read_context("other", |context| context.association_count())
+                .read_context(&state.id_of("other"), |context| context.association_count())
                 .map_err(|_| "read")
                 .unwrap();
             assert!(loaded_map(&state)["glossary"]);
@@ -1058,10 +1061,8 @@ mod tests {
 
     /// Names are display strings and not unique (issue #961 decision
     /// 1): two sidecars recording the same name boot side by side —
-    /// both listed — while every name-addressed operation refuses the
-    /// ambiguity explicitly instead of picking a claimant. (The wire
-    /// cannot create this state while creates are name-addressed;
-    /// only a hand-assembled directory can.)
+    /// both listed — while the name boundaries that remain refuse the
+    /// ambiguity explicitly instead of picking a claimant.
     #[test]
     fn duplicate_display_names_boot_side_by_side_and_name_operations_refuse() {
         let dir = scratch_dir("boot-duplicate-names");
@@ -1092,34 +1093,28 @@ mod tests {
             "the listing shows both, in (name, id) order"
         );
 
-        assert!(
-            matches!(
-                state.read_context("sake", |context| context.association_count()),
-                Err(AccessError::AmbiguousName(2))
-            ),
-            "a read refuses rather than picking a claimant"
-        );
+        // The id-addressed data paths reach each claimant fine; the
+        // NAME boundaries that remain (cross-search resolution, the
+        // import header) refuse the ambiguity explicitly.
         assert!(matches!(
-            state.delete("sake"),
-            Some(Err(DeleteError::AmbiguousName(2)))
+            state.resolve_wire_name("sake"),
+            Err(AccessError::AmbiguousName(2))
         ));
+        assert!(state.context_id_of("sake").is_none());
         assert!(matches!(
-            state.rename_context("sake", "shochu"),
-            Err(RenameContextError::AmbiguousName(2))
+            state.create_if_absent("sake", ContextMeta::default()),
+            Err(CreateError::AmbiguousName(2))
         ));
-        assert!(
-            matches!(
-                state.create("sake", ContextMeta::default()),
-                Err(CreateError::AlreadyExists)
-            ),
-            "a taken name is still a taken name"
-        );
+        // A plain create never resolves names: a third "sake" is a
+        // third, distinct context (issue #961 decision 1).
+        state.create("sake", ContextMeta::default()).unwrap();
+        assert_eq!(state.context_count(), 3);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     /// Hand-edits the meta sidecar's `schema_digest` directly — S1 ships
-    /// no writer for it (`PUT /contexts/{name}/schema` is #380), so
+    /// no writer for it (`PUT /contexts/{id}/schema` is #380), so
     /// this is the only way a test can put one there; the boot refusal
     /// under test does not care how it arrived.
     fn record_schema_digest(dir: &Path, stem: &str, digest: &str) {
@@ -1329,7 +1324,13 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state
-            .update_meta("sake", Some("updated".to_string()), None, None, None)
+            .update_meta(
+                &state.id_of("sake"),
+                Some("updated".to_string()),
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .unwrap();
         let value: serde_json::Value =

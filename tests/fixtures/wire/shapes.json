@@ -9,13 +9,13 @@
     "last_write_epoch"
   ],
   "required_request_fields": {
-    "/contexts/{name}/recall": ["cue"],
-    "/contexts/{name}/explore": ["origins"],
-    "/contexts/{name}/activate": ["origins"],
-    "/contexts/{name}/paths": ["origins", "targets"],
-    "/contexts/{name}/sources/search": ["query"],
-    "/contexts/{name}/communities/search": ["query"],
-    "/contexts/{name}/evidence": ["origins"]
+    "/contexts/{id}/recall": ["cue"],
+    "/contexts/{id}/explore": ["origins"],
+    "/contexts/{id}/activate": ["origins"],
+    "/contexts/{id}/paths": ["origins", "targets"],
+    "/contexts/{id}/sources/search": ["query"],
+    "/contexts/{id}/communities/search": ["query"],
+    "/contexts/{id}/evidence": ["origins"]
   },
   "enums": {
     "response.resultType": ["complete"],

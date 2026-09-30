@@ -20,6 +20,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/vocabulary/audit",
+  "route": "/contexts/{id}/vocabulary/audit",
   "status": 200
 }

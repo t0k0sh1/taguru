@@ -1479,7 +1479,7 @@ mod tests {
         // must fail hydrating rather than treat a missing local file
         // as "empty".
         let outcome = state
-            .source_effective_times("sake")
+            .source_effective_times(&state.id_of("sake"))
             .expect("the manifest-registered stem must exist");
         assert!(
             outcome.is_err(),
@@ -1527,7 +1527,7 @@ mod tests {
         .unwrap();
 
         let error = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .unwrap_err();
         assert!(
             matches!(error, crate::registry::AccessError::Load(_)),

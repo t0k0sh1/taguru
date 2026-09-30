@@ -1,4 +1,4 @@
-//! `POST /contexts/{name}/promote` (ADR 0018): graph-path promotion —
+//! `POST /contexts/{id}/promote` (ADR 0018): graph-path promotion —
 //! the named scratch sources move into an established destination
 //! `context` as export → filter → re-head → import → audit, one
 //! request, built from the same machinery the manual runbook uses
@@ -31,8 +31,9 @@ use super::import::{
     schema_issues_in_batch, stream_refusal,
 };
 use super::{
-    AppJson, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, deadline_exceeded,
-    error, key_name, ok_with_issues_total, overlong, truncate_issues, validation_error,
+    AppJson, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
+    deadline_exceeded, error, key_name, ok_with_issues_total, overlong, truncate_issues,
+    validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +91,7 @@ pub struct PromoteOutcome {
 #[allow(clippy::too_many_arguments)] // one axum extractor per concern; the router supplies them all
 pub async fn promote_sources(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -110,11 +111,15 @@ pub async fn promote_sources(
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
     }
-    if request.into == name {
+    // `into` is a display NAME while the path is the id (#964) — the
+    // self-promotion check resolves it before comparing. An ambiguous
+    // `into` resolves to None here and falls through to the existence
+    // and landing checks below, which own that refusal.
+    if state.context_id_of(&request.into).as_deref() == Some(id.as_str()) {
         return error(
             ErrorCode::InvalidArgument,
             format!(
-                "'into' names the promoting context '{name}' itself — promotion moves \
+                "'into' names the promoting context '{id}' itself — promotion moves \
                  sources into a DIFFERENT, established context"
             ),
             started_at,
@@ -187,9 +192,9 @@ pub async fn promote_sources(
         );
     }
     let requested: BTreeSet<String> = request.sources.iter().cloned().collect();
-    let snapshot = match tokio::task::block_in_place(|| state.export_context(&name, deadline)) {
+    let snapshot = match tokio::task::block_in_place(|| state.export_context(&id, deadline)) {
         Ok(snapshot) => snapshot,
-        Err(failure) => return access_error(&state, failure, &name, started_at),
+        Err(failure) => return access_error(&state, failure, &id, started_at),
     };
     // Every requested id must exist in the scratch — as a passage or a
     // live attribution — or the request refuses whole, naming the
@@ -203,7 +208,7 @@ pub async fn promote_sources(
         .map(|(index, source)| {
             Issue::unknown_reference(
                 format!("sources[{index}]"),
-                format!("'{source}' stored in context '{name}' as a passage or a live attribution"),
+                format!("'{source}' stored in context '{id}' as a passage or a live attribution"),
             )
         })
         .collect();
@@ -219,7 +224,7 @@ pub async fn promote_sources(
         return validation_error(
             ErrorCode::NoSource,
             format!(
-                "{total} of the named source id(s) exist(s) nowhere in context '{name}' — \
+                "{total} of the named source id(s) exist(s) nowhere in context '{id}' — \
                  under retract-then-apply a mistyped id would no-op silently, so the \
                  whole request refuses instead; nothing was applied",
             ),
@@ -320,7 +325,7 @@ pub async fn promote_sources(
                     tracing::info!(
                         target: "taguru::audit",
                         key = %key_name(&key),
-                        from = %name,
+                        from = %id,
                         context = %batch.context,
                         source = %batch.source,
                         retracted = applied.retracted,
@@ -446,6 +451,15 @@ fn landing_audit(
     into: &str,
     deadline: Deadline,
 ) -> Result<ConsolidationAudit, &'static str> {
+    // `into` is the destination's display NAME (the request body's
+    // vocabulary until #965); the audit reads are id-keyed. A name
+    // that stopped resolving — deleted, or made ambiguous by a racing
+    // same-name create — is the same "no_context" degrade a deleted
+    // destination always was.
+    let Some(into) = state.context_id_of(into) else {
+        return Err("no_context");
+    };
+    let into = into.as_str();
     let hidden = state.hidden_label(into);
     let effective: HashMap<String, u64> = match state.source_effective_times(into) {
         None => return Err("no_context"),

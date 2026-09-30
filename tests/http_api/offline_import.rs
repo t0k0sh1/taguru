@@ -30,7 +30,7 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let server = Server::start_on("import-serve", data_dir);
     let brewer = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "Aomine", "label": "杜氏"})),
     );
     assert_eq!(brewer["matches"][0]["subject"], json!("青嶺酒造"));
@@ -38,7 +38,7 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     assert_eq!(brewer["matches"][0]["weight"], json!(2.0));
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["doc-guide"]})),
     );
     assert_eq!(
@@ -137,7 +137,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let server = Server::start_on("import-refuse-sensitive", data_dir.clone());
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["clean.md", "leaky.md"]})),
     );
     assert_eq!(
@@ -148,7 +148,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     // Nothing of the refused batch — not its association either.
     let leaky = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "高瀬", "label": "鍵"})),
     );
     assert_eq!(
@@ -206,7 +206,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let server = Server::start_on("import-refuse-sensitive-off", data_dir);
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["leaky.md"]})),
     );
     assert!(
@@ -218,7 +218,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     );
     let leaky = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "高瀬", "label": "鍵"})),
     );
     assert_eq!(leaky["matches"][0]["object"], json!(key), "{leaky}");
@@ -500,9 +500,9 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     );
 
     let server = Server::start_on("import-json-failed-batch", data_dir);
-    let (status, _) = server.call("GET", "/contexts/a", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("a")), None);
     assert_eq!(status, 200, "the batch before the refusal must have landed");
-    let (status, _) = server.call("GET", "/contexts/c", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("c")), None);
     assert_eq!(
         status, 200,
         "the batch after the refusal must still have landed"
@@ -604,7 +604,7 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
     let server = Server::start_on("import-questions", data_dir);
     let hits = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "杜氏は誰?", "limit": 3})),
     );
     let hit = &hits["hits"][0];
@@ -677,7 +677,7 @@ fn an_offline_import_carries_locators_through_and_drops_out_of_range_ones() {
     let server = Server::start_on("import-locators", data_dir);
     let citation = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc-guide", "paragraph": 1})),
     );
     assert_eq!(
@@ -727,7 +727,7 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
     let server = Server::start_on("import-assoc-paragraph", data_dir);
     let founding = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
     );
     assert_eq!(
@@ -737,7 +737,7 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
     );
     let brewer = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
     );
     assert_eq!(
@@ -762,20 +762,20 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
 fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() {
     let server = Server::start("http-assoc-paragraph");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の記憶"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc-guide": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
         })),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "doc-guide", "paragraph": 0},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-guide", "paragraph": 9},
@@ -784,7 +784,7 @@ fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() 
 
     let founding = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
     );
     assert_eq!(
@@ -795,7 +795,7 @@ fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() 
 
     let brewer = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
     );
     assert_eq!(
@@ -855,7 +855,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // it, matching what a manual read of the source would show.
     let recalled = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "limit": 10})),
     );
     let brewer = recalled["matches"]
@@ -884,7 +884,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // leak backward either — unlike section, a locator never extends.
     let founding = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "創業年"})),
     );
     assert_eq!(
@@ -907,7 +907,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // resolve from.
     let water = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "仕込み水源"})),
     );
     assert_eq!(
@@ -926,7 +926,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // resolution reaches that shape too.
     let explored = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "max_depth": 1})),
     );
     let brewer_hop = explored["matches"]
@@ -951,7 +951,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // shape too.
     let activated = server.ok(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "limit": 10})),
     );
     let brewer_activation = activated["matches"]
@@ -971,7 +971,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     // qualifies; check its section resolves too.
     let orphaned = server.ok(
         "POST",
-        "/contexts/sake/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     let orphan_match = orphaned["matches"]
@@ -1013,7 +1013,7 @@ fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let server = Server::start_on("import-idem", data_dir);
     let edge = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
     );
     assert_eq!(edge["matches"][0]["weight"], json!(2.0));
@@ -1038,7 +1038,7 @@ fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let server = Server::start_on("import-idem-2", data_dir);
     let edge = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
     );
     assert_eq!(edge["matches"][0]["weight"], json!(5.0));
@@ -1098,7 +1098,7 @@ fn a_predicted_alias_rejection_touches_no_context_for_the_refresh_pass() {
     let server = Server::start_on("import-partial-touch", data_dir);
     let edge = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "新蔵", "label": "特徴"})),
     );
     assert_eq!(
@@ -1140,7 +1140,11 @@ fn a_batch_with_one_valid_and_one_conflicting_alias_registers_neither() {
     );
     assert_eq!(status, 409, "{body}");
 
-    let listing = server.ok("GET", "/contexts/sake/aliases", None);
+    let listing = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         listing["concepts"],
         json!({"kyo": "京都酒造"}),
@@ -1231,7 +1235,7 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
     assert_eq!(second["result"]["batches"][0]["retracted"], json!(1));
     let (status, edge) = server.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
         Some("opskey"),
     );
@@ -1260,15 +1264,17 @@ fn import_dry_run_previews_without_writing_anything() {
 
     // A preview writes nothing: the context it would create doesn't
     // exist yet.
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(status, 404, "dry_run must not create the context");
+    assert!(
+        server.try_cx("sake").is_none(),
+        "dry_run must not create the context"
+    );
 
     // The real import right after previews identically — same counts,
     // this time durable.
     let (status, real) = post_import(&server, batch, None);
     assert_eq!(status, 200, "{real}");
     assert_eq!(real["result"]["batches"][0], *outcome, "{real}");
-    let (status, _) = server.call("GET", "/contexts/sake", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(status, 200, "the real import did create the context");
 
     // Previewing a source replacement counts the retraction without
@@ -1286,7 +1292,7 @@ fn import_dry_run_previews_without_writing_anything() {
     );
     let (status, edge) = server.call(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
     );
     assert_eq!(status, 200);
@@ -1350,8 +1356,10 @@ fn import_dry_run_skips_group_records() {
 
     let (status, _) = server.call("GET", "/groups/kura", None);
     assert_eq!(status, 404, "dry_run must not create the group");
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(status, 404, "dry_run must not create the context either");
+    assert!(
+        server.try_cx("sake").is_none(),
+        "dry_run must not create the context either"
+    );
 }
 
 /// A live import whose alias step is predicted to fail is refused
@@ -1388,9 +1396,8 @@ fn a_predicted_alias_rejection_leaves_no_marker_on_a_live_import() {
         markers(&server.data_dir).is_empty(),
         "a predicted rejection opens no marker"
     );
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(
-        status, 404,
+    assert!(
+        server.try_cx("sake").is_none(),
         "a predicted rejection must not create the context"
     );
 }
@@ -1422,7 +1429,11 @@ fn a_rejected_new_source_import_never_appears_in_list_sources() {
     );
     assert_eq!(status, 409, "{body}");
 
-    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         sources["sources"],
         json!(["doc-old"]),
@@ -1455,13 +1466,17 @@ fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_sou
     // Batch 1's write stands...
     let edge = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "杜氏"})),
     );
     assert_eq!(edge["matches"][0]["object"], json!("高瀬"));
 
     // ...but batch 2's own source never appears at all.
-    let sources = server.ok("GET", "/contexts/sake/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         sources["sources"],
         json!(["doc-1"]),
@@ -1613,13 +1628,13 @@ fn the_import_endpoint_reports_dropped_association_paragraphs() {
 fn a_context_round_trips_through_the_export_endpoint_and_import() {
     let server = Server::start("http-export-roundtrip");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識", "dice_floor": 0.25})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.25})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
              "weight": 1.0, "source": "a.md", "paragraph": 0},
@@ -1629,7 +1644,7 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"a.md": "青嶺酒造の紹介。\n\n代表銘柄は青嶺。"},
             "questions": {"a.md": [{"paragraph": 0, "question": "どこの蔵?"}]},
@@ -1639,11 +1654,15 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"Aomine": "青嶺酒造"}})),
     );
 
-    let (status, exported) = server.call("GET", "/contexts/sake/export", None);
+    let (status, exported) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 200, "{exported}");
     let stream = exported
         .as_str()
@@ -1665,10 +1684,17 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     );
 
     // Exporting a context that does not exist is the ordinary 404.
-    let (status, missing) = server.call("GET", "/contexts/ghost/export", None);
+    let (status, missing) = server.call(
+        "GET",
+        &format!(
+            "/contexts/{}/export",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
+        None,
+    );
     assert_eq!(status, 404, "{missing}");
 
-    server.ok("DELETE", "/contexts/sake", None);
+    server.ok("DELETE", &format!("/contexts/{}", server.cx("sake")), None);
     let (status, restored) = post_import(&server, stream, None);
     assert_eq!(status, 200, "{restored}");
     let outcomes = restored["result"]["batches"]
@@ -1679,13 +1705,13 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
 
     let facts = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造"})),
     );
     assert_eq!(facts["total"], json!(2), "{facts}");
     let citation = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "a.md", "paragraph": 0})),
     );
     assert_eq!(citation["text"], json!("青嶺酒造の紹介。"), "{citation}");
@@ -1695,17 +1721,25 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
         json!({"kind": "page", "value": "1"}),
         "{citation}"
     );
-    let aliases = server.ok("GET", "/contexts/sake/aliases", None);
+    let aliases = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         aliases["concepts"]["Aomine"],
         json!("青嶺酒造"),
         "{aliases}"
     );
-    let row = server.ok("GET", "/contexts/sake", None);
+    let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(row["dice_floor"], json!(0.25), "{row}");
     // The question survived the delete+restore: re-exporting the
     // restored context still carries it.
-    let (status, re_exported) = server.call("GET", "/contexts/sake/export", None);
+    let (status, re_exported) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 200);
     assert!(
         re_exported.as_str().unwrap().contains("どこの蔵?"),
@@ -1718,7 +1752,7 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     assert_eq!(status, 200, "{again}");
     let facts = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造"})),
     );
     assert_eq!(facts["total"], json!(2), "no doubling: {facts}");
@@ -1812,7 +1846,7 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
         "{refusal}"
     );
     // The batch landed; no group did.
-    let (status, _) = server.call("GET", "/contexts/sake", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(
         status, 200,
         "the batches before the group refusal are durable"
@@ -1868,9 +1902,9 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     };
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/sake",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"})),
             "atok"
         )
         .0,
@@ -1878,9 +1912,9 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     );
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/bunko",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "bunko", "description": "d"})),
             "atok"
         )
         .0,
@@ -1944,9 +1978,9 @@ fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_gran
     };
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/sake",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"})),
             "atok"
         )
         .0,
@@ -1954,20 +1988,21 @@ fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_gran
     );
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/bunko",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "bunko", "description": "d"})),
             "atok"
         )
         .0,
         200
     );
 
+    let sake = server.cx("sake");
     // Destination already exists, but beyond the grant: refused, the
     // message naming the destination so the caller knows what to fix.
     let (status, refusal) = call(
         "POST",
-        "/contexts/sake/rename",
+        &format!("/contexts/{sake}/rename"),
         Some(json!({"to": "bunko"})),
         "ctok",
     );
@@ -1981,27 +2016,31 @@ fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_gran
     // same way — existence is not what is being checked.
     let (status, refusal) = call(
         "POST",
-        "/contexts/sake/rename",
+        &format!("/contexts/{sake}/rename"),
         Some(json!({"to": "shochu"})),
         "ctok",
     );
     assert_eq!(status, 403, "{refusal}");
 
-    // Neither refusal moved anything.
-    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 200);
-    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 404);
+    // Neither refusal moved anything: the row still answers under its
+    // old display name.
+    let (status, row) = call("GET", &format!("/contexts/{sake}"), None, "atok");
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["result"]["name"], json!("sake"), "{row}");
 
     // A key scoped to BOTH names may rename between them — the grant
-    // check is about the names involved, not a blanket ban.
+    // check is about the names involved, not a blanket ban. The id
+    // (and so the path) never moves; only the display name does.
     let (status, applied) = call(
         "POST",
-        "/contexts/sake/rename",
+        &format!("/contexts/{sake}/rename"),
         Some(json!({"to": "shochu"})),
         "wtok",
     );
     assert_eq!(status, 200, "{applied}");
-    assert_eq!(call("GET", "/contexts/shochu", None, "atok").0, 200);
-    assert_eq!(call("GET", "/contexts/sake", None, "atok").0, 404);
+    let (status, row) = call("GET", &format!("/contexts/{sake}"), None, "atok");
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["result"]["name"], json!("shochu"), "{row}");
 }
 
 /// `GET /groups/{name}/export` serves one `group` record that
@@ -2024,9 +2063,9 @@ fn a_group_exports_as_one_import_record() {
     };
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/sake",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"})),
             "atok"
         )
         .0,
@@ -2034,9 +2073,9 @@ fn a_group_exports_as_one_import_record() {
     );
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/bunko",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "bunko", "description": "d"})),
             "atok"
         )
         .0,
@@ -2161,10 +2200,14 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
 #[test]
 fn aliases_withdraw_and_the_spelling_is_reusable() {
     let server = Server::start("alias-remove");
-    server.ok("PUT", "/contexts/c", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/c/associations",
+        "/contexts",
+        Some(json!({"name": "c", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("c")),
         Some(json!([
             {"subject": "X", "label": "l", "object": "Z", "weight": 1.0},
             {"subject": "Y", "label": "l", "object": "Z", "weight": 1.0},
@@ -2172,43 +2215,55 @@ fn aliases_withdraw_and_the_spelling_is_reusable() {
     );
     server.ok(
         "POST",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": {"A": "X"}})),
     );
 
     let removed = server.ok(
         "DELETE",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": ["A"]})),
     );
     assert_eq!(removed, json!(1));
-    let listing = server.ok("GET", "/contexts/c/aliases", None);
+    let listing = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("c")),
+        None,
+    );
     assert_eq!(listing["concepts"], json!({}));
 
     // The spelling is free to point elsewhere — the un-wedging move.
     server.ok(
         "POST",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": {"A": "Y"}})),
     );
-    let via = server.ok("POST", "/contexts/c/query", Some(json!({"subject": "A"})));
+    let via = server.ok(
+        "POST",
+        &format!("/contexts/{}/query", server.cx("c")),
+        Some(json!({"subject": "A"})),
+    );
     assert_eq!(via["matches"][0]["subject"], json!("Y"));
 
     // Refusals: absent spellings and canonical names are conflicts,
     // and an empty withdrawal is malformed rather than a silent no-op.
     let (status, body) = server.call(
         "DELETE",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": ["ghost"]})),
     );
     assert_eq!(status, 409, "{body}");
     let (status, _) = server.call(
         "DELETE",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": ["X"]})),
     );
     assert_eq!(status, 409);
-    let (status, _) = server.call("DELETE", "/contexts/c/aliases", Some(json!({})));
+    let (status, _) = server.call(
+        "DELETE",
+        &format!("/contexts/{}/aliases", server.cx("c")),
+        Some(json!({})),
+    );
     assert_eq!(status, 400);
 }
 
@@ -2234,12 +2289,16 @@ fn an_import_alias_conflict_heals_with_a_withdrawal_then_reimport() {
     // makes the second attempt exact.
     server.ok(
         "DELETE",
-        "/contexts/c/aliases",
+        &format!("/contexts/{}/aliases", server.cx("c")),
         Some(json!({"concepts": ["A"]})),
     );
     let (status, body) = post_import(&server, revised, None);
     assert_eq!(status, 200, "{body}");
-    let listing = server.ok("GET", "/contexts/c/aliases", None);
+    let listing = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("c")),
+        None,
+    );
     assert_eq!(listing["concepts"]["A"], json!("Y"));
 }
 
@@ -2280,7 +2339,7 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     // overwritten.
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["doc-1"]})),
     );
     assert_eq!(passages["passages"]["doc-1"], json!("元の文章。"));
@@ -2288,7 +2347,7 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     // The old association still stands...
     let old = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
     );
     assert_eq!(old["matches"][0]["object"], json!("高瀬"));
@@ -2296,14 +2355,18 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     // ...and the replacement's own association never landed.
     let new = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "新蔵", "label": "特徴"})),
     );
     assert_eq!(new["matches"], json!([]));
 
     // The alias, which lives independently of any one source, is
     // untouched too.
-    let aliases = server.ok("GET", "/contexts/sake/aliases", None);
+    let aliases = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
+        None,
+    );
     assert_eq!(aliases["concepts"]["kyo"], json!("蔵"));
 }
 
@@ -2360,10 +2423,14 @@ const DOMAIN_VIOLATION_BATCH: &str = "{\"type\": \"source\", \"context\": \"sake
 #[test]
 fn import_report_line_names_schema_warnings_in_warn_mode() {
     let server = Server::start("schema-import-cli-warn");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(schema_document("warn")),
     );
     let data_dir = server.stop_gracefully();
@@ -2386,10 +2453,14 @@ fn import_report_line_names_schema_warnings_in_warn_mode() {
 #[test]
 fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
     let server = Server::start("schema-import-cli-strict");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(schema_document("strict")),
     );
     let data_dir = server.stop_gracefully();
@@ -2404,7 +2475,7 @@ fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
 
     let server = Server::start_on("schema-import-cli-strict-reboot", data_dir);
     assert_eq!(
-        server.ok("GET", "/contexts/sake", None)["stats"]["associations"],
+        server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["stats"]["associations"],
         json!(0),
         "the refused batch must not have written the type assertion or the fact"
     );

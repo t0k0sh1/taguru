@@ -454,7 +454,7 @@ chat endpoint:
   --context NAME      the context every source file targets
   --description TEXT  add a create block (used only if the context is absent)
   --schema FILE       the target context's schema document (same shape as
-                      {stem}.schema.json / GET /contexts/{name}/schema):
+                      {stem}.schema.json / GET /contexts/{id}/schema):
                       folds allowed entity types and constrained relations
                       into the system prompt and self-validates each answer
                       against it, same as the server would (ADR 0009 §11).

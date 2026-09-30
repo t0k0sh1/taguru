@@ -39,6 +39,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/sources",
+  "route": "/contexts/{id}/sources",
   "status": 200
 }

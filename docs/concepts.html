@@ -296,7 +296,7 @@
     <h2>Ingest discipline</h2>
     <p class="section-sub">Retrieval quality is decided here. The skeleton of the ingest loop in <code>/protocol</code>.</p>
     <ul>
-      <li><b>Check before mint</b>: <code>resolve</code>/<code>resolve_label</code> before creating a new spelling. Reuse what exists. The label vocabulary is listed by <code>GET /contexts/{name}/labels</code>.</li>
+      <li><b>Check before mint</b>: <code>resolve</code>/<code>resolve_label</code> before creating a new spelling. Reuse what exists. The label vocabulary is listed by <code>GET /contexts/{id}/labels</code>.</li>
       <li><b>Make implicit membership explicit</b>: "杜氏は高瀬" — whose master brewer? Run <code>unreachable_from</code> from the document's main entity to find islands you forgot to connect.</li>
       <li><b>Diff-sync when a document is updated</b>: retract the old version's contribution (weights, attributions, passage) with <code>sources/retract</code>, then ingest the new version normally. Concepts and edges remain; only weights drop.</li>
       <li><b>Audit the vocabulary at milestones</b>: <code>vocabulary/audit</code> lists candidate spelling splits — lexical twins (spelling variation) and semantic twins (a synonym split in two). Candidates, not verdicts. Same referent → pick a canonical and add an alias. <b>A pair that keeps colliding but is genuinely different</b> (東京都/京都, 前株/後株) is written down as a fact: <span class="tuple">(株式会社青嶺, 別物, 青嶺株式会社, 1.0)</span> — from then on, both glosses warn right at the resolve site.</li>

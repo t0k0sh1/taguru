@@ -12,9 +12,9 @@ use crate::registry::{AppState, ContextMeta, CreateError, DeleteError, RenameCon
 
 use super::groups::scope_refusal;
 use super::{
-    AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, key_name, not_found, ok, optional_body,
-    oversized,
+    AppBytes, AppJson, AppQuery, ContextIdPath, ErrorCode, MAX_CONTEXT_NAME_BYTES,
+    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, key_name,
+    not_found, ok, optional_body, oversized,
 };
 
 /// Keyset paging over the name-sorted directory.
@@ -24,8 +24,16 @@ pub struct ListContextsQuery {
     /// Page size; omitted means the ceiling (1000) — the directory is
     /// the routing surface, and a sane deployment fits one page.
     pub limit: Option<usize>,
-    /// Only `contexts` whose name sorts strictly after this one.
+    /// Only `contexts` sorting strictly after this name. Alone it
+    /// means "past every row with this name"; with `after_id` the
+    /// cursor lands inside a group of same-named `contexts` (names
+    /// are not unique — issue #961 decision 1), which is what lets a
+    /// page break fall between duplicates without losing any.
     pub after: Option<String>,
+    /// The id half of the `(name, id)` cursor — the previous page's
+    /// last row's `id`, beside its `name` in `after`. Requires
+    /// `after`.
+    pub after_id: Option<String>,
     /// Only `contexts` with this pinned state. Defines the population of
     /// interest rather than a cursor, so — unlike `after`/`limit` — it
     /// is applied before `total` is counted.
@@ -58,6 +66,14 @@ pub async fn list_contexts(
     let started_at = Instant::now();
     let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     let after = query.after.as_deref();
+    let after_id = query.after_id.as_deref();
+    if after_id.is_some() && after.is_none() {
+        return error(
+            ErrorCode::InvalidArgument,
+            "after_id is the id half of the (after, after_id) cursor and cannot stand alone",
+            started_at,
+        );
+    }
     // world so pagination stays coherent for that caller. An explicit
     // allow-list has no relation to name order, so seeking a page of
     // the full directory and filtering afterward could come back short
@@ -74,7 +90,7 @@ pub async fn list_contexts(
         None => None,
     };
     let (total, contexts) = if allowed.is_none() && query.pinned.is_none() {
-        state.directory_page(after, limit)
+        state.directory_page(after, after_id, limit)
     } else {
         // An allow-list or `pinned` forces the whole-directory scan
         // below instead of `directory_page`'s O(log n + k) seek — gate
@@ -83,19 +99,25 @@ pub async fn list_contexts(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
-        let mut directory: Vec<_> = tokio::task::block_in_place(|| match &allowed {
-            Some(allowed) => allowed
-                .iter()
-                .filter_map(|name| state.directory_entry(name))
-                .collect(),
-            None => state.directory(),
-        });
+        // Grant allow-lists hold display names until #966, and names
+        // are no longer unique — so the allow-list path walks the full
+        // directory and keeps every row whose name the grant lists,
+        // instead of resolving each listed name to at most one row.
+        let mut directory: Vec<_> = tokio::task::block_in_place(|| state.directory());
+        if let Some(allowed) = &allowed {
+            directory.retain(|entry| allowed.contains(&entry.name));
+        }
         directory.retain(|entry| query.pinned.is_none_or(|pinned| entry.pinned == pinned));
-        directory.sort_by(|a, b| a.name.cmp(&b.name));
+        directory.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
         let total = directory.len();
         let contexts = directory
             .into_iter()
-            .filter(|entry| after.is_none_or(|after| entry.name.as_str() > after))
+            .filter(|entry| {
+                after.is_none_or(|after| match after_id {
+                    Some(after_id) => (entry.name.as_str(), entry.id.as_str()) > (after, after_id),
+                    None => entry.name.as_str() > after,
+                })
+            })
             .take(limit)
             .collect();
         (total, contexts)
@@ -148,7 +170,7 @@ pub struct MaintenanceCompactQuery {
 
 /// `POST /maintenance/compact` — closes the server to ordinary traffic
 /// just long enough to rebuild every `context` whose dead ratio clears
-/// `min_dead_ratio` (`GET /contexts/{name}` and `/metrics` show the
+/// `min_dead_ratio` (`GET /contexts/{id}` and `/metrics` show the
 /// live ratios that inform the choice), worst ratio first, then reopens.
 /// `/health` answers 503 `maintenance` and `enforce_concurrency` sheds
 /// new work early for the duration, but the one real guarantee against
@@ -209,16 +231,16 @@ pub async fn maintenance_compact(
     ok(outcome, started_at)
 }
 
-/// One directory row by name — the cheap existence-and-stats check,
+/// One directory row by id — the cheap existence-and-stats check,
 /// without listing anything else.
 pub async fn get_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
 ) -> Response {
     let started_at = Instant::now();
-    match state.directory_entry(&name) {
+    match state.directory_entry_by_id(&id) {
         Some(entry) => ok(entry, started_at),
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
     }
 }
 
@@ -291,6 +313,11 @@ pub fn protocol_trailer(embed_model: Option<&str>, auto_embed: bool) -> String {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CreateContextRequest {
+    /// The display name — free-form and NOT unique (issue #961
+    /// decision 1): creating a name already in use mints a second,
+    /// distinct `context`. The server mints the id and the response
+    /// row carries it.
+    pub name: String,
     pub description: String,
     pub pinned: bool,
     /// Per-`context` fuzzy-entry floor for resolve; omitted means the
@@ -300,9 +327,11 @@ pub struct CreateContextRequest {
     pub semantic_floor: Option<f32>,
 }
 
+/// `POST /contexts` — mints the id (ADR 0045) and answers with the
+/// new `context`'s directory row, `id` included: the caller needs it
+/// to build every subsequent path.
 pub async fn create_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -311,6 +340,7 @@ pub async fn create_context(
         Ok(request) => request,
         Err(refusal) => return *refusal,
     };
+    let name = request.name;
     if let Some(refusal) = oversized(
         "the context name",
         &name,
@@ -339,17 +369,21 @@ pub async fn create_context(
     // Writes the sidecar (fsync + rename) like every other mutating
     // endpoint; keep it off the async worker.
     match tokio::task::block_in_place(|| state.create(&name, meta)) {
-        Ok(()) => ok(true, started_at),
-        Err(CreateError::AlreadyExists) => error(
-            ErrorCode::AlreadyExists,
-            format!("context '{name}' already exists"),
-            started_at,
-        ),
+        Ok(id) => match state.directory_entry_by_id(&id) {
+            Some(entry) => ok(entry, started_at),
+            // Only a delete racing this response can empty the row —
+            // the create itself succeeded and was durable.
+            None => not_found(&id, started_at),
+        },
         Err(CreateError::InvalidName) => error(
             ErrorCode::InvalidArgument,
             "the context name must not be empty".to_string(),
             started_at,
         ),
+        // `create` never resolves names, so it cannot find them
+        // ambiguous; the variant belongs to `create_if_absent` (the
+        // import header).
+        Err(CreateError::AmbiguousName(_)) => unreachable!("create does not resolve names"),
         Err(CreateError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(
@@ -371,7 +405,7 @@ pub struct UpdateContextRequest {
 
 pub async fn update_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UpdateContextRequest>,
 ) -> Response {
@@ -394,14 +428,14 @@ pub async fn update_context(
     // disk (`ensure_hot`); keep both off the async worker.
     match tokio::task::block_in_place(|| {
         state.update_meta(
-            &name,
+            &id,
             request.description,
             request.pinned,
             request.dice_floor,
             request.semantic_floor,
         )
     }) {
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
         Some(Ok(meta)) => ok(meta, started_at),
         Some(Err(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
@@ -416,7 +450,7 @@ pub async fn update_context(
 
 pub async fn delete_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
@@ -437,31 +471,13 @@ pub async fn delete_context(
         tracing::info!(
             target: "taguru::audit",
             key = %key_name(&key),
-            context = %name,
+            context = %id,
             files_removed,
             "context deleted",
         );
     };
-    match tokio::task::block_in_place(|| state.delete(&name)) {
-        None => not_found(&name, started_at),
-        // Same status code as `RenameContextError::Busy`: a name
-        // currently claimed by another in-flight operation.
-        Some(Err(DeleteError::MidRename)) => error(
-            ErrorCode::Conflict,
-            format!("context '{name}' is mid-rename; retry after it completes"),
-            started_at,
-        ),
-        // Same posture as `AccessError::AmbiguousName` (`api.rs`):
-        // nothing was deleted, and picking one claimant is exactly
-        // what this refusal exists to prevent.
-        Some(Err(DeleteError::AmbiguousName(count))) => error(
-            ErrorCode::Conflict,
-            format!(
-                "context name '{name}' is ambiguous: {count} contexts share it; \
-                 rename them apart (ids reach the wire in a later release)"
-            ),
-            started_at,
-        ),
+    match tokio::task::block_in_place(|| state.delete(&id)) {
+        None => not_found(&id, started_at),
         Some(Ok(())) => {
             audit(true);
             ok(true, started_at)
@@ -472,7 +488,7 @@ pub async fn delete_context(
             error(
                 ErrorCode::Internal,
                 format!(
-                    "context '{name}' removed but its files were not: {io_error} \
+                    "context '{id}' removed but its files were not: {io_error} \
                      (a deletion marker remains; the next boot resumes the removal)"
                 ),
                 started_at,
@@ -486,19 +502,21 @@ pub struct RenameRequest {
     pub to: String,
 }
 
-/// `POST /contexts/{name}/rename` — the whole file family moves to
-/// `to` and every `group` naming `name` is rewritten to match. Admin
-/// role (unclassified in [`crate::auth::required_role`], so it fails
-/// closed there); `{name}` is a `context` name like every other
-/// `/contexts/{name}...` route, so the authorization middleware's own
-/// per-`context` grant check already covers the SOURCE. The
-/// DESTINATION lives in the body, out of that middleware's reach —
-/// same discipline as `import_batch` — so this handler gates it with
-/// [`scope_refusal`] before renaming: otherwise a `context`-scoped key
-/// could move its data to a name outside its grant.
+/// `POST /contexts/{id}/rename` — a display-name change and nothing
+/// else (ADR 0045): the id, the files, and every path stay put. The
+/// destination may already be in use (names are not unique — issue
+/// #961 decision 1). Admin role (unclassified in
+/// [`crate::auth::required_role`], so it fails closed there); `{id}`
+/// is covered by the authorization middleware's per-`context` grant
+/// check like every other `/contexts/{id}...` route. The DESTINATION
+/// name lives in the body, out of that middleware's reach — same
+/// discipline as `import_batch` — so this handler gates it with
+/// [`scope_refusal`] before renaming: grants hold names until #966,
+/// and without this a `context`-scoped key could move a context to a
+/// name outside its grant.
 pub async fn rename_context(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -519,46 +537,24 @@ pub async fn rename_context(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    // Drains any unflushed Hot state to disk, moves the whole file
-    // family, and rewrites group membership; keep it off the async
-    // worker like every other mutating endpoint.
-    match tokio::task::block_in_place(|| state.rename_context(&name, &request.to)) {
+    // Persists the sidecar under the unchanged stem and rewrites group
+    // membership; keep it off the async worker like every other
+    // mutating endpoint.
+    match tokio::task::block_in_place(|| state.rename_context(&id, &request.to)) {
         Ok(()) => {
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                from = %name,
+                context = %id,
                 to = %request.to,
                 "context renamed",
             );
             ok(true, started_at)
         }
-        Err(RenameContextError::NotFound) => not_found(&name, started_at),
-        Err(RenameContextError::AlreadyExists) => error(
-            ErrorCode::AlreadyExists,
-            format!("context '{}' already exists", request.to),
-            started_at,
-        ),
+        Err(RenameContextError::NotFound) => not_found(&id, started_at),
         Err(RenameContextError::InvalidName) => error(
             ErrorCode::InvalidArgument,
             "the destination name must not be empty".to_string(),
-            started_at,
-        ),
-        Err(RenameContextError::Busy) => error(
-            ErrorCode::Conflict,
-            format!(
-                "context '{name}' or '{}' is mid-rename, -create, or -delete; retry shortly",
-                request.to
-            ),
-            started_at,
-        ),
-        // Same posture as `AccessError::AmbiguousName` (`api.rs`).
-        Err(RenameContextError::AmbiguousName(count)) => error(
-            ErrorCode::Conflict,
-            format!(
-                "context name '{name}' is ambiguous: {count} contexts share it; \
-                 rename them apart (ids reach the wire in a later release)"
-            ),
             started_at,
         ),
         Err(RenameContextError::Io(io_error)) => {
@@ -566,8 +562,8 @@ pub async fn rename_context(
             error(
                 ErrorCode::Internal,
                 format!(
-                    "context '{name}' rename not fully persisted: {io_error} \
-                     (a rename marker remains; the next boot resumes it)"
+                    "context '{id}' rename not persisted: {io_error} \
+                     (the previous name still stands)"
                 ),
                 started_at,
             )

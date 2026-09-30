@@ -18,10 +18,14 @@ use crate::support::*;
 /// the store stamps on passages — and no window can ever see its
 /// fact (ADR 0011 §4's rule for associations-only sources).
 fn seed(server: &Server) {
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "窓"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "窓"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-2019"},
             {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 2.0, "source": "doc-2019"},
@@ -32,7 +36,7 @@ fn seed(server: &Server) {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {
                 "doc-2019": "杜氏は高瀬。銘柄は青嶺。",
@@ -51,7 +55,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // As-of (until alone): only the 2019 regime existed by t=1500.
     let as_of = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏", "until": 1500})),
     );
     assert_eq!(as_of["total"], json!(1));
@@ -61,7 +65,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // window: in-window sum 2.0 / count 1, and only doc-2019 cited.
     let brand = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "銘柄", "until": 1500})),
     );
     assert_eq!(brand["matches"][0]["weight"], json!(2.0));
@@ -72,7 +76,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // Unwindowed, the same edge accumulates both regimes.
     let full = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "銘柄"})),
     );
     assert_eq!(full["matches"][0]["weight"], json!(3.0));
@@ -81,21 +85,21 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // `since` alone reads "asserted since": the 2024 regime.
     let recent = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "since": 1500})),
     );
     assert_eq!(recent["total"], json!(2), "{recent}");
     // The undated source's fact appears in no window at all…
     let ghost = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "幽霊", "since": 0})),
     );
     assert_eq!(ghost["total"], json!(0));
     // …but is served unwindowed, as ever.
     let ghost_full = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "幽霊"})),
     );
     assert_eq!(ghost_full["total"], json!(1));
@@ -104,7 +108,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // facts and never surfaces the 2024 assertion.
     let activated = server.ok(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": ["蔵"], "decay": 1.0, "until": 1500})),
     );
     assert_eq!(activated["total"], json!(2));
@@ -113,7 +117,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     }
     let explored = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["蔵"], "until": 1500})),
     );
     assert_eq!(explored["total"], json!(2));
@@ -122,13 +126,13 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // time excludes (upper bound exclusive), since == it includes.
     let at_until = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏", "until": 1000})),
     );
     assert_eq!(at_until["total"], json!(0), "{at_until}");
     let closed = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏", "since": 1000, "until": 1500})),
     );
     assert_eq!(closed["total"], json!(1), "{closed}");
@@ -138,19 +142,19 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // its fact is windowed IN by a since in the past.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵D", "label": "銘柄", "object": "残雪", "weight": 1.0, "source": "doc-memo"}
         ])),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"doc-memo": "日付なしのメモ。"}})),
     );
     let by_stored_at = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵D", "since": 2001})),
     );
     assert_eq!(by_stored_at["total"], json!(1), "{by_stored_at}");
@@ -158,7 +162,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // The shared window contract holds on the graph lanes too.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "since": 2000, "until": 2000})),
     );
     assert_eq!(status, 400, "{body}");
@@ -186,7 +190,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     let via_mcp = server.call_tool(
         1,
         "query",
-        json!({"context": "sake", "subject": "蔵", "label": "杜氏", "until": 1500}),
+        json!({"context": server.cx("sake"), "subject": "蔵", "label": "杜氏", "until": 1500}),
     );
     let text: Value =
         serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -197,7 +201,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     let via_mcp = server.call_tool(
         2,
         "query",
-        json!({"context": "sake", "subject": "蔵", "label": "杜氏", "since": 1500, "until": 2500}),
+        json!({"context": server.cx("sake"), "subject": "蔵", "label": "杜氏", "since": 1500, "until": 2500}),
     );
     let text: Value =
         serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -208,13 +212,13 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     // replay of one must not answer the other (both directions).
     let full_again = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏"})),
     );
     assert_eq!(full_again["total"], json!(2));
     let windowed_again = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵", "label": "杜氏", "until": 1500})),
     );
     assert_eq!(windowed_again["total"], json!(1));

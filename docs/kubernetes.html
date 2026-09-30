@@ -308,7 +308,7 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
     <p class="section-sub">The snapshot procedure, unchanged, for point-in-time copies and format-rollback insurance:</p>
     <ol>
       <li><code>POST /flush</code> — write out everything dirty.</li>
-      <li>Snapshot the PersistentVolume at the storage layer (a CSI VolumeSnapshot, or the backing store's own snapshot — every writer is fsync+rename, so a point-in-time snapshot is safe at any instant). Or take the portable stream with <code>GET /contexts/{name}/export</code> and restore anywhere through <code>POST /import</code>.</li>
+      <li>Snapshot the PersistentVolume at the storage layer (a CSI VolumeSnapshot, or the backing store's own snapshot — every writer is fsync+rename, so a point-in-time snapshot is safe at any instant). Or take the portable stream with <code>GET /contexts/{id}/export</code> and restore anywhere through <code>POST /import</code>.</li>
       <li>Verify the restored copy with <code>taguru inspect</code> — the same fully-validating load + WAL replay the server does. Verification runs anywhere the image runs: mount the restored volume on any machine and <code>docker run --rm -v …:/data ghcr.io/t0k0sh1/taguru inspect /data</code>.</li>
     </ol>
     <p class="note warn">

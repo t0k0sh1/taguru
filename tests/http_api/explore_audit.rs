@@ -7,10 +7,10 @@ use crate::support::*;
 #[test]
 fn unreachable_from_pages_like_recall_and_query() {
     let server = Server::start("orphanpage");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0},
             // Three islands no walk from the origin can reach.
@@ -22,7 +22,7 @@ fn unreachable_from_pages_like_recall_and_query() {
 
     let audit = server.ok(
         "POST",
-        "/contexts/sake/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "limit": 2})),
     );
     assert_eq!(audit["total"], json!(3));
@@ -36,10 +36,10 @@ fn unreachable_from_pages_like_recall_and_query() {
 #[test]
 fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     let server = Server::start("match-cursor");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "銘柄", "object": "a", "weight": 1.0},
             {"subject": "蔵", "label": "銘柄", "object": "b", "weight": 1.0},
@@ -59,7 +59,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     // recall: page past the limit, total constant, walk ends on empty.
     let first = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "limit": 2})),
     );
     assert_eq!(first["total"], json!(3), "{first}");
@@ -74,7 +74,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     );
     let second = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "limit": 2, "after": cursor_from(&matches[1])})),
     );
     assert_eq!(second["total"], json!(3), "{second}");
@@ -83,7 +83,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     assert_eq!(matches[0]["object"], json!("c"), "{second}");
     let third = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "limit": 2, "after": cursor_from(&matches[0])})),
     );
     assert_eq!(third["matches"], json!([]), "the walk has ended: {third}");
@@ -91,7 +91,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     // query: same cursor shape, position-pinned search.
     let first = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": "銘柄", "limit": 2})),
     );
     assert_eq!(first["total"], json!(3), "{first}");
@@ -99,7 +99,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     assert_eq!(matches.len(), 2);
     let second = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": "銘柄", "limit": 2, "after": cursor_from(&matches[1])})),
     );
     assert_eq!(second["total"], json!(3), "{second}");
@@ -108,7 +108,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     // unreachable_from: three islands past the reachable "蔵" cluster.
     let first = server.ok(
         "POST",
-        "/contexts/sake/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("sake")),
         Some(json!({"origins": ["蔵"], "limit": 2})),
     );
     assert_eq!(first["total"], json!(3), "{first}");
@@ -116,7 +116,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     assert_eq!(matches.len(), 2);
     let second = server.ok(
         "POST",
-        "/contexts/sake/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("sake")),
         Some(json!({
             "origins": ["蔵"], "limit": 2,
             "after": cursor_from(&matches[1]),
@@ -129,7 +129,7 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
     // empty page.
     let (status, refusal) = server.call(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "蔵", "after": {"bogus": true}})),
     );
     assert_eq!(status, 422, "{refusal}");
@@ -142,10 +142,14 @@ fn recall_query_and_unreachable_from_resume_past_a_match_cursor() {
 #[test]
 fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     let server = Server::start("driftaudit");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     // Empty context: every field comes back at its zero value.
-    let empty = server.ok("POST", "/contexts/sake/drift/audit", None);
+    let empty = server.ok(
+        "POST",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(empty["total"], json!(0), "{empty}");
     assert_eq!(empty["unsourced"], json!([]), "{empty}");
     assert_eq!(empty["dead_concept_aliases"], json!({}), "{empty}");
@@ -157,7 +161,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     // leave its fresh alias pointing at a dead canonical.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "x1", "label": "l", "object": "y1", "weight": 1.0},
             {"subject": "x2", "label": "l", "object": "y2", "weight": 2.0},
@@ -166,24 +170,28 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "高瀬", "label": "杜氏", "object": "蔵",
                      "weight": 1.0, "source": "a.md"}])),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": "高瀬", "label": "杜氏", "object": "蔵"})),
     );
     let applied = server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"タカセ": "高瀬"}})),
     );
     assert_eq!(applied, json!(1), "{applied}");
 
     // No floor, no limit: everything, worst-magnitude first.
-    let full = server.ok("POST", "/contexts/sake/drift/audit", None);
+    let full = server.ok(
+        "POST",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(full["total"], json!(3), "{full}");
     let matches = full["unsourced"].as_array().unwrap();
     assert_eq!(
@@ -208,7 +216,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     // only what clears it.
     let floored = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"unsourced_floor": 2.5})),
     );
     assert_eq!(floored["total"], json!(1), "{floored}");
@@ -219,7 +227,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     // limit + after pages the same worst-first order as recall/query.
     let first = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"limit": 2})),
     );
     assert_eq!(first["total"], json!(3), "{first}");
@@ -232,7 +240,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     });
     let second = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"limit": 2, "after": cursor})),
     );
     assert_eq!(second["total"], json!(3), "{second}");
@@ -244,7 +252,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     // caller's dice_floor.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "株式会社青嶺", "label": "kind", "object": "会社",
              "weight": 1.0, "source": "a.md"},
@@ -254,7 +262,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
     );
     let with_twins = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"include_twins": true, "dice_floor": 0.4})),
     );
     assert!(!with_twins["twins"].is_null(), "{with_twins}");
@@ -275,7 +283,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
 #[test]
 fn explore_without_max_depth_stops_at_the_server_ceiling() {
     let server = Server::start("depthcap");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     // A 15-hop chain: c0 → c1 → … → c15.
     let chain: Vec<Value> = (0..15)
         .map(|i| {
@@ -284,13 +292,13 @@ fn explore_without_max_depth_stops_at_the_server_ceiling() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(Value::Array(chain)),
     );
 
     let walked = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["c0"]})),
     );
     let deepest = walked["matches"]
@@ -306,12 +314,12 @@ fn explore_without_max_depth_stops_at_the_server_ceiling() {
 #[test]
 fn explore_pages_and_keeps_the_closest_past_the_limit() {
     let server = Server::start("explorepage");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     // A hub with four direct neighbours; one leads a hop further to a
     // heavy edge.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "hub", "label": "l", "object": "n1", "weight": 1.0},
             {"subject": "hub", "label": "l", "object": "n2", "weight": 1.0},
@@ -323,7 +331,7 @@ fn explore_pages_and_keeps_the_closest_past_the_limit() {
 
     let walked = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["hub"], "limit": 3})),
     );
     assert_eq!(walked["total"], json!(5));
@@ -346,10 +354,10 @@ fn explore_pages_and_keeps_the_closest_past_the_limit() {
 #[test]
 fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order() {
     let server = Server::start("explore-cursor");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "hub", "label": "l", "object": "d", "weight": 1.0},
             {"subject": "hub", "label": "l", "object": "b", "weight": 1.0},
@@ -374,7 +382,7 @@ fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order(
 
     let first = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["hub"], "limit": 2})),
     );
     assert_eq!(first["total"], json!(4), "{first}");
@@ -383,7 +391,7 @@ fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order(
 
     let second = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({
             "origins": ["hub"], "limit": 2,
             "after": cursor_from(&matches[1]),
@@ -395,7 +403,7 @@ fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order(
 
     let third = server.ok(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({
             "origins": ["hub"], "limit": 2,
             "after": cursor_from(&matches[1]),
@@ -407,7 +415,7 @@ fn explore_resumes_past_a_cursor_with_same_distance_ties_in_lexicographic_order(
     // empty page.
     let (status, refusal) = server.call(
         "POST",
-        "/contexts/sake/explore",
+        &format!("/contexts/{}/explore", server.cx("sake")),
         Some(json!({"origins": ["hub"], "after": {"bogus": true}})),
     );
     assert_eq!(status, 422, "{refusal}");

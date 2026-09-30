@@ -35,9 +35,9 @@ fn other_fn() {
 
 fn routes(state: AppState) -> Router<AppState> {
     let heavy_routes = Router::new()
-        .route("/contexts/{name}/compact", post(api::compact_context))
+        .route("/contexts/{id}/compact", post(api::compact_context))
         .route(
-            "/contexts/{name}/promote",
+            "/contexts/{id}/promote",
             post(api::promote_sources),
         );
     Router::new()
@@ -51,8 +51,8 @@ fn mcp_dispatch() {
 """
     paths = check_surface_completeness.extract_router_paths(text)
     assert paths == {
-        "/contexts/{name}/compact",
-        "/contexts/{name}/promote",
+        "/contexts/{id}/compact",
+        "/contexts/{id}/promote",
         "/health",
     }
     assert "/should-not-appear" not in paths
@@ -63,13 +63,13 @@ def test_extract_router_paths_handles_a_multi_line_route_call() -> None:
     text = """\
 fn routes() -> Router<AppState> {
     Router::new().route(
-        "/contexts/{name}/schema/validate",
+        "/contexts/{id}/schema/validate",
         post(api::validate_schema),
     )
 }
 """
     assert check_surface_completeness.extract_router_paths(text) == {
-        "/contexts/{name}/schema/validate"
+        "/contexts/{id}/schema/validate"
     }
 
 
@@ -90,37 +90,37 @@ classes:
   Taguru:
     flush: { route: "POST /flush" }
     promote:
-      route: "POST /contexts/{name}/promote"
+      route: "POST /contexts/{id}/promote"
       args: [into, sources]
 """
     assert check_surface_completeness.extract_surface_paths(text) == {
         "/flush",
-        "/contexts/{name}/promote",
+        "/contexts/{id}/promote",
     }
 
 
 def test_extract_surface_paths_strips_a_query_string_suffix() -> None:
     # promote_dry_run.json's own `route` field carries "?dry_run=true" —
     # the completeness check compares bare path templates only.
-    text = 'route: "POST /contexts/{name}/promote?dry_run=true"'
-    assert check_surface_completeness.extract_surface_paths(text) == {"/contexts/{name}/promote"}
+    text = 'route: "POST /contexts/{id}/promote?dry_run=true"'
+    assert check_surface_completeness.extract_surface_paths(text) == {"/contexts/{id}/promote"}
 
 
 # --- find_problems(): the three-way diff (forward, reverse, stale allowlist) ---
 
 
 def test_find_problems_is_empty_when_router_and_surface_agree() -> None:
-    router = {"/health", "/contexts/{name}/compact"}
-    surface = {"/health", "/contexts/{name}/compact"}
+    router = {"/health", "/contexts/{id}/compact"}
+    surface = {"/health", "/contexts/{id}/compact"}
     assert check_surface_completeness.find_problems(router, surface, {}) == []
 
 
 def test_find_problems_flags_a_router_path_missing_from_surface() -> None:
-    router = {"/health", "/contexts/{name}/promote"}
+    router = {"/health", "/contexts/{id}/promote"}
     surface = {"/health"}
     problems = check_surface_completeness.find_problems(router, surface, {})
     assert len(problems) == 1
-    assert "/contexts/{name}/promote" in problems[0]
+    assert "/contexts/{id}/promote" in problems[0]
     assert "absent from surface.yaml" in problems[0]
 
 
@@ -133,10 +133,10 @@ def test_find_problems_allows_an_allowlisted_router_only_path() -> None:
 
 def test_find_problems_flags_a_surface_path_missing_from_router() -> None:
     router = {"/health"}
-    surface = {"/health", "/contexts/{name}/renamed-away"}
+    surface = {"/health", "/contexts/{id}/renamed-away"}
     problems = check_surface_completeness.find_problems(router, surface, {})
     assert len(problems) == 1
-    assert "/contexts/{name}/renamed-away" in problems[0]
+    assert "/contexts/{id}/renamed-away" in problems[0]
     assert "no longer in fn routes()" in problems[0]
 
 

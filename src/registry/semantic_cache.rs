@@ -92,7 +92,7 @@ impl SemanticBucket {
     fn of(key: &RetrievalKey, sans_query_params: &str) -> Self {
         Self {
             op: key.op,
-            targets: key.targets.iter().map(|t| t.name.clone()).collect(),
+            targets: key.targets.iter().map(|t| t.id.clone()).collect(),
             params: sans_query_params.to_string(),
         }
     }
@@ -813,7 +813,7 @@ mod tests {
         let key = RetrievalKey {
             op: RetrievalCacheOp::SearchPassages,
             targets: Box::new([TargetFingerprint {
-                name: "c".to_string(),
+                id: "c".to_string(),
                 identity: 1,
                 lanes: [0, 0],
             }]),

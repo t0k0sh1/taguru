@@ -10,7 +10,7 @@
 //! File-based on purpose: extract stays an offline producer with no
 //! server credential surface — the same ruling ADR 0009 §13 made for
 //! `--schema`, for the same reason. The operator exports the `context`
-//! (`taguru export`, or GET /contexts/{name}/export) and points
+//! (`taguru export`, or GET /contexts/{id}/export) and points
 //! `--vocabulary` at the result.
 
 use super::*;

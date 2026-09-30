@@ -27,7 +27,7 @@ fn schema_document(mode: &str) -> Value {
 fn install_schema(server: &Server, context: &str, mode: &str) {
     server.ok(
         "PUT",
-        &format!("/contexts/{context}/schema"),
+        &format!("/contexts/{}/schema", server.cx(context)),
         Some(schema_document(mode)),
     );
 }
@@ -42,13 +42,13 @@ fn assoc(subject: &str, label: &str, object: &str) -> Value {
 /// untyped third concept — the fixture every test below reuses.
 fn seed(server: &Server, context: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": context, "description": "d"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/associations"),
+        &format!("/contexts/{}/associations", server.cx(context)),
         Some(json!([
             assoc("青嶺酒造", "schema:type", "Brewery"),
             assoc("青嶺酒造", "杜氏", "高瀬"),
@@ -72,7 +72,7 @@ fn describe_reports_types_only_once_a_schema_is_installed() {
 
     let before = server.ok(
         "POST",
-        "/contexts/sake/describe",
+        &format!("/contexts/{}/describe", server.cx("sake")),
         Some(json!({"concept": "青嶺酒造"})),
     );
     assert!(
@@ -91,7 +91,7 @@ fn describe_reports_types_only_once_a_schema_is_installed() {
     install_schema(&server, "sake", "warn");
     let after = server.ok(
         "POST",
-        "/contexts/sake/describe",
+        &format!("/contexts/{}/describe", server.cx("sake")),
         Some(json!({"concept": "青嶺酒造"})),
     );
     assert_eq!(after["types"], json!(["Brewery"]), "{after}");
@@ -102,7 +102,7 @@ fn describe_reports_types_only_once_a_schema_is_installed() {
     // are the same fact here, so the wire shape treats them the same.
     let untyped = server.ok(
         "POST",
-        "/contexts/sake/describe",
+        &format!("/contexts/{}/describe", server.cx("sake")),
         Some(json!({"concept": "霧沢町"})),
     );
     assert!(untyped.get("types").is_none(), "{untyped}");
@@ -122,21 +122,21 @@ fn read_side_types_are_gated_by_document_existence_not_by_mode() {
 
     let described = server.ok(
         "POST",
-        "/contexts/sake/describe",
+        &format!("/contexts/{}/describe", server.cx("sake")),
         Some(json!({"concept": "青嶺酒造"})),
     );
     assert_eq!(described["types"], json!(["Brewery"]), "{described}");
 
     let resolved = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(resolved[0]["types"], json!(["Brewery"]), "{resolved}");
 
     let filtered = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": ["杜氏", "所在"], "subject_types": "Brewery"})),
     );
     assert_eq!(filtered["total"], json!(1), "{filtered}");
@@ -158,7 +158,7 @@ fn resolve_attaches_types_to_top_candidates_but_resolve_label_never_does() {
 
     let resolved = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(resolved[0]["name"], json!("青嶺酒造"), "{resolved}");
@@ -169,7 +169,7 @@ fn resolve_attaches_types_to_top_candidates_but_resolve_label_never_does() {
     // `gloss`.
     let untyped = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "霧沢町"})),
     );
     assert!(
@@ -179,7 +179,7 @@ fn resolve_attaches_types_to_top_candidates_but_resolve_label_never_does() {
 
     let labels = server.ok(
         "POST",
-        "/contexts/sake/resolve_label",
+        &format!("/contexts/{}/resolve_label", server.cx("sake")),
         Some(json!({"cue": "杜氏"})),
     );
     assert!(
@@ -206,14 +206,14 @@ fn query_filters_by_type_and_expands_through_is_a() {
 
     let unfiltered = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts})),
     );
     assert_eq!(unfiltered["total"], json!(2), "{unfiltered}");
 
     let direct = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts, "subject_types": "Brewery"})),
     );
     assert_eq!(direct["total"], json!(1), "{direct}");
@@ -227,7 +227,7 @@ fn query_filters_by_type_and_expands_through_is_a() {
     // concept only ever asserted as the child.
     let via_ancestor = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts, "subject_types": "Organization"})),
     );
     assert_eq!(via_ancestor["total"], json!(1), "{via_ancestor}");
@@ -236,7 +236,7 @@ fn query_filters_by_type_and_expands_through_is_a() {
     // never matches a non-empty object filter.
     let object_filtered = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts, "object_types": "Person"})),
     );
     assert_eq!(object_filtered["total"], json!(1), "{object_filtered}");
@@ -247,7 +247,7 @@ fn query_filters_by_type_and_expands_through_is_a() {
     );
     let no_match = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts, "object_types": "Organization"})),
     );
     assert_eq!(
@@ -259,7 +259,7 @@ fn query_filters_by_type_and_expands_through_is_a() {
     // An unknown type name matches nothing, without erroring.
     let unknown = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"label": facts, "subject_types": "存在しない型"})),
     );
     assert_eq!(unknown["total"], json!(0), "{unknown}");
@@ -274,7 +274,7 @@ fn query_type_filter_on_a_schema_free_context_answers_empty() {
 
     let filtered = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "subject_types": "Brewery"})),
     );
     assert_eq!(filtered["total"], json!(0), "{filtered}");
@@ -282,7 +282,7 @@ fn query_type_filter_on_a_schema_free_context_answers_empty() {
     // The position pins still work — only the type axis is gated.
     let unfiltered = server.ok(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造"})),
     );
     assert_eq!(unfiltered["total"], json!(2), "{unfiltered}");
@@ -299,7 +299,7 @@ fn query_type_filter_never_satisfies_the_at_least_one_position_rule() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject_types": "Brewery"})),
     );
     assert_eq!(status, 400, "{body}");
@@ -327,7 +327,13 @@ fn query_type_filter_does_not_share_a_cache_entry_with_the_unfiltered_call() {
     seed(&server, "sake");
     install_schema(&server, "sake", "warn");
 
-    let query = |body: Value| server.ok("POST", "/contexts/sake/query", Some(body));
+    let query = |body: Value| {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/query", server.cx("sake")),
+            Some(body),
+        )
+    };
     query(json!({"subject": "青嶺酒造"}));
     query(json!({"subject": "青嶺酒造", "subject_types": "Brewery"}));
     assert_eq!(
@@ -382,7 +388,7 @@ fn mcp_query_tool_forwards_type_filters() {
     let reply = server.call_tool(
         1,
         "query",
-        json!({"context": "sake", "label": ["杜氏", "所在"], "subject_types": "Brewery"}),
+        json!({"context": server.cx("sake"), "label": ["杜氏", "所在"], "subject_types": "Brewery"}),
     );
     assert!(reply.get("isError").is_none(), "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();

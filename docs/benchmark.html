@@ -640,7 +640,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       search finds. <code>taguru benchmark search</code> (issue #260, ADR 0003 §11) builds one
       <code>context</code> per model from a finished results directory's already-written source files, runs one
       shared question set against every one of them over the exact retrieval path a real client
-      uses (<code>POST /contexts/{name}/sources/search</code>), and writes
+      uses (<code>POST /contexts/{id}/sources/search</code>), and writes
       <code>results/retrieval.json</code>: per-case, per-model hit counts, lane evidence, and
       model-pair hit-set overlap. Like <a href="#differences"><code>differences.jsonl</code></a>,
       it is <b>gold-data-free and judgment-free by construction</b> — with no expectations supplied
@@ -767,7 +767,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       with graded-relevance nDCG and citation metrics on top, and — unlike this reference — turns
       the result into a pass/fail gate.
     </p>
-    <p class="section-sub">Why not <code>POST /contexts/{name}/recall</code></p>
+    <p class="section-sub">Why not <code>POST /contexts/{id}/recall</code></p>
     <p>
       <code>expected_concepts</code> is checked against hit text, not driven through the graph's own
       <code>recall</code> endpoint, on purpose: <code>Context::recall(cue)</code> requires
@@ -781,15 +781,15 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p>
       <code>plan</code> and per-hit lane accounting are read straight off <code>sources/search</code>'s
       own response (the same <code>plan</code>/<code>lanes</code> shape every client sees —
-      documented in full, with a worked example, under <code>POST /contexts/{name}/sources/search</code>
+      documented in full, with a worked example, under <code>POST /contexts/{id}/sources/search</code>
       in the LLM-facing protocol manual served at <code>GET /protocol</code>) — this command never calls
-      <code>POST /contexts/{name}/embeddings/refresh</code>, because that endpoint only re-embeds
+      <code>POST /contexts/{id}/embeddings/refresh</code>, because that endpoint only re-embeds
       concept and label <i>glosses</i> (what <code>resolve</code>'s semantic fallback reads), never
       the passage vectors <code>sources/search</code>'s vector lane actually reads. Passage
       embeddings refresh only from the server's own background flush tick, gated on
       <code>TAGURU_EMBED_PASSAGES</code>, and have no on-demand HTTP endpoint at all — so whether the
       vector lane runs for a given corpus is outside this command's control. <code>corpus.*.passage_vectors</code>
-      is a best-effort, read-only <code>GET /contexts/{name}/embeddings</code> snapshot taken once
+      is a best-effort, read-only <code>GET /contexts/{id}/embeddings</code> snapshot taken once
       per corpus, offered purely as evidence for why a case's <code>plan.vector.reason</code> reads
       the way it does. A response missing <code>plan</code>/lane fields entirely (an older server)
       degrades to lane fields recorded <code>null</code> — every non-lane comparison for that case

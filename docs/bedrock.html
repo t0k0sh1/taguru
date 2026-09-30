@@ -216,11 +216,11 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
       best <i>other</i> candidate feeds the lower; the report prints both bands, the gap, and a
       suggested <code>TAGURU_SEMANTIC_FLOOR</code> mid-gap (<code>--json</code> for automation),
       stamped with the (model, width) it measured — the identity
-      <code>GET /contexts/{name}/embeddings</code> serves. Cues that lexically resolve — the
+      <code>GET /contexts/{id}/embeddings</code> serves. Cues that lexically resolve — the
       step humans get wrong — are detected and <b>excluded loudly</b>, and overlapping bands are
       reported as exactly that (a model that cannot separate these names at this dimension),
       never papered over with a number. The manual probe, when you want to see one score with
-      your own eyes: <code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor":
+      your own eyes: <code>POST /contexts/{id}/resolve {"cue": "…", "semantic_floor":
       0.05}</code>.
     </p>
     <p>Starting points per model — always confirm with <code>taguru calibrate</code> before trusting one:</p>

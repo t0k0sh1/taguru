@@ -41,6 +41,46 @@ fn normalized(value: &Value) -> Value {
                 if map.contains_key("fingerprint") {
                     map.insert("fingerprint".to_string(), json!("…"));
                 }
+                // Context ids are minted per data directory (#964), so
+                // the single instance and the fleet can never agree on
+                // them — canonicalize UUID-shaped ids, keep the field.
+                if let Some(id) = map.get("id").and_then(Value::as_str)
+                    && id.len() == 36
+                    && id.as_bytes()[8] == b'-'
+                {
+                    map.insert("id".to_string(), json!("<uuid>"));
+                }
+                // An error message quoting an id-addressed path (the
+                // unknown-path 404) diverges the same way: mask every
+                // UUID-shaped run — 36 bytes, hyphens at the fixed
+                // offsets, hex elsewhere. Ids are ASCII, so a byte
+                // scan can't split a multi-byte char mid-mask.
+                if let Some(error) = map.get("error").and_then(Value::as_str) {
+                    let bytes = error.as_bytes();
+                    let mut out = String::new();
+                    let mut index = 0;
+                    while index < bytes.len() {
+                        let uuid_shaped = index + 36 <= bytes.len()
+                            && bytes[index..index + 36]
+                                .iter()
+                                .enumerate()
+                                .all(|(offset, byte)| match offset {
+                                    8 | 13 | 18 | 23 => *byte == b'-',
+                                    _ => byte.is_ascii_hexdigit(),
+                                });
+                        if uuid_shaped {
+                            out.push_str("<uuid>");
+                            index += 36;
+                        } else {
+                            // Copy the full char, not just one byte.
+                            let rest = &error[index..];
+                            let ch = rest.chars().next().expect("in-bounds index");
+                            out.push(ch);
+                            index += ch.len_utf8();
+                        }
+                    }
+                    map.insert("error".to_string(), json!(out));
+                }
                 for (_, child) in map.iter_mut() {
                     walk(child);
                 }
@@ -67,9 +107,9 @@ fn seed(server: &Server) {
         ("glossary", "酒の用語集"),
     ] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{name}"),
-            Some(json!({"description": description})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": description})),
         );
     }
     // sake and breweries live on shard A, glossary on shard B (see the
@@ -136,8 +176,23 @@ fn assert_equivalent(
     path: &str,
     body: Option<Value>,
 ) -> Value {
-    let (single_status, single_body) = single.call(method, path, body.clone());
-    let (router_status, router_body) = router.call(method, path, body);
+    assert_equivalent_at(single, router, method, path, path, body)
+}
+
+/// [`assert_equivalent`] for id-addressed paths, which spell the same
+/// context differently per front door (#964: ids are minted per data
+/// directory) — everything else identical.
+fn assert_equivalent_at(
+    single: &Server,
+    router: &Server,
+    method: &str,
+    single_path: &str,
+    router_path: &str,
+    body: Option<Value>,
+) -> Value {
+    let path = router_path;
+    let (single_status, single_body) = single.call(method, single_path, body.clone());
+    let (router_status, router_body) = router.call(method, router_path, body);
     assert_eq!(
         single_status, router_status,
         "{method} {path}: status diverged — single {single_body} vs router {router_body}"
@@ -176,7 +231,14 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // router sent it to shard A alone (never broadcast, unlike
     // groups) — content served back through GET must still match the
     // single instance exactly.
-    assert_equivalent(&single, &router, "GET", "/contexts/sake/schema", None);
+    assert_equivalent_at(
+        &single,
+        &router,
+        "GET",
+        &format!("/contexts/{}/schema", single.cx("sake")),
+        &format!("/contexts/{}/schema", router.cx_http("sake")),
+        None,
+    );
 
     // The seeding itself already proved the import split: now the
     // responses. Cross recall with contexts, with groups (nested),
@@ -308,12 +370,12 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         json!([{"subject": "甘口", "label": "意味する", "object": "甘い", "weight": 1.0}]);
     router.ok(
         "POST",
-        "/contexts/glossary/associations",
+        &format!("/contexts/{}/associations", router.cx_http("glossary")),
         Some(member_write.clone()),
     );
     single.ok(
         "POST",
-        "/contexts/glossary/associations",
+        &format!("/contexts/{}/associations", single.cx("glossary")),
         Some(member_write),
     );
     let fingerprint_after = router.ok("GET", "/groups/jp", None)["fingerprint"]
@@ -391,19 +453,30 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // Per-context verbs proxy byte-for-byte — a routed read and a
     // routed refusal (unknown subpath falls through to the shard's
     // own 404 shape).
-    assert_equivalent(
+    let single_sake = single.cx("sake");
+    let router_sake = router.cx_http("sake");
+    assert_equivalent_at(
         &single,
         &router,
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{single_sake}/recall"),
+        &format!("/contexts/{router_sake}/recall"),
         Some(json!({"cue": "青嶺"})),
     );
-    assert_equivalent(&single, &router, "GET", "/contexts/sake/export", None);
-    assert_equivalent(
+    assert_equivalent_at(
+        &single,
+        &router,
+        "GET",
+        &format!("/contexts/{single_sake}/export"),
+        &format!("/contexts/{router_sake}/export"),
+        None,
+    );
+    assert_equivalent_at(
         &single,
         &router,
         "POST",
-        "/contexts/sake/unknown-verb",
+        &format!("/contexts/{single_sake}/unknown-verb"),
+        &format!("/contexts/{router_sake}/unknown-verb"),
         None,
     );
 
@@ -442,7 +515,14 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // Deleting a context through the router routes to its shard and
     // the directory merge reflects it — writes are first-class, not a
     // replica-style refusal.
-    assert_equivalent(&single, &router, "DELETE", "/contexts/breweries", None);
+    assert_equivalent_at(
+        &single,
+        &router,
+        "DELETE",
+        &format!("/contexts/{}", single.cx("breweries")),
+        &format!("/contexts/{}", router.cx_http("breweries")),
+        None,
+    );
     assert_equivalent(&single, &router, "GET", "/contexts", None);
 }
 
@@ -475,23 +555,28 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let token = Some("sesame");
 
     for (name, shard) in [("sake", &shard_a), ("glossary", &shard_b)] {
-        let _ = shard;
         let (status, body) =
-            router.call_with_token("PUT", &format!("/contexts/{name}"), None, token);
+            router.call_with_token("POST", "/contexts", Some(json!({"name": name})), token);
         assert_eq!(status, 200, "{body}");
         let (status, body) = router.call_with_token(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", shard.cx(name)),
             Some(json!([{"subject": "麹", "label": "関わる", "object": name,
                          "weight": 1.0, "source": "s"}])),
             token,
         );
         assert_eq!(status, 200, "{body}");
     }
+    let sake_id = shard_a.cx("sake");
+    let glossary_id = shard_b.cx("glossary");
 
     // Auth is the shards': no token → their 401 passes through the
     // router verbatim, fan-out and proxy alike.
-    let (status, body) = router.call("POST", "/contexts/sake/recall", Some(json!({"cue": "麹"})));
+    let (status, body) = router.call(
+        "POST",
+        &format!("/contexts/{sake_id}/recall"),
+        Some(json!({"cue": "麹"})),
+    );
     assert_eq!(status, 401, "{body}");
     let (status, body) = router.call(
         "POST",
@@ -527,7 +612,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     assert_eq!(body["code"], "forbidden", "{body}");
     let (status, body) = router.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{sake_id}/query"),
         Some(json!({"subject": "密造"})),
         token,
     );
@@ -567,14 +652,14 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     // the shard and the context — retryable by design, never a hang.
     let (status, body) = router.call_with_token(
         "POST",
-        "/contexts/glossary/recall",
+        &format!("/contexts/{glossary_id}/recall"),
         Some(json!({"cue": "麹"})),
         token,
     );
     assert_eq!(status, 502, "{body}");
     assert_eq!(body["code"], "shard_unreachable", "{body}");
     assert!(
-        body["error"].as_str().unwrap().contains("glossary"),
+        body["error"].as_str().unwrap().contains(&glossary_id),
         "{body}"
     );
 
@@ -677,8 +762,8 @@ fn schema_outcomes_answer_in_stream_order_not_shard_number_order() {
         &[],
     );
 
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
-    router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })));
 
     let stream = concat!(
         "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
@@ -715,7 +800,7 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
         &format!("ctx_ok = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_ok", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_ok", })));
     // `ghost` is intentionally never created — the second schema
     // record's context does not exist on its own shard.
 
@@ -746,7 +831,11 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
 
     // The shard_a install really did land — proof the rewrap's
     // "durable_prefix" claim is true, not just structurally present.
-    let installed = router.ok("GET", "/contexts/ctx_ok/schema", None);
+    let installed = router.ok(
+        "GET",
+        &format!("/contexts/{}/schema", shard_a.cx("ctx_ok")),
+        None,
+    );
     assert_eq!(installed["mode"], "warn", "{installed}");
 }
 
@@ -781,8 +870,8 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
-    router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })));
 
     // A record NO shard holds answers "created" — every projection is
     // created, and a created projection carrying members must not slip
@@ -835,8 +924,8 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         &format!("ctx_c = {}\nctx_d = {}\n", shard_c.base, shard_d.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_c", Some(json!({})));
-    router.ok("PUT", "/contexts/ctx_d", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_c", })));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_d", })));
     shard_c.ok("PUT", "/groups/g2", Some(json!({"contexts": ["ctx_c"]})));
     let stream = "{\"type\": \"group\", \"id\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
     let (status, body) = post_import(&router, stream, None);
@@ -864,7 +953,7 @@ fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    shard_a.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    shard_a.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
     let healed = router.ok("GET", "/groups/g", None);
     assert_eq!(healed["contexts"], json!(["ctx_a"]), "{healed}");
@@ -947,7 +1036,7 @@ fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     // ctx_b is never created, and its batch carries no create meta —
     // stream-level parsing accepts it, so only the owning shard's own
     // dry run can refuse it.
@@ -967,7 +1056,7 @@ fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
     );
     let (query_status, hits) = router.call(
         "POST",
-        "/contexts/ctx_a/query",
+        &format!("/contexts/{}/query", shard_a.cx("ctx_a")),
         Some(json!({"subject": "x"})),
     );
     assert_eq!(query_status, 200, "{hits}");
@@ -1026,7 +1115,7 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     // The batch AND a schema land first; the group names `ghost`,
     // which is routable (so the router accepts the stream) but never
     // created, so shard B's live-state validation refuses on the real
@@ -1064,7 +1153,7 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     let stream = concat!(
         "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
@@ -1094,7 +1183,7 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     let stream = concat!(
         "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
@@ -1192,10 +1281,11 @@ fn sighup_swaps_the_route_map_and_a_broken_edit_keeps_the_old_map() {
     let shard_b = Server::start("map-hup-b");
     let router = Server::start_router("map-hup", &format!("moved = {}\n", shard_a.base), &[]);
     router.ok(
-        "PUT",
-        "/contexts/moved",
-        Some(json!({"description": "hot-reload target"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "moved", "description": "hot-reload target"})),
     );
+    let moved = shard_a.cx("moved");
 
     // The broken edit: refused whole, old map still routing.
     let map_path = router.data_dir.join("route-map");
@@ -1206,7 +1296,7 @@ fn sighup_swaps_the_route_map_and_a_broken_edit_keeps_the_old_map() {
         "the refused reload to be counted",
         || map_reload_count(&router, "refused") >= 1,
     );
-    let (status, body) = router.call("GET", "/contexts/moved", None);
+    let (status, body) = router.call("GET", &format!("/contexts/{moved}"), None);
     assert_eq!(
         status, 200,
         "a refused reload must keep the old map serving: {body}"
@@ -1220,9 +1310,12 @@ fn sighup_swaps_the_route_map_and_a_broken_edit_keeps_the_old_map() {
     eventually(
         Duration::from_secs(10),
         "the rewritten map to take over routing",
-        || router.call("GET", "/contexts/moved", None).0 == 404,
+        || router.call("GET", &format!("/contexts/{moved}"), None).0 == 404,
     );
-    assert_eq!(shard_a.call("GET", "/contexts/moved", None).0, 200);
+    assert_eq!(
+        shard_a.call("GET", &format!("/contexts/{moved}"), None).0,
+        200
+    );
     assert!(map_reload_count(&router, "applied") >= 1);
 }
 
@@ -1235,10 +1328,11 @@ fn the_map_file_watch_swaps_routing_with_no_signal() {
     let shard_b = Server::start("map-watch-b");
     let router = Server::start_router("map-watch", &format!("moved = {}\n", shard_a.base), &[]);
     router.ok(
-        "PUT",
-        "/contexts/moved",
-        Some(json!({"description": "watch target"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "moved", "description": "watch target"})),
     );
+    let moved = shard_a.cx("moved");
     std::fs::write(
         router.data_dir.join("route-map"),
         format!("moved = {}\n", shard_b.base),
@@ -1249,7 +1343,7 @@ fn the_map_file_watch_swaps_routing_with_no_signal() {
     eventually(
         Duration::from_secs(15),
         "the watch to swap the map with no signal",
-        || router.call("GET", "/contexts/moved", None).0 == 404,
+        || router.call("GET", &format!("/contexts/{moved}"), None).0 == 404,
     );
     // Exactly the one edit reloaded: the watch's baseline is the
     // digest of the bytes boot applied, so startup itself must never
@@ -1285,24 +1379,35 @@ fn shard_request_count(router: &Server, shard_url: &str, outcome: &str) -> u64 {
 /// — because keep-vs-replace are different arms of the same guard.
 #[test]
 fn merge_contexts_dedups_a_mid_move_stray_by_map_ownership() {
-    let shard_a = Server::start("stray-a");
-    let shard_b = Server::start("stray-b");
+    // A mid-move stray shares its ID across shards (a move copies the
+    // context's files, id and all — #964), so both shards mint the
+    // same deterministic sequence here to seed the collision; two rows
+    // merely sharing a NAME are two distinct contexts and both stay.
+    let deterministic = &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")][..];
+    let shard_a = Server::start_with_env("stray-a", deterministic);
+    let shard_b = Server::start_with_env("stray-b", deterministic);
     let router = Server::start_router(
         "stray",
         &format!("ctx-a = {}\nctx-b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    // Each context exists on BOTH shards (a mid-move leftover), with
-    // descriptions naming the copy so the winner is observable.
+    // Each context exists on BOTH shards (a mid-move leftover) under
+    // the SAME id, with descriptions naming the copy so the winner is
+    // observable.
     for (shard, tag) in [(&shard_a, "A"), (&shard_b, "B")] {
         for name in ["ctx-a", "ctx-b"] {
             shard.ok(
-                "PUT",
-                &format!("/contexts/{name}"),
-                Some(json!({"description": format!("{name}@{tag}")})),
+                "POST",
+                "/contexts",
+                Some(json!({"name": name, "description": format!("{name}@{tag}")})),
             );
         }
     }
+    assert_eq!(
+        shard_a.cx("ctx-a"),
+        shard_b.cx("ctx-a"),
+        "the seeded stray must actually collide on its id"
+    );
     let listing = router.ok("GET", "/contexts", None);
     assert_eq!(
         listing["total"],
@@ -1314,7 +1419,7 @@ fn merge_contexts_dedups_a_mid_move_stray_by_map_ownership() {
             .as_array()
             .expect("directory rows")
             .iter()
-            .find(|entry| entry["id"] == json!(name))
+            .find(|entry| entry["name"] == json!(name))
             .unwrap_or_else(|| panic!("{name} missing from {listing}"))["description"]
             .as_str()
             .unwrap()
@@ -1339,9 +1444,9 @@ fn operator_verbs_broadcast_and_shard_metrics_key_on_the_url() {
         &[],
     );
     router.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "銘柄"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "銘柄"})),
     );
 
     let (status, manual) = router.call("GET", "/protocol", None);
@@ -1490,7 +1595,7 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
         &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/sake", None);
+    router.ok("POST", "/contexts", Some(json!({"name": "sake"})));
 
     // A JSON array is valid JSON and not a group request. (A single
     // instance reads it as a positional struct — serde's doing — and

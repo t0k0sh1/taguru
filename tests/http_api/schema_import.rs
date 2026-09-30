@@ -45,12 +45,21 @@ fn domain_violation_batch() -> String {
 }
 
 fn seed(server: &Server, mode: &str) {
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/sake/schema", Some(document(mode)));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(document(mode)),
+    );
 }
 
 fn associations_count(server: &Server) -> serde_json::Value {
-    server.ok("GET", "/contexts/sake", None)["stats"]["associations"].clone()
+    server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["stats"]["associations"]
+        .clone()
 }
 
 /// `strict`: the domain violation refuses the whole batch before
@@ -274,20 +283,28 @@ fn a_type_declared_after_the_fact_it_types_still_validates() {
 #[test]
 fn a_batch_label_alias_resolving_to_the_reserved_label_refuses_in_every_mode() {
     let server = Server::start("schema-import-reserved");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     // Interns `schema:type` as an ordinary label before any schema
     // exists (guard 1) — the same precedent
     // `schema.rs::a_label_alias_resolving_to_the_reserved_type_label_refuses_the_put`
     // uses for `PUT /schema` itself.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "某社", "label": "schema:type", "object": "Brewery",
                       "weight": 1.0, "source": "pre.md"}]),
         ),
     );
-    server.ok("PUT", "/contexts/sake/schema", Some(document("off")));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(document("off")),
+    );
 
     let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
                  {\"alias\": \"種別\", \"canonical\": \"schema:type\", \"kind\": \"label\"}\n";

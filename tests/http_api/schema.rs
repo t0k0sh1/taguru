@@ -36,9 +36,17 @@ fn valid_document() -> serde_json::Value {
 #[test]
 fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     let server = Server::start("schema-roundtrip");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
-    let (status, body) = server.call("GET", "/contexts/sake/schema", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_schema", "{body}");
     assert!(
@@ -46,7 +54,14 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
         "{body}"
     );
 
-    let (status, body) = server.call("GET", "/contexts/nope/schema", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!(
+            "/contexts/{}/schema",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
+        None,
+    );
     assert_eq!(status, 404, "{body}");
     assert_eq!(
         body["code"], "no_context",
@@ -54,7 +69,14 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     );
     // The write side of the same distinction: a PUT against a context
     // that does not exist at all is `no_context`, not `no_schema`.
-    let (status, body) = server.call("PUT", "/contexts/nope/schema", Some(valid_document()));
+    let (status, body) = server.call(
+        "PUT",
+        &format!(
+            "/contexts/{}/schema",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
+        Some(valid_document()),
+    );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_context", "{body}");
 
@@ -62,14 +84,26 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     // installs — and is served back — states it.
     let mut stated = valid_document();
     stated["version"] = json!("2026-09-17");
-    let installed = server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
+    let installed = server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
     assert_eq!(installed, stated);
 
-    let fetched = server.ok("GET", "/contexts/sake/schema", None);
+    let fetched = server.ok(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(fetched, stated);
 
     // Spelling the version out installs the identical document.
-    let respelled = server.ok("PUT", "/contexts/sake/schema", Some(stated.clone()));
+    let respelled = server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(stated.clone()),
+    );
     assert_eq!(respelled, stated);
 }
 
@@ -80,11 +114,19 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
 #[test]
 fn install_refusals_answer_400() {
     let server = Server::start("schema-refusals");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let mut unread_version = valid_document();
     unread_version["version"] = json!("2099-01-01");
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(unread_version));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(unread_version),
+    );
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], "invalid_argument", "{body}");
     assert!(
@@ -100,19 +142,35 @@ fn install_refusals_answer_400() {
     // wrong-shaped body, refused before `install` runs.
     let mut untyped = valid_document();
     untyped.as_object_mut().unwrap().remove("type");
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(untyped.clone()));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(untyped.clone()),
+    );
     assert_eq!(status, 422, "{body}");
     untyped["schema"] = json!(1);
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(untyped));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(untyped),
+    );
     assert_eq!(status, 422, "{body}");
     let mut null_version = valid_document();
     null_version["version"] = json!(null);
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(null_version));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(null_version),
+    );
     assert_eq!(status, 422, "{body}");
 
     let mut cycle = valid_document();
     cycle["types"] = json!({"A": {"is_a": ["B"]}, "B": {"is_a": ["A"]}});
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(cycle));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(cycle),
+    );
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().unwrap().contains("cycle"), "{body}");
 
@@ -120,7 +178,11 @@ fn install_refusals_answer_400() {
     // `schema:type` is reserved for type assertions.
     let mut reserved = valid_document();
     reserved["relations"] = json!({"schema:type": {}});
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(reserved));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(reserved),
+    );
     assert_eq!(status, 400, "{body}");
     assert!(
         body["error"].as_str().unwrap().contains("schema:type"),
@@ -132,11 +194,19 @@ fn install_refusals_answer_400() {
     // wrong shape), not `install`'s 400.
     let mut unknown_field = valid_document();
     unknown_field["extra"] = json!(true);
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(unknown_field));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(unknown_field),
+    );
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["code"], "malformed_request", "{body}");
 
-    let (status, _) = server.call("GET", "/contexts/sake/schema", None);
+    let (status, _) = server.call(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         status, 404,
         "no refused PUT above may have installed anything"
@@ -149,13 +219,17 @@ fn install_refusals_answer_400() {
 #[test]
 fn a_label_alias_resolving_to_the_reserved_type_label_refuses_the_put() {
     let server = Server::start("schema-reserved-alias");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     // Legal today — guard 1: `schema:type` is an ordinary label until a
     // schema exists — and interns the label id the alias resolves
     // against.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "蔵", "label": "schema:type", "object": "Brewery",
                       "weight": 1.0, "source": "a.md"}]),
@@ -163,15 +237,23 @@ fn a_label_alias_resolving_to_the_reserved_type_label_refuses_the_put() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"labels": {"種別": "schema:type"}})),
     );
 
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(valid_document()));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().unwrap().contains("種別"), "{body}");
 
-    let (status, _) = server.call("GET", "/contexts/sake/schema", None);
+    let (status, _) = server.call(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 404, "a refused PUT must not install anything");
 }
 
@@ -183,10 +265,14 @@ fn a_label_alias_resolving_to_the_reserved_type_label_refuses_the_put() {
 #[test]
 fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
     let server = Server::start("schema-strict-switch");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema", "mode": "off", "closed_labels": false,
             "types": {"Brewery": {}, "Person": {}},
@@ -197,7 +283,7 @@ fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
     // under the relation declared above, were it enforced.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "高瀬", "label": "杜氏", "object": "青嶺酒造",
                       "weight": 1.0, "source": "a.md"}]),
@@ -206,10 +292,18 @@ fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
 
     let mut strict = valid_document();
     strict["relations"] = json!({"杜氏": {"domain": ["Brewery"], "range": ["Person"]}});
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(strict));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        server.ok("GET", "/contexts/sake/schema", None)["mode"],
+        server.ok(
+            "GET",
+            &format!("/contexts/{}/schema", server.cx("sake")),
+            None
+        )["mode"],
         "strict"
     );
 }
@@ -222,17 +316,25 @@ fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
 #[test]
 fn schema_mode_echoes_on_the_directory_and_the_put_bumps_config_revision() {
     let server = Server::start("schema-directory-echo");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
-    let single = server.ok("GET", "/contexts/sake", None);
+    let single = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(single["schema_mode"], serde_json::Value::Null);
     let before_revision = single["revision"]["config"].as_u64().unwrap();
 
     let mut warn = valid_document();
     warn["mode"] = json!("warn");
-    server.ok("PUT", "/contexts/sake/schema", Some(warn));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(warn),
+    );
 
-    let single = server.ok("GET", "/contexts/sake", None);
+    let single = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(single["schema_mode"], "warn", "{single}");
     assert_eq!(
         single["revision"]["config"].as_u64().unwrap(),
@@ -244,7 +346,7 @@ fn schema_mode_echoes_on_the_directory_and_the_put_bumps_config_revision() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["id"] == "sake")
+        .find(|row| row["name"] == "sake")
         .unwrap();
     assert_eq!(row["schema_mode"], "warn", "{row}");
 }
@@ -255,15 +357,28 @@ fn schema_mode_echoes_on_the_directory_and_the_put_bumps_config_revision() {
 #[test]
 fn a_repeated_put_of_the_same_document_does_not_bump_the_revision_again() {
     let server = Server::start("schema-idempotent-put");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
-    let revision = server.ok("GET", "/contexts/sake", None)["revision"]["config"]
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
+    let revision = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["revision"]
+        ["config"]
         .as_u64()
         .unwrap();
 
-    server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
     assert_eq!(
-        server.ok("GET", "/contexts/sake", None)["revision"]["config"]
+        server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["revision"]["config"]
             .as_u64()
             .unwrap(),
         revision,
@@ -288,12 +403,20 @@ fn a_repeated_put_of_the_same_document_does_not_bump_the_revision_again() {
 #[test]
 fn strict_refuses_a_domain_violation_before_any_write() {
     let server = Server::start("schema-strict-domain");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
@@ -324,12 +447,20 @@ fn strict_refuses_a_domain_violation_before_any_write() {
 #[test]
 fn strict_refuses_a_range_violation_and_names_the_object_path() {
     let server = Server::start("schema-strict-range");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
             {"subject": "高瀬", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
@@ -351,16 +482,28 @@ fn strict_refuses_a_range_violation_and_names_the_object_path() {
 #[test]
 fn warn_writes_and_reports_the_same_issues_a_strict_context_would_refuse() {
     let server = Server::start("schema-warn-writes");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let mut warn = valid_document();
     warn["mode"] = json!("warn");
-    server.ok("PUT", "/contexts/sake/schema", Some(warn));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(warn),
+    );
 
     let batch = json!([
         {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
         {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
     ]);
-    let (status, body) = server.call("POST", "/contexts/sake/associations", Some(batch));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(batch),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         body["result"],
@@ -389,16 +532,28 @@ fn warn_writes_and_reports_the_same_issues_a_strict_context_would_refuse() {
 #[test]
 fn off_mode_never_reports_issues_even_over_the_same_violation() {
     let server = Server::start("schema-off-silent");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let mut off = valid_document();
     off["mode"] = json!("off");
-    server.ok("PUT", "/contexts/sake/schema", Some(off));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(off),
+    );
 
     let batch = json!([
         {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
         {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
     ]);
-    let (status, body) = server.call("POST", "/contexts/sake/associations", Some(batch));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(batch),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"], json!(2), "{body}");
     assert!(
@@ -419,10 +574,18 @@ fn off_mode_never_reports_issues_even_over_the_same_violation() {
 #[test]
 fn warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap() {
     let server = Server::start("schema-warn-truncation");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let mut warn = valid_document();
     warn["mode"] = json!("warn");
-    server.ok("PUT", "/contexts/sake/schema", Some(warn));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(warn),
+    );
 
     // 21 independent subjects, each typed Person (violating 杜氏's
     // domain, [Brewery]) and each asserting 杜氏 once — one violation
@@ -438,7 +601,7 @@ fn warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap() {
         .collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(serde_json::Value::Array(batch)),
     );
     assert_eq!(status, 200, "{body}");
@@ -463,15 +626,27 @@ fn warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap() {
 #[test]
 fn a_batch_typing_its_own_subject_after_the_fact_op_still_validates() {
     let server = Server::start("schema-strict-order");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(valid_document()),
+    );
 
     let batch = json!([
         {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
         {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
         {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
     ]);
-    let (status, body) = server.call("POST", "/contexts/sake/associations", Some(batch));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(batch),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"], json!(3), "{body}");
     assert!(!body.as_object().unwrap().contains_key("issues"), "{body}");
@@ -484,10 +659,14 @@ fn a_batch_typing_its_own_subject_after_the_fact_op_still_validates() {
 #[test]
 fn closed_labels_refuses_an_undeclared_label() {
     let server = Server::start("schema-closed-labels");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "strict",
@@ -499,7 +678,7 @@ fn closed_labels_refuses_an_undeclared_label() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "未知の関係", "object": "個人A", "weight": 1.0, "source": "a.md"},
         ])),

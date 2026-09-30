@@ -39,7 +39,7 @@
               "type": "object"
             },
             "context": {
-              "description": "Context name (from list_contexts)",
+              "description": "Context id (the id column of list_contexts, a UUID)",
               "type": "string"
             },
             "dice_floor": {

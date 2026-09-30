@@ -91,7 +91,7 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     );
     let passages = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(serde_json::json!({"sources": ["clean.md", "leaky.md"]})),
     );
     assert_eq!(
@@ -314,8 +314,10 @@ fn a_remote_dry_run_previews_every_chunk_and_writes_nothing() {
     assert!(stdout.contains("dry run:"), "{stdout}");
     assert!(stdout.contains("nothing applied"), "{stdout}");
 
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(status, 404, "a dry run must write nothing");
+    assert!(
+        server.try_cx("sake").is_none(),
+        "a dry run must write nothing"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
 }
@@ -414,8 +416,10 @@ fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
     );
     assert_eq!(outcome["associations"], serde_json::json!(1));
 
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(status, 404, "a dry run must write nothing");
+    assert!(
+        server.try_cx("sake").is_none(),
+        "a dry run must write nothing"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
 }
@@ -456,7 +460,11 @@ fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
         "{stdout}"
     );
 
-    let (_, export) = server.call("GET", "/contexts/sake/export", None);
+    let (_, export) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("sake")),
+        None,
+    );
     let export_text = export.as_str().expect("export is raw text, not JSON");
     for i in 0..6 {
         assert!(
@@ -497,8 +505,10 @@ fn a_lone_batch_the_server_still_413s_is_a_hard_error_naming_both_remedies() {
     assert!(stderr.contains("TAGURU_MAX_BODY_BYTES"), "{stderr}");
     assert!(stderr.contains("split"), "{stderr}");
 
-    let (status, _) = server.call("GET", "/contexts/sake", None);
-    assert_eq!(status, 404, "a refused lone batch must apply nothing");
+    assert!(
+        server.try_cx("sake").is_none(),
+        "a refused lone batch must apply nothing"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
 }
@@ -610,11 +620,10 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
         assert!(stderr.contains(&line), "missing {line:?} in: {stderr}");
     }
 
-    let (status, _) = server.call("GET", "/contexts/a", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("a")), None);
     assert_eq!(status, 200, "the batch before the refusal must have landed");
-    let (status, _) = server.call("GET", "/contexts/c", None);
-    assert_eq!(
-        status, 404,
+    assert!(
+        server.try_cx("c").is_none(),
         "the batch after the refusal must never have been sent"
     );
 

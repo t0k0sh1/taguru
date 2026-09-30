@@ -514,6 +514,11 @@ interface ChunkRecord {
  * modulo TS being async-only (no separate `a`-prefixed variants).
  */
 export class TaguruIngester {
+  /**
+   * The target `context`'s display NAME — what the import header carries
+   * (and creates, with `create_context`); reads resolve it to the
+   * context's id through the directory (#964).
+   */
   readonly context: string;
   readonly source_key: string;
   readonly questions: number;
@@ -1003,7 +1008,15 @@ export class TaguruIngester {
     if (this.refresh_embeddings) {
       this.emit({ kind: "embedding_refresh_started", source: options.source });
       try {
-        const refreshResult = await this.client.context(this.context).refreshEmbeddings();
+        // The import above just created (or found) the context by
+        // name; the refresh addresses it by id.
+        const refreshContextId = await this.contextId();
+        if (refreshContextId === null) {
+          throw new NotFoundError(`context ${JSON.stringify(this.context)} not found`, {
+            status: 404,
+          });
+        }
+        const refreshResult = await this.client.context(refreshContextId).refreshEmbeddings();
         this.emit({
           kind: "embedding_refresh_completed",
           source: options.source,
@@ -1095,12 +1108,43 @@ export class TaguruIngester {
   }
 
   /**
+   * The id behind the ingester's context NAME, read off the directory —
+   * `null` when nothing carries the name yet (first ingest) or a listing
+   * fails; several contexts sharing it throw, since writing into "one of
+   * them" would be a coin flip.
+   */
+  /** @internal — the S3 connector's deletion sweep resolves through it too. */
+  async contextId(): Promise<string | null> {
+    const matches: string[] = [];
+    try {
+      for await (const row of this.client.contexts.iter()) {
+        if (row.name === this.context) {
+          matches.push(row.id);
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `context name ${JSON.stringify(this.context)} is ambiguous: ` +
+          `${matches.length} contexts share it`,
+      );
+    }
+    return matches[0] ?? null;
+  }
+
+  /**
    * The `context`'s live relation vocabulary — an advantage the offline
    * extractor structurally lacks. Best-effort: an absent `context` is fine.
    */
   private async fetchVocabulary(): Promise<string[]> {
+    const contextId = await this.contextId();
+    if (contextId === null) {
+      return [];
+    }
     try {
-      const page = await this.client.context(this.context).listLabels({
+      const page = await this.client.context(contextId).listLabels({
         limit: this.vocabulary_cap,
       });
       return page.labels;
@@ -1118,8 +1162,12 @@ export class TaguruIngester {
    * `context` is fine, and this ingester works unchanged either way.
    */
   private async fetchSchema(): Promise<SchemaDocument | null> {
+    const contextId = await this.contextId();
+    if (contextId === null) {
+      return null;
+    }
     try {
-      return await this.client.context(this.context).getSchema();
+      return await this.client.context(contextId).getSchema();
     } catch (error) {
       if (error instanceof NotFoundError) {
         return null;

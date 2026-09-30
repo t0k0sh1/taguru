@@ -104,6 +104,52 @@ impl Server {
         common::context_stem(&self.data_dir, name)
     }
 
+    /// The path id for the `context` named `name` — shorthand for
+    /// [`Server::context_stem`] wherever a test creates by display
+    /// name and then builds `/contexts/{id}/…` paths (#964). Panics
+    /// when no sidecar records the name, like `context_stem` itself.
+    #[allow(dead_code)]
+    pub fn cx(&self, name: &str) -> String {
+        self.context_stem(name)
+    }
+
+    /// [`Server::cx`] for a name that may not resolve — `None` where
+    /// `cx` panics. For asserting absence, or for paths that must 404.
+    #[allow(dead_code)]
+    pub fn try_cx(&self, name: &str) -> Option<String> {
+        common::try_context_stem(&self.data_dir, name)
+    }
+
+    /// [`Server::cx`] over HTTP (`GET /contexts`) instead of the data
+    /// directory — the only resolver that works on a ROUTER handle,
+    /// whose scratch dir holds a route map and no meta sidecars.
+    /// Panics when no directory row carries the name.
+    #[allow(dead_code)]
+    pub fn cx_http(&self, name: &str) -> String {
+        let listing = self.ok("GET", "/contexts", None);
+        listing["contexts"]
+            .as_array()
+            .expect("directory rows")
+            .iter()
+            .find(|row| row["name"] == json!(name))
+            .unwrap_or_else(|| panic!("no directory row is named '{name}': {listing}"))["id"]
+            .as_str()
+            .expect("a row id")
+            .to_string()
+    }
+
+    /// `POST /contexts` with `name`, asserting success and handing
+    /// back the minted id from the response row — the one-liner most
+    /// tests want where the old wire's `PUT /contexts/{name}` stood.
+    #[allow(dead_code)]
+    pub fn create_context(&self, name: &str) -> String {
+        let row = self.ok("POST", "/contexts", Some(json!({ "name": name })));
+        row["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("create must answer the row: {row}"))
+            .to_string()
+    }
+
     /// Sends `signal` (e.g. "-HUP") to the running server without
     /// stopping it — the keyring-reload trigger.
     #[cfg(unix)]

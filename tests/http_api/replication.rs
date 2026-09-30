@@ -107,13 +107,13 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
 
     // A context exercising both log lanes and the alias table…
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
             {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0, "source": "第3段落"},
@@ -121,14 +121,14 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"あおみね": "青嶺酒造"}})),
     );
     // A schema too (ADR 0009 §13, #384): the ship→restore round trip
@@ -138,7 +138,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     // actually exercises it rather than passing vacuously.
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "warn",
@@ -169,7 +169,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     // Writes that land AFTER the baseline ride the tail path.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
         ])),
@@ -299,7 +299,7 @@ fn a_restore_that_fails_partway_cleans_up_so_a_retry_succeeds() {
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
         ],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     wait_for("the baseline to complete", || {
         bucket
             .join("gen-00000000000000000001")
@@ -392,7 +392,7 @@ fn a_restore_racing_an_active_writer_is_refused_and_leaves_its_data_intact() {
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
         ],
     );
-    source.ok("PUT", "/contexts/sake", Some(json!({})));
+    source.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     wait_for("the baseline to complete", || {
         bucket
             .join("gen-00000000000000000001")
@@ -408,9 +408,9 @@ fn a_restore_racing_an_active_writer_is_refused_and_leaves_its_data_intact() {
     let target = scratch("racing-restore-target");
     let writer = Server::start_on("repl-racing-target", target.clone());
     writer.ok(
-        "PUT",
-        "/contexts/precious",
-        Some(json!({"description": "must survive"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "precious", "description": "must survive"})),
     );
 
     // The restore must be refused by the lock, not by "not empty" —
@@ -439,7 +439,7 @@ fn a_restore_racing_an_active_writer_is_refused_and_leaves_its_data_intact() {
     // is still running (the same process, the same lock, the whole
     // time): still there, still answering, not wiped by the racing
     // restore's cleanup path.
-    let (status, body) = writer.call("GET", "/contexts/precious", None);
+    let (status, body) = writer.call("GET", &format!("/contexts/{}", writer.cx("precious")), None);
     assert_eq!(status, 200, "{body}");
 
     let target_data_dir = writer.stop_gracefully();
@@ -471,9 +471,9 @@ fn a_pre_manifest_generation_is_refused_not_silently_restored() {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     let generation = bucket.join("gen-00000000000000000001");
     wait_for("the baseline to complete", || {
@@ -483,7 +483,7 @@ fn a_pre_manifest_generation_is_refused_not_silently_restored() {
     // A write AFTER the baseline rides the wal tail…
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
         ])),
@@ -546,9 +546,9 @@ fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     wait_for("the baseline to complete", || {
         bucket
@@ -560,7 +560,7 @@ fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
     // A write grows the local log …
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "第2段落"},
         ])),
@@ -604,7 +604,7 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
         ],
     );
-    first.ok("PUT", "/contexts/sake", Some(json!({})));
+    first.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     let sake_stem = first.context_stem("sake");
     wait_for("the first writer's baseline", || {
         bucket
@@ -633,7 +633,7 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
     // cycle — give it one.
     first.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", first.cx("sake")),
         Some(json!([
             {"subject": "a", "label": "b", "object": "c", "weight": 1.0},
         ])),
@@ -651,7 +651,7 @@ fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
     // answering from its local truth.
     let page = first.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", first.cx("sake")),
         Some(json!({"cue": "a", "limit": 3})),
     );
     assert_eq!(page["total"], json!(1));
@@ -687,33 +687,37 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
     // not (the lazy half) — plus passages and a group, so every file
     // family crosses the bucket.
     first.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     first.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", first.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
         ])),
     );
     first.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", first.cx("sake")),
         Some(json!({"passages": {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
     );
     first.ok(
-        "PUT",
-        "/contexts/glossary",
-        Some(json!({"description": "用語集"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "glossary", "description": "用語集"})),
     );
-    first.ok("PATCH", "/contexts/glossary", Some(json!({"pinned": true})));
+    first.ok(
+        "PATCH",
+        &format!("/contexts/{}", first.cx("glossary")),
+        Some(json!({"pinned": true})),
+    );
     first.ok(
         "POST",
-        "/contexts/glossary/associations",
+        &format!("/contexts/{}/associations", first.cx("glossary")),
         Some(json!([
             {"subject": "杜氏", "label": "意味", "object": "醸造責任者", "weight": 1.0},
         ])),
@@ -765,20 +769,20 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry["id"].as_str().unwrap())
+        .map(|entry| entry["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["glossary", "sake"], "{page}");
 
     // First touch serves the hydrated truth: recall and passages both.
     let recall = second.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", second.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "limit": 5})),
     );
     assert_eq!(recall["total"], json!(1), "{recall}");
     let hits = second.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", second.cx("sake")),
         Some(json!({"query": "伏流水", "limit": 3})),
     );
     assert!(!hits["hits"].as_array().unwrap().is_empty(), "{hits}");
@@ -837,7 +841,7 @@ fn deposing_a_live_writer_needs_stated_intent_but_a_retired_one_does_not() {
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
         ],
     );
-    first.ok("PUT", "/contexts/sake", Some(json!({})));
+    first.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     wait_for("the holder's baseline", || {
         bucket
             .join("gen-00000000000000000001")
@@ -916,7 +920,7 @@ fn context_names(server: &Server) -> Vec<String> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry["id"].as_str().unwrap().to_string())
+        .map(|entry| entry["name"].as_str().unwrap().to_string())
         .collect()
 }
 
@@ -934,20 +938,20 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // The same spread the bucket-boot test ships: a pinned context
     // (the eager half), a lazy one with passages, and a group.
     writer.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     writer.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", writer.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
         ])),
     );
     writer.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", writer.cx("sake")),
         Some(json!({"passages": {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
@@ -959,7 +963,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // directory above).
     writer.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", writer.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "warn",
@@ -969,11 +973,15 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         })),
     );
     writer.ok(
-        "PUT",
-        "/contexts/glossary",
-        Some(json!({"description": "用語集"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "glossary", "description": "用語集"})),
     );
-    writer.ok("PATCH", "/contexts/glossary", Some(json!({"pinned": true})));
+    writer.ok(
+        "PATCH",
+        &format!("/contexts/{}", writer.cx("glossary")),
+        Some(json!({"pinned": true})),
+    );
     writer.ok(
         "PUT",
         "/groups/breweries",
@@ -1021,13 +1029,13 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // directory — all serve the lineage.
     let recall = replica.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", replica.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "limit": 5})),
     );
     assert_eq!(recall["total"], json!(1), "{recall}");
     let hits = replica.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", replica.cx("sake")),
         Some(json!({"query": "伏流水", "limit": 3})),
     );
     assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
@@ -1037,12 +1045,20 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // gate like every other retrieval GET. `glossary` never installed
     // one, so its 404 is the ordinary "no schema installed" answer,
     // not a replica refusal.
-    let (status, answer) = replica.call("GET", "/contexts/glossary/schema", None);
+    let (status, answer) = replica.call(
+        "GET",
+        &format!("/contexts/{}/schema", replica.cx("glossary")),
+        None,
+    );
     assert_eq!(status, 404, "{answer}");
     assert_eq!(answer["code"], "no_schema", "{answer}");
     // `sake`'s schema installed on the writer must have tailed to the
     // replica along with everything else (ADR 0009 §13, #384).
-    let sake_schema = replica.ok("GET", "/contexts/sake/schema", None);
+    let sake_schema = replica.ok(
+        "GET",
+        &format!("/contexts/{}/schema", replica.cx("sake")),
+        None,
+    );
     assert_eq!(sake_schema["mode"], "warn", "{sake_schema}");
     assert_eq!(
         sake_schema["types"],
@@ -1052,11 +1068,15 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // `schema/audit` and `schema/validate` (#385, ADR 0009 §12.5) are
     // Role::Read too — neither writes anything, so both pass the
     // replica gate exactly like `GET /schema` above.
-    let audit = replica.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = replica.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", replica.cx("sake")),
+        None,
+    );
     assert_eq!(audit["total"], json!(0), "{audit}");
     let validated = replica.ok(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", replica.cx("sake")),
         Some(json!({"document": {
             "type": "schema", "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {}
@@ -1077,26 +1097,31 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // Writes refuse crisply, naming the writer — the ingest loop, the
     // operator verbs, and a dispatched MCP write tool alike. Read
     // tools on /mcp work unchanged.
+    let sake = replica.cx("sake");
     for (method, path, body) in [
-        ("PUT", "/contexts/fresh", Some(json!({}))),
         (
             "POST",
-            "/contexts/sake/associations",
+            "/contexts".to_string(),
+            Some(json!({"name": "fresh"})),
+        ),
+        (
+            "POST",
+            format!("/contexts/{sake}/associations"),
             Some(json!([{"subject": "a", "label": "l", "object": "o", "weight": 1.0}])),
         ),
         (
             "PUT",
-            "/contexts/sake/schema",
+            format!("/contexts/{sake}/schema"),
             Some(json!({
                 "type": "schema", "mode": "off", "closed_labels": false,
                 "types": {}, "relations": {}
             })),
         ),
-        ("DELETE", "/contexts/sake", None),
-        ("POST", "/flush", None),
-        ("POST", "/contexts/sake/compact", None),
+        ("DELETE", format!("/contexts/{sake}"), None),
+        ("POST", "/flush".to_string(), None),
+        ("POST", format!("/contexts/{sake}/compact"), None),
     ] {
-        let (status, answer) = replica.call(method, path, body);
+        let (status, answer) = replica.call(method, &path, body);
         assert_eq!(status, 403, "{method} {path} -> {answer}");
         assert_eq!(answer["code"], "read_only_replica", "{answer}");
         assert!(
@@ -1132,12 +1157,16 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     assert_eq!(answer["code"], "read_only_replica", "{answer}");
     drop(oauth_replica);
 
-    let read_tool = replica.call_tool(1, "recall", json!({"context": "sake", "cue": "青嶺酒造"}));
+    let read_tool = replica.call_tool(
+        1,
+        "recall",
+        json!({"context": replica.cx("sake"), "cue": "青嶺酒造"}),
+    );
     assert_ne!(read_tool["isError"], json!(true), "{read_tool}");
     let write_tool = replica.call_tool(
         2,
         "add_associations",
-        json!({"context": "sake", "associations": [
+        json!({"context": replica.cx("sake"), "associations": [
             {"subject": "a", "label": "l", "object": "o", "weight": 1.0}
         ]}),
     );
@@ -1154,20 +1183,20 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // and the replica follows within shipping lag + poll interval.
     writer.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", writer.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "銘柄", "object": "雲居", "weight": 1.0},
         ])),
     );
     writer.ok(
-        "PUT",
-        "/contexts/news",
-        Some(json!({"description": "新着"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "news", "description": "新着"})),
     );
     wait_for("the replica to tail the new fact", || {
         let recall = replica.ok(
             "POST",
-            "/contexts/sake/recall",
+            &format!("/contexts/{}/recall", replica.cx("sake")),
             Some(json!({"cue": "青嶺酒造", "limit": 5})),
         );
         recall["total"] == json!(2)
@@ -1185,7 +1214,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // A deletion propagates: the context leaves the directory AND its
     // files leave the replica's disk.
     let news_stem = replica.context_stem("news");
-    writer.ok("DELETE", "/contexts/news", None);
+    writer.ok("DELETE", &format!("/contexts/{}", writer.cx("news")), None);
     wait_for("the deletion to propagate", || {
         !context_names(&replica).contains(&"news".to_string())
     });
@@ -1215,13 +1244,13 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
         ],
     );
     writer.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     writer.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", writer.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0},
         ])),
@@ -1254,7 +1283,7 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     // steady state a promotion starts from.
     writer.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", writer.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "銘柄", "object": "雲居", "weight": 1.0},
         ])),
@@ -1263,7 +1292,7 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
         wait_for(&format!("the {name} to reach the writer's tip"), || {
             let recall = replica.ok(
                 "POST",
-                "/contexts/sake/recall",
+                &format!("/contexts/{}/recall", replica.cx("sake")),
                 Some(json!({"cue": "青嶺酒造", "limit": 5})),
             );
             recall["total"] == json!(2)
@@ -1328,14 +1357,14 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     );
     promoted.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", promoted.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "创業", "object": "1897年", "weight": 1.0},
         ])),
     );
     let recall = promoted.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", promoted.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "limit": 5})),
     );
     assert_eq!(
@@ -1356,7 +1385,7 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     wait_for("the pool replica to follow the promoted lineage", || {
         let recall = pool.ok(
             "POST",
-            "/contexts/sake/recall",
+            &format!("/contexts/{}/recall", pool.cx("sake")),
             Some(json!({"cue": "青嶺酒造", "limit": 5})),
         );
         recall["total"] == json!(3)
@@ -1364,7 +1393,7 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     wait_for("the pool replica's generation gauge to advance", || {
         metrics_text(&pool).contains("taguru_replica_generation 2")
     });
-    let (status, answer) = pool.call("PUT", "/contexts/fresh", Some(json!({})));
+    let (status, answer) = pool.call("POST", "/contexts", Some(json!({"name": "fresh", })));
     assert_eq!(status, 403, "{answer}");
     assert_eq!(answer["code"], "read_only_replica", "{answer}");
 

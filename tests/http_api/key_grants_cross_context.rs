@@ -36,19 +36,9 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // grant: admin, everywhere.
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/sake",
-            Some(json!({"description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
-    assert_eq!(
-        call(
-            "PUT",
-            "/contexts/bunko",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"})),
             "atok"
         )
         .0,
@@ -57,7 +47,17 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/associations",
+            "/contexts",
+            Some(json!({"name": "bunko", "description": "d"})),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "POST",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(fact.clone()),
             "atok"
         )
@@ -67,7 +67,13 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // The key with no grant entry (default admin) clears every role
     // gate, drift/audit included.
     assert_eq!(
-        call("POST", "/contexts/sake/drift/audit", None, "atok").0,
+        call(
+            "POST",
+            &format!("/contexts/{}/drift/audit", server.cx("sake")),
+            None,
+            "atok"
+        )
+        .0,
         200
     );
 
@@ -75,7 +81,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/recall",
+            &format!("/contexts/{}/recall", server.cx("sake")),
             Some(json!({"cue": "蔵"})),
             "rtok"
         )
@@ -85,7 +91,13 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // drift/audit is Role::Read too: the reader key reaches it directly,
     // not just via the role hierarchy other checks here exercise.
     assert_eq!(
-        call("POST", "/contexts/sake/drift/audit", None, "rtok").0,
+        call(
+            "POST",
+            &format!("/contexts/{}/drift/audit", server.cx("sake")),
+            None,
+            "rtok"
+        )
+        .0,
         200
     );
     // schema/validate (#385, ADR 0009 §12.5) is Role::Read too — it
@@ -95,7 +107,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/schema/validate",
+            &format!("/contexts/{}/schema/validate", server.cx("sake")),
             Some(json!({"document": {
                 "type": "schema", "mode": "off", "closed_labels": false,
                 "types": {}, "relations": {}
@@ -111,7 +123,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/evidence",
+            &format!("/contexts/{}/evidence", server.cx("sake")),
             Some(json!({"origins": "蔵"})),
             "rtok"
         )
@@ -120,7 +132,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     );
     let (status, refusal) = call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(fact.clone()),
         "rtok",
     );
@@ -129,12 +141,30 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         refusal["error"].as_str().unwrap().contains("needs 'write'"),
         "{refusal}"
     );
-    assert_eq!(call("DELETE", "/contexts/sake", None, "rtok").0, 403);
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("/contexts/{}", server.cx("sake")),
+            None,
+            "rtok"
+        )
+        .0,
+        403
+    );
     // ADR 0009 §12.5: `GET /schema` sits beside the other retrieval
     // GETs (a reader reaches it), `PUT /schema` is Write — an ingest
     // verb, not Admin — so a reader is refused it exactly like the
     // associations write above.
-    assert_eq!(call("GET", "/contexts/sake/schema", None, "rtok").0, 404);
+    assert_eq!(
+        call(
+            "GET",
+            &format!("/contexts/{}/schema", server.cx("sake")),
+            None,
+            "rtok"
+        )
+        .0,
+        404
+    );
     let schema_document = json!({
         "type": "schema", "mode": "off", "closed_labels": false,
         "types": {}, "relations": {}
@@ -142,7 +172,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "PUT",
-            "/contexts/sake/schema",
+            &format!("/contexts/{}/schema", server.cx("sake")),
             Some(schema_document.clone()),
             "rtok"
         )
@@ -154,7 +184,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/bunko/associations",
+            &format!("/contexts/{}/associations", server.cx("bunko")),
             Some(fact.clone()),
             "wtok"
         )
@@ -164,7 +194,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "PUT",
-            "/contexts/bunko/schema",
+            &format!("/contexts/{}/schema", server.cx("bunko")),
             Some(schema_document),
             "wtok"
         )
@@ -175,7 +205,13 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // The role hierarchy (Admin ⊃ Write ⊃ Read) puts drift/audit's
     // Role::Read within reach of a write key too.
     assert_eq!(
-        call("POST", "/contexts/bunko/drift/audit", None, "wtok").0,
+        call(
+            "POST",
+            &format!("/contexts/{}/drift/audit", server.cx("bunko")),
+            None,
+            "wtok"
+        )
+        .0,
         200
     );
     // schema/audit (#385, ADR 0009 §12.5) is Role::Read too — `bunko`
@@ -183,10 +219,25 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // reaches schema/audit directly, the same way it reaches
     // drift/audit.
     assert_eq!(
-        call("POST", "/contexts/bunko/schema/audit", None, "rtok").0,
+        call(
+            "POST",
+            &format!("/contexts/{}/schema/audit", server.cx("bunko")),
+            None,
+            "rtok"
+        )
+        .0,
         200
     );
-    assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("/contexts/{}", server.cx("bunko")),
+            None,
+            "wtok"
+        )
+        .0,
+        403
+    );
     assert_eq!(call("POST", "/flush", None, "wtok").0, 403);
 
     // Flush is server-wide (it names every flushed context), so a
@@ -209,14 +260,19 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(fact.clone()),
             "stok"
         )
         .0,
         200
     );
-    let (status, outside) = call("POST", "/contexts/bunko/associations", Some(fact), "stok");
+    let (status, outside) = call(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("bunko")),
+        Some(fact),
+        "stok",
+    );
     assert_eq!(status, 403);
     assert!(
         outside["error"]
@@ -225,18 +281,33 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
             .contains("no grant on context 'bunko'"),
         "{outside}"
     );
-    assert_eq!(call("GET", "/contexts/bunko", None, "stok").0, 403);
+    assert_eq!(
+        call(
+            "GET",
+            &format!("/contexts/{}", server.cx("bunko")),
+            None,
+            "stok"
+        )
+        .0,
+        403
+    );
     // Role::Read still bows to the context grant: sake-scoped write
     // reaches bunko's associations no further than bunko's drift/audit.
     assert_eq!(
-        call("POST", "/contexts/bunko/drift/audit", None, "stok").0,
+        call(
+            "POST",
+            &format!("/contexts/{}/drift/audit", server.cx("bunko")),
+            None,
+            "stok"
+        )
+        .0,
         403
     );
     let (status, listed) = call("GET", "/contexts", None, "stok");
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(1), "{listed}");
     assert_eq!(
-        listed["result"]["contexts"][0]["id"],
+        listed["result"]["contexts"][0]["name"],
         json!("sake"),
         "{listed}"
     );
@@ -301,7 +372,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         Some(json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "add_associations", "arguments": {
-                "context": "sake",
+                "context": server.cx("sake"),
                 "associations": [{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0}],
             }},
         })),
@@ -322,7 +393,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         "/mcp",
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "recall", "arguments": {"context": "sake", "cue": "蔵"}},
+            "params": {"name": "recall", "arguments": {"context": server.cx("sake"), "cue": "蔵"}},
         })),
         Some("rtok"),
     );
@@ -365,10 +436,10 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
                     "weight": 2.0, "source": "no.md"}]),
         ),
     ] {
-        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok("POST", "/contexts", Some(json!({"name": name, })));
         server.ok(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", server.cx(name)),
             Some(fact),
         );
     }
@@ -426,12 +497,12 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     // per-context rank — both rank-0 hits lead, in target-list order.
     server.ok(
         "POST",
-        "/contexts/izakaya/sources",
+        &format!("/contexts/{}/sources", server.cx("izakaya")),
         Some(json!({"passages": {"iz.md": "蔵元の燗酒は冬の名物。"}})),
     );
     server.ok(
         "POST",
-        "/contexts/sakagura/sources",
+        &format!("/contexts/{}/sources", server.cx("sakagura")),
         Some(json!({"passages": {"sk.md": "杜氏の高瀬は蔵元を任されている。"}})),
     );
     let hits = server.ok(
@@ -526,10 +597,10 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
 fn cross_recall_merges_four_targets_gathered_concurrently() {
     let server = Server::start("cross-concurrent");
     for (name, weight) in [("c1", 1.0), ("c2", 2.0), ("c3", 3.0), ("c4", 4.0)] {
-        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok("POST", "/contexts", Some(json!({"name": name, })));
         server.ok(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", server.cx(name)),
             Some(json!([
                 {"subject": "蔵", "label": "l", "object": format!("o-{name}"), "weight": weight}
             ])),
@@ -569,10 +640,10 @@ fn cross_recall_merges_four_targets_gathered_concurrently() {
 fn cross_recall_pages_with_a_cursor_across_contexts() {
     let server = Server::start("cross-cursor");
     for name in ["zeta", "alpha"] {
-        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok("POST", "/contexts", Some(json!({"name": name, })));
         server.ok(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", server.cx(name)),
             Some(json!([
                 {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0}
             ])),
@@ -660,10 +731,10 @@ fn cross_context_search_resolves_groups_beside_contexts() {
                     "weight": 1.0, "source": "sk.md"}]),
         ),
     ] {
-        server.ok("PUT", &format!("/contexts/{name}"), Some(json!({})));
+        server.ok("POST", "/contexts", Some(json!({"name": name, })));
         server.ok(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", server.cx(name)),
             Some(fact),
         );
     }
@@ -708,12 +779,12 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     // members follow — sakagura outranks izakaya arriving via sakaya.
     server.ok(
         "POST",
-        "/contexts/izakaya/sources",
+        &format!("/contexts/{}/sources", server.cx("izakaya")),
         Some(json!({"passages": {"iz.md": "蔵元の燗酒は冬の名物。"}})),
     );
     server.ok(
         "POST",
-        "/contexts/sakagura/sources",
+        &format!("/contexts/{}/sources", server.cx("sakagura")),
         Some(json!({"passages": {"sk.md": "杜氏の高瀬は蔵元を任されている。"}})),
     );
     let hits = server.ok(
@@ -828,7 +899,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     };
     for name in ["sake", "bunko"] {
         assert_eq!(
-            call("PUT", &format!("/contexts/{name}"), Some(json!({})), "atok").0,
+            call("POST", "/contexts", Some(json!({"name": name})), "atok").0,
             200
         );
     }
@@ -919,7 +990,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     ] {
         let (status, _) = call(
             "POST",
-            &format!("/contexts/{context}/associations"),
+            &format!("/contexts/{}/associations", server.cx(context)),
             Some(json!([{"subject": fact["subject"], "label": fact["label"],
                          "object": fact["object"], "weight": 1.0, "source": "x.md"}])),
             "atok",
@@ -1020,13 +1091,18 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         finish(response.expect("request must assemble"), method, path).0
     };
     assert_eq!(
-        call("PUT", "/contexts/sake", Some(json!({"description": "d"}))),
+        call(
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"}))
+        ),
         200
     );
+    let sake = common::context_stem(&data_dir, "sake");
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{sake}/associations"),
             Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
                          "weight": 1.0, "source": "a.md"}])),
         ),
@@ -1036,7 +1112,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/aliases",
+            &format!("/contexts/{}/aliases", sake),
             Some(json!({"concepts": {"Kura": "蔵"}})),
         ),
         200
@@ -1044,7 +1120,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     assert_eq!(
         call(
             "DELETE",
-            "/contexts/sake/aliases",
+            &format!("/contexts/{}/aliases", sake),
             Some(json!({"concepts": ["Kura"]})),
         ),
         200
@@ -1063,16 +1139,19 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         .status()
         .as_u16();
     assert_eq!(import_status, 200);
-    assert_eq!(call("POST", "/contexts/sake/compact", None), 200);
+    assert_eq!(
+        call("POST", &format!("/contexts/{}/compact", sake), None),
+        200
+    );
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/sources/retract",
+            &format!("/contexts/{sake}/sources/retract"),
             Some(json!({"source": "a.md"})),
         ),
         200
     );
-    assert_eq!(call("DELETE", "/contexts/sake", None), 200);
+    assert_eq!(call("DELETE", &format!("/contexts/{sake}"), None), 200);
 
     // Stop the server so stderr reaches EOF, then judge the whole log.
     let pid = child.id().to_string();
@@ -1093,10 +1172,10 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         .find(|record| {
             record["fields"]["message"] == json!("http")
                 && record["fields"]["method"] == json!("DELETE")
-                && record["fields"]["route"] == json!("/contexts/{name}")
+                && record["fields"]["route"] == json!("/contexts/{id}")
         })
         .expect("an access-log line for the DELETE must appear");
-    assert_eq!(access_delete["fields"]["context"], json!("sake"));
+    assert_eq!(access_delete["fields"]["context"], json!(sake));
     assert_eq!(access_delete["fields"]["key"], json!("default"));
 
     let retracted = lines
@@ -1106,7 +1185,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
                 && record["fields"]["message"] == json!("source retracted")
         })
         .expect("the retraction must leave an audit line");
-    assert_eq!(retracted["fields"]["context"], json!("sake"));
+    assert_eq!(retracted["fields"]["context"], json!(sake));
     assert_eq!(retracted["fields"]["source"], json!("a.md"));
     assert_eq!(retracted["fields"]["key"], json!("default"));
     assert_eq!(retracted["fields"]["associations_touched"], json!(1));
@@ -1118,7 +1197,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
                 && record["fields"]["message"] == json!("context deleted")
         })
         .expect("the deletion must leave an audit line");
-    assert_eq!(deleted["fields"]["context"], json!("sake"));
+    assert_eq!(deleted["fields"]["context"], json!(sake));
     assert_eq!(deleted["fields"]["files_removed"], json!(true));
 
     // Every destructive operation — not just delete/retract — leaves an
@@ -1134,17 +1213,17 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
             .unwrap_or_else(|| panic!("missing audit line: {message}"))
     };
     let aliases_registered = audit_line("aliases registered");
-    assert_eq!(aliases_registered["fields"]["context"], json!("sake"));
+    assert_eq!(aliases_registered["fields"]["context"], json!(sake));
     assert_eq!(aliases_registered["fields"]["key"], json!("default"));
     let aliases_removed = audit_line("aliases removed");
-    assert_eq!(aliases_removed["fields"]["context"], json!("sake"));
+    assert_eq!(aliases_removed["fields"]["context"], json!(sake));
     assert_eq!(aliases_removed["fields"]["key"], json!("default"));
     let imported = audit_line("import source applied");
     assert_eq!(imported["fields"]["context"], json!("sake"));
     assert_eq!(imported["fields"]["source"], json!("b.md"));
     assert_eq!(imported["fields"]["key"], json!("default"));
     let compacted = audit_line("context compacted");
-    assert_eq!(compacted["fields"]["context"], json!("sake"));
+    assert_eq!(compacted["fields"]["context"], json!(sake));
     assert_eq!(compacted["fields"]["key"], json!("default"));
 
     let _ = std::fs::remove_dir_all(&data_dir);

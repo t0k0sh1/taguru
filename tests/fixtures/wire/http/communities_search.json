@@ -54,6 +54,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/communities/search",
+  "route": "/contexts/{id}/communities/search",
   "status": 200
 }

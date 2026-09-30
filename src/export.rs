@@ -93,7 +93,7 @@ must not be running; the directory lock enforces it).
   --url URL    export from a RUNNING server instead of the local data
                directory: GET /contexts and GET /groups are enumerated
                (keyset-paged) and each item is fetched from
-               GET /contexts/{name}/export / GET /groups/{name}/export
+               GET /contexts/{id}/export / GET /groups/{name}/export
                — the same files land in --out. Auth rides
                TAGURU_API_TOKEN (or the first name:token entry of
                TAGURU_API_TOKENS), the same variables the server
@@ -818,14 +818,34 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
         }
     };
 
+    // Explicit arguments are context IDS, same as the remote path
+    // (#964); the enumeration reads both id and display name from the
+    // directory rows.
     let explicit = !names.is_empty();
-    let names = if explicit {
-        names
+    let mut failures = 0usize;
+    let total = if explicit { names.len() } else { 0 };
+    let contexts: Vec<(String, String)> = if explicit {
+        let mut resolved = Vec::with_capacity(names.len());
+        for id in &names {
+            match state.directory_entry_by_id(id) {
+                Some(entry) => resolved.push((entry.id, entry.name)),
+                // A per-item failure, like a failed render — the rest
+                // of the subset still exports.
+                None => {
+                    eprintln!(
+                        "taguru: export: context '{id}': no such context (arguments take the \
+                         id column of GET /contexts)"
+                    );
+                    failures += 1;
+                }
+            }
+        }
+        resolved
     } else {
-        let all: Vec<String> = state
+        let all: Vec<(String, String)> = state
             .directory()
             .into_iter()
-            .map(|entry| entry.name)
+            .map(|entry| (entry.id, entry.name))
             .collect();
         if all.is_empty() {
             eprintln!("taguru: export: the data directory holds no contexts");
@@ -839,12 +859,13 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
         return 1;
     }
 
-    let mut failures = 0usize;
-    for name in &names {
-        match export_one(&state, name, out) {
+    let file_names = context_file_names(&contexts);
+    let total = if explicit { total } else { contexts.len() };
+    for ((id, name), file_name) in contexts.iter().zip(&file_names) {
+        match export_one(&state, id, name, file_name, out) {
             Ok(report) => println!("{report}"),
             Err(message) => {
-                eprintln!("taguru: export: context '{name}': {message}");
+                eprintln!("taguru: export: context '{name}' ({id}): {message}");
                 failures += 1;
             }
         }
@@ -868,20 +889,16 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
                 }
             }
         }
-        let expected =
-            expected_file_names(&names, all_groups.iter().map(|(name, _)| name.as_str()));
+        let expected = expected_file_names(
+            &file_names,
+            all_groups.iter().map(|(name, _)| name.as_str()),
+        );
         stale_failures = prune_stale_streams(out, &expected);
     }
 
     println!(
         "{}",
-        summary_line(
-            names.len() - failures,
-            names.len(),
-            group_count,
-            group_failures,
-            out,
-        )
+        summary_line(total - failures, total, group_count, group_failures, out,)
     );
     if failures + group_failures + stale_failures > 0 {
         1
@@ -927,16 +944,40 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
          `taguru restore`"
     );
 
+    // Explicit arguments are context IDS (paths are id-addressed,
+    // #964); each resolves to its directory row for the display name
+    // the stream and the file carry. The full enumeration gets both
+    // from the listing's rows directly.
     let explicit = !names.is_empty();
-    let names = if explicit {
-        names
+    let mut failures = 0usize;
+    let total = if explicit { names.len() } else { 0 };
+    let contexts: Vec<(String, String)> = if explicit {
+        let mut resolved = Vec::with_capacity(names.len());
+        for id in &names {
+            match api.get(&["contexts", id]) {
+                Ok(row) => match row["name"].as_str() {
+                    Some(name) => resolved.push((id.clone(), name.to_string())),
+                    None => {
+                        eprintln!("taguru: export: context '{id}': the row carries no name");
+                        failures += 1;
+                    }
+                },
+                // A per-item failure, like a failed fetch below — the
+                // rest of the subset still exports.
+                Err(error) => {
+                    eprintln!("taguru: export: context '{id}': {error}");
+                    failures += 1;
+                }
+            }
+        }
+        resolved
     } else {
-        match api.list_names("contexts") {
-            Ok(names) if names.is_empty() => {
+        match api.list_context_entries() {
+            Ok(rows) if rows.is_empty() => {
                 eprintln!("taguru: export: the server at {base} holds no contexts");
                 return 1;
             }
-            Ok(names) => names,
+            Ok(rows) => rows.into_iter().map(|row| (row.id, row.name)).collect(),
             Err(error) => {
                 eprintln!("taguru: export: {error}");
                 return 1;
@@ -949,12 +990,13 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
         return 1;
     }
 
-    let mut failures = 0usize;
-    for name in &names {
-        match remote_export_one(&api, name, out) {
+    let file_names = context_file_names(&contexts);
+    let total = if explicit { total } else { contexts.len() };
+    for ((id, name), file_name) in contexts.iter().zip(&file_names) {
+        match remote_export_one(&api, id, name, file_name, out) {
             Ok(report) => println!("{report}"),
             Err(message) => {
-                eprintln!("taguru: export: context '{name}': {message}");
+                eprintln!("taguru: export: context '{name}' ({id}): {message}");
                 failures += 1;
             }
         }
@@ -977,7 +1019,8 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
                         }
                     }
                 }
-                let expected = expected_file_names(&names, group_names.iter().map(String::as_str));
+                let expected =
+                    expected_file_names(&file_names, group_names.iter().map(String::as_str));
                 stale_failures = prune_stale_streams(out, &expected);
             }
             Err(error) => {
@@ -994,13 +1037,7 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
 
     println!(
         "{}",
-        summary_line(
-            names.len() - failures,
-            names.len(),
-            group_count,
-            group_failures,
-            out,
-        )
+        summary_line(total - failures, total, group_count, group_failures, out,)
     );
     if failures + group_failures + stale_failures > 0 {
         1
@@ -1009,14 +1046,43 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     }
 }
 
+/// The stream file each exported `context` writes: `{stem}.jsonl` of
+/// its display name — the layout every release wrote — except when
+/// several exported `contexts` share a name (names are not unique,
+/// issue #961 decision 1): each of those gets `{stem}.{id}.jsonl`
+/// instead, so one twin can never silently overwrite the other.
+fn context_file_names(contexts: &[(String, String)]) -> Vec<String> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, name) in contexts {
+        *counts.entry(name.as_str()).or_default() += 1;
+    }
+    contexts
+        .iter()
+        .map(|(id, name)| {
+            let stem = crate::registry::file_stem(name);
+            if counts[name.as_str()] > 1 {
+                format!("{stem}.{id}.jsonl")
+            } else {
+                format!("{stem}.jsonl")
+            }
+        })
+        .collect()
+}
+
 /// One `context`'s stream, fetched whole from `GET
-/// /contexts/{name}/export` and written exactly like the local path
+/// /contexts/{id}/export` and written exactly like the local path
 /// writes its own render. A request that outlives `Api`'s 35s budget,
 /// or a `context` deleted between enumeration and this fetch, surfaces
 /// as an `Err` here and is counted as a per-item failure by the
 /// caller — never a reason to abort the rest of the run.
-fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
-    let stream = api.get_raw(&["contexts", name, "export"])?;
+fn remote_export_one(
+    api: &Api,
+    id: &str,
+    name: &str,
+    file_name: &str,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let stream = api.get_raw(&["contexts", id, "export"])?;
     // Validated before it touches disk: write_atomic's whole point is
     // that a crash mid-write must never shred a previously-good
     // backup, which a malformed response would defeat if it landed
@@ -1051,7 +1117,7 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
              group record"
         ));
     }
-    let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
+    let path = out.join(file_name);
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     let (batches, lines) = stream_counts(&stream);
@@ -1132,12 +1198,12 @@ fn stream_counts(stream: &str) -> (usize, usize) {
 /// lists (attempted, not just succeeded), so a `context` whose fetch
 /// failed keeps whatever file a previous run left for it.
 fn expected_file_names<'a>(
-    contexts: &[String],
+    context_files: &[String],
     groups: impl Iterator<Item = &'a str>,
 ) -> BTreeSet<String> {
-    contexts
+    context_files
         .iter()
-        .map(|name| format!("{}.jsonl", crate::registry::file_stem(name)))
+        .cloned()
         .chain(groups.map(|name| format!("{}.group.jsonl", crate::registry::file_stem(name))))
         .collect()
 }
@@ -1242,26 +1308,37 @@ fn export_group_file(
     ))
 }
 
-fn export_one(state: &AppState, name: &str, out: &std::path::Path) -> Result<String, String> {
-    let snapshot = state
-        .export_context(name, Deadline::unbounded())
-        .map_err(|failure| match failure {
-            AccessError::NotFound => "no such context".to_string(),
-            AccessError::AmbiguousName(count) => {
-                format!("context name is ambiguous ({count} contexts share it); rename them apart")
-            }
-            AccessError::Load(error) => error,
-            AccessError::Unpersisted(error) => error,
-            // The CLI runs with Deadline::unbounded(), which never
-            // expires — unreachable in practice, kept for
-            // exhaustiveness.
-            AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
-            // Same unreachability: the offline CLI boots with no quota
-            // declaration (and an export is a read besides).
-            AccessError::QuotaExceeded(error) => error,
-        })?;
+fn export_one(
+    state: &AppState,
+    id: &str,
+    name: &str,
+    file_name: &str,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let snapshot =
+        state
+            .export_context(id, Deadline::unbounded())
+            .map_err(|failure| match failure {
+                AccessError::NotFound => "no such context".to_string(),
+                // Unreachable on an id-addressed export, kept for
+                // exhaustiveness.
+                AccessError::AmbiguousName(count) => {
+                    format!(
+                        "context name is ambiguous ({count} contexts share it); rename them apart"
+                    )
+                }
+                AccessError::Load(error) => error,
+                AccessError::Unpersisted(error) => error,
+                // The CLI runs with Deadline::unbounded(), which never
+                // expires — unreachable in practice, kept for
+                // exhaustiveness.
+                AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
+                // Same unreachability: the offline CLI boots with no quota
+                // declaration (and an export is a read besides).
+                AccessError::QuotaExceeded(error) => error,
+            })?;
     let rendered = render(name, &snapshot, Deadline::unbounded())?;
-    let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
+    let path = out.join(file_name);
     // Stage + fsync + rename, never a truncating write in place: a
     // backup that "wrote" but never reached the platter is worse than a
     // refusal, and a crash while REFRESHING an existing backup must not
@@ -1325,7 +1402,7 @@ mod tests {
         fs::write(dir.join("stale.group.jsonl"), b"{}").unwrap();
         fs::write(dir.join("notes.txt"), b"bystander").unwrap();
 
-        let expected = expected_file_names(&["keep".to_string()], std::iter::once("keep"));
+        let expected = expected_file_names(&["keep.jsonl".to_string()], std::iter::once("keep"));
         assert_eq!(prune_stale_streams(&dir, &expected), 0);
 
         assert!(dir.join("keep.jsonl").exists());
@@ -1365,13 +1442,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The expected set percent-encodes exactly like the writers do —
-    /// a name the stem encoding changes must protect the file the
-    /// export actually wrote, not the raw name.
+    /// Context file names arrive precomputed (`context_file_names`
+    /// encodes and — under duplicate display names — disambiguates);
+    /// the group half still percent-encodes exactly like the group
+    /// writer does, protecting the file the export actually wrote.
     #[test]
     fn expected_file_names_match_the_writers_stem_encoding() {
         let expected = expected_file_names(
-            &["酒".to_string(), "plain".to_string()],
+            &["%E9%85%92.jsonl".to_string(), "plain.jsonl".to_string()],
             std::iter::once("k.g"),
         );
         assert_eq!(
@@ -1379,6 +1457,27 @@ mod tests {
             vec![
                 "%E9%85%92.jsonl".to_string(),
                 "k%2Eg.group.jsonl".to_string(),
+                "plain.jsonl".to_string(),
+            ]
+        );
+    }
+
+    /// The duplicate-name disambiguation rule: a unique display name
+    /// keeps its pretty `{stem}.jsonl`; names shared by several
+    /// exported contexts each get `{stem}.{id}.jsonl` so one twin can
+    /// never overwrite the other.
+    #[test]
+    fn context_file_names_disambiguate_duplicate_display_names_by_id() {
+        let contexts = vec![
+            ("id-1".to_string(), "sake".to_string()),
+            ("id-2".to_string(), "sake".to_string()),
+            ("id-3".to_string(), "plain".to_string()),
+        ];
+        assert_eq!(
+            context_file_names(&contexts),
+            vec![
+                "sake.id-1.jsonl".to_string(),
+                "sake.id-2.jsonl".to_string(),
                 "plain.jsonl".to_string(),
             ]
         );
@@ -1482,7 +1581,7 @@ mod tests {
             .unwrap();
         state_a
             .add_associations(
-                "sake",
+                &state_a.id_of("sake"),
                 vec![
                     // Corroborated twice by a.md — the locator rides the
                     // first assertion — and once more by b.md.
@@ -1500,7 +1599,7 @@ mod tests {
             .unwrap();
         state_a
             .store_passages(
-                "sake",
+                &state_a.id_of("sake"),
                 BTreeMap::from([
                     (
                         "a.md".to_string(),
@@ -1545,7 +1644,7 @@ mod tests {
             .unwrap();
         state_a
             .add_aliases(
-                "sake",
+                &state_a.id_of("sake"),
                 &BTreeMap::from([
                     ("Aomine".to_string(), "青嶺酒造".to_string()),
                     // Canonical loses its every edge below: must drop.
@@ -1555,10 +1654,12 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state_a.retract_source("sake", "gone.md").unwrap();
+        state_a
+            .retract_source(&state_a.id_of("sake"), "gone.md")
+            .unwrap();
 
         let snapshot_a = state_a
-            .export_context("sake", Deadline::unbounded())
+            .export_context(&state_a.id_of("sake"), Deadline::unbounded())
             .unwrap();
         let rendered = render("sake", &snapshot_a, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.aliases_dropped, 1, "the edgeless canonical");
@@ -1581,7 +1682,7 @@ mod tests {
             }
         }
         let snapshot_b = state_b
-            .export_context("sake", Deadline::unbounded())
+            .export_context(&state_b.id_of("sake"), Deadline::unbounded())
             .unwrap();
 
         // The restored context has a REAL attribution to the reserved
@@ -1605,7 +1706,7 @@ mod tests {
             render(
                 "sake",
                 &state_c
-                    .export_context("sake", Deadline::unbounded())
+                    .export_context(&state_c.id_of("sake"), Deadline::unbounded())
                     .unwrap(),
                 Deadline::unbounded(),
             )

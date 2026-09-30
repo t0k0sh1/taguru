@@ -742,7 +742,14 @@ async function handleDeletions(options: {
   const needsContext = deleted.size > 0 && (deletionPolicy === "retract" || deletionPolicy === "mirror");
   if (needsContext || (deletionPolicy === "mirror" && listingCompleted)) {
     const client = clientOf(ingester);
-    const context = client.context(ingester.context);
+    const contextId = await ingester.contextId();
+    if (contextId === null) {
+      throw new Error(
+        `context ${JSON.stringify(ingester.context)} does not resolve to a context — ` +
+          "nothing to retract from",
+      );
+    }
+    const context = client.context(contextId);
 
     const retract = async (source: string): Promise<void> => {
       await context.retractSource(source);

@@ -36,8 +36,8 @@ def test_probes_stay_token_free(server: SpawnedServer) -> None:
 def test_read_scoped_key_reads_but_cannot_write(
     client: Taguru, reader_client: Taguru, fresh_name: str
 ) -> None:
-    seed(client, fresh_name)
-    ctx = reader_client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = reader_client.context(context_id)
 
     assert ctx.recall("青嶺酒造").total > 0  # the retrieval loop is granted
     with pytest.raises(PermissionDeniedError):
@@ -45,10 +45,10 @@ def test_read_scoped_key_reads_but_cannot_write(
     with pytest.raises(PermissionDeniedError):
         reader_client.contexts.create("reader-made")
     with pytest.raises(PermissionDeniedError):
-        reader_client.contexts.delete(fresh_name)  # delete is admin-only
+        reader_client.contexts.delete(context_id)  # delete is admin-only
     with pytest.raises(PermissionDeniedError):
         reader_client.flush()
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_rate_limit_answers_429_with_retry_after(spawn_server, tmp_path) -> None:
@@ -68,20 +68,20 @@ def test_body_cap_answers_413(spawn_server) -> None:
     server = spawn_server({"TAGURU_API_TOKEN": "cap-token", "TAGURU_MAX_BODY_BYTES": "1024"})
     with Taguru(server.base_url, "cap-token", retries=0) as client:
         client.wait_until_ready(timeout=30)
-        client.contexts.create("cap")
+        cap_id = client.contexts.create("cap").id
         big = [
             {"subject": f"s{i}", "label": "l", "object": "o" * 40, "weight": 1.0}
             for i in range(200)
         ]
         with pytest.raises(PayloadTooLargeError) as capped:
-            client.context("cap").add_associations(big)
+            client.context(cap_id).add_associations(big)
         # The cap breach speaks the JSON error shape, code included.
         assert capped.value.code == "payload_too_large"
 
 
 def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
     ctx.add_aliases(concepts={"Aomine": "青嶺酒造"})
     stream = ctx.export()
     assert stream.count('"type":"source"') >= 1
@@ -93,7 +93,8 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     assert all(outcome.context == restored_name for outcome in result.batches)
     assert any(outcome.created for outcome in result.batches)
 
-    restored = client.context(restored_name)
+    restored_id = next(row.id for row in client.contexts.iter() if row.name == restored_name)
+    restored = client.context(restored_id)
     assert restored.query(subject="青嶺酒造", label="杜氏").matches[0].object == "高瀬"
     assert restored.lookup_passages(["docs/aomine.md"]).passages["docs/aomine.md"] == AOMINE_DOC
     assert restored.resolve("Aomine")[0].name == "青嶺酒造"
@@ -106,20 +107,20 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     assert after.weight == before.weight
     assert after.count == before.count
 
-    client.contexts.delete(fresh_name)
-    client.contexts.delete(restored_name)
+    client.contexts.delete(context_id)
+    client.contexts.delete(restored_id)
 
 
 def test_export_stream_and_file(client: Taguru, fresh_name: str, tmp_path) -> None:
-    seed(client, fresh_name)
-    ctx = client.context(fresh_name)
+    context_id = seed(client, fresh_name)
+    ctx = client.context(context_id)
     streamed = b"".join(chunk for chunk in ctx.export_stream())
     assert streamed.decode("utf-8") == ctx.export()
 
     target = tmp_path / "backup.jsonl"
     ctx.export_to_file(target)
     assert target.read_bytes() == streamed
-    client.contexts.delete(fresh_name)
+    client.contexts.delete(context_id)
 
 
 def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
@@ -135,4 +136,5 @@ def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
     assert result.batches[0].created
     assert result.batches[0].associations == 1
     assert result.batches[0].passage_stored
-    client.contexts.delete(fresh_name)
+    context_id = next(row.id for row in client.contexts.iter() if row.name == fresh_name)
+    client.contexts.delete(context_id)

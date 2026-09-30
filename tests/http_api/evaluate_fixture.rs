@@ -236,13 +236,13 @@ fn spawn_mutating_proxy(target_base: String, context: String) -> String {
 //   irrelevant candidate" that must never appear in any hit set.
 fn seed_offline_corpus(server: &Server, context: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "#278 offline fixture"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": context, "description": "#278 offline fixture"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/sources"),
+        &format!("/contexts/{}/sources", server.cx(context)),
         Some(json!({
             "passages": {
                 "corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。",
@@ -262,7 +262,7 @@ fn seed_offline_corpus(server: &Server, context: &str) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/associations"),
+        &format!("/contexts/{}/associations", server.cx(context)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "醸造元", "object": "蔵元",
              "weight": 1.0, "source": "corpus/brewery.md", "paragraph": 0},
@@ -310,7 +310,7 @@ fn evaluate_fixture_covers_graph_bm25_filter_known_miss_and_citation_paths() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &proxy_base,
             "--out",
@@ -486,16 +486,24 @@ fn evaluate_fixture_covers_graph_bm25_filter_known_miss_and_citation_paths() {
 #[test]
 fn evaluate_never_crosses_into_a_sibling_group_members_sources() {
     let server = Server::start("evaluate-fixture-grouping");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
     );
-    server.ok("PUT", "/contexts/beer", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/beer/sources",
+        "/contexts",
+        Some(json!({"name": "beer", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("beer")),
         Some(json!({"passages": {"corpus/hops.md": "青嶺麦酒のホップは芳醇である。"}})),
     );
     server.ok(
@@ -519,7 +527,7 @@ fn evaluate_never_crosses_into_a_sibling_group_members_sources() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -549,16 +557,24 @@ fn evaluate_never_crosses_into_a_sibling_group_members_sources() {
 #[test]
 fn evaluate_preflight_refuses_a_sibling_group_members_source() {
     let server = Server::start("evaluate-fixture-grouping-preflight");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
     );
-    server.ok("PUT", "/contexts/beer", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/beer/sources",
+        "/contexts",
+        Some(json!({"name": "beer", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("beer")),
         Some(json!({"passages": {"corpus/hops.md": "青嶺麦酒のホップは芳醇である。"}})),
     );
     server.ok(
@@ -582,7 +598,7 @@ fn evaluate_preflight_refuses_a_sibling_group_members_source() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -591,7 +607,7 @@ fn evaluate_preflight_refuses_a_sibling_group_members_source() {
         &[],
     );
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("sake"), "{stderr}");
+    assert!(stderr.contains(&server.cx("sake")), "{stderr}");
     assert!(stderr.contains("corpus/hops.md"), "{stderr}");
     assert!(!out_path.exists());
 
@@ -663,16 +679,20 @@ fn evaluate_fixture_covers_fusion_and_semantic_paraphrase_under_a_provider() {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/orchard",
-        Some(json!({"description": "果樹園"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "orchard", "description": "果樹園"})),
     );
     server.ok(
         "POST",
-        "/contexts/orchard/sources",
+        &format!("/contexts/{}/sources", server.cx("orchard")),
         Some(json!({"passages": {"corpus/grape.md": "ぶどう畑で収穫の準備が進む。"}})),
     );
-    server.ok("POST", "/contexts/orchard/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("orchard")),
+        None,
+    );
 
     let dir = eval_dir("provider");
     let eval_path = write_eval_file(
@@ -690,7 +710,7 @@ fn evaluate_fixture_covers_fusion_and_semantic_paraphrase_under_a_provider() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "orchard",
+            &server.cx("orchard"),
             "--url",
             &server.base,
             "--out",
@@ -754,10 +774,14 @@ fn evaluate_fixture_covers_fusion_and_semantic_paraphrase_under_a_provider() {
 #[test]
 fn evaluate_records_a_null_provider_model_when_no_provider_is_configured() {
     let server = Server::start("evaluate-fixture-no-provider");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
     );
     let dir = eval_dir("no-provider");
@@ -775,7 +799,7 @@ fn evaluate_records_a_null_provider_model_when_no_provider_is_configured() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "sake",
+            &server.cx("sake"),
             "--url",
             &server.base,
             "--out",
@@ -813,13 +837,17 @@ fn evaluate_records_a_null_provider_model_when_no_provider_is_configured() {
 #[test]
 fn evaluate_fails_the_gate_when_a_write_lands_mid_run() {
     let server = Server::start("evaluate-fixture-unstable");
-    server.ok("PUT", "/contexts/watch", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/watch/sources",
+        "/contexts",
+        Some(json!({"name": "watch", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("watch")),
         Some(json!({"passages": {"corpus/seed.md": "初期状態の文章です。"}})),
     );
-    let proxy_base = spawn_mutating_proxy(server.base.clone(), "watch".to_string());
+    let proxy_base = spawn_mutating_proxy(server.base.clone(), server.cx("watch"));
 
     let dir = eval_dir("unstable");
     let eval_path = write_eval_file(
@@ -837,7 +865,7 @@ fn evaluate_fails_the_gate_when_a_write_lands_mid_run() {
             "--eval",
             eval_path.to_str().unwrap(),
             "--context",
-            "watch",
+            &server.cx("watch"),
             "--url",
             &proxy_base,
             "--out",

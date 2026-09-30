@@ -5,14 +5,14 @@
 //! independent lanes run in a fixed order with no fusion between them
 //! (ADR 0004 §7):
 //!
-//! - **Passage lane** (always): `POST /contexts/{name}/sources/search`.
+//! - **Passage lane** (always): `POST /contexts/{id}/sources/search`.
 //! - **Structural lane** (only when a case declares
 //!   `expected_concepts`/`expected_labels`/`expected_associations`):
 //!   `/resolve`/`/resolve_label` for coverage, then `/query` for each
 //!   `expected_associations[]` entry whose three positions all resolve
 //!   to exactly one name apiece.
 //! - **Citation lane** (only when a case declares `expected_citations`):
-//!   one `POST /contexts/{name}/citations` call per entry, always run —
+//!   one `POST /contexts/{id}/citations` call per entry, always run —
 //!   independent of whether the passage lane found anything at all (ADR
 //!   0004 §8).
 //!
@@ -108,7 +108,7 @@ validity, corpus revision bracketing, and run metadata.
                         stderr line says so).
   --assembly             #308 (ADR 0006 §14): replaces the passage
                         lane's `sources/search` call with
-                        `POST /contexts/{name}/evidence` — the same
+                        `POST /contexts/{id}/evidence` — the same
                         structural lane runs either way, so a
                         baseline/assembly pair of runs stays
                         comparable. Without --assembly, evaluate's
@@ -190,7 +190,7 @@ fn run_evaluate(args: &[String]) -> i32 {
         return 2;
     }
 
-    // #308 (ADR 0006 §14): `POST /contexts/{name}/evidence` has no
+    // #308 (ADR 0006 §14): `POST /contexts/{id}/evidence` has no
     // `tags`/`since`/`until` request fields at all (§5.1) — a case
     // declaring any of them still runs under --assembly (never a
     // usage error; a dataset shared with a baseline run must still
@@ -342,7 +342,7 @@ fn run_evaluate(args: &[String]) -> i32 {
 
     // Always resolved (defaulted 40/65536/4000 when no --max-* flag
     // was given) — an --assembly run always sends this to
-    // POST /contexts/{name}/evidence, since that endpoint has no
+    // POST /contexts/{id}/evidence, since that endpoint has no
     // unbudgeted mode (ADR 0006 §8). `budget_given` below is what
     // decides whether `baseline` mode additionally truncates to the
     // same ceilings, and whether either mode's artifact carries a
@@ -479,7 +479,7 @@ struct EvaluateArgs {
     out: PathBuf,
     thresholds: Option<PathBuf>,
     /// #308: swaps the passage lane from `sources/search` to
-    /// `POST /contexts/{name}/evidence` (ADR 0006). The structural
+    /// `POST /contexts/{id}/evidence` (ADR 0006). The structural
     /// lane never changes between the two modes — coverage/lane-cross
     /// stay comparable across a `baseline`/`assembly` pair.
     assembly: bool,
@@ -492,7 +492,7 @@ struct EvaluateArgs {
     /// in the artifact) — this default is what keeps every archived
     /// `evaluation.json` and every existing caller unaffected.
     /// `assembly` has no such unbudgeted mode: `POST
-    /// /contexts/{name}/evidence` always enforces *some* budget, so an
+    /// /contexts/{id}/evidence` always enforces *some* budget, so an
     /// `--assembly` run with none of these flags still runs — and
     /// still carries a `budget` block — under the server's own
     /// defaults (`max_items: 40, max_bytes: 65536, max_tokens: 4000`).
@@ -725,7 +725,7 @@ fn fetch_embeddings(api: &Api, context: &str) -> Option<EmbeddingsBlock> {
     }
 }
 
-/// Keyset-walks `GET /contexts/{name}/sources` itself: its page items
+/// Keyset-walks `GET /contexts/{id}/sources` itself: its page items
 /// are bare strings, not `{name: ...}` objects, so `Api::list_names`
 /// (built for the latter) does not fit — see `remote.rs`'s own comment
 /// on `get_with_query` for why this is not new HTTP client code.

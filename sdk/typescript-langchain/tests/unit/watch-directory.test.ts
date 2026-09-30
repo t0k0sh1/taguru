@@ -69,6 +69,36 @@ class FakeServer {
         { status: 200 },
       );
     }
+    if (path === "/contexts" && method === "GET") {
+      // The ingester resolves its configured context NAME to the id
+      // every /contexts/{id}/… route takes (#964).
+      const row = {
+        id: "id-sake",
+        name: "sake",
+        description: "",
+        pinned: false,
+        loaded: false,
+        dice_floor: null,
+        semantic_floor: null,
+        stats: {
+          associations: 0,
+          concepts: 0,
+          labels: 0,
+          sources: 0,
+          footprint_bytes: 0,
+          dead_edges: 0,
+          dead_attributions: 0,
+          arena_slack: 0,
+          unsourced_edges: 0,
+          unsourced_weight: 0,
+          top_concepts: [],
+          label_sample: [],
+        },
+        usage: { reads: 0, empty_reads: 0, writes: 0, last_read_epoch: 0, last_write_epoch: 0 },
+      };
+      const rows = url.searchParams.get("after") === null ? [row] : [];
+      return ok({ total: 1, contexts: rows });
+    }
     let body: unknown = null;
     if (typeof init?.body === "string") {
       try {

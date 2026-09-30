@@ -53,7 +53,11 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
         "{outcome}"
     );
 
-    let installed = server.ok("GET", "/contexts/sake/schema", None);
+    let installed = server.ok(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(installed["mode"], "warn", "{installed}");
     assert_eq!(
         installed["types"],
@@ -63,7 +67,7 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
 
     // A stream with no schema record at all keeps the response shape
     // byte-identical to before this feature — no `schemas` key.
-    server.ok("PUT", "/contexts/plain", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "plain", })));
     let (status, plain) = post_import(
         &server,
         "{\"type\": \"source\", \"context\": \"plain\", \"id\": \"b.md\"}\n",
@@ -97,11 +101,16 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
             ),
         ],
     );
-    let put = |path: &str| {
-        server.call_with_token("PUT", path, Some(json!({"description": "d"})), Some("atok"))
+    let create = |name: &str| {
+        server.call_with_token(
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": "d"})),
+            Some("atok"),
+        )
     };
-    assert_eq!(put("/contexts/sake").0, 200);
-    assert_eq!(put("/contexts/bunko").0, 200);
+    assert_eq!(create("sake").0, 200);
+    assert_eq!(create("bunko").0, 200);
     let stream = format!(
         "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
@@ -128,7 +137,12 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
     // Nothing applied: sake's association from the SAME stream must
     // not have landed either, even though it appears before the
     // refused schema record.
-    let (status, sake) = server.call_with_token("GET", "/contexts/sake", None, Some("atok"));
+    let (status, sake) = server.call_with_token(
+        "GET",
+        &format!("/contexts/{}", server.cx("sake")),
+        None,
+        Some("atok"),
+    );
     assert_eq!(status, 200, "{sake}");
     assert_eq!(sake["result"]["stats"]["associations"], 0, "{sake}");
 
@@ -165,7 +179,7 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
     // The sake batch that preceded the refused schema record is
     // durable — retract-then-apply's own idempotence means re-POSTing
     // a corrected stream is exact, never double-counted.
-    let sake = server.ok("GET", "/contexts/sake", None);
+    let sake = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(sake["stats"]["associations"], 1, "{sake}");
 }
 
@@ -181,7 +195,11 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
 #[test]
 fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
     let server = Server::start("schema-stream-partial-integrity");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let stream = format!(
         "{first}{second}",
         first = schema_line("sake", "warn"),
@@ -197,7 +215,11 @@ fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
 
     // The first schema record's install is durable — proof the
     // refusal above did not, and could not, roll it back.
-    let installed = server.ok("GET", "/contexts/sake/schema", None);
+    let installed = server.ok(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(installed["mode"], "warn", "{installed}");
 }
 
@@ -210,13 +232,13 @@ fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
 fn cli_export_and_import_url_round_trip_a_schema_record() {
     let source = Server::start("schema-cli-source");
     source.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     source.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", source.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "warn",
@@ -248,9 +270,9 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
 
     let target = Server::start("schema-cli-target");
     target.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
     );
     let (code, stdout, stderr) = run_cli(
         &[
@@ -263,7 +285,11 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    let installed = target.ok("GET", "/contexts/sake/schema", None);
+    let installed = target.ok(
+        "GET",
+        &format!("/contexts/{}/schema", target.cx("sake")),
+        None,
+    );
     assert_eq!(installed["mode"], "warn", "{installed}");
     assert_eq!(
         installed["types"],

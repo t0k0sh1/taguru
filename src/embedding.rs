@@ -9,7 +9,7 @@
 //!
 //! Vectors are a derived cache of (model × name), kept per `context` in a
 //! `{name}.vectors.bin` sidecar — refreshed explicitly (POST
-//! /contexts/{name}/embeddings/refresh), loaded on demand by the
+//! /contexts/{id}/embeddings/refresh), loaded on demand by the
 //! semantic fallback, and discarded wholesale when the model changes —
 //! or when its output width changes behind a stable model name (a
 //! dimensions setting is a request-time parameter on modern models):

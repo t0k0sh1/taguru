@@ -49,8 +49,8 @@ def client(server: SpawnedServer) -> Iterator[Taguru]:
 @pytest.fixture(scope="session")
 def seeded(client: Taguru) -> str:
     """The 青嶺酒造 fixture context, created once per session."""
-    client.contexts.create(SEEDED_CONTEXT, description="青嶺酒造という架空の酒蔵の知識")
-    ctx = client.context(SEEDED_CONTEXT)
+    row = client.contexts.create(SEEDED_CONTEXT, description="青嶺酒造という架空の酒蔵の知識")
+    ctx = client.context(row.id)
     ctx.add_associations(
         [
             {
@@ -96,4 +96,18 @@ def seeded(client: Taguru) -> str:
         ]
     )
     ctx.store_passages({"docs/aomine.md": AOMINE_DOC})
-    return SEEDED_CONTEXT
+    # The retriever's single `context` field takes the id (#964).
+    return row.id
+
+
+def context_id_of(client: Taguru, name: str) -> str:
+    """The id behind a display name — for verifying what an ingester
+    (whose `context` field is a NAME, riding the name-addressed import
+    stream) actually wrote, over the id-addressed routes (#964)."""
+    return next(row.id for row in client.contexts.iter() if row.name == name)
+
+
+def try_context_id_of(client: Taguru, name: str) -> str | None:
+    """:func:`context_id_of` for a name that may be absent — ``None``
+    instead of raising, for existence checks and cleanup."""
+    return next((row.id for row in client.contexts.iter() if row.name == name), None)

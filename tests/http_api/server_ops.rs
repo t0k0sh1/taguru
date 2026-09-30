@@ -11,12 +11,12 @@ fn health_reports_503_while_flushes_fail_and_recovers_after() {
     use std::time::{Duration, Instant};
 
     let server = Server::start("health503");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     // The first write creates the WAL file while the directory is
     // still writable; afterwards appends only need the existing file.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
     );
 
@@ -27,7 +27,7 @@ fn health_reports_503_while_flushes_fail_and_recovers_after() {
     let degraded = loop {
         let _ = server.call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 0.001}])),
         );
         let (status, body) = server.call("GET", "/health", None);
@@ -44,7 +44,7 @@ fn health_reports_503_while_flushes_fail_and_recovers_after() {
     loop {
         let _ = server.call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 0.001}])),
         );
         let (status, _) = server.call("GET", "/health", None);
@@ -99,9 +99,9 @@ fn version_is_bare_json_and_matches_the_protocol_trailer() {
 fn a_body_over_the_configured_limit_is_rejected_with_413() {
     let server = Server::start_with_env("bodycap", &[("TAGURU_MAX_BODY_BYTES", "16")]);
     let (status, body) = server.call(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "この説明は16バイトよりずっと長い"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "この説明は16バイトよりずっと長い"})),
     );
     assert_eq!(status, 413);
     // The cap breach speaks the one JSON error shape like every other
@@ -115,7 +115,7 @@ fn a_custom_request_timeout_does_not_disturb_fast_requests() {
     // The deadline actually firing is unit-tested in limits.rs; this
     // pins the wiring — a tight budget must not break normal traffic.
     let server = Server::start_with_env("timeout", &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")]);
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     assert_eq!(server.call("GET", "/contexts", None).0, 200);
 }
 

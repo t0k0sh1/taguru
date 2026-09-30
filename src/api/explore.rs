@@ -12,7 +12,7 @@ use crate::metrics::SearchOp;
 use crate::registry::AppState;
 
 use super::{
-    ActivationOut, AppJson, AppPath, ExploreCursor, MAX_EXPLORE_DEPTH, MAX_MATCH_LIMIT,
+    ActivationOut, AppJson, ContextIdPath, ExploreCursor, MAX_EXPLORE_DEPTH, MAX_MATCH_LIMIT,
     MAX_PATHS_LIMIT, RecollectionOut, TrailOut, access_error, activations_out, clamp,
     deadline_exceeded, explore_page, ok, overlong, recollections_out, search_log_enabled,
     trails_out,
@@ -35,7 +35,7 @@ pub struct DescribeRequest {
 /// `AppState::hidden_label`'s own doc).
 pub async fn describe(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<DescribeRequest>,
 ) -> Response {
@@ -43,15 +43,15 @@ pub async fn describe(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let type_label = tokio::task::block_in_place(|| state.hidden_label(&name));
-    match state.read_context(&name, |context| {
+    let type_label = tokio::task::block_in_place(|| state.hidden_label(&id));
+    match state.read_context(&id, |context| {
         context.describe_typed(&request.concept, type_label)
     }) {
         Ok(result) => {
-            state.note_read(&name, result.is_none());
+            state.note_read(&id, result.is_none());
             ok(result, started_at)
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -87,7 +87,7 @@ pub struct ExplorePage {
 
 pub async fn explore(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExploreRequest>,
 ) -> Response {
@@ -99,18 +99,14 @@ pub async fn explore(
         return deadline_exceeded(started_at);
     }
     // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk.
-    let excluded = state.excluded_hidden_label(&name);
-    let window_names = match super::sources::resolve_window(
-        &state,
-        &name,
-        request.since,
-        request.until,
-        started_at,
-    ) {
-        Ok(names) => names,
-        Err(refusal) => return *refusal,
-    };
-    match state.read_context(&name, |context| {
+    let excluded = state.excluded_hidden_label(&id);
+    let window_names =
+        match super::sources::resolve_window(&state, &id, request.since, request.until, started_at)
+        {
+            Ok(names) => names,
+            Err(refusal) => return *refusal,
+        };
+    match state.read_context(&id, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         // The clamp turns "omitted = the whole component" into
         // "omitted = the server's hop ceiling".
@@ -128,21 +124,21 @@ pub async fn explore(
             // can put a million edges within a single hop, and explore
             // used to return them all in one body.
             let (total, matches) = explore_page(matches, request.after.as_ref(), request.limit);
-            state.note_search(SearchOp::Explore, &name, total == 0);
+            state.note_search(SearchOp::Explore, &id, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "explore",
                     origins = %request.origins.join(","),
                     hits = total,
                     "search",
                 );
             }
-            let matches = recollections_out(&state, &name, matches);
+            let matches = recollections_out(&state, &id, matches);
             ok(ExplorePage { total, matches }, started_at)
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -177,7 +173,7 @@ pub struct PathsPage {
 
 pub async fn paths(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<PathsRequest>,
 ) -> Response {
@@ -193,8 +189,8 @@ pub async fn paths(
     }
     // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk —
     // same reason as `explore`.
-    let excluded = state.excluded_hidden_label(&name);
-    match state.read_context(&name, |context| {
+    let excluded = state.excluded_hidden_label(&id);
+    match state.read_context(&id, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         let targets: Vec<&str> = request.targets.iter().map(String::as_str).collect();
         context.paths_excluding(
@@ -206,11 +202,11 @@ pub async fn paths(
         )
     }) {
         Ok(result) => {
-            state.note_search(SearchOp::Paths, &name, result.total == 0);
+            state.note_search(SearchOp::Paths, &id, result.total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "paths",
                     origins = %request.origins.join(","),
                     targets = %request.targets.join(","),
@@ -218,7 +214,7 @@ pub async fn paths(
                     "search",
                 );
             }
-            let matches = trails_out(&state, &name, result.trails);
+            let matches = trails_out(&state, &id, result.trails);
             ok(
                 PathsPage {
                     total: result.total,
@@ -228,7 +224,7 @@ pub async fn paths(
                 started_at,
             )
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -259,7 +255,7 @@ pub struct ActivateRequest {
 
 pub async fn activate(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ActivateRequest>,
 ) -> Response {
@@ -271,18 +267,14 @@ pub async fn activate(
         return deadline_exceeded(started_at);
     }
     // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s.
-    let excluded = state.excluded_hidden_label(&name);
-    let window_names = match super::sources::resolve_window(
-        &state,
-        &name,
-        request.since,
-        request.until,
-        started_at,
-    ) {
-        Ok(names) => names,
-        Err(refusal) => return *refusal,
-    };
-    match state.read_context(&name, |context| {
+    let excluded = state.excluded_hidden_label(&id);
+    let window_names =
+        match super::sources::resolve_window(&state, &id, request.since, request.until, started_at)
+        {
+            Ok(names) => names,
+            Err(refusal) => return *refusal,
+        };
+    match state.read_context(&id, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         let decay = request.decay.unwrap_or(0.5);
         let limit = clamp(request.limit, 20, MAX_MATCH_LIMIT);
@@ -295,20 +287,20 @@ pub async fn activate(
         }
     }) {
         Ok((total, matches)) => {
-            state.note_search(SearchOp::Activate, &name, total == 0);
+            state.note_search(SearchOp::Activate, &id, total == 0);
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "activate",
                     origins = %request.origins.join(","),
                     hits = total,
                     "search",
                 );
             }
-            let matches = activations_out(&state, &name, matches);
+            let matches = activations_out(&state, &id, matches);
             ok(ActivationPage { total, matches }, started_at)
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }

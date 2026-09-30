@@ -18,13 +18,13 @@ use crate::support::*;
 /// a sign-contested edge, and an undatable associations-only source.
 fn seed(server: &Server) {
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "整理"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "整理"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             // The twins: two spellings of one brewery, two shared facts,
             // one distinct fact each.
@@ -50,7 +50,7 @@ fn seed(server: &Server) {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {
                 "doc-2019": "旧情報。", "doc-2024": "新情報。", "宣伝": "宣伝文。",
@@ -62,7 +62,11 @@ fn seed(server: &Server) {
 }
 
 fn audit(server: &Server, body: Value) -> Value {
-    server.ok("POST", "/contexts/sake/consolidation/audit", Some(body))
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/consolidation/audit", server.cx("sake")),
+        Some(body),
+    )
 }
 
 #[test]
@@ -130,7 +134,7 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
     // …and move when the evidence moves.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2025"}
         ])),
@@ -156,13 +160,13 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
     assert!(only_merge.get("staleness").is_none());
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/consolidation/audit",
+        &format!("/contexts/{}/consolidation/audit", server.cx("sake")),
         Some(json!({"checks": []})),
     );
     assert_eq!(status, 400, "{body}");
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/consolidation/audit",
+        &format!("/contexts/{}/consolidation/audit", server.cx("sake")),
         Some(json!({"checks": ["typo"]})),
     );
     assert_eq!(status, 400, "{body}");
@@ -176,14 +180,17 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
         .collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/consolidation/audit",
+        &format!("/contexts/{}/consolidation/audit", server.cx("sake")),
         Some(json!({"checks": alternating})),
     );
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], json!("over_limit"), "{body}");
     let (status, _) = server.call(
         "POST",
-        "/contexts/nope/consolidation/audit",
+        &format!(
+            "/contexts/{}/consolidation/audit",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"checks": ["staleness"]})),
     );
     assert_eq!(status, 404);
@@ -295,7 +302,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
 
     // Dry-run first: names the work, calls nothing, writes nothing.
     let (code, stdout, stderr) = run_consolidation(
-        &["--context", "sake", "--dry-run", &server.base],
+        &["--context", &server.cx("sake"), "--dry-run", &server.base],
         &extract_env,
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -303,8 +310,10 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     assert_eq!(*calls.lock().unwrap(), 0);
 
     // First real run: every candidate judged once, artifact written.
-    let (code, stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains("judged 5 (5 apply, 0 dismiss), 0 reused"),
@@ -313,7 +322,10 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     assert_eq!(*calls.lock().unwrap(), 5);
     let stored = server.ok(
         "POST",
-        "/contexts/sake::consolidation/sources/lookup",
+        &format!(
+            "/contexts/{}/sources/lookup",
+            server.cx("sake::consolidation")
+        ),
         Some(json!({"sources": ["consolidation:manifest"]})),
     );
     let manifest: Value = serde_json::from_str(
@@ -327,7 +339,10 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     assert_eq!(manifest["detector"], json!("consolidation/1"));
 
     // Second run over the unchanged graph: zero LLM calls.
-    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, _) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0);
     assert!(
         stdout.contains("judgments up to date (5 reused, no LLM calls)"),
@@ -338,12 +353,15 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     // Moved evidence re-judges exactly the moved candidate.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2024b"}
         ])),
     );
-    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, _) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(
         stdout.contains("judged 1 (1 apply, 0 dismiss), 4 reused"),
@@ -395,7 +413,7 @@ fn a_shapeless_judgment_fails_the_run_and_writes_nothing() {
     seed(&server);
     let chat_url = stub_junk();
     let (code, stdout, stderr) = run_consolidation(
-        &["--context", "sake", &server.base],
+        &["--context", &server.cx("sake"), &server.base],
         &[
             ("TAGURU_EXTRACT_URL", chat_url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
@@ -403,9 +421,8 @@ fn a_shapeless_judgment_fails_the_run_and_writes_nothing() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("not the required JSON shape"), "{stderr}");
-    let (status, _) = server.call("GET", "/contexts/sake::consolidation", None);
-    assert_eq!(
-        status, 404,
+    assert!(
+        server.try_cx("sake::consolidation").is_none(),
         "a failed run must not have created the artifact"
     );
 }
@@ -505,8 +522,10 @@ fn a_dismissal_is_counted_and_reused_like_any_judgment() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains("judged 5 (0 apply, 5 dismiss), 0 reused"),
@@ -514,7 +533,10 @@ fn a_dismissal_is_counted_and_reused_like_any_judgment() {
     );
     assert_eq!(*calls.lock().unwrap(), 5);
 
-    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, _) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(
         stdout.contains("judgments up to date (5 reused, no LLM calls)"),
@@ -534,8 +556,11 @@ fn a_foreign_server_detector_is_refused_outright() {
     let seen = Arc::clone(&requests);
     std::thread::spawn(move || {
         let responses = [
-            // GET /health for the skew preflight, then the audit.
+            // GET /health for the skew preflight, the id's directory
+            // row (the default artifact name comes from it, #964),
+            // then the audit.
             json!({"status": "ok"}).to_string(),
+            json!({"result": {"id": "sake-id", "name": "sake"}}).to_string(),
             json!({"result": {"detector": "consolidation/999"}}).to_string(),
         ];
         for body in responses {
@@ -556,7 +581,7 @@ fn a_foreign_server_detector_is_refused_outright() {
         }
     });
     let (code, _stdout, stderr) = run_consolidation(
-        &["--context", "sake", "--url", &format!("http://{addr}")],
+        &["--context", "sake-id", "--url", &format!("http://{addr}")],
         &[],
     );
     assert_eq!(code, 1, "{stderr}");
@@ -567,10 +592,14 @@ fn a_foreign_server_detector_is_refused_outright() {
     // The refusal is side-effect free: the health preflight and the
     // audit itself are the ONLY requests — nothing was written.
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests.len(), 3, "{requests:?}");
     assert!(requests[0].starts_with("GET /health"), "{requests:?}");
     assert!(
-        requests[1].starts_with("POST /contexts/sake/consolidation/audit"),
+        requests[1].starts_with("GET /contexts/sake-id"),
+        "{requests:?}"
+    );
+    assert!(
+        requests[2].starts_with("POST /contexts/sake-id/consolidation/audit"),
         "{requests:?}"
     );
 }
@@ -588,7 +617,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, _) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(*calls.lock().unwrap(), 5);
 
@@ -599,8 +631,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         &json!({"type": "consolidation_manifest", "detector": "consolidation/0", "context": "sake"})
             .to_string(),
     );
-    let (code, stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stderr.contains("detector changed (consolidation/0 → consolidation/1)"),
@@ -616,7 +650,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     // everything instead of re-costing five judgments per run.
     let stored = server.ok(
         "POST",
-        "/contexts/sake::consolidation/sources/lookup",
+        &format!(
+            "/contexts/{}/sources/lookup",
+            server.cx("sake::consolidation")
+        ),
         Some(json!({"sources": ["consolidation:manifest"]})),
     );
     let manifest: Value = serde_json::from_str(
@@ -626,7 +663,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     )
     .unwrap();
     assert_eq!(manifest["detector"], json!("consolidation/1"), "{manifest}");
-    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, _) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(
         stdout.contains("judgments up to date (5 reused, no LLM calls)"),
@@ -664,8 +704,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     ] {
         let text = stored_manifest.to_string();
         overwrite_manifest(&server, &text);
-        let (code, _stdout, stderr) =
-            run_consolidation(&["--context", "sake", &server.base], &extract_env);
+        let (code, _stdout, stderr) = run_consolidation(
+            &["--context", &server.cx("sake"), &server.base],
+            &extract_env,
+        );
         assert_eq!(code, 1, "{text}: {stderr}");
         assert!(
             stderr.contains("the stored manifest is not one this build reads")
@@ -675,7 +717,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
         let stored = server.ok(
             "POST",
-            "/contexts/sake::consolidation/sources/lookup",
+            &format!(
+                "/contexts/{}/sources/lookup",
+                server.cx("sake::consolidation")
+            ),
             Some(json!({"sources": ["consolidation:manifest"]})),
         );
         assert_eq!(
@@ -694,8 +739,10 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         &json!({"type": "consolidation_manifest", "detector": "consolidation/1", "context": "sake"})
             .to_string(),
     );
-    let (code, stdout, stderr) =
-        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", &server.cx("sake"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains("judgments up to date (5 reused, no LLM calls)"),

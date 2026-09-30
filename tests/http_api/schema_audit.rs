@@ -33,13 +33,28 @@ fn strict_document() -> serde_json::Value {
 #[test]
 fn audit_refuses_with_no_schema_or_no_context() {
     let server = Server::start("schema-audit-404");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
-    let (status, body) = server.call("POST", "/contexts/sake/schema/audit", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_schema", "{body}");
 
-    let (status, body) = server.call("POST", "/contexts/nope/schema/audit", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!(
+            "/contexts/{}/schema/audit",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
+        None,
+    );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], "no_context", "{body}");
 }
@@ -57,7 +72,7 @@ fn audit_denies_unknown_fields() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/schema/audit",
+        "/contexts/00000000-0000-4000-8000-00000000dead/schema/audit",
         Some(json!({"limit": 5, "typo": true})),
     );
     assert_eq!(status, 400, "{body}");
@@ -73,10 +88,14 @@ fn audit_denies_unknown_fields() {
 #[test]
 fn audit_reports_domain_violations_even_in_off_mode() {
     let server = Server::start("schema-audit-off-mode");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -86,9 +105,17 @@ fn audit_reports_domain_violations_even_in_off_mode() {
     );
     let mut document = strict_document();
     document["mode"] = json!("off");
-    server.ok("PUT", "/contexts/sake/schema", Some(document));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(document),
+    );
 
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(audit["total"], json!(1), "{audit}");
     let violations = audit["violations"].as_array().unwrap();
     assert_eq!(violations.len(), 1, "{audit}");
@@ -114,10 +141,14 @@ fn audit_reports_domain_violations_even_in_off_mode() {
 #[test]
 fn audit_answers_the_same_regardless_of_mode() {
     let server = Server::start("schema-audit-mode-invariant");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -130,8 +161,16 @@ fn audit_answers_the_same_regardless_of_mode() {
     for mode in ["off", "warn", "strict"] {
         let mut document = strict_document();
         document["mode"] = json!(mode);
-        server.ok("PUT", "/contexts/sake/schema", Some(document));
-        audits.push(server.ok("POST", "/contexts/sake/schema/audit", None));
+        server.ok(
+            "PUT",
+            &format!("/contexts/{}/schema", server.cx("sake")),
+            Some(document),
+        );
+        audits.push(server.ok(
+            "POST",
+            &format!("/contexts/{}/schema/audit", server.cx("sake")),
+            None,
+        ));
     }
     // The whole response, not just `total` — every section (violations'
     // issue detail included) must be identical across modes, not merely
@@ -147,10 +186,14 @@ fn audit_answers_the_same_regardless_of_mode() {
 #[test]
 fn audit_untyped_concepts_excludes_type_names_and_declared_types() {
     let server = Server::start("schema-audit-untyped");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -159,9 +202,17 @@ fn audit_untyped_concepts_excludes_type_names_and_declared_types() {
              "weight": 1.0, "source": "a.md"},
         ])),
     );
-    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
 
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     let names: Vec<&str> = audit["untyped_concepts"]["names"]
         .as_array()
         .unwrap()
@@ -188,10 +239,14 @@ fn audit_untyped_concepts_excludes_type_names_and_declared_types() {
 #[test]
 fn audit_undeclared_types_reported_regardless_of_closed_labels() {
     let server = Server::start("schema-audit-undeclared-types");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Distillery",
              "weight": 1.0, "source": "a.md"},
@@ -200,8 +255,16 @@ fn audit_undeclared_types_reported_regardless_of_closed_labels() {
     for closed_labels in [false, true] {
         let mut document = strict_document();
         document["closed_labels"] = json!(closed_labels);
-        server.ok("PUT", "/contexts/sake/schema", Some(document));
-        let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+        server.ok(
+            "PUT",
+            &format!("/contexts/{}/schema", server.cx("sake")),
+            Some(document),
+        );
+        let audit = server.ok(
+            "POST",
+            &format!("/contexts/{}/schema/audit", server.cx("sake")),
+            None,
+        );
         assert_eq!(
             audit["undeclared_types"]["names"],
             json!(["Distillery"]),
@@ -215,10 +278,14 @@ fn audit_undeclared_types_reported_regardless_of_closed_labels() {
 #[test]
 fn audit_unknown_labels_only_when_closed_labels_and_never_schema_type() {
     let server = Server::start("schema-audit-unknown-labels");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -227,14 +294,30 @@ fn audit_unknown_labels_only_when_closed_labels_and_never_schema_type() {
         ])),
     );
 
-    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
-    let open = server.ok("POST", "/contexts/sake/schema/audit", None);
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
+    let open = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(open["unknown_labels"]["names"], json!([]), "{open}");
 
     let mut closed = strict_document();
     closed["closed_labels"] = json!(true);
-    server.ok("PUT", "/contexts/sake/schema", Some(closed));
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(closed),
+    );
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     let names: Vec<&str> = audit["unknown_labels"]["names"]
         .as_array()
         .unwrap()
@@ -268,10 +351,14 @@ fn audit_unknown_labels_only_when_closed_labels_and_never_schema_type() {
 #[test]
 fn audit_violations_page_like_every_other_match_list() {
     let server = Server::start("schema-audit-paging");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -283,9 +370,17 @@ fn audit_violations_page_like_every_other_match_list() {
              "weight": 1.0, "source": "a.md"},
         ])),
     );
-    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
 
-    let full = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let full = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(full["total"], json!(3), "{full}");
     let full_matches = full["violations"].as_array().unwrap();
     // Worst-magnitude-first, exactly like `drift/audit`'s `unsourced`.
@@ -300,7 +395,7 @@ fn audit_violations_page_like_every_other_match_list() {
 
     let first = server.ok(
         "POST",
-        "/contexts/sake/schema/audit",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
         Some(json!({"limit": 2})),
     );
     assert_eq!(first["total"], json!(3), "{first}");
@@ -320,7 +415,7 @@ fn audit_violations_page_like_every_other_match_list() {
     });
     let second = server.ok(
         "POST",
-        "/contexts/sake/schema/audit",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
         Some(json!({"limit": 2, "after": cursor})),
     );
     assert_eq!(second["total"], json!(3), "{second}");
@@ -351,13 +446,17 @@ fn audit_violations_page_like_every_other_match_list() {
 #[test]
 fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
     let server = Server::start("schema-validate-reserved-alias");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     // Legal today — guard 1: `schema:type` is an ordinary label until a
     // schema exists — and interns the label id the alias resolves
     // against.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
@@ -365,13 +464,13 @@ fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"labels": {"種類": "schema:type"}})),
     );
 
     let audit = server.ok(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", server.cx("sake")),
         Some(json!({"document": strict_document()})),
     );
     assert_eq!(
@@ -382,7 +481,11 @@ fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
 
     // Confirms the scenario this section exists to warn about: the same
     // document really does refuse at `PUT` time, naming the same alias.
-    let (status, body) = server.call("PUT", "/contexts/sake/schema", Some(strict_document()));
+    let (status, body) = server.call(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().unwrap().contains("種類"), "{body}");
 }
@@ -393,10 +496,14 @@ fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
 #[test]
 fn validate_dry_runs_without_persisting() {
     let server = Server::start("schema-validate-dry-run");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -407,7 +514,7 @@ fn validate_dry_runs_without_persisting() {
 
     let audit = server.ok(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", server.cx("sake")),
         Some(json!({"document": strict_document()})),
     );
     assert_eq!(audit["total"], json!(1), "{audit}");
@@ -418,7 +525,11 @@ fn validate_dry_runs_without_persisting() {
         "{audit}"
     );
 
-    let (status, body) = server.call("GET", "/contexts/sake/schema", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 404, "validate must never persist: {body}");
     assert_eq!(body["code"], "no_schema", "{body}");
 }
@@ -430,10 +541,14 @@ fn validate_dry_runs_without_persisting() {
 #[test]
 fn validate_works_whether_or_not_a_schema_is_already_installed() {
     let server = Server::start("schema-validate-either-way");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -444,7 +559,7 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
 
     let without = server.ok(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", server.cx("sake")),
         Some(json!({"document": strict_document()})),
     );
 
@@ -452,7 +567,7 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
     // proposed document — the resident schema must play no part.
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
@@ -460,7 +575,7 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
     );
     let with = server.ok(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", server.cx("sake")),
         Some(json!({"document": strict_document()})),
     );
     // The whole response, not just `total`/`violations` — every section
@@ -476,13 +591,17 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
 #[test]
 fn validate_refuses_an_invalid_proposed_document() {
     let server = Server::start("schema-validate-invalid-document");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let mut document = strict_document();
     document["relations"]["schema:type"] = json!({"domain": [], "range": []});
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/schema/validate",
+        &format!("/contexts/{}/schema/validate", server.cx("sake")),
         Some(json!({"document": document})),
     );
     assert_eq!(status, 400, "{body}");
@@ -498,7 +617,11 @@ fn validate_refuses_an_invalid_proposed_document() {
 #[test]
 fn audit_untyped_concepts_truncates_past_max_audit_names() {
     let server = Server::start("schema-audit-untyped-cap");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let mut ops: Vec<serde_json::Value> = vec![json!({
         "subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
         "weight": 1.0, "source": "a.md",
@@ -511,12 +634,20 @@ fn audit_untyped_concepts_truncates_past_max_audit_names() {
     }));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(serde_json::Value::Array(ops)),
     );
-    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
 
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(audit["untyped_concepts"]["total"], json!(101), "{audit}");
     let names: Vec<String> = audit["untyped_concepts"]["names"]
         .as_array()
@@ -536,7 +667,11 @@ fn audit_untyped_concepts_truncates_past_max_audit_names() {
 #[test]
 fn audit_undeclared_types_truncates_past_max_audit_names() {
     let server = Server::start("schema-audit-undeclared-cap");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let ops: Vec<serde_json::Value> = (0..101)
         .map(|i| {
             json!({
@@ -547,12 +682,20 @@ fn audit_undeclared_types_truncates_past_max_audit_names() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(serde_json::Value::Array(ops)),
     );
-    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(strict_document()),
+    );
 
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(audit["undeclared_types"]["total"], json!(101), "{audit}");
     let names: Vec<String> = audit["undeclared_types"]["names"]
         .as_array()
@@ -572,7 +715,11 @@ fn audit_undeclared_types_truncates_past_max_audit_names() {
 #[test]
 fn audit_unknown_labels_truncates_past_max_audit_names() {
     let server = Server::start("schema-audit-unknown-labels-cap");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     let ops: Vec<serde_json::Value> = (0..101)
         .map(|i| {
             json!({
@@ -583,15 +730,23 @@ fn audit_unknown_labels_truncates_past_max_audit_names() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(serde_json::Value::Array(ops)),
     );
     let mut document = strict_document();
     document["mode"] = json!("warn");
     document["closed_labels"] = json!(true);
-    server.ok("PUT", "/contexts/sake/schema", Some(document));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(document),
+    );
 
-    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/schema/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(audit["unknown_labels"]["total"], json!(101), "{audit}");
     let names: Vec<String> = audit["unknown_labels"]["names"]
         .as_array()

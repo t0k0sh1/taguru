@@ -15,7 +15,7 @@ use crate::schema::SCHEMA_TYPE_LABEL;
 
 use super::consolidation::{DEFAULT_COSINE_FLOOR, DEFAULT_DICE_FLOOR};
 use super::{
-    AppBytes, AppPath, AssociationOut, MatchCursor, access_error, association_out,
+    AppBytes, AssociationOut, ContextIdPath, MatchCursor, access_error, association_out,
     deadline_exceeded, locator_keys, ok, optional_body, page_by,
 };
 
@@ -169,7 +169,7 @@ pub(super) fn vocabulary_audit(
 
 pub async fn audit_vocabulary(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -189,10 +189,10 @@ pub async fn audit_vocabulary(
         return deadline_exceeded(started_at);
     }
     match tokio::task::block_in_place(|| {
-        vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
+        vocabulary_audit(&state, &id, dice_floor, cosine_floor, deadline)
     }) {
         Ok(audit) => ok(audit, started_at),
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -249,7 +249,7 @@ pub struct DriftAudit {
 
 pub async fn audit_drift(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     axum::Extension(heavy_ops): axum::Extension<HeavyOpsLimiter>,
     AppBytes(body): AppBytes,
@@ -270,7 +270,7 @@ pub async fn audit_drift(
     }
     let loaded = tokio::task::block_in_place(|| {
         state
-            .read_context(&name, |context| {
+            .read_context(&id, |context| {
                 let unsourced = context
                     .unsourced_edges(floor, deadline)
                     .map_err(|_| AccessError::DeadlineExceeded)?;
@@ -283,7 +283,7 @@ pub async fn audit_drift(
     });
     let (unsourced, (dead_concept_aliases, dead_label_aliases)) = match loaded {
         Ok(loaded) => loaded,
-        Err(failure) => return access_error(&state, failure, &name, started_at),
+        Err(failure) => return access_error(&state, failure, &id, started_at),
     };
 
     let (total, unsourced) = page_by(unsourced, request.limit, request.after.as_ref(), |edge| {
@@ -296,9 +296,9 @@ pub async fn audit_drift(
     });
     // A graph read like unreachable_from — zero drift is the audit
     // succeeding, not a miss, so it never counts as an empty read.
-    state.note_read(&name, false);
+    state.note_read(&id, false);
     let markers = state.resolve_markers(
-        &name,
+        &id,
         locator_keys(unsourced.iter().map(|edge| &edge.association)),
     );
     let unsourced = unsourced
@@ -323,10 +323,10 @@ pub async fn audit_drift(
         let dice_floor = request.dice_floor.unwrap_or(DEFAULT_DICE_FLOOR);
         let cosine_floor = request.cosine_floor.unwrap_or(DEFAULT_COSINE_FLOOR);
         match tokio::task::block_in_place(|| {
-            vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
+            vocabulary_audit(&state, &id, dice_floor, cosine_floor, deadline)
         }) {
             Ok(audit) => Some(audit),
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     } else {
         None

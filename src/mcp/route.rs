@@ -91,29 +91,42 @@ pub fn route_tool(
             "GET",
             format!(
                 "/contexts{}",
-                query_string(arguments, &["limit", "after", "pinned"])?
+                query_string(arguments, &["limit", "after", "after_id", "pinned"])?
             ),
             None,
         ),
-        "create_context" => (
-            "PUT",
-            context_path("name")?,
-            Some(pick(
-                arguments,
-                &["description", "pinned", "dice_floor", "semantic_floor"],
-            )),
-        ),
+        // The one directory tool with no path id: the server mints the
+        // id (ADR 0045) and the response row carries it. `name` is
+        // required here, not just picked — the schema's required list
+        // and this gate must agree.
+        "create_context" => {
+            need(arguments, "name")?;
+            (
+                "POST",
+                "/contexts".to_string(),
+                Some(pick(
+                    arguments,
+                    &[
+                        "name",
+                        "description",
+                        "pinned",
+                        "dice_floor",
+                        "semantic_floor",
+                    ],
+                )),
+            )
+        }
         "update_context" => (
             "PATCH",
-            context_path("name")?,
+            context_path("context")?,
             Some(pick(
                 arguments,
                 &["description", "pinned", "dice_floor", "semantic_floor"],
             )),
         ),
-        "delete_context" => ("DELETE", context_path("name")?, None),
+        "delete_context" => ("DELETE", context_path("context")?, None),
         "rename_context" => {
-            let path = format!("{}/rename", context_path("name")?);
+            let path = format!("{}/rename", context_path("context")?);
             need(arguments, "to")?;
             ("POST", path, Some(pick(arguments, &["to"])))
         }

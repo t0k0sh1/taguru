@@ -106,6 +106,46 @@ class FakeServer:
                 200,
                 json={"server": "0.6.0", "http_contract": {"current": 2, "supported": [2]}},
             )
+        if path == "/contexts" and request.method == "GET":
+            # The ingester/retriever resolve their configured context
+            # NAMES to the ids every /contexts/{id}/… route takes
+            # (#964) — routed above `self.calls.append` like /version,
+            # so the resolution round trip doesn't pollute the exact
+            # call-list assertions below.
+            def row(name: str) -> dict[str, Any]:
+                return {
+                    "id": f"id-{name}",
+                    "name": name,
+                    "description": "",
+                    "pinned": False,
+                    "loaded": False,
+                    "dice_floor": None,
+                    "semantic_floor": None,
+                    "stats": {
+                        "associations": 0,
+                        "concepts": 0,
+                        "labels": 0,
+                        "sources": 0,
+                        "footprint_bytes": 0,
+                        "dead_edges": 0,
+                        "dead_attributions": 0,
+                        "arena_slack": 0,
+                        "unsourced_edges": 0,
+                        "unsourced_weight": 0.0,
+                        "top_concepts": [],
+                        "label_sample": [],
+                    },
+                    "usage": {
+                        "reads": 0,
+                        "empty_reads": 0,
+                        "writes": 0,
+                        "last_read_epoch": 0,
+                        "last_write_epoch": 0,
+                    },
+                }
+
+            rows = [] if request.url.params.get("after") else [row("sake"), row("tea")]
+            return ok({"total": 2, "contexts": rows})
         body: Any = None
         if request.content:
             try:

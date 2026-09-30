@@ -12,20 +12,20 @@ use crate::support::*;
 /// at once (the mixed-lane case #305's completion criteria name).
 fn seed_mixed_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "酒蔵の記憶"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "酒蔵の記憶"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/sources"),
+        &format!("/contexts/{}/sources", server.cx(name)),
         Some(json!({"passages": {
             "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
         }})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "docs/kura.md", "paragraph": 0},
@@ -42,7 +42,7 @@ fn assembles_a_mixed_lane_provenance_complete_package() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
 
@@ -123,14 +123,14 @@ fn include_communities_without_an_artifact_degrades_instead_of_refusing() {
 
     let (direct_status, direct_body) = server.call(
         "POST",
-        "/contexts/sake/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sake")),
         Some(json!({"query": "テーマ"})),
     );
     assert_eq!(direct_status, 404, "{direct_body}");
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "include_communities": true})),
     );
     let communities_plan = &package["plan"]["lanes"]["communities"];
@@ -155,7 +155,7 @@ fn a_tiny_budget_yields_an_empty_package_with_every_omission_accounted() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "budget": {"max_items": 0}})),
     );
     assert_eq!(package["items"], json!([]), "{package}");
@@ -177,8 +177,16 @@ fn selection_is_deterministic_across_repeated_calls() {
     seed_mixed_corpus(&server, "sake");
 
     let request = json!({"origins": ["青嶺酒造"]});
-    let first = server.ok("POST", "/contexts/sake/evidence", Some(request.clone()));
-    let second = server.ok("POST", "/contexts/sake/evidence", Some(request));
+    let first = server.ok(
+        "POST",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
+        Some(request.clone()),
+    );
+    let second = server.ok(
+        "POST",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
+        Some(request),
+    );
     assert_eq!(first, second);
 }
 
@@ -201,7 +209,7 @@ fn the_query_lane_runs_only_when_labels_pins_a_facet_and_contributes_real_eviden
 
     let unlabeled = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     assert_eq!(
@@ -212,7 +220,7 @@ fn the_query_lane_runs_only_when_labels_pins_a_facet_and_contributes_real_eviden
 
     let labeled = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "labels": ["杜氏"]})),
     );
     assert_eq!(
@@ -246,7 +254,7 @@ fn dice_floor_forwards_into_the_per_origin_resolve_call() {
 
     let lenient = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         // A typo of the stored concept "青嶺酒造" — the fuzzy tier
         // resolves it under the default floor.
         Some(json!({"origins": ["青嶺酒蔵"]})),
@@ -262,7 +270,7 @@ fn dice_floor_forwards_into_the_per_origin_resolve_call() {
 
     let strict = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒蔵"], "dice_floor": 0.9})),
     );
     assert!(
@@ -291,7 +299,7 @@ fn activate_limit_forwards_into_the_activate_call() {
     seed_mixed_corpus(&server, "sake");
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "所在地", "object": "雲居県",
              "weight": 1.0, "source": "docs/kura.md", "paragraph": 0},
@@ -300,7 +308,7 @@ fn activate_limit_forwards_into_the_activate_call() {
 
     let unlimited = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     let unlimited_associations = unlimited["items"]
@@ -313,7 +321,7 @@ fn activate_limit_forwards_into_the_activate_call() {
 
     let limited = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "activate_limit": 1})),
     );
     let limited_associations = limited["items"]
@@ -341,7 +349,7 @@ fn an_attribution_to_a_never_stored_source_is_dropped_not_orphaned() {
     seed_mixed_corpus(&server, "sake");
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "受賞歴", "object": "金賞",
              "weight": 1.0, "source": "ghost.md", "paragraph": 0},
@@ -350,7 +358,7 @@ fn an_attribution_to_a_never_stored_source_is_dropped_not_orphaned() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     let item = package["items"]
@@ -385,14 +393,14 @@ fn the_assemble_evidence_tool_routes_to_the_same_endpoint() {
 
     let http_package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
 
     let result = server.call_tool(
         1,
         "assemble_evidence",
-        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
     let text = result["content"][0]["text"].as_str().unwrap();
@@ -419,7 +427,7 @@ fn malformed_input_is_refused_with_the_documented_error_codes() {
     let too_many_origins: Vec<String> = (0..1001).map(|i| format!("cue{i}")).collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": too_many_origins})),
     );
     assert_eq!(status, 400, "{body}");
@@ -431,7 +439,7 @@ fn malformed_input_is_refused_with_the_documented_error_codes() {
     // `malformed_request`, the stable code a client branches on.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "budget": "not-an-object"})),
     );
     assert_eq!(status, 422, "{body}");
@@ -444,7 +452,7 @@ fn malformed_input_is_refused_with_the_documented_error_codes() {
     // uses, via the JSON extractor itself).
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": 5})),
     );
     assert_eq!(status, 422, "{body}");
@@ -467,9 +475,9 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
     };
     assert_eq!(
         call(
-            "PUT",
-            "/contexts/sake",
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": "sake", "description": "d"})),
             "atok"
         )
         .0,
@@ -478,7 +486,7 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/sources",
+            &format!("/contexts/{}/sources", server.cx("sake")),
             Some(json!({"passages": {
                 "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
             }})),
@@ -490,7 +498,7 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
     assert_eq!(
         call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([
                 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
                  "source": "docs/kura.md", "paragraph": 0},
@@ -503,7 +511,7 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
 
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
         Some("rtok"),
     );
@@ -513,7 +521,7 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
     // fans out to unaffected.
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
         Some("rtok"),
     );
@@ -592,6 +600,10 @@ fn rerank_env(url: &str, model: &str, timeout_secs: &str) -> Vec<(&'static str, 
         ("TAGURU_RERANK_URL", url.to_string()),
         ("TAGURU_RERANK_MODEL", model.to_string()),
         ("TAGURU_RERANK_TIMEOUT_SECS", timeout_secs.to_string()),
+        // The degrade tests compare packages across SERVERS byte for
+        // byte, and a passage candidate_id embeds the context id
+        // (#964) — deterministic minting keeps the ids equal.
+        ("TAGURU_TEST_DETERMINISTIC_IDS", "1".to_string()),
     ]
 }
 
@@ -630,12 +642,12 @@ fn a_configured_reranker_reorders_admission_and_reports_its_model() {
 
     let baseline = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     let reranked = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
     );
 
@@ -684,7 +696,7 @@ fn a_configured_reranker_left_unrequested_reports_ran_false_with_no_reason() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
     assert_eq!(
@@ -701,11 +713,14 @@ fn a_configured_reranker_left_unrequested_reports_ran_false_with_no_reason() {
 /// naming `provider_error`.
 #[test]
 fn a_failing_or_unreachable_reranker_degrades_to_the_unconfigured_package() {
-    let unconfigured = Server::start("evidence-rerank-baseline");
+    let unconfigured = Server::start_with_env(
+        "evidence-rerank-baseline",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_mixed_corpus(&unconfigured, "sake");
     let baseline = unconfigured.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", unconfigured.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
 
@@ -720,7 +735,7 @@ fn a_failing_or_unreachable_reranker_degrades_to_the_unconfigured_package() {
         seed_mixed_corpus(&server, "sake");
         let degraded = server.ok(
             "POST",
-            "/contexts/sake/evidence",
+            &format!("/contexts/{}/evidence", server.cx("sake")),
             Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
         );
         assert_eq!(
@@ -767,11 +782,14 @@ fn a_failing_or_unreachable_reranker_degrades_to_the_unconfigured_package() {
 /// `api::evidence::rerank::tests::a_deadline_driven_transport_timeout_is_reported_as_timeout`.
 #[test]
 fn an_invalid_permutation_degrades_to_the_unconfigured_package() {
-    let unconfigured = Server::start("evidence-rerank-invalid-baseline");
+    let unconfigured = Server::start_with_env(
+        "evidence-rerank-invalid-baseline",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_mixed_corpus(&unconfigured, "sake");
     let baseline = unconfigured.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", unconfigured.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
 
@@ -790,7 +808,7 @@ fn an_invalid_permutation_degrades_to_the_unconfigured_package() {
     seed_mixed_corpus(&server, "sake");
     let degraded = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
     );
     assert_eq!(
@@ -824,7 +842,7 @@ fn a_rerank_model_mismatch_degrades_without_calling_the_provider() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {"model": "a-different-model"}})),
     );
     assert_eq!(
@@ -881,7 +899,7 @@ fn reranker_privacy_leaks_no_candidate_text_or_credential_into_metrics() {
 
     let package = server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
     );
     assert_eq!(

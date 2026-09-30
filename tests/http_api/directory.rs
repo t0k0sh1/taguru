@@ -10,9 +10,9 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
     let server = Server::start("dirpage");
     for name in ["apple", "banana", "cherry"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{name}"),
-            Some(json!({"description": name})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": name})),
         );
     }
 
@@ -22,7 +22,7 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple", "banana"], "name order, first page");
 
@@ -32,14 +32,19 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["cherry"], "keyset picks up after the cursor");
 
-    let single = server.ok("GET", "/contexts/banana", None);
-    assert_eq!(single["id"], json!("banana"));
+    let single = server.ok("GET", &format!("/contexts/{}", server.cx("banana")), None);
+    assert_eq!(single["id"], json!(server.cx("banana")));
+    assert_eq!(single["name"], json!("banana"));
     assert_eq!(single["description"], json!("banana"));
-    let (status, body) = server.call("GET", "/contexts/nope", None);
+    let (status, body) = server.call(
+        "GET",
+        "/contexts/00000000-0000-4000-8000-00000000dead",
+        None,
+    );
     assert_eq!(status, 404);
     assert_eq!(body["status"], json!("error"));
 }
@@ -54,9 +59,9 @@ fn a_zero_limit_still_returns_one_context_rather_than_reading_as_the_end() {
     let server = Server::start("dirpage-zero-limit");
     for name in ["apple", "banana", "cherry"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{name}"),
-            Some(json!({"description": name})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": name})),
         );
     }
 
@@ -66,7 +71,7 @@ fn a_zero_limit_still_returns_one_context_rather_than_reading_as_the_end() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple"], "floored to one, not zero");
 }
@@ -77,19 +82,19 @@ fn a_zero_limit_still_returns_one_context_rather_than_reading_as_the_end() {
 fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
     let server = Server::start("dirpinned");
     server.ok(
-        "PUT",
-        "/contexts/apple",
-        Some(json!({"description": "a", "pinned": true})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "apple", "description": "a", "pinned": true})),
     );
     server.ok(
-        "PUT",
-        "/contexts/banana",
-        Some(json!({"description": "b", "pinned": false})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "banana", "description": "b", "pinned": false})),
     );
     server.ok(
-        "PUT",
-        "/contexts/cherry",
-        Some(json!({"description": "c", "pinned": true})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "cherry", "description": "c", "pinned": true})),
     );
 
     let pinned = server.ok("GET", "/contexts?pinned=true", None);
@@ -98,13 +103,13 @@ fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["apple", "cherry"]);
 
     let unpinned = server.ok("GET", "/contexts?pinned=false", None);
     assert_eq!(unpinned["total"], json!(1), "{unpinned}");
-    assert_eq!(unpinned["contexts"][0]["id"], json!("banana"));
+    assert_eq!(unpinned["contexts"][0]["name"], json!("banana"));
 
     let all = server.ok("GET", "/contexts", None);
     assert_eq!(all["total"], json!(3), "no filter means every context");
@@ -128,9 +133,9 @@ fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() 
     );
     for name in ["apple", "banana", "cherry", "date"] {
         let (status, _) = server.call_with_token(
-            "PUT",
-            &format!("/contexts/{name}"),
-            Some(json!({"description": name})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": name})),
             Some("atok"),
         );
         assert_eq!(status, 200);
@@ -150,7 +155,7 @@ fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() 
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(
         names,
@@ -166,7 +171,7 @@ fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() 
         .as_array()
         .unwrap()
         .iter()
-        .map(|context| context["id"].as_str().unwrap())
+        .map(|context| context["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["date"], "keyset picks up after the cursor");
 }

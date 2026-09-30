@@ -36,20 +36,20 @@ classes:
     close: {}
 
   Contexts:
-    list: { route: "GET /contexts", options: [limit, after, pinned] }
+    list: { route: "GET /contexts", options: [limit, after, after_id, pinned] }
     iter: { route: "GET /contexts", options: [limit, pinned] }
-    get: { route: "GET /contexts/{name}", args: [name] }
-    exists: { route: "GET /contexts/{name}", args: [name] }
+    get: { route: "GET /contexts/{id}", args: [context_id] }
+    exists: { route: "GET /contexts/{id}", args: [context_id] }
     create:
-      route: "PUT /contexts/{name}"
+      route: "POST /contexts"
       args: [name]
       options: [description, pinned, dice_floor, semantic_floor]
     update:
-      route: "PATCH /contexts/{name}"
-      args: [name]
+      route: "PATCH /contexts/{id}"
+      args: [context_id]
       options: [description, pinned, dice_floor, semantic_floor]
-    delete: { route: "DELETE /contexts/{name}", args: [name] }
-    rename: { route: "POST /contexts/{name}/rename", args: [name, to] }
+    delete: { route: "DELETE /contexts/{id}", args: [context_id] }
+    rename: { route: "POST /contexts/{id}/rename", args: [context_id, to] }
 
   Groups:
     list: { route: "GET /groups", options: [limit, after] }
@@ -70,122 +70,122 @@ classes:
 
   Context:
     resolve:
-      route: "POST /contexts/{name}/resolve"
+      route: "POST /contexts/{id}/resolve"
       args: [cue]
       options: [dice_floor, semantic_floor, limit]
     resolve_label:
-      route: "POST /contexts/{name}/resolve_label"
+      route: "POST /contexts/{id}/resolve_label"
       args: [cue]
       options: [dice_floor, semantic_floor, limit]
     explain_resolve:
-      route: "POST /contexts/{name}/resolve/explain"
+      route: "POST /contexts/{id}/resolve/explain"
       args: [cue, expected]
       options: [dice_floor, semantic_floor, limit]
     explain_resolve_label:
-      route: "POST /contexts/{name}/resolve_label/explain"
+      route: "POST /contexts/{id}/resolve_label/explain"
       args: [cue, expected]
       options: [dice_floor, semantic_floor, limit]
-    describe: { route: "POST /contexts/{name}/describe", args: [concept] }
+    describe: { route: "POST /contexts/{id}/describe", args: [concept] }
     query:
-      route: "POST /contexts/{name}/query"
+      route: "POST /contexts/{id}/query"
       options: [subject, label, object, subject_types, object_types, limit, after, since, until]
     recall:
-      route: "POST /contexts/{name}/recall"
+      route: "POST /contexts/{id}/recall"
       args: [cue]
       options: [limit, after, since, until]
     activate:
-      route: "POST /contexts/{name}/activate"
+      route: "POST /contexts/{id}/activate"
       args: [origins]
       options: [decay, limit, since, until]
     explore:
-      route: "POST /contexts/{name}/explore"
+      route: "POST /contexts/{id}/explore"
       args: [origins]
       options: [max_depth, limit, after, since, until]
     paths:
-      route: "POST /contexts/{name}/paths"
+      route: "POST /contexts/{id}/paths"
       args: [origins, targets]
       options: [max_depth, limit]
     changes:
-      route: "GET /contexts/{name}/changes"
+      route: "GET /contexts/{id}/changes"
       options: [since, limit]
     unreachable_from:
-      route: "POST /contexts/{name}/unreachable_from"
+      route: "POST /contexts/{id}/unreachable_from"
       args: [origins]
       options: [limit, after]
-    list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after, prefix] }
-    iter_labels: { route: "GET /contexts/{name}/labels", options: [limit, prefix] }
-    get_schema: { route: "GET /contexts/{name}/schema" }
+    list_labels: { route: "GET /contexts/{id}/labels", options: [limit, after, prefix] }
+    iter_labels: { route: "GET /contexts/{id}/labels", options: [limit, prefix] }
+    get_schema: { route: "GET /contexts/{id}/schema" }
     put_schema:
-      route: "PUT /contexts/{name}/schema"
+      route: "PUT /contexts/{id}/schema"
       args: [document]
     audit_schema:
-      route: "POST /contexts/{name}/schema/audit"
+      route: "POST /contexts/{id}/schema/audit"
       options: [limit, after]
     validate_schema:
-      route: "POST /contexts/{name}/schema/validate"
+      route: "POST /contexts/{id}/schema/validate"
       args: [document]
       options: [limit, after]
     add_associations:
-      route: "POST /contexts/{name}/associations"
+      route: "POST /contexts/{id}/associations"
       args: [associations]
     add_associations_batched:
-      route: "POST /contexts/{name}/associations"
+      route: "POST /contexts/{id}/associations"
       args: [associations]
       options: [chunk_size, max_chunk_bytes]
     retract_association:
-      route: "POST /contexts/{name}/associations/retract"
+      route: "POST /contexts/{id}/associations/retract"
       args: [subject, label, object]
     store_passages:
-      route: "POST /contexts/{name}/sources"
+      route: "POST /contexts/{id}/sources"
       args: [passages]
       options: [questions, sections, locators, tags, dates]
-    lookup_passages: { route: "POST /contexts/{name}/sources/lookup", args: [sources] }
+    lookup_passages: { route: "POST /contexts/{id}/sources/lookup", args: [sources] }
     search_passages:
-      route: "POST /contexts/{name}/sources/search"
+      route: "POST /contexts/{id}/sources/search"
       args: [query]
       options: [limit, semantic_floor, tags, since, until]
     search_communities:
-      route: "POST /contexts/{name}/communities/search"
+      route: "POST /contexts/{id}/communities/search"
       args: [query]
       options: [limit, semantic_floor, derived]
-    analyze_communities: { route: "GET /contexts/{name}/communities" }
+    analyze_communities: { route: "GET /contexts/{id}/communities" }
     explain_search_passages:
-      route: "POST /contexts/{name}/sources/search/explain"
+      route: "POST /contexts/{id}/sources/search/explain"
       args: [query, source]
       options: [paragraph, limit, semantic_floor, tags, since, until]
     retract_source:
-      route: "POST /contexts/{name}/sources/retract"
+      route: "POST /contexts/{id}/sources/retract"
       args: [source]
       options: [dry_run]
-    list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after, prefix] }
-    iter_sources: { route: "GET /contexts/{name}/sources", options: [limit, prefix] }
-    cite_passage: { route: "POST /contexts/{name}/citations", args: [source, paragraph] }
-    get_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, after, prefix] }
-    iter_aliases: { route: "GET /contexts/{name}/aliases", options: [limit, prefix] }
-    add_aliases: { route: "POST /contexts/{name}/aliases", options: [concepts, labels] }
-    remove_aliases: { route: "DELETE /contexts/{name}/aliases", options: [concepts, labels] }
+    list_sources: { route: "GET /contexts/{id}/sources", options: [limit, after, prefix] }
+    iter_sources: { route: "GET /contexts/{id}/sources", options: [limit, prefix] }
+    cite_passage: { route: "POST /contexts/{id}/citations", args: [source, paragraph] }
+    get_aliases: { route: "GET /contexts/{id}/aliases", options: [limit, after, prefix] }
+    iter_aliases: { route: "GET /contexts/{id}/aliases", options: [limit, prefix] }
+    add_aliases: { route: "POST /contexts/{id}/aliases", options: [concepts, labels] }
+    remove_aliases: { route: "DELETE /contexts/{id}/aliases", options: [concepts, labels] }
     audit_vocabulary:
-      route: "POST /contexts/{name}/vocabulary/audit"
+      route: "POST /contexts/{id}/vocabulary/audit"
       options: [dice_floor, cosine_floor]
     audit_drift:
-      route: "POST /contexts/{name}/drift/audit"
+      route: "POST /contexts/{id}/drift/audit"
       options: [unsourced_floor, limit, after, include_twins, dice_floor, cosine_floor]
     audit_consolidation:
-      route: "POST /contexts/{name}/consolidation/audit"
+      route: "POST /contexts/{id}/consolidation/audit"
       args: [checks]
       options: [limit, evidence_cap, dice_floor, cosine_floor, floor_secs]
-    refresh_embeddings: { route: "POST /contexts/{name}/embeddings/refresh" }
-    embeddings_status: { route: "GET /contexts/{name}/embeddings" }
-    compact: { route: "POST /contexts/{name}/compact" }
+    refresh_embeddings: { route: "POST /contexts/{id}/embeddings/refresh" }
+    embeddings_status: { route: "GET /contexts/{id}/embeddings" }
+    compact: { route: "POST /contexts/{id}/compact" }
     promote:
-      route: "POST /contexts/{name}/promote"
+      route: "POST /contexts/{id}/promote"
       args: [into, sources]
       options: [audit, dry_run]
-    export: { route: "GET /contexts/{name}/export" }
-    export_stream: { route: "GET /contexts/{name}/export" }
-    export_to_file: { route: "GET /contexts/{name}/export", args: [path] }
+    export: { route: "GET /contexts/{id}/export" }
+    export_stream: { route: "GET /contexts/{id}/export" }
+    export_to_file: { route: "GET /contexts/{id}/export", args: [path] }
     assemble_evidence:
-      route: "POST /contexts/{name}/evidence"
+      route: "POST /contexts/{id}/evidence"
       args: [origins]
       options:
         - labels

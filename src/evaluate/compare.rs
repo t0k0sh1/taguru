@@ -696,7 +696,7 @@ fn describe_budget(limits: Option<BudgetLimits>) -> String {
         ),
         // Only reachable for a `baseline` run with no --max-* flag —
         // `assembly` always carries Some(limits), even the server's
-        // own defaults, since POST /contexts/{name}/evidence has no
+        // own defaults, since POST /contexts/{id}/evidence has no
         // unbudgeted mode (InputsBlock.budget's own doc comment).
         None => "none (untruncated baseline)".to_string(),
     }

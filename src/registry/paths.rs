@@ -16,6 +16,17 @@ use crate::storage::write_atomic;
 /// an encoded stem cannot contain `-`-separated hex groups of this
 /// shape by accident, and uniqueness comes from the 122 random bits.
 pub(crate) fn mint_context_id() -> String {
+    // The wire-fixture generator commits response bodies that carry
+    // minted ids, so its ids must be identical run to run. This hook
+    // is for THAT — a test-only sequence in the same canonical shape —
+    // and for nothing else: two servers minting from it collide, and
+    // a restart re-mints ids the data directory already holds.
+    if std::env::var_os("TAGURU_TEST_DETERMINISTIC_IDS").is_some() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        return format!("00000000-0000-4000-8000-{n:012x}");
+    }
     uuid::Uuid::new_v4().to_string()
 }
 

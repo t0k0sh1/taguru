@@ -181,7 +181,7 @@ def main() -> int:
         for outcome in outcomes:
             print(f"ingested {outcome.source}: {outcome.associations} facts, {outcome.aliases} aliases")
 
-        # -- read: POST /contexts/{name}/evidence directly, no assembly-lane
+        # -- read: POST /contexts/{id}/evidence directly, no assembly-lane
         #    intermediary — this is the same call `taguru evaluate --assembly`
         #    drives for the equal-budget comparison documented on
         #    docs/evidence.html. Context.assemble_evidence(), not a bare

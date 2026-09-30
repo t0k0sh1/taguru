@@ -2008,18 +2008,8 @@ fn the_mcp_bridge_carries_structured_content_on_a_rejected_write() {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "create_context", "arguments": {"name": "sake"}}
     });
-    let invalid = serde_json::json!({
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "add_associations", "arguments": {"context": "sake", "associations": [
-            {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
-        ]}}
-    });
 
     let mut stdin = bridge.stdin.take().unwrap();
-    writeln!(stdin, "{create}").unwrap();
-    writeln!(stdin, "{invalid}").unwrap();
-    drop(stdin);
-
     let stdout = bridge.stdout.take().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2027,13 +2017,33 @@ fn the_mcp_bridge_carries_structured_content_on_a_rejected_write() {
         let _ = sender.send(lines.next().and_then(Result::ok));
         let _ = sender.send(lines.next().and_then(Result::ok));
     });
-    // The bridge dispatches queued `tools/call` requests onto a worker
-    // pool, so the two replies are not guaranteed to arrive in request
-    // order — match by `id` instead of position.
+    // The create must answer FIRST: the second call addresses the
+    // context by the id the create's response row carries (#964).
+    writeln!(stdin, "{create}").unwrap();
     let first = receiver
         .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("the bridge must answer the first call")
+        .expect("the bridge must answer the create")
         .expect("one JSON-RPC response line");
+    let first: serde_json::Value = serde_json::from_str(&first).expect("reply must be JSON");
+    assert_eq!(first["id"], serde_json::json!(1), "{first}");
+    let row: serde_json::Value = serde_json::from_str(
+        first["result"]["content"][0]["text"]
+            .as_str()
+            .expect("create answers the directory row as text"),
+    )
+    .expect("the create row must be JSON");
+    let context_id = row["result"]["id"]
+        .as_str()
+        .expect("the row carries the id");
+
+    let invalid = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "add_associations", "arguments": {"context": context_id, "associations": [
+            {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
+        ]}}
+    });
+    writeln!(stdin, "{invalid}").unwrap();
+    drop(stdin);
     let second = receiver
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the bridge must answer the second call")
@@ -2045,13 +2055,8 @@ fn the_mcp_bridge_carries_structured_content_on_a_rejected_write() {
     let _ = server.wait();
     let _ = std::fs::remove_dir_all(&dir);
 
-    let first: serde_json::Value = serde_json::from_str(&first).expect("reply must be JSON");
-    let second: serde_json::Value = serde_json::from_str(&second).expect("reply must be JSON");
-    let answer = if first["id"] == serde_json::json!(2) {
-        first
-    } else {
-        second
-    };
+    let answer: serde_json::Value = serde_json::from_str(&second).expect("reply must be JSON");
+    assert_eq!(answer["id"], serde_json::json!(2), "{answer}");
     assert_eq!(
         answer["result"]["isError"],
         serde_json::json!(true),
@@ -2459,9 +2464,11 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
         "{third:?}"
     );
 
-    // A subset export writes its slice and removes nothing.
+    // A subset export writes its slice and removes nothing. The
+    // argument is the context's id (the file stem, ADR 0045).
     std::fs::write(out.join("zombie.jsonl"), b"{}").expect("stale file must be writable");
-    let subset = run_in(&["export", "--out", &out.display().to_string(), "sake"]);
+    let sake_stem = common::context_stem(&data, "sake");
+    let subset = run_in(&["export", "--out", &out.display().to_string(), &sake_stem]);
     assert_eq!(subset.status.code(), Some(0), "{subset:?}");
     assert!(
         out.join("zombie.jsonl").exists(),
@@ -2500,11 +2507,12 @@ fn export_counts_an_unknown_context_as_a_failure() {
     assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
 
     let out = dir.join("out");
+    let sake_stem = common::context_stem(&data, "sake");
     let output = run_in(&[
         "export",
         "--out",
         &out.display().to_string(),
-        "sake",
+        &sake_stem,
         "nope",
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -3228,9 +3236,10 @@ fn compact_counts_an_unknown_context_as_a_failure_on_every_local_path() {
     let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
     assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
 
+    let sake_stem = common::context_stem(&data, "sake");
     for args in [
-        &["compact", "sake", "nope"][..],
-        &["compact", "--parallel", "2", "sake", "nope"][..],
+        &["compact", sake_stem.as_str(), "nope"][..],
+        &["compact", "--parallel", "2", sake_stem.as_str(), "nope"][..],
     ] {
         let output = run_in(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
@@ -3245,7 +3254,7 @@ fn compact_counts_an_unknown_context_as_a_failure_on_every_local_path() {
         );
     }
 
-    let dry = run_in(&["compact", "--dry-run", "sake", "nope"]);
+    let dry = run_in(&["compact", "--dry-run", sake_stem.as_str(), "nope"]);
     assert_eq!(dry.status.code(), Some(1), "{dry:?}");
     assert!(
         String::from_utf8_lossy(&dry.stdout).contains("of 2 context(s) carry dead weight"),

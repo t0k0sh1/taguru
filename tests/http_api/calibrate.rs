@@ -136,19 +136,23 @@ fn calibration_server(tag: &str, flat: Arc<AtomicBool>) -> Server {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/cal",
-        Some(json!({"description": "calibration corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "cal", "description": "calibration corpus"})),
     );
     server.ok(
         "POST",
-        "/contexts/cal/associations",
+        &format!("/contexts/{}/associations", server.cx("cal")),
         Some(json!([
             {"subject": "琥珀", "label": "分類", "object": "樹脂化石", "weight": 1.0},
             {"subject": "ダイヤモンド", "label": "特徴", "object": "輝き", "weight": 1.0},
         ])),
     );
-    server.ok("POST", "/contexts/cal/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("cal")),
+        None,
+    );
     server
 }
 
@@ -170,7 +174,11 @@ fn a_calibration_run_measures_bands_excludes_contamination_and_suggests_a_floor(
 
     // The identity exposure the report stamps itself with (#131/#133):
     // provider setting beside what the sidecar actually holds.
-    let status = server.ok("GET", "/contexts/cal/embeddings", None);
+    let status = server.ok(
+        "GET",
+        &format!("/contexts/{}/embeddings", server.cx("cal")),
+        None,
+    );
     assert_eq!(status["provider_model"], json!("titan-mock"), "{status}");
     assert_eq!(status["glosses"]["model"], json!("titan-mock"), "{status}");
     assert_eq!(status["glosses"]["width"], json!(8), "{status}");
@@ -191,7 +199,7 @@ fn a_calibration_run_measures_bands_excludes_contamination_and_suggests_a_floor(
     let (code, stdout, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &server.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -267,7 +275,7 @@ fn a_calibration_run_measures_bands_excludes_contamination_and_suggests_a_floor(
     let (code, stdout, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &server.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             &server.base,
@@ -295,7 +303,7 @@ fn overlapping_bands_refuse_to_invent_a_floor() {
     let (code, stdout, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &server.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -320,15 +328,15 @@ fn servers_that_cannot_calibrate_say_why() {
     // No provider at all.
     let bare = Server::start("calibrate-off");
     bare.ok(
-        "PUT",
-        "/contexts/cal",
-        Some(json!({"description": "no embeddings here"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "cal", "description": "no embeddings here"})),
     );
     let probes = write_probes("calibrate-off", "むかしのじゅし\t琥珀\n");
     let (code, _, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &bare.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -349,19 +357,19 @@ fn servers_that_cannot_calibrate_say_why() {
         ],
     );
     unrefreshed.ok(
-        "PUT",
-        "/contexts/cal",
-        Some(json!({"description": "vectors never refreshed"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "cal", "description": "vectors never refreshed"})),
     );
     unrefreshed.ok(
         "POST",
-        "/contexts/cal/associations",
+        &format!("/contexts/{}/associations", unrefreshed.cx("cal")),
         Some(json!([{"subject": "琥珀", "label": "分類", "object": "樹脂化石", "weight": 1.0}])),
     );
     let (code, _, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &unrefreshed.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -376,7 +384,7 @@ fn servers_that_cannot_calibrate_say_why() {
     let (code, _, stderr) = run_calibrate(
         &[
             "--context",
-            "nope",
+            "00000000-0000-4000-8000-00000000dead",
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -409,25 +417,26 @@ fn an_authenticated_server_accepts_the_environment_token() {
         parsed["result"].clone()
     };
     with_token(
-        "PUT",
-        "/contexts/cal",
-        Some(json!({"description": "auth calibration"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "cal", "description": "auth calibration"})),
     );
+    let cal = server.cx("cal");
     with_token(
         "POST",
-        "/contexts/cal/associations",
+        &format!("/contexts/{cal}/associations"),
         Some(json!([
             {"subject": "琥珀", "label": "分類", "object": "樹脂化石", "weight": 1.0},
             {"subject": "ダイヤモンド", "label": "特徴", "object": "輝き", "weight": 1.0},
         ])),
     );
-    with_token("POST", "/contexts/cal/embeddings/refresh", None);
+    with_token("POST", &format!("/contexts/{cal}/embeddings/refresh"), None);
 
     let probes = write_probes("calibrate-auth", "むかしのじゅし\t琥珀\n");
     let (code, stdout, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &server.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",
@@ -442,7 +451,7 @@ fn an_authenticated_server_accepts_the_environment_token() {
     let (code, _, stderr) = run_calibrate(
         &[
             "--context",
-            "cal",
+            &server.cx("cal"),
             "--probes",
             probes.to_str().unwrap(),
             "--json",

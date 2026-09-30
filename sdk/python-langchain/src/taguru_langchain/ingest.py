@@ -362,7 +362,9 @@ class TaguruIngester:
     """Decompose LangChain Documents into one Taguru ``context`` via a chat model.
 
     Args:
-        context: Target ``context`` name.
+        context: Target ``context``'s display NAME — what the import header
+            carries (and creates, with ``create_context``); the ingester
+            resolves it to the context's id for every read (#964).
         llm: Any LangChain chat model; asked for a single JSON object, with
             corrective turns on a malformed answer (see ``max_attempts``),
             mirroring taguru extract.
@@ -1035,7 +1037,12 @@ class TaguruIngester:
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                refresh_result = self.client.context(self.context).refresh_embeddings()
+                # The import above just created (or found) the context
+                # by name; the refresh addresses it by id.
+                context_id = self._context_id()
+                if context_id is None:
+                    raise NotFoundError(f"context {self.context!r} not found", status=404)
+                refresh_result = self.client.context(context_id).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
                         source=source,
@@ -1098,12 +1105,31 @@ class TaguruIngester:
                 break
         return outcomes
 
+    def _context_id(self) -> str | None:
+        """The id behind the ingester's context NAME, read off the directory —
+        ``None`` when nothing carries the name yet (first ingest) or when a
+        listing fails; several contexts sharing it raise, since writing into
+        "one of them" would be a coin flip."""
+        assert self.client is not None
+        try:
+            matches = [row.id for row in self.client.contexts.iter() if row.name == self.context]
+        except Exception:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
+            )
+        return matches[0] if matches else None
+
     def _fetch_vocabulary(self) -> list[str]:
         """The ``context``'s live relation vocabulary — an advantage the offline
         extractor structurally lacks. Best-effort: an absent ``context`` is fine."""
         assert self.client is not None
+        context_id = self._context_id()
+        if context_id is None:
+            return []
         try:
-            page = self.client.context(self.context).list_labels(limit=self.vocabulary_cap)
+            page = self.client.context(context_id).list_labels(limit=self.vocabulary_cap)
         except NotFoundError:
             return []
         return page.labels
@@ -1114,8 +1140,11 @@ class TaguruIngester:
         server or a schema-free ``context`` is fine, and this ingester works
         unchanged either way."""
         assert self.client is not None
+        context_id = self._context_id()
+        if context_id is None:
+            return None
         try:
-            return self.client.context(self.context).get_schema()
+            return self.client.context(context_id).get_schema()
         except NotFoundError:
             return None
 
@@ -1425,7 +1454,11 @@ class TaguruIngester:
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
             try:
-                refresh_result = await self.async_client.context(self.context).refresh_embeddings()
+                # Same id resolution as the sync path.
+                context_id = await self._acontext_id()
+                if context_id is None:
+                    raise NotFoundError(f"context {self.context!r} not found", status=404)
+                refresh_result = await self.async_client.context(context_id).refresh_embeddings()
                 self._emit(
                     EmbeddingRefreshCompleted(
                         source=source,
@@ -1562,10 +1595,30 @@ class TaguruIngester:
         except Exception:
             pass
 
-    async def _afetch_vocabulary(self) -> list[str]:
+    async def _acontext_id(self) -> str | None:
+        """Async twin of ``_context_id``."""
         assert self.async_client is not None
         try:
-            page = await self.async_client.context(self.context).list_labels(
+            matches = [
+                row.id
+                async for row in self.async_client.contexts.iter()
+                if row.name == self.context
+            ]
+        except Exception:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
+            )
+        return matches[0] if matches else None
+
+    async def _afetch_vocabulary(self) -> list[str]:
+        assert self.async_client is not None
+        context_id = await self._acontext_id()
+        if context_id is None:
+            return []
+        try:
+            page = await self.async_client.context(context_id).list_labels(
                 limit=self.vocabulary_cap
             )
         except NotFoundError:
@@ -1575,8 +1628,11 @@ class TaguruIngester:
     async def _afetch_schema(self) -> SchemaDocument | None:
         """Async twin of ``_fetch_schema``."""
         assert self.async_client is not None
+        context_id = await self._acontext_id()
+        if context_id is None:
+            return None
         try:
-            return await self.async_client.context(self.context).get_schema()
+            return await self.async_client.context(context_id).get_schema()
         except NotFoundError:
             return None
 

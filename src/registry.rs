@@ -108,7 +108,7 @@ mod semantic_cache;
 mod terms;
 #[path = "registry/test_support.rs"]
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[path = "registry/wal_replay.rs"]
 mod wal_replay;
 
@@ -200,7 +200,7 @@ pub struct ContextStats {
     #[serde(deserialize_with = "deserialize_top_concepts")]
     pub top_concepts: Vec<LabelUsage>,
     /// The first labels of the relation vocabulary (capped; the full
-    /// list is at `GET /contexts/{name}/labels`).
+    /// list is at `GET /contexts/{id}/labels`).
     pub label_sample: Vec<String>,
 }
 
@@ -245,7 +245,7 @@ impl ContextStats {
     const TOP_CONCEPTS: usize = 10;
     /// How much of the relation-label vocabulary the directory
     /// samples. A sample, not the vocabulary: `GET
-    /// /contexts/{name}/labels` is the complete, authoritative view
+    /// /contexts/{id}/labels` is the complete, authoritative view
     /// (`label_sample`'s own field doc says as much), and this exists
     /// so an ingester can eyeball spelling drift without a second
     /// request. Rides the persisted sidecar exactly like
@@ -396,9 +396,13 @@ fn unix_now() -> u64 {
 /// cold ones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
-    /// The `context`'s id — its name. `id` on the wire (#851: a row's
-    /// own key is `id`); `name` inside the program, where it always was.
-    #[serde(rename = "id")]
+    /// The `context`'s id (a server-minted UUID, ADR 0045) — the value
+    /// every `/contexts/{id}/…` path takes. #957 named this column
+    /// `id` while it still carried the name; #964 makes it the real id
+    /// and returns the display name as its own `name` column.
+    pub id: String,
+    /// The display name — free-form and NOT unique (issue #961
+    /// decision 1); rows sort by `(name, id)`.
     pub name: String,
     pub description: String,
     pub pinned: bool,
@@ -949,7 +953,7 @@ struct EntryInner {
     /// sidecar at scan/register, like `graph_revision`/`config_revision`
     /// above, and re-persisted by every `write_meta` call this entry
     /// makes so a flush can never let it quietly revert to `None`.
-    /// `PUT /contexts/{name}/schema` (#380) is the one path that writes
+    /// `PUT /contexts/{id}/schema` (#380) is the one path that writes
     /// a NEW value here; this field exists so a value a hand-edited
     /// sidecar or a `PUT` recorded survives every flush cycle intact,
     /// the same durability story `config_revision` already has.
@@ -991,30 +995,25 @@ fn next_cache_identity() -> u64 {
 
 #[derive(Debug)]
 pub enum CreateError {
-    AlreadyExists,
     /// The name is not usable as a `context` — currently only the empty
     /// string. The stem is the id now, so an empty name no longer
-    /// endangers the files; it is refused because it is unaddressable
-    /// on a wire that reaches `contexts` by name.
+    /// endangers the files; it is refused because a blank display name
+    /// renders every listing row and log line unreadable.
     InvalidName,
+    /// Several `contexts` already share the name —
+    /// [`AppState::create_if_absent`] only (the import header's
+    /// create): it cannot say which existing `context` the header
+    /// meant, and minting another would deepen the collision.
+    AmbiguousName(usize),
     Io(io::Error),
 }
 
-/// Why [`AppState::delete`] refused or could not fully complete —
-/// mirrors [`RenameContextError`]'s shape so the API layer can treat
-/// the two consistently. `MidRename` is a refusal, not a failure: the
-/// `context` still exists (an in-flight rename's marker still claims
-/// it), so the caller must not treat this the same as the disk trouble
-/// `Io` reports, nor log it as a completed deletion.
+/// Why [`AppState::delete`] could not fully complete: the entry is
+/// gone from the registry either way, and `Io` reports files the
+/// unlink loop could not remove (the durable marker keeps the next
+/// boot on the job).
 #[derive(Debug)]
 pub enum DeleteError {
-    MidRename,
-    /// Several `contexts` share the name (possible only in a
-    /// hand-assembled data directory while the wire still addresses
-    /// `contexts` by name, see [`ContextTable`]): nothing was deleted,
-    /// and the caller must say which — which it cannot until paths
-    /// take ids (#964) — so the refusal names the collision count.
-    AmbiguousName(usize),
     Io(io::Error),
 }
 
@@ -1071,20 +1070,13 @@ pub enum UpdateGroupError {
 #[derive(Debug)]
 pub enum RenameContextError {
     NotFound,
-    /// Same posture as [`CreateError::InvalidName`]: an empty name is
-    /// unaddressable on a wire that reaches `contexts` by name.
+    /// Same posture as [`CreateError::InvalidName`]: a blank display
+    /// name would render every listing row and log line unreadable.
     InvalidName,
-    AlreadyExists,
-    /// `from` or `to` is reserved by a create, delete, or another
-    /// rename already in flight — retry once it settles.
-    Busy,
-    /// Several `contexts` share `from` — same refusal as
-    /// [`DeleteError::AmbiguousName`], for the same reason.
-    AmbiguousName(usize),
     Io(io::Error),
 }
 
-/// Why a `PUT /contexts/{name}/schema` (#380) did not persist.
+/// Why a `PUT /contexts/{id}/schema` (#380) did not persist.
 #[derive(Debug)]
 pub enum PutSchemaError {
     /// An already-persisted `label_alias` resolves to
@@ -1262,7 +1254,7 @@ impl GroupRestoreOutcome {
 /// What one compaction accomplished — the before/after footprint and
 /// the dead weight shed, for the CLI report and the endpoint response.
 /// `Deserialize` lets `compact --url` read this straight back out of a
-/// `POST /contexts/{name}/compact` response, so the remote path can
+/// `POST /contexts/{id}/compact` response, so the remote path can
 /// render the exact same report line the local path does.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CompactOutcome {
@@ -1998,7 +1990,7 @@ pub struct PassageRefreshOutcome {
     pub skipped_over_limit: usize,
 }
 
-/// What `GET /contexts/{name}/embeddings` serves: the provider this
+/// What `GET /contexts/{id}/embeddings` serves: the provider this
 /// server is configured to call beside the (model, width) identity
 /// each vector sidecar actually carries. The facts a calibration
 /// report ties its floor to (#131) — and the state an operator reads
@@ -2086,7 +2078,7 @@ pub struct BootOptions {
     /// tailer owns the disk — see the `StateInner` field.
     pub(crate) replica: Option<Arc<crate::replica::ReplicaInfo>>,
     /// The optional evidence reranker (#307, ADR 0006 §12); `None`
-    /// keeps `POST /contexts/{name}/evidence` fully deterministic, at
+    /// keeps `POST /contexts/{id}/evidence` fully deterministic, at
     /// no network or credential cost. Bundled into `BootOptions`
     /// (rather than `boot_with`'s own positional parameter, the way
     /// `embedder` is) so the many tests that construct
@@ -2268,44 +2260,6 @@ impl Drop for MaintenanceGuard {
 /// `TAGURU_SEMANTIC_FLOOR≈0.2` next to its `TAGURU_EMBED_MODEL`.
 const DEFAULT_SEMANTIC_FLOOR: f32 = 0.35;
 
-/// Names with a reservation in flight for `create`, `delete`, or
-/// `rename_context` — held under ONE mutex so that checking all three
-/// sets and reserving a name in one of them happen as a single
-/// critical section. Splitting these into three independent mutexes
-/// let a `create`'s check-then-insert interleave with a concurrent
-/// `rename_context`'s own check-then-insert (each only ever took
-/// `registry.read()`, which does not exclude the other): both could
-/// observe the other's set as still empty and both proceed to reserve
-/// the same name, racing their disk writes. `delete` needs no such
-/// care against the other two — it holds `registry.write()` across
-/// its whole check-then-reserve phase, which already excludes any
-/// concurrent `create`/`rename_context` (both readers).
-#[derive(Default)]
-struct PendingNames {
-    /// Names whose delete is still removing files. A delete takes the
-    /// name out of the registry FIRST and only then (unlocked) unlinks
-    /// the file family — without this set, a create() in that window
-    /// would lay down a new generation for the tail of the delete's
-    /// unlink loop to destroy. Entered in the same critical section
-    /// that removes the name, left when the files are gone.
-    deletes: HashSet<String>,
-    /// Names whose create is still writing files — the create-side twin
-    /// of `deletes`. A create reserves the name here FIRST and only
-    /// then (unlocked) clears leftovers and fsyncs the fresh file
-    /// family; without this set the registry lock would have to stay
-    /// held across that disk work, stalling every operation on every
-    /// `context` behind one create's fsyncs. Entered under the registry
-    /// guard, left in the critical section that registers the entry.
-    creates: HashSet<String>,
-    /// Both the `from` and `to` names of an in-flight rename — reserved
-    /// before the marker is written, released only once the rename's
-    /// last step (the `group` membership rewrite) lands. `create` and
-    /// `delete` both refuse a name reserved here: a create under `to`
-    /// would collide with the files about to land there, and a delete
-    /// of either name would race the move or strand the marker.
-    renames: HashSet<String>,
-}
-
 /// The in-memory `context` table: entries keyed by id, plus the name
 /// index the wire — which still addresses `contexts` by name until
 /// #964 — resolves through. Names are display strings and NOT unique
@@ -2395,18 +2349,6 @@ impl ContextTable {
         self.by_name.contains_key(name)
     }
 
-    /// Unregisters the exactly-one entry `name` maps to and returns
-    /// it; `None` for a missing OR ambiguous name (the caller's
-    /// `resolve` distinguishes them when it needs to refuse loudly).
-    fn remove_unique(&mut self, name: &str) -> Option<Arc<Entry>> {
-        let id = match self.resolve(name) {
-            NameResolution::One(entry) => entry.id.clone(),
-            _ => return None,
-        };
-        self.unindex(name, &id);
-        self.by_id.remove(&id)
-    }
-
     /// The entry registered under `id`, if any — the replica tailer's
     /// lookup (its manifest speaks stems, which ARE ids).
     fn get_id(&self, id: &str) -> Option<&Arc<Entry>> {
@@ -2430,6 +2372,16 @@ impl ContextTable {
             self.unindex(&actual, id);
         }
         Some(entry)
+    }
+
+    /// The name currently indexing `id`, by reverse scan of the name
+    /// index — O(names), for the rare paths (delete) that hold the
+    /// registry lock and so must NOT read `EntryInner::name` (the
+    /// entry lock is never taken under this table's lock).
+    fn name_of(&self, id: &str) -> Option<String> {
+        self.by_name
+            .iter()
+            .find_map(|(name, ids)| ids.contains(id).then(|| name.clone()))
     }
 
     /// Drops `id` from `name`'s index set, dropping the set when it
@@ -2475,21 +2427,37 @@ impl ContextTable {
         self.by_id.values()
     }
 
-    /// One keyset page: up to `limit` entries whose name is inside
-    /// `(start, ∞)`, in `(name, id)` order — `directory_page`'s seek.
-    /// The wire cursor is still a bare name (#964 moves paging to
-    /// `(name, id)`), so with duplicate names a cursor that lands ON
-    /// a shared name skips the whole name group — the same "possible
-    /// only from a hand-assembled directory" caveat every ambiguity
-    /// path in this table carries.
-    fn range_named(&self, start: std::ops::Bound<&str>, limit: usize) -> Vec<(String, Arc<Entry>)> {
+    /// One keyset page: up to `limit` entries strictly after the
+    /// `(name, id)` cursor, in `(name, id)` order — `directory_page`'s
+    /// seek. A cursor with no id means "past the whole name group"
+    /// (the pre-#964 semantics `after` alone keeps); with an id it
+    /// lands inside a group of same-named `contexts`, which is what
+    /// makes paging over duplicate names lossless.
+    fn range_named(
+        &self,
+        after_name: Option<&str>,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<(String, Arc<Entry>)> {
+        use std::ops::Bound;
         let by_id = &self.by_id;
+        let start = match (after_name, after_id) {
+            (Some(name), Some(_)) => Bound::Included(name),
+            (Some(name), None) => Bound::Excluded(name),
+            (None, _) => Bound::Unbounded,
+        };
         self.by_name
-            .range::<str, _>((start, std::ops::Bound::Unbounded))
+            .range::<str, _>((start, Bound::Unbounded))
             .flat_map(move |(name, ids)| {
                 ids.iter().filter_map(move |id| {
                     by_id.get(id).map(|entry| (name.clone(), Arc::clone(entry)))
                 })
+            })
+            .skip_while(move |(name, entry)| match (after_name, after_id) {
+                (Some(after_name), Some(after_id)) => {
+                    (name.as_str(), entry.id.as_str()) <= (after_name, after_id)
+                }
+                _ => false,
             })
             .take(limit)
             .collect()
@@ -2536,7 +2504,7 @@ struct StateInner {
     /// readers.
     embed_breaker: Option<crate::embedding::EmbedBreaker>,
     /// The optional evidence reranker (#307, ADR 0006 §12); `None`
-    /// keeps `POST /contexts/{name}/evidence` selection fully
+    /// keeps `POST /contexts/{id}/evidence` selection fully
     /// deterministic.
     reranker: Option<Arc<dyn EvidenceReranker>>,
     /// The reranker's own circuit breaker, mirroring `embed_breaker`'s
@@ -2681,9 +2649,12 @@ struct StateInner {
     /// write-refusal names: the writer's URL and the bucket's fence
     /// holder.
     replica: Option<Arc<crate::replica::ReplicaInfo>>,
-    /// See [`PendingNames`] for why `create`, `delete`, and
-    /// `rename_context` share one mutex here instead of one each.
-    pending: Mutex<PendingNames>,
+    /// Names an [`AppState::create_if_absent`] is currently minting a
+    /// `context` for — the one remaining name reservation now that
+    /// plain create, delete, and rename operate on collision-free ids
+    /// (#964). Checked and inserted under the registry read guard so
+    /// two racing at-most-one-per-name creates cannot both pass.
+    pending_creates: Mutex<HashSet<String>>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -3180,7 +3151,7 @@ impl AppState {
     /// lags the durable copy (healed by the next flush), never the
     /// served one. A tombstoned entry skips both halves: the delete
     /// owns the name and its files.
-    fn bump_config_revision(&self, name: &str, entry: &Entry) {
+    fn bump_config_revision(&self, entry: &Entry) {
         let Some(mut guard) = entry.lock_unless_deleted() else {
             return;
         };
@@ -3202,7 +3173,8 @@ impl AppState {
             inner.schema_digest.as_deref(),
         ) {
             tracing::warn!(
-                "config revision for '{name}' not persisted (lags until the next flush): {error}"
+                "config revision for '{}' not persisted (lags until the next flush): {error}",
+                entry.id
             );
         }
     }
@@ -3218,10 +3190,10 @@ impl AppState {
     /// the worker pool on synchronous loads.
     pub fn read_context<T>(
         &self,
-        name: &str,
+        id: &str,
         operate: impl FnOnce(&Context) -> T,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.resolved_id(id)?;
         // Fast path: already resident, shared lock, no exclusivity.
         {
             let inner = entry.inner.read();
@@ -3246,7 +3218,6 @@ impl AppState {
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -3265,7 +3236,9 @@ impl AppState {
     /// window can elapse without the test sleeping through it.
     #[cfg(test)]
     pub fn age_load_failures(&self, name: &str, by: std::time::Duration) {
-        let entry = self.lookup(name).expect("the context must be registered");
+        let entry = self
+            .lookup_named(name)
+            .expect("the context must be registered");
         if let Some((failed_at, _)) = &mut entry.inner.write().load_failure {
             *failed_at = failed_at
                 .checked_sub(by)
@@ -3306,7 +3279,6 @@ impl AppState {
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -3322,14 +3294,51 @@ impl AppState {
         Ok(result)
     }
 
-    fn lookup(&self, name: &str) -> Option<Arc<Entry>> {
+    /// The entry registered under `id` — the data paths' lookup now
+    /// that every `/contexts/{id}/…` route addresses `contexts` by id
+    /// (#964).
+    fn lookup_id(&self, id: &str) -> Option<Arc<Entry>> {
+        self.0.registry.read().get_id(id).cloned()
+    }
+
+    /// [`Self::lookup_id`] for the data paths that report through
+    /// [`AccessError`]: an unknown id is `NotFound` — ids are minted,
+    /// never ambiguous.
+    fn resolved_id(&self, id: &str) -> Result<Arc<Entry>, AccessError> {
+        self.lookup_id(id).ok_or(AccessError::NotFound)
+    }
+
+    /// The exactly-one entry `name` maps to — the name-boundary
+    /// lookup for the surfaces that still speak display names until
+    /// #965 (cross-`context` search bodies, `group` membership) and
+    /// for tests, which create by name. `None` for a missing OR
+    /// ambiguous name (the index logs the ambiguous case).
+    fn lookup_named(&self, name: &str) -> Option<Arc<Entry>> {
         self.0.registry.read().unique(name).cloned()
     }
 
-    /// [`Self::lookup`] for the data paths that report through
-    /// [`AccessError`]: a missing name is `NotFound`, an ambiguous one
-    /// is its own explicit refusal (issue #961 decision 1) — never
-    /// folded into "not found", never resolved by picking a claimant.
+    /// The id behind a display name, for the name-boundary callers
+    /// (the import header, cross-`context` bodies) that then continue
+    /// on the id-keyed data paths. `None` for a missing OR ambiguous
+    /// name — the ambiguous case is logged by the index, and callers
+    /// that must refuse it loudly resolve through
+    /// [`Self::lookup_resolved`] instead.
+    pub(crate) fn context_id_of(&self, name: &str) -> Option<String> {
+        self.lookup_named(name).map(|entry| entry.id.clone())
+    }
+
+    /// [`Self::context_id_of`] with the ambiguity kept loud: the
+    /// cross-search bodies still name their targets (until #965), and
+    /// a name several `contexts` share must refuse as its own
+    /// conflict — never fold into "not found", never pick one.
+    pub(crate) fn resolve_wire_name(&self, name: &str) -> Result<String, AccessError> {
+        self.lookup_resolved(name).map(|entry| entry.id.clone())
+    }
+
+    /// [`Self::lookup_named`] reporting through [`AccessError`]: a
+    /// missing name is `NotFound`, an ambiguous one is its own
+    /// explicit refusal (issue #961 decision 1) — never folded into
+    /// "not found", never resolved by picking a claimant.
     fn lookup_resolved(&self, name: &str) -> Result<Arc<Entry>, AccessError> {
         let registry = self.0.registry.read();
         match registry.resolve(name) {
@@ -3345,7 +3354,16 @@ impl AppState {
     /// name.
     #[cfg(test)]
     pub(crate) fn stem_of(&self, name: &str) -> Option<String> {
-        self.lookup(name).map(|entry| entry.id.clone())
+        self.lookup_named(name).map(|entry| entry.id.clone())
+    }
+
+    /// Test-only: [`Self::stem_of`] with the unresolved name handed
+    /// back verbatim — tests address `contexts` by the display names
+    /// they created, and a name that resolves to nothing (a "ghost")
+    /// must keep meaning "an id nothing answers to", not panic.
+    #[cfg(test)]
+    pub(crate) fn id_of(&self, name: &str) -> String {
+        self.stem_of(name).unwrap_or_else(|| name.to_string())
     }
 
     /// The display name of the `context` whose id is `stem`, falling
@@ -3429,6 +3447,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
         Slot::Deleted => return None,
     };
     Some(DirectoryEntry {
+        id: entry.id.clone(),
         name,
         description: inner.meta.description.clone(),
         pinned: inner.meta.pinned,
@@ -3583,7 +3602,6 @@ fn width_observation_fresh(observed_at: &std::time::Instant) -> bool {
 fn ensure_hot(
     data_dir: &Path,
     stem: &str,
-    name: &str,
     inner: &mut EntryInner,
     metrics: &Metrics,
     hydrator: Option<&crate::hydrate::Hydrator>,
@@ -3595,7 +3613,7 @@ fn ensure_hot(
     // Callers check the tombstone under this same lock before calling;
     // seeing one here means a caller forgot.
     if matches!(inner.slot, Slot::Deleted) {
-        return Err(format!("context '{name}' is deleted"));
+        return Err(format!("context '{stem}' is deleted"));
     }
     if let Some((failed_at, refusal)) = &inner.load_failure
         && still_quarantined(failed_at)
@@ -3613,7 +3631,7 @@ fn ensure_hot(
     if let Some(hydrator) = hydrator
         && let Err(error) = hydrator.ensure_context(stem)
     {
-        let error = format!("context '{name}' hydration failed: {error}");
+        let error = format!("context '{stem}' hydration failed: {error}");
         metrics.record_cache_load(false);
         inner.load_failure = Some((std::time::Instant::now(), error.clone()));
         return Err(error);
@@ -3631,16 +3649,16 @@ fn ensure_hot(
     match schema::load_schema(data_dir, stem, inner.schema_digest.as_deref(), true) {
         Ok(schema) => inner.schema = schema.map(Arc::new),
         Err(error) => {
-            let error = format!("context '{name}': {error}");
+            let error = format!("context '{stem}': {error}");
             metrics.record_cache_load(false);
             inner.load_failure = Some((std::time::Instant::now(), error.clone()));
             return Err(error);
         }
     }
     let loaded = fs::read(image_path(data_dir, stem))
-        .map_err(|e| format!("context '{name}' image unreadable: {e}"))
+        .map_err(|e| format!("context '{stem}' image unreadable: {e}"))
         .and_then(|bytes| {
-            Context::from_bytes(&bytes).map_err(|e| format!("context '{name}' image corrupt: {e}"))
+            Context::from_bytes(&bytes).map_err(|e| format!("context '{stem}' image corrupt: {e}"))
         })
         .and_then(|mut context| {
             // Replay runs whether or not the WAL is currently enabled:
@@ -3656,7 +3674,7 @@ fn ensure_hot(
                 context.applied_seq(),
                 &mut context,
             )
-            .map_err(|e| format!("context '{name}' WAL replay failed: {e}"))?;
+            .map_err(|e| format!("context '{stem}' WAL replay failed: {e}"))?;
             Ok((context, top))
         });
     let (mut context, top) = match loaded {

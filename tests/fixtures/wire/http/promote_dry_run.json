@@ -35,6 +35,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/promote?dry_run=true",
+  "route": "/contexts/{id}/promote?dry_run=true",
   "status": 200
 }

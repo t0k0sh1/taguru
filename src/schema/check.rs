@@ -440,7 +440,7 @@ impl SchemaCheck {
 /// only name which side of that one association fired.
 pub(crate) enum IssuePath<'a> {
     /// `{prefix}associations[{index}].{side}` — `""` for
-    /// `POST /contexts/{name}/associations` (paths read
+    /// `POST /contexts/{id}/associations` (paths read
     /// `associations[{i}]...`), `"batches[{b}]."` for
     /// `POST /import`/`taguru import` (paths read
     /// `batches[{b}].associations[{a}]...`).

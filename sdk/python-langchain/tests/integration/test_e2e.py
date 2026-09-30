@@ -21,6 +21,8 @@ from taguru_langchain.ingest_connectors import (
     sync_references,
 )
 
+from .conftest import context_id_of, try_context_id_of
+
 
 def test_retriever_serves_both_lanes_from_the_seeded_context(
     client: Taguru, server: object, seeded: str
@@ -97,7 +99,7 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     # Dry run first: rendered, validated, nothing applied.
     dry = ingester.ingest_text(SHOP_DOC, source="docs/geppakudo.md", dry_run=True)
     assert dry.ok and dry.ndjson is not None
-    assert not client.contexts.exists("wagashi")
+    assert try_context_id_of(client, "wagashi") is None
 
     outcomes = ingester.ingest_documents(
         [Document(page_content=SHOP_DOC, metadata={"source": "docs/geppakudo.md"})]
@@ -111,7 +113,7 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     # 501 (no embedding provider in tests) must stay silent.
     assert outcomes[0].embeddings_refresh_warning is None
 
-    ctx = client.context("wagashi")
+    ctx = client.context(context_id_of(client, "wagashi"))
     match = ctx.query(subject="月白堂", label="名物").matches[0]
     assert match.object == "栗きんとん"
     assert match.attributions[0].paragraph == 1
@@ -128,11 +130,11 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     assert after.count == before.count
 
     # The ingested knowledge is immediately retrievable through the retriever.
-    retriever = TaguruRetriever(context="wagashi", client=client, k=4)
+    retriever = TaguruRetriever(context=context_id_of(client, "wagashi"), client=client, k=4)
     documents = retriever.invoke("月白堂")
     assert any("栗きんとん" in d.page_content for d in documents)
 
-    client.contexts.delete("wagashi")
+    client.contexts.delete(context_id_of(client, "wagashi"))
 
 
 def test_connector_document_round_trips_sections_and_locators_to_citations(
@@ -178,7 +180,7 @@ def test_connector_document_round_trips_sections_and_locators_to_citations(
         assert outcome.sections_stored == 1
         assert outcome.locators_stored == 1
 
-        ctx = client.context("aizome")
+        ctx = client.context(context_id_of(client, "aizome"))
         heading_citation = ctx.cite_passage(document.source, 0)
         assert heading_citation.section == "藍染工房"
 
@@ -189,8 +191,10 @@ def test_connector_document_round_trips_sections_and_locators_to_citations(
         # is left behind on the shared real server and the next run starts
         # from create_context=True colliding with an already-existing
         # context, turning one failure into a second, unrelated one.
-        if client.contexts.exists("aizome"):
-            client.contexts.delete("aizome")
+        leftover = try_context_id_of(client, "aizome")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_pdf_connector_document_round_trips_page_locators_to_citations(
@@ -239,12 +243,14 @@ def test_pdf_connector_document_round_trips_page_locators_to_citations(
         assert outcome.ok
         assert outcome.locators_stored == len(document.locators)
 
-        ctx = client.context("indigo-workshop")
+        ctx = client.context(context_id_of(client, "indigo-workshop"))
         located_citation = ctx.cite_passage(document.source, 2)
         assert located_citation.locator == Locator(kind="page", value="2")
     finally:
-        if client.contexts.exists("indigo-workshop"):
-            client.contexts.delete("indigo-workshop")
+        leftover = try_context_id_of(client, "indigo-workshop")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_html_connector_document_round_trips_fragment_locators_to_citations(
@@ -293,13 +299,15 @@ def test_html_connector_document_round_trips_fragment_locators_to_citations(
         assert outcome.sections_stored == len(document.sections)
         assert outcome.locators_stored == len(document.locators)
 
-        ctx = client.context("weaving-studio")
+        ctx = client.context(context_id_of(client, "weaving-studio"))
         heading_citation = ctx.cite_passage(document.source, 2)
         assert heading_citation.section == "Weaving Studio > Products"
         assert heading_citation.locator == Locator(kind="fragment", value="products")
     finally:
-        if client.contexts.exists("weaving-studio"):
-            client.contexts.delete("weaving-studio")
+        leftover = try_context_id_of(client, "weaving-studio")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_docx_connector_document_round_trips_table_locators_to_citations(
@@ -351,14 +359,16 @@ def test_docx_connector_document_round_trips_table_locators_to_citations(
         assert outcome.sections_stored == len(document.sections)
         assert outcome.locators_stored == len(document.locators)
 
-        ctx = client.context("pottery-studio")
+        ctx = client.context(context_id_of(client, "pottery-studio"))
         table_paragraph = document.locators[0].paragraph
         table_citation = ctx.cite_passage(document.source, table_paragraph)
         assert table_citation.section == "Pottery Studio > Products"
         assert table_citation.locator == Locator(kind="table", value="1")
     finally:
-        if client.contexts.exists("pottery-studio"):
-            client.contexts.delete("pottery-studio")
+        leftover = try_context_id_of(client, "pottery-studio")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
@@ -434,7 +444,7 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
         assert report.imported == 4
         assert report.failed == 0
 
-        ctx = client.context("ceramics-s3")
+        ctx = client.context(context_id_of(client, "ceramics-s3"))
         pdf_source = f"{store.base_uri}/report.pdf"
         html_source = f"{store.base_uri}/page.html"
         docx_source = f"{store.base_uri}/catalog.docx"
@@ -466,8 +476,10 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
         assert third.retracted == 1
         assert docx_source in ctx.lookup_passages([docx_source]).missing
     finally:
-        if client.contexts.exists("ceramics-s3"):
-            client.contexts.delete("ceramics-s3")
+        leftover = try_context_id_of(client, "ceramics-s3")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_sync_references_end_to_end_with_events_sidecar(client: Taguru, tmp_path: Path) -> None:
@@ -507,15 +519,17 @@ def test_sync_references_end_to_end_with_events_sidecar(client: Taguru, tmp_path
         ]
         assert on_disk_phases == ["discovered", "parsed", "extracted", "imported"]
 
-        ctx = client.context("ceramics-references")
+        ctx = client.context(context_id_of(client, "ceramics-references"))
         assert str(reference) in ctx.lookup_passages([str(reference)]).passages
 
         second = sync_references([str(reference)], ingester=ingester, checkpoints=checkpoints)
         assert second.unchanged == 1
         assert second.imported == 0
     finally:
-        if client.contexts.exists("ceramics-references"):
-            client.contexts.delete("ceramics-references")
+        leftover = try_context_id_of(client, "ceramics-references")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)
 
 
 def test_pptx_connector_document_round_trips_slide_and_notes_locators_to_citations(
@@ -566,7 +580,7 @@ def test_pptx_connector_document_round_trips_slide_and_notes_locators_to_citatio
         assert outcome.sections_stored == len(document.sections)
         assert outcome.locators_stored == len(document.locators)
 
-        ctx = client.context("glassblowing-studio")
+        ctx = client.context(context_id_of(client, "glassblowing-studio"))
         body_citation = ctx.cite_passage(document.source, 1)
         assert body_citation.section == "Glassblowing Studio"
         assert body_citation.locator == Locator(kind="slide", value="1")
@@ -574,5 +588,7 @@ def test_pptx_connector_document_round_trips_slide_and_notes_locators_to_citatio
         notes_citation = ctx.cite_passage(document.source, 2)
         assert notes_citation.locator == Locator(kind="speaker_notes", value="1")
     finally:
-        if client.contexts.exists("glassblowing-studio"):
-            client.contexts.delete("glassblowing-studio")
+        leftover = try_context_id_of(client, "glassblowing-studio")
+
+        if leftover is not None:
+            client.contexts.delete(leftover)

@@ -512,8 +512,23 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
 
     let mut failures = 0usize;
     let mut retracted = 0usize;
+    // The data paths key on the context's ID (#964); the sync's
+    // `--context` stays a display name (this offline flow owns its
+    // whole data directory, where that name is unambiguous — it only
+    // ever creates one context). `None` simply means nothing imported
+    // yet: the import below creates the context by name, and the id
+    // resolves again right after.
+    let resolve_id = |state: &crate::registry::AppState| state.context_id_of(&args.context);
+    let context_id = resolve_id(&state);
     for source in &retractions {
-        match state.retract_source(&args.context, source) {
+        let Some(context_id) = context_id.as_deref() else {
+            // Nothing imported yet under this context — the
+            // deletion's truth (source absent) already holds.
+            retracted += 1;
+            fingerprints.remove(source);
+            continue;
+        };
+        match state.retract_source(context_id, source) {
             Ok(_) => {
                 retracted += 1;
                 fingerprints.remove(source);
@@ -561,10 +576,14 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     state.flush_dirty();
     state.persist_usage();
     let wrote_something = imported > 0 || retracted > 0 || partial_writes;
+    // Re-resolved: the first import of a fresh map just created the
+    // context this run.
+    let context_id = resolve_id(&state);
     if state.embeddings_configured()
         && wrote_something
+        && let Some(context_id) = context_id.as_deref()
         && let Some(Err(error)) =
-            state.refresh_embeddings(&args.context, taguru::deadline::Deadline::unbounded())
+            state.refresh_embeddings(context_id, taguru::deadline::Deadline::unbounded())
     {
         eprintln!("taguru-code: sync: embeddings refresh: {error}");
     }
@@ -575,8 +594,9 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     if state.embeddings_configured()
         && state.passage_embedding_enabled()
         && wrote_something
+        && let Some(context_id) = context_id.as_deref()
         && let Some(Err(error)) =
-            state.refresh_passage_embeddings(&args.context, taguru::deadline::Deadline::unbounded())
+            state.refresh_passage_embeddings(context_id, taguru::deadline::Deadline::unbounded())
     {
         eprintln!("taguru-code: sync: passage embeddings refresh: {error}");
     }

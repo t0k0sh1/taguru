@@ -50,6 +50,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/paths",
+  "route": "/contexts/{id}/paths",
   "status": 200
 }

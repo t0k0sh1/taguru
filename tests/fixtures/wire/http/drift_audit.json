@@ -41,6 +41,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/drift/audit",
+  "route": "/contexts/{id}/drift/audit",
   "status": 200
 }

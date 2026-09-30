@@ -16,6 +16,10 @@ The retriever addresses one ``context``, several ``contexts``, or ``groups``
 several ``contexts`` the graph lane runs per ``context`` and interleaves by
 per-``context`` rank — the posture the server itself takes for passage scores —
 and the text lane rides the server's own cross-``context`` search.
+
+``context``/``contexts`` take context IDS — the ``id`` column of
+``client.contexts.list()`` (#964). ``groups`` take group names; each member
+resolves to its id through the directory before the lanes run.
 """
 
 from __future__ import annotations
@@ -55,8 +59,13 @@ class TaguruRetriever(BaseRetriever):
     still become Documents (``page_content`` = "subject label object") when
     ``include_graph_only_facts`` is on, so pure-graph deployments retrieve too.
 
-    Name at least one target: ``context`` (one name), ``contexts`` (several),
-    or ``groups`` (``group`` names — each searches every ``context`` it reaches).
+    Name at least one target: ``context`` (one context id — the ``id``
+    column of ``contexts.list()``), ``contexts`` (several context display
+    NAMES — the cross-search body is name-addressed until #965; a name
+    several ``contexts`` share is the server's own ambiguity refusal), or
+    ``groups`` (``group`` names — each searches every ``context`` it
+    reaches). The cross graph lane resolves each name to its id (paths
+    are id-addressed, #964) and skips a name it cannot resolve uniquely.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -149,7 +158,25 @@ class TaguruRetriever(BaseRetriever):
             stack.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
 
-    def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
+    def _ids_by_name(self, client: Taguru) -> dict[str, str]:
+        """The cross graph lane's name→id bridge (#964): one directory walk,
+        keeping only names exactly one ``context`` carries. Best-effort —
+        a name that no longer resolves, or that several ``contexts``
+        share, is skipped by the caller rather than failing retrieval."""
+        counted: dict[str, list[str]] = {}
+        try:
+            for row in client.contexts.iter():
+                counted.setdefault(row.name, []).append(row.id)
+        except Exception:
+            return {}
+        return {name: ids[0] for name, ids in counted.items() if len(ids) == 1}
+
+    def _graph_lane(
+        self, client: Taguru, target: str, query: str, label: str | None = None
+    ) -> list[Document]:
+        """``target`` is the context ID; ``label`` is what the Documents'
+        metadata names it (the display name on the cross path, matching
+        the text lane's own tags)."""
         ctx = client.context(target)
         candidates = ctx.resolve(
             query,
@@ -170,7 +197,9 @@ class TaguruRetriever(BaseRetriever):
                 citations[wanted] = ctx.cite_passage(*wanted)
             except NotFoundError:
                 citations[wanted] = None
-        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
+        return _graph_documents(
+            page.matches, citations, self.include_graph_only_facts, label or target
+        )
 
     def _get_relevant_documents(
         self,
@@ -230,11 +259,18 @@ class TaguruRetriever(BaseRetriever):
         if self.include_graph:
             # One target erroring (a deleted context, a transient
             # failure) should not blank out the graph docs every other
-            # target already found.
-            per_target = []
+            # target already found. Targets are names; the lane runs on
+            # ids (#964) — an unresolvable name keeps its slot with no
+            # docs, so the interleave order holds.
+            ids = self._ids_by_name(self.client)
+            per_target: list[list[Document]] = []
             for target in targets:
+                target_id = ids.get(target)
+                if target_id is None:
+                    per_target.append([])
+                    continue
                 try:
-                    per_target.append(self._graph_lane(self.client, target, query))
+                    per_target.append(self._graph_lane(self.client, target_id, query, target))
                 except Exception:
                     per_target.append([])
             graph_docs = _interleave(per_target)
@@ -286,7 +322,21 @@ class TaguruRetriever(BaseRetriever):
                 frontier.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
 
-    async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
+    async def _aids_by_name(self, client: AsyncTaguru) -> dict[str, str]:
+        """:meth:`_ids_by_name`'s async twin — see there."""
+        counted: dict[str, list[str]] = {}
+        try:
+            async for row in client.contexts.iter():
+                counted.setdefault(row.name, []).append(row.id)
+        except Exception:
+            return {}
+        return {name: ids[0] for name, ids in counted.items() if len(ids) == 1}
+
+    async def _agraph_lane(
+        self, client: AsyncTaguru, target: str, query: str, label: str | None = None
+    ) -> list[Document]:
+        """:meth:`_graph_lane`'s async twin: ``target`` is the id, ``label``
+        the metadata name."""
         ctx = client.context(target)
         candidates = await ctx.resolve(
             query,
@@ -329,7 +379,9 @@ class TaguruRetriever(BaseRetriever):
         citations: dict[tuple[str, int], Citation | None] = dict(
             zip(wanted_pairs, fetched, strict=True)
         )
-        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
+        return _graph_documents(
+            page.matches, citations, self.include_graph_only_facts, label or target
+        )
 
     async def _aget_relevant_documents(
         self,
@@ -389,8 +441,20 @@ class TaguruRetriever(BaseRetriever):
             # return_exceptions=True: one target erroring (a deleted
             # context, a transient failure) should not blank out the
             # graph docs every other target already found.
+            # Targets are names; the lane runs on ids (#964) — an
+            # unresolvable name keeps its slot with no docs, so the
+            # interleave order holds.
+            client = self.async_client
+            ids = await self._aids_by_name(client)
+
+            async def _lane_for(name: str) -> list[Document]:
+                target_id = ids.get(name)
+                if target_id is None:
+                    return []
+                return await self._agraph_lane(client, target_id, query, name)
+
             per_target = await asyncio.gather(
-                *(self._agraph_lane(self.async_client, target, query) for target in targets),
+                *(_lane_for(target) for target in targets),
                 return_exceptions=True,
             )
             lanes: list[list[Document]] = []

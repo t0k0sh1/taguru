@@ -7,14 +7,14 @@ use crate::support::*;
 #[test]
 fn an_association_batch_over_the_cap_is_rejected_before_any_write() {
     let server = Server::start("batchcap");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let batch: Vec<Value> = (0..10_001)
         .map(|i| json!({"subject": format!("s{i}"), "label": "l", "object": "o", "weight": 1.0}))
         .collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(Value::Array(batch)),
     );
     assert_eq!(status, 400, "{body}");
@@ -27,14 +27,14 @@ fn an_association_batch_over_the_cap_is_rejected_before_any_write() {
 #[test]
 fn an_insane_weight_is_rejected_before_any_write() {
     let server = Server::start("weightcap");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     // Finite but absurd: two of these would saturate an edge to
     // +Infinity, and a later retract would mint Inf − Inf = NaN — a
     // fact nothing can read or reset again.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "a", "label": "l", "object": "b", "weight": 1.0},
             {"subject": "青嶺酒造", "label": "生産量", "object": "無限", "weight": 1.0e300},
@@ -56,7 +56,7 @@ fn an_insane_weight_is_rejected_before_any_write() {
     // The documented boundary stays usable, negation included.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "a", "label": "l", "object": "b", "weight": 1.0e6},
             {"subject": "a", "label": "l2", "object": "b", "weight": -1.0e6},
@@ -73,9 +73,9 @@ fn a_present_body_is_parsed_whatever_the_content_type_says() {
     // used to silently drop the body and create with every field
     // defaulted, under a 200.
     let (status, body) = server.call_raw(
-        "PUT",
-        "/contexts/sake",
-        Some(r#"{"description":"青嶺酒造の記憶","pinned":true}"#),
+        "POST",
+        "/contexts",
+        Some(r#"{"name":"sake","description":"青嶺酒造の記憶","pinned":true}"#),
         None,
     );
     assert_eq!(status, 200, "{body}");
@@ -87,31 +87,38 @@ fn a_present_body_is_parsed_whatever_the_content_type_says() {
     assert_eq!(directory["contexts"][0]["pinned"], json!(true));
 
     // A present body that is not JSON is an error, never defaults.
-    let (status, body) =
-        server.call_raw("PUT", "/contexts/beer", Some("definitely not json"), None);
+    let (status, body) = server.call_raw("POST", "/contexts", Some("definitely not json"), None);
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["status"], json!("error"));
 
-    // An absent body still means defaults — the documented shape.
-    let (status, body) = server.call_raw("PUT", "/contexts/beer", None, None);
-    assert_eq!(status, 200, "{body}");
+    // An absent body defaults every OPTIONAL field — but the name is
+    // required (an empty display name is refused), so the bare create
+    // is a 400, not a silently unnamed context.
+    let (status, body) = server.call_raw("POST", "/contexts", None, None);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("invalid_argument"), "{body}");
 
     // The other optional-body endpoint follows the same contract.
     let (status, body) = server.call_raw(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some("also not json"),
         None,
     );
     assert_eq!(status, 400, "{body}");
-    let (status, body) = server.call_raw("POST", "/contexts/sake/vocabulary/audit", None, None);
+    let (status, body) = server.call_raw(
+        "POST",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
+        None,
+        None,
+    );
     assert_eq!(status, 200, "{body}");
 }
 
 #[test]
 fn off_axis_errors_speak_the_api_error_shape_too() {
     let server = Server::start("errshape");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     // Unknown path → 404 in the error shape.
     let (status, body) = server.call("GET", "/contextz", None);
@@ -121,7 +128,11 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     assert!(body["time"].is_number(), "{body}");
 
     // Known path, wrong method → 405 in the error shape.
-    let (status, body) = server.call("DELETE", "/contexts/sake/recall", None);
+    let (status, body) = server.call(
+        "DELETE",
+        &format!("/contexts/{}/recall", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 405, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
     assert_eq!(body["code"], json!("method_not_allowed"), "{body}");
@@ -129,7 +140,7 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     // Malformed JSON on a JSON-required endpoint → 400 in shape.
     let (status, body) = server.call_raw(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some("{not json"),
         Some("application/json"),
     );
@@ -140,7 +151,7 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     // Wrong media type → 415 in shape.
     let (status, body) = server.call_raw(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some("cue=x"),
         Some("application/x-www-form-urlencoded"),
     );
@@ -151,7 +162,7 @@ fn off_axis_errors_speak_the_api_error_shape_too() {
     // Well-formed JSON of the wrong type → 422 in shape.
     let (status, body) = server.call_raw(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(r#"{"cue": 42}"#),
         Some("application/json"),
     );
@@ -190,11 +201,16 @@ fn errors_carry_the_documented_machine_readable_code() {
     );
 
     let key = Some("codekey");
-    let (status, body) = server.call_with_token("PUT", "/contexts/sake", Some(json!({})), key);
+    let (status, body) =
+        server.call_with_token("POST", "/contexts", Some(json!({"name": "sake"})), key);
     assert_eq!(status, 200, "{body}");
 
-    // PUT on an existing context → already_exists.
-    let (status, body) = server.call_with_token("PUT", "/contexts/sake", Some(json!({})), key);
+    // Context creates no longer collide (names are not unique, #961
+    // decision 1) — `already_exists` lives on at the GROUP create,
+    // which still keys on the name.
+    let (status, body) = server.call_with_token("PUT", "/groups/codes-group", Some(json!({})), key);
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = server.call_with_token("PUT", "/groups/codes-group", Some(json!({})), key);
     assert_eq!(
         code_of(status, &body),
         (409, "already_exists".into()),
@@ -204,7 +220,10 @@ fn errors_carry_the_documented_machine_readable_code() {
     // Unknown context → no_context.
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/ghost/recall",
+        &format!(
+            "/contexts/{}/recall",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"cue": "x"})),
         key,
     );
@@ -214,7 +233,7 @@ fn errors_carry_the_documented_machine_readable_code() {
     // invalid_argument.
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1e300}])),
         key,
     );
@@ -228,15 +247,19 @@ fn errors_carry_the_documented_machine_readable_code() {
     let origins: Vec<String> = (0..1001).map(|index| format!("o{index}")).collect();
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": origins})),
         key,
     );
     assert_eq!(code_of(status, &body), (400, "over_limit".into()), "{body}");
 
     // No embedding provider configured → embeddings_unconfigured.
-    let (status, body) =
-        server.call_with_token("POST", "/contexts/sake/embeddings/refresh", None, key);
+    let (status, body) = server.call_with_token(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+        key,
+    );
     assert_eq!(
         code_of(status, &body),
         (501, "embeddings_unconfigured".into()),
@@ -247,21 +270,21 @@ fn errors_carry_the_documented_machine_readable_code() {
     // source with an out-of-range locator → no_paragraph.
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"doc": "本文。"}})),
         key,
     );
     assert_eq!(status, 200, "{body}");
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "ghost", "paragraph": 0})),
         key,
     );
     assert_eq!(code_of(status, &body), (404, "no_source".into()), "{body}");
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc", "paragraph": 9})),
         key,
     );
@@ -274,9 +297,9 @@ fn errors_carry_the_documented_machine_readable_code() {
     // The body cap now answers in the SAME JSON shape as every other
     // axis (it used to be axum's plain text) — payload_too_large.
     let (status, body) = server.call_with_token(
-        "PUT",
-        "/contexts/big",
-        Some(json!({"description": "こ".repeat(8000)})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "big", "description": "こ".repeat(8000)})),
         key,
     );
     assert_eq!(
@@ -291,27 +314,31 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     let server = Server::start("namecap");
     let long = "字".repeat(400); // 1200 bytes, over the 1024-byte name cap
 
-    // A context name becomes a file stem (percent-encoded ×3): 64
-    // bytes is the cap.
+    // The context display name rides every directory row (it is no
+    // longer a file stem — ids are, #964), so it keeps its own cap.
+    let (status, body) = server.call("POST", "/contexts", Some(json!({"name": "n".repeat(65), })));
+    assert_eq!(status, 400, "{body}");
+    // The rename destination is the same field on its other boundary.
+    server.ok("POST", "/contexts", Some(json!({"name": "cap-rename", })));
     let (status, body) = server.call(
-        "PUT",
-        &format!("/contexts/{}", "n".repeat(65)),
-        Some(json!({})),
+        "POST",
+        &format!("/contexts/{}/rename", server.cx("cap-rename")),
+        Some(json!({"to": "n".repeat(65)})),
     );
     assert_eq!(status, 400, "{body}");
 
     // The description rides in every directory listing.
     let (status, body) = server.call(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d".repeat(5000)})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d".repeat(5000)})),
     );
     assert_eq!(status, 400, "{body}");
 
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     let (status, body) = server.call(
         "PATCH",
-        "/contexts/sake",
+        &format!("/contexts/{}", server.cx("sake")),
         Some(json!({"description": "d".repeat(5000)})),
     );
     assert_eq!(status, 400, "{body}");
@@ -320,7 +347,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     // GET /contexts response, far outside the cache budget.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": long, "label": "l", "object": "o", "weight": 1.0}])),
     );
     assert_eq!(status, 400, "{body}");
@@ -337,7 +364,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     concepts.insert(long.clone(), json!("x"));
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": concepts, "labels": {}})),
     );
     assert_eq!(status, 400, "{body}");
@@ -345,7 +372,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     passages.insert(long.clone(), json!("原文"));
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": passages})),
     );
     assert_eq!(status, 400, "{body}");
@@ -355,14 +382,18 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     // pay for on every oversized call.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": long})),
     );
     assert_eq!(status, 400, "{body}");
 
     // A rename's destination rides in the body, not the path — it
     // needs its own cap, for both the context and the group route.
-    let (status, body) = server.call("POST", "/contexts/sake/rename", Some(json!({"to": long})));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/rename", server.cx("sake")),
+        Some(json!({"to": long})),
+    );
     assert_eq!(status, 400, "{body}");
     server.ok("PUT", "/groups/kura", Some(json!({})));
     let (status, body) = server.call("POST", "/groups/kura/rename", Some(json!({"to": long})));
@@ -375,7 +406,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     // The boundary itself stays usable.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{
             "subject": "s".repeat(1024), "label": "l", "object": "o", "weight": 1.0
         }])),
@@ -389,7 +420,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
 #[test]
 fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
     let server = Server::start("keysetcap");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     let long = "n".repeat(2000); // over MAX_CURSOR_BYTES either way
 
     for path in [
@@ -414,14 +445,18 @@ fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
     }
 
     // The cap doesn't reject an ordinary, in-bounds prefix.
-    let ok = server.ok("GET", "/contexts/sake/sources?prefix=n", None);
+    let ok = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?prefix=n", server.cx("sake")),
+        None,
+    );
     assert_eq!(ok["total"], json!(0), "{ok}");
 }
 
 #[test]
 fn empty_names_are_rejected_at_the_write_boundary() {
     let server = Server::start("emptyname");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     // An empty subject/label/object is not a degenerate name, it is no
     // name — each must be refused on its own, naming the offending
@@ -440,8 +475,11 @@ fn empty_names_are_rejected_at_the_write_boundary() {
             json!({"subject": "s", "label": "l", "object": "", "weight": 1.0}),
         ),
     ] {
-        let (status, body) =
-            server.call("POST", "/contexts/sake/associations", Some(json!([triple])));
+        let (status, body) = server.call(
+            "POST",
+            &format!("/contexts/{}/associations", server.cx("sake")),
+            Some(json!([triple])),
+        );
         assert_eq!(status, 400, "{field}: {body}");
         assert!(
             body["error"]
@@ -474,7 +512,11 @@ fn empty_names_are_rejected_at_the_write_boundary() {
             json!({"concepts": {}, "labels": {"l": ""}}),
         ),
     ] {
-        let (status, body) = server.call("POST", "/contexts/sake/aliases", Some(request));
+        let (status, body) = server.call(
+            "POST",
+            &format!("/contexts/{}/aliases", server.cx("sake")),
+            Some(request),
+        );
         assert_eq!(status, 400, "{name}: {body}");
     }
 
@@ -483,7 +525,7 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     // mistakes then silently merge into (and retract together).
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": ""}])),
     );
     assert_eq!(status, 400, "{body}");
@@ -515,14 +557,18 @@ fn empty_names_are_rejected_at_the_write_boundary() {
             }),
         ),
     ] {
-        let (status, body) = server.call("POST", "/contexts/sake/sources", Some(request));
+        let (status, body) = server.call(
+            "POST",
+            &format!("/contexts/{}/sources", server.cx("sake")),
+            Some(request),
+        );
         assert_eq!(status, 400, "{name}: {body}");
     }
 
     // retract_source's source id is no exception either.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": ""})),
     );
     assert_eq!(status, 400, "{body}");
@@ -531,7 +577,7 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     // not a missing name — it must NOT be swept up by the same check.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0}])),
     );
 
@@ -547,11 +593,11 @@ fn empty_names_are_rejected_at_the_write_boundary() {
 #[test]
 fn add_associations_collects_every_issue_in_one_pass() {
     let server = Server::start("collectall");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "", "label": "l", "object": "o", "weight": 1.0},
             {"subject": "s", "label": "l", "object": "o", "weight": 1e300},
@@ -596,7 +642,7 @@ fn add_associations_collects_every_issue_in_one_pass() {
 #[test]
 fn refusal_issues_total_survives_truncation_past_the_listed_issue_cap() {
     let server = Server::start("collectall-truncation");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     // 25 independent bad associations, each an empty subject — one
     // more than MAX_LISTED_ISSUES (20).
@@ -605,7 +651,7 @@ fn refusal_issues_total_survives_truncation_past_the_listed_issue_cap() {
         .collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(serde_json::Value::Array(batch)),
     );
     assert_eq!(status, 400, "{body}");
@@ -634,11 +680,11 @@ fn refusal_issues_total_survives_truncation_past_the_listed_issue_cap() {
 #[test]
 fn add_associations_invalid_batch_never_writes_a_valid_subset() {
     let server = Server::start("nosubset");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "good", "label": "l", "object": "o", "weight": 1.0},
             {"subject": "bad", "label": "l", "object": "o", "weight": "nope"},
@@ -656,11 +702,11 @@ fn add_associations_invalid_batch_never_writes_a_valid_subset() {
 #[test]
 fn store_passages_issue_paths_name_the_source_and_item_index() {
     let server = Server::start("passagepaths");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc.md": "text"},
             "questions": {"doc.md": [
@@ -687,7 +733,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     // alongside a wrong-typed question in one pass too.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc.md": "text"},
             "sections": {"ghost.md": [{"paragraph": 0, "section": "intro"}]},
@@ -711,7 +757,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
         .collect();
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc.md": "text"},
             "questions": {"doc.md": bad_questions},
@@ -723,7 +769,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
 
     let lookup = server.ok(
         "POST",
-        "/contexts/sake/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("sake")),
         Some(json!({"sources": ["doc.md"]})),
     );
     assert_eq!(lookup["missing"], json!(["doc.md"]), "{lookup}");
@@ -734,7 +780,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     // passage source id", not a path a client could act on).
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"": "text"}})),
     );
     assert_eq!(status, 400, "{body}");
@@ -746,7 +792,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     let long = "s".repeat(1025);
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {long.clone(): "text"}})),
     );
     assert_eq!(status, 400, "{body}");

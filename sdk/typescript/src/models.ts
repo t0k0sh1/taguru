@@ -194,9 +194,13 @@ export interface ContextRevision {
   config: number;
 }
 
-/** One `context` directory row. `id` is the `context`'s name — the row's own key (#851). */
+/**
+ * One `context` directory row. `id` is the server-minted UUID every path
+ * takes; `name` is the display name — free-form and not unique.
+ */
 export interface DirectoryEntry {
   id: string;
+  name: string;
   description: string;
   pinned: boolean;
   loaded: boolean;

@@ -123,9 +123,9 @@ fn exact_cosine_server(tag: &str, targets: &'static [(&'static str, f32)]) -> Se
 /// never finds a candidate — every semantic verdict's precondition.
 fn seed_concepts(server: &Server, name: &str, targets: &[(&str, f32)]) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "d"})),
     );
     let batch: Vec<Value> = targets
         .iter()
@@ -139,12 +139,12 @@ fn seed_concepts(server: &Server, name: &str, targets: &[(&str, f32)]) {
         .collect();
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(Value::Array(batch)),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/embeddings/refresh"),
+        &format!("/contexts/{}/embeddings/refresh", server.cx(name)),
         None,
     );
 }
@@ -160,7 +160,7 @@ fn explain_reports_semantic_below_floor() {
 
     let explained = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": CUE, "expected": "低調"})),
     );
     assert_eq!(
@@ -194,7 +194,7 @@ fn explain_reports_below_cutoff_via_the_semantic_cap() {
 
     let explained = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": CUE, "expected": "次点"})),
     );
     assert_eq!(explained["verdict"], json!("below_cutoff"), "{explained}");
@@ -222,7 +222,7 @@ fn explain_reports_below_cutoff_via_the_requests_own_limit() {
 
     let explained = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": CUE, "expected": "次点", "limit": 1})),
     );
     assert_eq!(explained["verdict"], json!("below_cutoff"), "{explained}");
@@ -241,7 +241,7 @@ fn explain_reports_below_cutoff_via_the_requests_own_limit() {
     // serves it.
     let wider = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": CUE, "expected": "次点", "limit": 2})),
     );
     assert_eq!(wider["verdict"], json!("served"), "{wider}");
@@ -349,16 +349,24 @@ fn query_faulty_server(tag: &str, fault: QueryFault) -> Server {
             ("TAGURU_EMBED_MODEL", "query-fault-mock"),
         ],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
              "weight": 1.0, "source": "a.md"},
         ])),
     );
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     server
 }
 
@@ -371,7 +379,11 @@ fn query_faulty_server(tag: &str, fault: QueryFault) -> Server {
 fn resolve_reports_embeddings_failed_when_the_cue_embed_is_unreachable() {
     let server = query_faulty_server("resolve-query-failed", QueryFault::Fail);
 
-    let (status, body) = server.call("POST", "/contexts/sake/resolve", Some(json!({"cue": CUE})));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
+        Some(json!({"cue": CUE})),
+    );
     assert_eq!(status, 502, "{body}");
     assert_eq!(body["code"], json!("embeddings_failed"), "{body}");
 }
@@ -392,18 +404,30 @@ fn resolve_reports_timeout_when_the_cue_embed_is_slow() {
             ("TAGURU_REQUEST_TIMEOUT_SECS", "1"),
         ],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
              "weight": 1.0, "source": "a.md"},
         ])),
     );
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
-    let (status, body) = server.call("POST", "/contexts/sake/resolve", Some(json!({"cue": CUE})));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
+        Some(json!({"cue": CUE})),
+    );
     assert_eq!(status, 408, "{body}");
     assert_eq!(body["code"], json!("timeout"), "{body}");
 }
@@ -422,7 +446,11 @@ fn resolve_serves_weak_lexical_results_when_the_cue_embed_fails_but_lexical_matc
     // exactly this shape.
     let cue = "青嶺の酒造り";
 
-    let (status, body) = server.call("POST", "/contexts/sake/resolve", Some(json!({"cue": cue})));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
+        Some(json!({"cue": cue})),
+    );
     assert_eq!(status, 200, "{body}");
     let candidates = body["result"].as_array().expect("candidates array");
     assert!(
@@ -447,15 +475,21 @@ fn resolve_serves_weak_lexical_results_when_the_cue_embed_fails_but_lexical_matc
 #[test]
 fn a_cue_over_the_name_byte_cap_is_refused_by_every_resolve_endpoint() {
     let server = Server::start("resolve-cue-too-long");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let long_cue = "字".repeat(400); // 1200 bytes, over the 1024-byte cap
+    let sake = server.cx("sake");
     for path in [
-        "/contexts/sake/resolve",
-        "/contexts/sake/resolve_label",
-        "/contexts/sake/resolve/explain",
-        "/contexts/sake/resolve_label/explain",
+        format!("/contexts/{sake}/resolve"),
+        format!("/contexts/{sake}/resolve_label"),
+        format!("/contexts/{sake}/resolve/explain"),
+        format!("/contexts/{sake}/resolve_label/explain"),
     ] {
+        let path = path.as_str();
         let (status, body) = server.call(
             "POST",
             path,
@@ -476,9 +510,10 @@ fn a_cue_over_the_name_byte_cap_is_refused_by_every_resolve_endpoint() {
     // same way — with a cue short enough to prove the refusal is about
     // `expected` and not about the cue again.
     for path in [
-        "/contexts/sake/resolve/explain",
-        "/contexts/sake/resolve_label/explain",
+        format!("/contexts/{sake}/resolve/explain"),
+        format!("/contexts/{sake}/resolve_label/explain"),
     ] {
+        let path = path.as_str();
         let (status, body) = server.call(
             "POST",
             path,
@@ -499,7 +534,7 @@ fn a_cue_over_the_name_byte_cap_is_refused_by_every_resolve_endpoint() {
     let at_cap = "字".repeat(341); // 1023 bytes
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": at_cap})),
     );
     assert_eq!(status, 200, "{body}");

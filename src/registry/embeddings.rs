@@ -30,10 +30,10 @@ impl AppState {
     /// The embedding identity in one read: the provider this server is
     /// configured to call beside what each vector sidecar actually
     /// holds. `None` when the `context` does not exist. Backs
-    /// `GET /contexts/{name}/embeddings` — the identity a calibration
+    /// `GET /contexts/{id}/embeddings` — the identity a calibration
     /// report stamps its floor with (#131).
-    pub fn embeddings_status(&self, name: &str) -> Option<EmbeddingsStatus> {
-        let entry = self.lookup(name)?;
+    pub fn embeddings_status(&self, id: &str) -> Option<EmbeddingsStatus> {
+        let entry = self.lookup_id(id)?;
         let stem = entry.id.clone();
         // Both sidecar loads sit under the entry's tombstone fence: a
         // delete that won the race must read as the same 404 the
@@ -80,7 +80,7 @@ impl AppState {
     #[allow(clippy::type_complexity)]
     pub fn semantic_twins(
         &self,
-        name: &str,
+        id: &str,
         cosine_floor: f32,
         deadline: Deadline,
     ) -> Option<(
@@ -106,7 +106,7 @@ impl AppState {
         /// cost like [`crate::embedding::PASSAGE_ANN_THRESHOLD`].
         const PAIR_CAP: usize = 100;
 
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let floor = cosine_floor.clamp(0.0, 1.0);
         // Scoped tombstone fence: it covers the sidecar load (a lost
         // race with delete must answer `None`, not sweep a stale or
@@ -172,7 +172,7 @@ impl AppState {
         // related (glosses quote shared facts), and would bury the real
         // fork candidates in noise. Filtering needs the graph, so the
         // context loads if cold — acceptable for an explicit audit.
-        match self.read_context(name, |context| {
+        match self.read_context(id, |context| {
             concepts.retain(|(a, b, _)| !context.adjacent(a, b));
             labels.retain(|(a, b, _)| !context.labels_share_subject(a, b));
         }) {
@@ -218,10 +218,10 @@ impl AppState {
     /// ONE call — the contract `tests/http_api/width_probe.rs` pins.
     pub fn refresh_embeddings(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Option<Result<(usize, usize), String>> {
-        self.refresh_embeddings_inner(name, deadline, false)
+        self.refresh_embeddings_inner(id, deadline, false)
     }
 
     /// The auto-embed ticker's variant of [`AppState::refresh_embeddings`]
@@ -235,15 +235,15 @@ impl AppState {
     /// deliberate refresh always heals a width change in one call.
     pub(crate) fn auto_refresh_embeddings(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Option<Result<(usize, usize), String>> {
-        self.refresh_embeddings_inner(name, deadline, true)
+        self.refresh_embeddings_inner(id, deadline, true)
     }
 
     fn refresh_embeddings_inner(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
         throttle_probe: bool,
     ) -> Option<Result<(usize, usize), String>> {
@@ -253,13 +253,13 @@ impl AppState {
                     .to_string(),
             ));
         };
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         // One refresh per context at a time (see Entry::vectors_refresh
         // for why); held across the gloss read too, not just the embed
         // and merge, so no overlapping refresh can be mid-flight against
         // a gloss state this one hasn't seen yet.
         let _serial = entry.vectors_refresh.lock();
-        let glosses = match self.read_context(name, |context| {
+        let glosses = match self.read_context(id, |context| {
             let concepts: Vec<(String, String)> = context
                 .concept_names()
                 .into_iter()
@@ -415,7 +415,7 @@ impl AppState {
         });
         if !fresh_model && width_mismatch {
             tracing::warn!(
-                context = name,
+                context = id,
                 model = embedder.model(),
                 carried_concepts = ?carried_concepts_width,
                 carried_labels = ?carried_labels_width,
@@ -541,7 +541,7 @@ impl AppState {
         // entry's write lock, and its own tombstone check covers the
         // delete race the fence covered here.
         if newly_embedded > 0 || pruned > 0 {
-            self.bump_config_revision(name, &entry);
+            self.bump_config_revision(&entry);
         }
         if let Some(error) = save_error {
             return Some(Err(format!("vector store not persisted: {error}")));
@@ -687,10 +687,10 @@ impl AppState {
     /// [`AppState::refresh_embeddings`]'s doc for why the split exists.
     pub fn refresh_passage_embeddings(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
-        self.refresh_passage_embeddings_inner(name, deadline, false)
+        self.refresh_passage_embeddings_inner(id, deadline, false)
     }
 
     /// The auto-embed ticker's variant of
@@ -699,15 +699,15 @@ impl AppState {
     /// this mirrors (issue #677 item 2).
     pub(crate) fn auto_refresh_passage_embeddings(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
-        self.refresh_passage_embeddings_inner(name, deadline, true)
+        self.refresh_passage_embeddings_inner(id, deadline, true)
     }
 
     fn refresh_passage_embeddings_inner(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
         throttle_probe: bool,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
@@ -722,7 +722,7 @@ impl AppState {
                 "passage embedding is disabled (set TAGURU_EMBED_PASSAGES=1)".to_string(),
             ));
         }
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         // One refresh per context at a time (see Entry::passage_refresh
         // for why); the diff below makes the loser's pass a no-op.
         let _serial = entry.passage_refresh.lock();
@@ -935,7 +935,7 @@ impl AppState {
                 && carried_w != fresh_w
             {
                 tracing::warn!(
-                    context = name,
+                    context = id,
                     model = embedder.model(),
                     carried = carried_w,
                     fresh = fresh_w,
@@ -998,7 +998,7 @@ impl AppState {
         // revision moves with it — after the fence, exactly as the
         // gloss refresh does (the bump re-checks the tombstone itself).
         if published_change {
-            self.bump_config_revision(name, &entry);
+            self.bump_config_revision(&entry);
         }
         if let Some(error) = save_error {
             return Some(Err(format!("passage vectors not persisted: {error}")));
@@ -1025,7 +1025,7 @@ impl AppState {
     /// sidecar belongs to another model.
     pub fn semantic_resolve(
         &self,
-        name: &str,
+        id: &str,
         cue: &str,
         labels: bool,
         floor_override: Option<f32>,
@@ -1034,7 +1034,7 @@ impl AppState {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Ok(Vec::new()));
         };
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         // Floor read and sidecar load share one scoped tombstone fence
         // (the guard doubles as the `meta` read — a second
         // `inner.read()` under it could deadlock behind a queued
@@ -1099,7 +1099,7 @@ impl AppState {
     /// the `context` does not exist.
     pub fn explain_semantic_resolve(
         &self,
-        name: &str,
+        id: &str,
         cue: &str,
         expected: &str,
         labels: bool,
@@ -1109,7 +1109,7 @@ impl AppState {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(GlossLaneReport::Off);
         };
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         // Same scoped fence as `semantic_resolve` — floor and sidecar
         // under one guard, dropped before any provider call.
         let (context_floor, store) = {

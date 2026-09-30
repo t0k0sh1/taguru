@@ -196,7 +196,7 @@
     </p>
     <ul>
       <li><b>Extract stage</b>: a segment is done when its entry in <code>.extract-manifest.json</code> matches the current compute-input fingerprint (content hash × model × prompt version × <code>context</code> × output-shaping flags). <code>taguru extract --dry-run</code> reports this without calling the model. A connector-driven run has its own two-layer version of this same test — see <a href="connectors.html#checkpoints">ingest connectors: checkpoints</a>.</li>
-      <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{name}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed source now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
+      <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{id}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed source now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
     </ul>
     <p>
       Below segment granularity, <a href="extract.html#checkpoints">chunk checkpoints</a> key
@@ -430,7 +430,7 @@ may be half-applied — re-import its source file or retract the source</code></
       a segment that stops being extracted. The manifest only ever grows entries; it has no notion
       of "no longer part of this corpus." Detecting and retiring stale membership is the runner's
       job — diff the corpus's current file list (or section list) against
-      <code>iter_sources()</code>/<code>GET /contexts/{name}/sources</code>, and for anything
+      <code>iter_sources()</code>/<code>GET /contexts/{id}/sources</code>, and for anything
       present in Taguru but absent from the corpus, emit a header-only <b>pure retraction</b>
       source file (a <code>"type": "source"</code> header with no operation lines) naming that source — see
       <a href="import.html#one-file-one-source">"one file = one source's complete truth"</a>.

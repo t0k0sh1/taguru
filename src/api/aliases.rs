@@ -11,7 +11,7 @@ use taguru::deadline::Deadline;
 use crate::registry::AppState;
 
 use super::{
-    AppJson, AppPath, AppQuery, ErrorCode, MAX_ASSOCIATIONS_PER_REQUEST, MAX_MATCH_LIMIT,
+    AppJson, AppQuery, ContextIdPath, ErrorCode, MAX_ASSOCIATIONS_PER_REQUEST, MAX_MATCH_LIMIT,
     MAX_NAME_BYTES, access_error, clamp_page, deadline_exceeded, empty, error, key_name, ok,
     overlong, oversized, partial_write_error,
 };
@@ -148,7 +148,7 @@ pub(super) fn keyset_bounds(query: &KeysetQuery, started_at: Instant) -> Option<
 
 pub async fn add_aliases(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AliasRequest>,
@@ -199,7 +199,7 @@ pub async fn add_aliases(
     // inner check (`hidden_label` short-circuits), so this costs a
     // schema-free write nothing beyond one lock probe.
     if let Some(alias) =
-        tokio::task::block_in_place(|| state.reserved_alias_conflict(&name, &request.labels))
+        tokio::task::block_in_place(|| state.reserved_alias_conflict(&id, &request.labels))
     {
         return error(
             ErrorCode::InvalidArgument,
@@ -216,10 +216,9 @@ pub async fn add_aliases(
     }
     // Same fsync-bearing WAL write as add_associations; keep it off the
     // async worker.
-    match tokio::task::block_in_place(|| {
-        state.add_aliases(&name, &request.concepts, &request.labels)
-    }) {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+    match tokio::task::block_in_place(|| state.add_aliases(&id, &request.concepts, &request.labels))
+    {
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(Ok(applied)) => {
             // Counts (not the spellings — a batch may run to
             // thousands) reach the audit line, the access log names
@@ -230,7 +229,7 @@ pub async fn add_aliases(
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                context = %name,
+                context = %id,
                 concepts = request.concepts.len(),
                 labels = request.labels.len(),
                 applied,
@@ -239,12 +238,12 @@ pub async fn add_aliases(
             // Same rule as add_associations: an empty batch applies
             // nothing, so it must not bump the write counter either.
             if applied > 0 {
-                state.note_write(&name);
+                state.note_write(&id);
             }
             ok(applied, started_at)
         }
         Ok(Err(partial)) => {
-            partial_write_error(&state, &name, partial, started_at, |applied, message| {
+            partial_write_error(&state, &id, partial, started_at, |applied, message| {
                 format!("applied {applied} aliases, then {message}")
             })
         }
@@ -265,7 +264,7 @@ pub struct RemoveAliasesRequest {
 
 pub async fn remove_aliases(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RemoveAliasesRequest>,
@@ -313,9 +312,9 @@ pub async fn remove_aliases(
     }
     // Same fsync-bearing WAL write; keep it off the async worker.
     match tokio::task::block_in_place(|| {
-        state.remove_aliases(&name, &request.concepts, &request.labels)
+        state.remove_aliases(&id, &request.concepts, &request.labels)
     }) {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(Ok(removed)) => {
             // Withdrawn spellings live in the body; counts (not the
             // spellings — a batch may run to thousands) reach the
@@ -323,19 +322,19 @@ pub async fn remove_aliases(
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                context = %name,
+                context = %id,
                 concepts = request.concepts.len(),
                 labels = request.labels.len(),
                 removed,
                 "aliases removed",
             );
-            state.note_write(&name);
+            state.note_write(&id);
             ok(removed, started_at)
         }
         // `full` is unreachable for removals (they free, never fill),
         // but the shared mapping stays uniform.
         Ok(Err(partial)) => {
-            partial_write_error(&state, &name, partial, started_at, |applied, message| {
+            partial_write_error(&state, &id, partial, started_at, |applied, message| {
                 format!("removed {applied} aliases, then {message}")
             })
         }
@@ -344,7 +343,7 @@ pub async fn remove_aliases(
 
 pub async fn list_aliases(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
@@ -395,7 +394,7 @@ pub async fn list_aliases(
     // `limit`.
     let outcome = match query.prefix.as_deref() {
         Some(prefix) => tokio::task::block_in_place(|| {
-            state.read_context(&name, |context| {
+            state.read_context(&id, |context| {
                 let mut concepts: Vec<(String, String)> = context
                     .concept_aliases()
                     .into_iter()
@@ -441,7 +440,7 @@ pub async fn list_aliases(
                 export
             })
         }),
-        None => state.read_context(&name, |context| {
+        None => state.read_context(&id, |context| {
             let total = context.concept_alias_count() + context.label_alias_count();
             let mut export = AliasExport {
                 total,
@@ -468,7 +467,7 @@ pub async fn list_aliases(
     };
     match outcome {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 

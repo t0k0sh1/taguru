@@ -21,14 +21,32 @@ const AOMINE_DOC = `青嶺酒造は1907年創業の架空の酒蔵である。�
 let server: SpawnedServer;
 let client: Taguru;
 const seededContext = `sake-${randomUUID().slice(0, 8)}`;
+// The seeded context's id — every /contexts/{id}/… call and the
+// retriever's single `context` field take it (#964).
+let seededId: string;
+
+/** The id behind a display name — for verifying what an ingester (whose
+ * `context` field is a NAME, riding the name-addressed import stream)
+ * actually wrote, over the id-addressed routes (#964). */
+async function contextIdOf(name: string): Promise<string> {
+  for await (const row of client.contexts.iter()) {
+    if (row.name === name) {
+      return row.id;
+    }
+  }
+  throw new Error(`no context named ${name}`);
+}
 
 beforeAll(async () => {
   server = await spawnServer(serverBinary(), { TAGURU_API_TOKEN: TOKEN });
   client = new Taguru({ base_url: server.baseUrl, api_key: TOKEN });
   await client.waitUntilReady({ timeout: 30 });
 
-  await client.contexts.create(seededContext, { description: "青嶺酒造という架空の酒蔵の知識" });
-  const ctx = client.context(seededContext);
+  const row = await client.contexts.create(seededContext, {
+    description: "青嶺酒造という架空の酒蔵の知識",
+  });
+  seededId = row.id;
+  const ctx = client.context(seededId);
   await ctx.addAssociations([
     { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
     { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
@@ -44,7 +62,7 @@ afterAll(() => {
 
 describe("TaguruRetriever (real server)", () => {
   it("serves both lanes from the seeded context", async () => {
-    const retriever = new TaguruRetriever({ context: seededContext, client, k: 8 });
+    const retriever = new TaguruRetriever({ context: seededId, client, k: 8 });
     const documents = await retriever.invoke("青嶺酒造");
 
     expect(documents.length).toBeGreaterThan(0);
@@ -63,7 +81,7 @@ describe("TaguruRetriever (real server)", () => {
 
   it("catches answer-shaped queries through the text lane", async () => {
     const retriever = new TaguruRetriever({
-      context: seededContext,
+      context: seededId,
       client,
       include_graph: false,
       k: 3,
@@ -105,7 +123,9 @@ describe("TaguruIngester (real server)", () => {
       dry_run: true,
     });
     expect(dry.ok).toBe(true);
-    expect(await client.contexts.exists("wagashi")).toBe(false);
+    for await (const listed of client.contexts.iter()) {
+      expect(listed.name).not.toBe("wagashi");
+    }
 
     const outcomes = await ingester.ingestDocuments([
       { pageContent: SHOP_DOC, metadata: { source: "docs/geppakudo.md" } },
@@ -117,7 +137,7 @@ describe("TaguruIngester (real server)", () => {
     expect(outcomes[0]!.questions_stored).toBe(1);
     expect(outcomes[0]!.embeddings_refresh_warning).toBeNull();
 
-    const ctx = client.context("wagashi");
+    const ctx = client.context(await contextIdOf("wagashi"));
     const match = (await ctx.query({ subject: "月白堂", label: "名物" })).matches[0]!;
     expect(match.object).toBe("栗きんとん");
     expect(match.attributions[0]!.paragraph).toBe(1);
@@ -133,10 +153,14 @@ describe("TaguruIngester (real server)", () => {
     expect(after.count).toBe(before.count);
 
     // Immediately retrievable through the retriever.
-    const retriever = new TaguruRetriever({ context: "wagashi", client, k: 4 });
+    const retriever = new TaguruRetriever({
+      context: await contextIdOf("wagashi"),
+      client,
+      k: 4,
+    });
     const documents = await retriever.invoke("月白堂");
     expect(documents.some((d) => d.pageContent.includes("栗きんとん"))).toBe(true);
 
-    await client.contexts.delete("wagashi");
+    await client.contexts.delete(await contextIdOf("wagashi"));
   });
 });

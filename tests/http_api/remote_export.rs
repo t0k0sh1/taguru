@@ -19,6 +19,10 @@ use serde_json::json;
 
 use crate::support::{Server, batch_dir, run_cli, run_import};
 
+/// A well-formed id no context carries — subset args are ids (#964),
+/// so "unknown context" means an unresolvable id, not an unknown name.
+const GHOST: &str = "00000000-0000-4000-8000-00000000dead";
+
 /// Every file directly under `dir`, name → bytes — the same
 /// byte-identical comparison `tests/http_api/replication.rs` uses to
 /// pin a restored bucket against its source.
@@ -124,8 +128,16 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
 #[test]
 fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
     let server = Server::start("remote-export-subset");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/bunko", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "bunko", "description": "d"})),
+    );
     server.ok(
         "PUT",
         "/groups/kura",
@@ -144,7 +156,7 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
             &server.base,
             "--out",
             out.to_str().unwrap(),
-            "sake",
+            &server.cx("sake"),
         ],
         &[],
     );
@@ -177,9 +189,9 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
 fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
     let server = Server::start_with_env("remote-export-auth", &[("TAGURU_API_TOKEN", "sekrit")]);
     let (status, _) = server.call_with_token(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
         Some("sekrit"),
     );
     assert_eq!(status, 200);
@@ -220,7 +232,11 @@ fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
 #[test]
 fn an_unknown_context_counts_as_a_failure_and_the_rest_still_lands() {
     let server = Server::start("remote-export-unknown");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let out = std::env::temp_dir().join(format!(
         "taguru-remote-export-unknown-{}",
@@ -234,13 +250,13 @@ fn an_unknown_context_counts_as_a_failure_and_the_rest_still_lands() {
             &server.base,
             "--out",
             out.to_str().unwrap(),
-            "sake",
-            "nope",
+            &server.cx("sake"),
+            GHOST,
         ],
         &[],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stderr.contains("context 'nope'"), "{stderr}");
+    assert!(stderr.contains(&format!("context '{GHOST}'")), "{stderr}");
     assert!(stderr.contains("404"), "{stderr}");
     assert!(stdout.contains("1 of 2 context(s)"), "{stdout}");
     let contents = dir_contents(&out);
@@ -342,7 +358,11 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
 #[test]
 fn a_full_remote_export_removes_stale_stream_files() {
     let server = Server::start("remote-export-prune");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let out = crate::support::common::scratch_dir("remote-export-prune");
     std::fs::create_dir_all(&out).expect("out dir must be creatable");
@@ -358,7 +378,7 @@ fn a_full_remote_export_removes_stale_stream_files() {
             &server.base,
             "--out",
             out.to_str().unwrap(),
-            "sake",
+            &server.cx("sake"),
         ],
         &[],
     );
@@ -434,7 +454,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /contexts, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -518,7 +538,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -654,7 +674,7 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#,
+                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#,
             ),
             ("HTTP/1.1 200 OK", r#"{"result":{"total":1,"contexts":[]}}"#),
             // GET /contexts/sake/export: a per-context failure.
@@ -723,7 +743,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /contexts: one context, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"sake"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -773,7 +793,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("context 'sake': not a taguru export stream"),
+        stderr.contains("context 'sake' (id-sake): context 'sake': not a taguru export stream"),
         "{stderr}"
     );
     assert!(stderr.contains("group 'g'"), "{stderr}");
@@ -800,7 +820,11 @@ fn per_item_failures_count_and_the_rest_still_lands() {
 #[test]
 fn an_uncreatable_out_directory_refuses_the_remote_export() {
     let server = Server::start("remote-export-outfail");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let scratch = crate::support::common::scratch_dir("remote-export-outfail");
     std::fs::create_dir_all(&scratch).expect("scratch dir must be creatable");

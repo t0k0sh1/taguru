@@ -125,15 +125,19 @@ fn the_plan_names_every_stable_vector_lane_state() {
             ("TAGURU_EMBED_MODEL", "alpha"),
         ],
     );
-    off.ok("PUT", "/contexts/mine", Some(json!({"description": "d"})));
     off.ok(
         "POST",
-        "/contexts/mine/sources",
+        "/contexts",
+        Some(json!({"name": "mine", "description": "d"})),
+    );
+    off.ok(
+        "POST",
+        &format!("/contexts/{}/sources", off.cx("mine")),
         Some(json!({"passages": {"docs/ore.md": "琥珀は樹脂の化石である。"}})),
     );
     let page = off.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", off.cx("mine")),
         Some(json!({"query": "琥珀"})),
     );
     assert_eq!(
@@ -146,7 +150,7 @@ fn the_plan_names_every_stable_vector_lane_state() {
     // "lane didn't run" are different sentences now.
     let none = off.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", off.cx("mine")),
         Some(json!({"query": "真珠"})),
     );
     assert_eq!(none["hits"], json!([]), "{none}");
@@ -159,7 +163,7 @@ fn the_plan_names_every_stable_vector_lane_state() {
     // A query with no searchable terms: both lanes honestly not run.
     let empty = off.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", off.cx("mine")),
         Some(json!({"query": "、。"})),
     );
     assert_eq!(
@@ -177,15 +181,19 @@ fn the_plan_names_every_stable_vector_lane_state() {
             ("TAGURU_EMBED_PASSAGES", "1"),
         ],
     );
-    server.ok("PUT", "/contexts/mine", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mine/sources",
+        "/contexts",
+        Some(json!({"name": "mine", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mine")),
         Some(json!({"passages": {"docs/ore.md": "琥珀は樹脂の化石である。"}})),
     );
     let unrefreshed = server.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "琥珀"})),
     );
     assert_eq!(
@@ -196,10 +204,14 @@ fn the_plan_names_every_stable_vector_lane_state() {
     );
 
     // Refreshed: the lane runs and names the effective (default) floor.
-    server.ok("POST", "/contexts/mine/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("mine")),
+        None,
+    );
     let ran = server.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "琥珀"})),
     );
     assert_eq!(vector_plan(&ran)["ran"], json!(true), "{ran}");
@@ -213,7 +225,7 @@ fn the_plan_names_every_stable_vector_lane_state() {
     let reply = server.call_tool(
         1,
         "search_passages",
-        json!({"context": "mine", "query": "琥珀"}),
+        json!({"context": server.cx("mine"), "query": "琥珀"}),
     );
     assert!(reply.get("isError").is_none(), "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();
@@ -238,7 +250,7 @@ fn the_plan_names_every_stable_vector_lane_state() {
     );
     let changed = renamed.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", renamed.cx("mine")),
         Some(json!({"query": "琥珀"})),
     );
     assert_eq!(
@@ -268,17 +280,21 @@ fn a_refused_query_embedding_is_confessed_and_never_cached() {
             ("TAGURU_EMBED_PASSAGES", "1"),
         ],
     );
-    server.ok("PUT", "/contexts/mine", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mine/sources",
+        "/contexts",
+        Some(json!({"name": "mine", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mine")),
         Some(json!({"passages": {"docs/ore.md": "琥珀は樹脂の化石である。"}})),
     );
 
     let search = || {
         server.ok(
             "POST",
-            "/contexts/mine/sources/search",
+            &format!("/contexts/{}/sources/search", server.cx("mine")),
             Some(json!({"query": "琥珀"})),
         )
     };
@@ -327,9 +343,9 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     let server = Server::start("plan-graph");
     for context in ["amber", "quartz"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
         );
     }
     server.ok(
@@ -340,7 +356,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
 
     let single = server.ok(
         "POST",
-        "/contexts/amber/recall",
+        &format!("/contexts/{}/recall", server.cx("amber")),
         Some(json!({"cue": "何もない"})),
     );
     assert_eq!(single["total"], json!(0), "{single}");

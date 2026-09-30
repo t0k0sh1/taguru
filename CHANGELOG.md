@@ -9,6 +9,30 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — `/contexts/{…}` paths take the context ID, and
+  the directory row carries `id` and `name` as separate columns**
+  (#964, ADR 0045; rides the same unreleased `http_contract` 2 as
+  #937): every `/contexts/{id}/…` route now takes the server-minted
+  UUID from the `id` column of `GET /contexts` — a non-UUID path
+  segment is a 400 `invalid_argument`, and no route resolves a name.
+  Contexts are created with `POST /contexts` (body `{"name", …}`; the
+  response is the directory row with the minted `id`) — `PUT
+  /contexts/{name}` is gone, and with it the name-uniqueness conflict:
+  creating a duplicate display name mints a second, distinct context
+  (issue #961 decision 1). `GET /contexts` sorts and pages by `(name,
+  id)` (`after` + new `after_id`), and rename changes only the `name`
+  column — the id, and so every path and cursor, never moves. Name
+  boundaries that stay until #965/#966 keep working on display names:
+  cross-search `contexts` bodies, import-stream headers, group member
+  lists, and grant allow-lists (an ambiguous name is its own 409/403,
+  never silently resolved). MCP `context` tool arguments now take ids
+  (`create_context` takes `name`; argument renames are #967), CLI
+  `--context`/CONTEXT arguments take ids (`taguru extract --context`
+  stays a name — it writes the stream header), and the SDKs follow:
+  `client.context(id)` / `contexts.create(name=…) -> row`,
+  `DirectoryEntry.name`, and `after_id` paging. Single-context search
+  responses report `plan.contexts` by display name, matching hits and
+  the cross paths.
 - **Breaking (on-disk format) — a `context`'s files are named by a
   server-minted id, not its name** (#963, ADR 0045): every `context`
   gets a UUID v4 at create; the data directory's file stems are that

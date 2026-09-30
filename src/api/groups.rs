@@ -158,7 +158,7 @@ fn group_fingerprint(
         if !scope_allows(grant, &context) {
             continue;
         }
-        let Some(revision) = state.context_revision(&context) else {
+        let Some(revision) = state.context_revision_named(&context) else {
             continue;
         };
         digest = crate::hash::fnv1a_fold(digest, (context.len() as u64).to_le_bytes());

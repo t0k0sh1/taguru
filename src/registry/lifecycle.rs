@@ -3,16 +3,25 @@ use super::*;
 impl AppState {
     /// Registers an empty `context` under a freshly minted id and
     /// persists it immediately, so its existence (and description)
-    /// survives a crash from the moment the create call returns. A
-    /// persistence failure fails the create.
+    /// survives a crash from the moment the create call returns —
+    /// which hands back the minted id, the only address the wire has
+    /// for the new `context` (#964). A persistence failure fails the
+    /// create.
+    ///
+    /// No uniqueness check: names are display strings and duplicates
+    /// are allowed (issue #961 decision 1) — `POST /contexts` of a
+    /// name already in use mints a second, distinct `context`. That is
+    /// also why no reservation set is needed here anymore: the stem is
+    /// a UUID minted right here, so no concurrent create, delete, or
+    /// rename can be working on the same file family. Callers that DO
+    /// want at-most-one-per-name (the import header's `create` block)
+    /// go through [`AppState::create_if_absent`] instead.
     ///
     /// The registry lock is NOT held across the disk work
     /// (`save_files`' fsyncs — seconds on slow storage, behind which
-    /// every operation on every `context` would otherwise stall). The
-    /// name is reserved in `pending.creates` under the registry
-    /// guard, the files are written unlocked, and the entry lands in
-    /// a second critical section — the create twin of delete's
-    /// `pending.deletes` choreography.
+    /// every operation on every `context` would otherwise stall): the
+    /// files are written unlocked and the entry lands in one short
+    /// critical section afterwards.
     ///
     /// No stale-leftover sweep, unlike every release before ids: the
     /// stem is a UUID minted right here, so no earlier generation —
@@ -23,69 +32,75 @@ impl AppState {
     /// will ever register, invisible and inert. The old
     /// same-name-same-stem model recycled those on the next create;
     /// the id model just leaves a few bytes behind.)
-    pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
-        // An empty name is no longer self-erasing (the stem is the id,
-        // not the name), but it is still unaddressable on a wire that
-        // reaches contexts by name — refuse it at the lowest boundary,
-        // so no entrance (import, direct call) can conjure one.
+    pub fn create(&self, name: &str, meta: ContextMeta) -> Result<String, CreateError> {
+        // An empty name would render every listing row and log line
+        // blank — refuse it at the lowest boundary, so no entrance
+        // (import, direct call) can conjure one.
+        if name.is_empty() {
+            return Err(CreateError::InvalidName);
+        }
+        let id = mint_context_id();
+        let (stats, usage, context) = self.create_files(&id, name, &meta)?;
+        self.0.registry.write().insert(
+            name,
+            Arc::new(Entry::new(
+                id.clone(),
+                name.to_string(),
+                meta,
+                stats,
+                Slot::Hot(Box::new(context)),
+                0,
+                0,
+                usage,
+                ContextRevision::default(),
+                // A brand-new generation never has a schema — and
+                // under a freshly minted stem there is no earlier
+                // generation's stray file to inherit one from.
+                None,
+                None,
+            )),
+        );
+        Ok(id)
+    }
+
+    /// The import header's create semantics: exactly one `context` per
+    /// name, however many batches race. Resolves `name` first — an
+    /// existing `context` is the answer (`Ok(None)`), an ambiguous one
+    /// is refused (several already share the name; minting a third
+    /// would make the header's target even less recoverable) — and
+    /// only creates when nothing carries the name. The name is
+    /// reserved in `pending_creates` for the disk work's duration, so
+    /// a concurrent batch of the same stream sees "taken" instead of
+    /// minting a twin; it reports `Ok(None)` exactly as if the winner
+    /// had already registered, and its subsequent by-name operations
+    /// wait out the same window the pre-id create had.
+    pub fn create_if_absent(
+        &self,
+        name: &str,
+        meta: ContextMeta,
+    ) -> Result<Option<String>, CreateError> {
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
         {
             let registry = self.0.registry.read();
-            // The wire still creates by name (`PUT /contexts/{name}`),
-            // so a live name is taken even though the store itself no
-            // longer requires names unique (issue #961 decision 1) —
-            // a second create of the same name must keep refusing
-            // exactly as it always has. A name mid-delete or
-            // mid-create is equally taken, and either end of an
-            // in-flight rename is too: the client sees the same
-            // refusal as for a live name and retries after the other
-            // call's response.
-            if registry.contains_name(name) {
-                return Err(CreateError::AlreadyExists);
+            match registry.resolve(name) {
+                NameResolution::One(_) => return Ok(None),
+                NameResolution::Ambiguous(count) => {
+                    return Err(CreateError::AmbiguousName(count));
+                }
+                NameResolution::None => {}
             }
-            // Checking the other two sets and reserving this one all
-            // happen under the SAME lock, in one critical section — see
-            // `PendingNames`'s doc for why that atomicity is what closes
-            // the gap against a concurrent `rename_context` (the only
-            // sibling that, like this call, holds only `registry.read()`
-            // for its own check-then-reserve).
-            let mut pending = self.0.pending.lock();
-            if pending.deletes.contains(name)
-                || pending.renames.contains(name)
-                || !pending.creates.insert(name.to_string())
-            {
-                return Err(CreateError::AlreadyExists);
+            // Reserved under the registry read guard, so this
+            // check-then-insert cannot interleave with another
+            // create_if_absent of the same name (both would need the
+            // pending lock inside the same registry guard).
+            if !self.0.pending_creates.lock().insert(name.to_string()) {
+                return Ok(None);
             }
         }
-        let id = mint_context_id();
-        let created = self.create_files(&id, name, &meta);
-        // Success or failure, the reservation leaves in the same
-        // critical section that (on success) makes the entry visible.
-        let mut registry = self.0.registry.write();
-        let outcome = created.map(|(stats, usage, context)| {
-            registry.insert(
-                name,
-                Arc::new(Entry::new(
-                    id,
-                    name.to_string(),
-                    meta,
-                    stats,
-                    Slot::Hot(Box::new(context)),
-                    0,
-                    0,
-                    usage,
-                    ContextRevision::default(),
-                    // A brand-new generation never has a schema — and
-                    // under a freshly minted stem there is no earlier
-                    // generation's stray file to inherit one from.
-                    None,
-                    None,
-                )),
-            );
-        });
-        self.0.pending.lock().creates.remove(name);
+        let outcome = self.create(name, meta).map(Some);
+        self.0.pending_creates.lock().remove(name);
         outcome
     }
 
@@ -137,43 +152,24 @@ impl AppState {
     /// concurrent create() the name stays taken for the delete's whole
     /// run, so no new generation of files can appear under the tail of
     /// this one's removals.
-    pub fn delete(&self, name: &str) -> Option<Result<(), DeleteError>> {
-        let entry = {
+    pub fn delete(&self, id: &str) -> Option<Result<(), DeleteError>> {
+        let (entry, name) = {
             let mut registry = self.0.registry.write();
-            let ambiguous = match registry.resolve(name) {
-                NameResolution::None => return None,
-                NameResolution::One(_) => None,
-                // Several contexts share this name (possible only in a
-                // hand-assembled data directory while the wire still
-                // addresses contexts by name): refuse explicitly
-                // rather than tearing one of them down by coin flip.
-                NameResolution::Ambiguous(count) => Some(count),
-            };
-            if let Some(count) = ambiguous {
-                return Some(Err(DeleteError::AmbiguousName(count)));
-            }
-            // A name mid-rename is refused rather than torn down: the
-            // rename is about to persist a sidecar for the very entry
-            // this delete would unlink, and losing that race would
-            // resurrect the sidecar of a family already gone.
-            // Reported through the same `Option<Result<...>>` a live
-            // name already uses — the caller sees a name that exists
-            // but cannot be deleted right now, not "no such context".
-            // `MidRename` is its own variant, not `Io`: nothing was
-            // touched, so the API layer must not report this as a
-            // completed (if partial) deletion the way `Io` does.
-            if self.0.pending.lock().renames.contains(name) {
-                return Some(Err(DeleteError::MidRename));
-            }
-            let entry = registry.remove_unique(name)?;
-            self.0.pending.lock().deletes.insert(name.to_string());
-            entry
+            // The name hint is the index's own reverse scan: `inner`
+            // must not be locked while the registry lock is held (the
+            // table's locking contract), and `remove_id`'s fallback
+            // covers a hint gone stale anyway.
+            let name = registry.name_of(id)?;
+            let entry = registry.remove_id(id, &name)?;
+            (entry, name)
         };
         let mut in_flight = entry.inner.write();
         self.tombstone_locked(&mut in_flight, &entry);
         // The rest of this function is disk I/O (marker, group sweep,
-        // unlinks) guarded by `pending.deletes`, not by `inner` — hold
-        // it no longer than the in-memory teardown above needs.
+        // unlinks). No reservation set guards it anymore: the entry is
+        // out of the registry (nothing new can address it), a create
+        // can never re-mint this stem, and a rename that raced this
+        // far finds the tombstone under `inner` and backs off.
         drop(in_flight);
         let stem = entry.id.clone();
         // A lazy bucket boot: the bucket's copy of this family must
@@ -203,7 +199,7 @@ impl AppState {
         // effort — the delete's own durability rides on the marker
         // alone, and a sweep that could not persist is healed by the
         // next boot's reconciliation.
-        self.sweep_context_from_groups(name);
+        self.sweep_context_from_groups(&name);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
             if let Err(error) = remove_persisted_file(self.0.data_dir.join(file))
@@ -227,7 +223,6 @@ impl AppState {
         if outcome.is_ok() {
             let _ = remove_persisted_file(&marker);
         }
-        self.0.pending.lock().deletes.remove(name);
         Some(outcome.map_err(DeleteError::Io))
     }
 
@@ -240,15 +235,15 @@ impl AppState {
     /// `group` membership — which still names contexts by name until
     /// #965 — along.
     ///
-    /// Both names are reserved in `pending.renames` for the call's
-    /// duration, so a concurrent `create(to)` cannot land between the
-    /// availability check and the index update. The sidecar write
-    /// happens under the entry lock and BEFORE the index moves: a
-    /// success response always means the new name is durable, and a
-    /// crash mid-call leaves at worst a sidecar already renamed whose
-    /// index entry still says `from` — the next boot reads the
-    /// sidecar and registers the new name, exactly what the caller
-    /// was about to be told.
+    /// No availability check and no reservation: the destination name
+    /// may already be in use (issue #961 decision 1 — names are not
+    /// unique), so there is nothing for a concurrent create or rename
+    /// to collide with. The sidecar write happens under the entry
+    /// lock and BEFORE the index moves: a success response always
+    /// means the new name is durable, and a crash mid-call leaves at
+    /// worst a sidecar already renamed whose index entry still says
+    /// the old name — the next boot reads the sidecar and registers
+    /// the new name, exactly what the caller was about to be told.
     ///
     /// The `group` membership rewrite is best-effort: a record that
     /// will not persist is warned about and heals structurally at
@@ -257,73 +252,38 @@ impl AppState {
     /// the rewrite loses the renamed context's membership at the next
     /// boot's `reconcile_groups` — the price of retiring the durable
     /// marker, accepted by #963's design.
-    pub fn rename_context(&self, from: &str, to: &str) -> Result<(), RenameContextError> {
+    pub fn rename_context(&self, id: &str, to: &str) -> Result<(), RenameContextError> {
         if to.is_empty() {
             return Err(RenameContextError::InvalidName);
         }
-        let entry = {
-            let registry = self.0.registry.read();
-            let entry = match registry.resolve(from) {
-                NameResolution::One(entry) => Arc::clone(entry),
-                NameResolution::None => return Err(RenameContextError::NotFound),
-                // Several contexts share `from` (a hand-assembled data
-                // directory): refuse rather than rename one by coin
-                // flip.
-                NameResolution::Ambiguous(count) => {
-                    return Err(RenameContextError::AmbiguousName(count));
-                }
-            };
-            // Checked AFTER existence, not before: a self-rename of a
-            // name that does not exist is still a `NotFound`, not a
-            // silent no-op success.
-            if from == to {
-                return Ok(());
-            }
-            // The wire still addresses contexts by name, so a taken
-            // destination refuses exactly as it always has — even
-            // though the store itself no longer requires names unique.
-            if registry.contains_name(to) {
-                return Err(RenameContextError::AlreadyExists);
-            }
-            // Checking all three sets and reserving both names in
-            // `renames` all happen under the SAME lock, in one critical
-            // section — see `PendingNames`'s doc for why that atomicity
-            // is what closes the gap against a concurrent `create` (the
-            // only sibling that, like this call, holds only
-            // `registry.read()` for its own check-then-reserve).
-            let mut pending = self.0.pending.lock();
-            if pending.deletes.contains(from)
-                || pending.deletes.contains(to)
-                || pending.creates.contains(to)
-                || pending.renames.contains(from)
-                || pending.renames.contains(to)
-            {
-                return Err(RenameContextError::Busy);
-            }
-            pending.renames.insert(from.to_string());
-            pending.renames.insert(to.to_string());
-            Arc::clone(&entry)
+        let Some(entry) = self.lookup_id(id) else {
+            return Err(RenameContextError::NotFound);
         };
-        let outcome = self.rename_entry(&entry, to);
-        if outcome.is_ok() {
-            self.0.registry.write().reindex(&entry.id, from, to);
-        }
+        let from = match self.rename_entry(&entry, to)? {
+            // A self-rename: the sidecar was not rewritten and the
+            // index has nothing to move.
+            None => return Ok(()),
+            Some(previous) => previous,
+        };
         {
-            let mut pending = self.0.pending.lock();
-            pending.renames.remove(from);
-            pending.renames.remove(to);
+            let mut registry = self.0.registry.write();
+            // A delete that raced this rename has already unindexed
+            // the entry — reindexing here would resurrect a name row
+            // for an id the table no longer holds.
+            if registry.get_id(id).is_some() {
+                registry.reindex(id, &from, to);
+            }
         }
-        outcome?;
         // Group membership still names contexts by name until #965.
         // Best-effort, after the rename is already served: see this
         // function's doc for the crash window this accepts.
         let membership_persisted = {
             let mut groups = self.0.groups.write();
-            rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
+            rename_in_membership(&self.0.data_dir, &mut groups, &from, to, |record| {
                 &mut record.contexts
             })
         };
-        warn_unpersisted_membership(from, to, membership_persisted);
+        warn_unpersisted_membership(&from, to, membership_persisted);
         Ok(())
     }
 
@@ -331,14 +291,21 @@ impl AppState {
     /// `EntryInner::name` and persists the sidecar under the entry's
     /// unchanged id, rolling the in-memory name back if the write
     /// fails — so memory and the sidecar can only disagree over a
-    /// crash, never over a reported error.
-    fn rename_entry(&self, entry: &Entry, to: &str) -> Result<(), RenameContextError> {
+    /// crash, never over a reported error. Hands the previous name
+    /// back (the index move and the group rewrite need it), or `None`
+    /// for a self-rename, which touches nothing. The current name is
+    /// read under the same entry lock as the swap, so "self-rename"
+    /// is judged against the name the sidecar actually holds.
+    fn rename_entry(&self, entry: &Entry, to: &str) -> Result<Option<String>, RenameContextError> {
         let Some(mut guard) = entry.lock_unless_deleted() else {
             // A delete won the race after the resolve above; to its
             // caller the name is simply gone.
             return Err(RenameContextError::NotFound);
         };
         let inner = &mut *guard;
+        if inner.name == to {
+            return Ok(None);
+        }
         let previous = std::mem::replace(&mut inner.name, to.to_string());
         // The revision counters deliberately do NOT move: a rename is
         // the same content under a new name, exactly as before ids —
@@ -358,7 +325,7 @@ impl AppState {
             inner.name = previous;
             return Err(RenameContextError::Io(error));
         }
-        Ok(())
+        Ok(Some(previous))
     }
 }
 
@@ -387,13 +354,13 @@ impl AppState {
     /// resident); unpinning subjects it to the cache budget again.
     pub fn update_meta(
         &self,
-        name: &str,
+        id: &str,
         description: Option<String>,
         pinned: Option<bool>,
         dice_floor: Option<f64>,
         semantic_floor: Option<f32>,
     ) -> Option<io::Result<ContextMeta>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let outcome = {
             // A `None` means a delete won the lock first: don't
             // recreate the sidecar it just removed.
@@ -427,7 +394,6 @@ impl AppState {
                 && let Err(error) = ensure_hot(
                     &self.0.data_dir,
                     &entry.id,
-                    name,
                     inner,
                     &self.0.metrics,
                     self.0.hydrator.as_deref(),
@@ -474,7 +440,7 @@ impl AppState {
     }
 
     /// The resident schema for `name` — `Ok(None)` for a schema-free
-    /// `context` (`GET /contexts/{name}/schema`, #380, turns that into a
+    /// `context` (`GET /contexts/{id}/schema`, #380, turns that into a
     /// 404). Outer `None` means no such `context`.
     ///
     /// The common case is already resolved without touching disk: boot
@@ -494,9 +460,9 @@ impl AppState {
     /// management call, not a retrieval hot path.
     pub fn schema_of(
         &self,
-        name: &str,
+        id: &str,
     ) -> Option<Result<Option<Arc<schema::InstalledSchema>>, String>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         {
             let inner = entry.read_unless_deleted()?;
             if inner.schema.is_some() || inner.schema_digest.is_none() {
@@ -509,7 +475,6 @@ impl AppState {
             if let Err(error) = ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -545,8 +510,8 @@ impl AppState {
     /// neither reentrant nor reader-preferring, so that ordering
     /// deadlocks. Resolve the hidden label first, then pass the
     /// `Option<&str>` into the closure.
-    pub fn hidden_label(&self, name: &str) -> Option<&'static str> {
-        match self.schema_of(name)? {
+    pub fn hidden_label(&self, id: &str) -> Option<&'static str> {
+        match self.schema_of(id)? {
             Ok(Some(_)) => Some(schema::SCHEMA_TYPE_LABEL),
             Ok(None) => None,
             Err(_) => Some(schema::SCHEMA_TYPE_LABEL),
@@ -559,8 +524,8 @@ impl AppState {
     /// run before, never inside, a `read_context` closure. Bundles the
     /// `block_in_place` + `.into_iter().collect()` idiom five HTTP
     /// handlers each wrote out by hand.
-    pub fn excluded_hidden_label(&self, name: &str) -> Vec<&'static str> {
-        tokio::task::block_in_place(|| self.hidden_label(name))
+    pub fn excluded_hidden_label(&self, id: &str) -> Vec<&'static str> {
+        tokio::task::block_in_place(|| self.hidden_label(id))
             .into_iter()
             .collect()
     }
@@ -606,7 +571,7 @@ impl AppState {
         .map(str::to_string)
     }
 
-    /// `PUT /contexts/{name}/schema` (#380): installs `installed` as
+    /// `PUT /contexts/{id}/schema` (#380): installs `installed` as
     /// `name`'s schema document, replacing whatever was there wholesale
     /// — there is no delta form, so a retry after a failure below is
     /// always safe regardless of which side of it the previous attempt
@@ -621,10 +586,10 @@ impl AppState {
     /// so the handler can answer `GET`-shaped without a second lookup.
     pub fn put_schema(
         &self,
-        name: &str,
+        id: &str,
         installed: schema::InstalledSchema,
     ) -> Option<Result<schema::SchemaDocument, PutSchemaError>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let outcome = {
             let mut guard = entry.lock_unless_deleted()?;
             let inner = &mut *guard;
@@ -637,7 +602,6 @@ impl AppState {
             if let Err(error) = ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -795,7 +759,7 @@ mod tests {
             let stem = state.stem_of("sake").unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                     Deadline::unbounded(),
                 )
@@ -812,7 +776,7 @@ mod tests {
                 .unwrap();
 
             fail_persistence_ops_after(failure);
-            let outcome = state.delete("sake").unwrap();
+            let outcome = state.delete(&state.id_of("sake")).unwrap();
             let past_end = clear_persistence_fault();
             drop(state);
 
@@ -857,7 +821,7 @@ mod tests {
                 .map_err(|_| "create")
                 .unwrap();
             old_stem = state.stem_of("sake").unwrap();
-            state.delete("sake");
+            state.delete(&state.id_of("sake"));
             // Simulate the failure mode delete() cannot fully guard: its
             // unlink loop errored before removing the marker, so the
             // marker survives on disk while the name is free again.
@@ -873,7 +837,7 @@ mod tests {
             );
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                     Deadline::unbounded(),
                 )
@@ -891,7 +855,7 @@ mod tests {
             "the recreated context must survive the restart"
         );
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 1, "its data must be intact");
@@ -915,7 +879,7 @@ mod tests {
                 .map_err(|_| "create")
                 .unwrap();
             old_stem = state.stem_of("sake").unwrap();
-            state.delete("sake").unwrap().unwrap();
+            state.delete(&state.id_of("sake")).unwrap().unwrap();
             // The failure delete() cannot fully guard: its marker sweep
             // missed one (crash, held handle), so the file outlives the
             // name — together with the `.deleted` marker that promises
@@ -957,7 +921,13 @@ mod tests {
 
         // A clean update lands on disk.
         let meta = state
-            .update_meta("sake", Some("A".to_string()), None, None, None)
+            .update_meta(
+                &state.id_of("sake"),
+                Some("A".to_string()),
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(meta.description, "A");
@@ -965,7 +935,13 @@ mod tests {
         // The disk goes bad: this update must be refused...
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
         let failed = state
-            .update_meta("sake", Some("B".to_string()), None, None, None)
+            .update_meta(
+                &state.id_of("sake"),
+                Some("B".to_string()),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(failed.is_err(), "a persist failure must surface as Err");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
@@ -974,7 +950,7 @@ mod tests {
         // unrelated successful update must still see and persist "A",
         // not silently resurrect the failed change.
         let meta = state
-            .update_meta("sake", None, Some(true), None, None)
+            .update_meta(&state.id_of("sake"), None, Some(true), None, None)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -993,8 +969,8 @@ mod tests {
             .create("victim", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        let stale = state.lookup("victim").unwrap();
-        state.delete("victim").unwrap().unwrap();
+        let stale = state.lookup_named("victim").unwrap();
+        state.delete(&state.id_of("victim")).unwrap().unwrap();
 
         // The gate every post-lookup lock acquisition goes through:
         // a handle that predates the removal must be turned away.
@@ -1006,7 +982,7 @@ mod tests {
         // recreating the WAL file the delete just removed.
         assert!(matches!(
             state.add_associations(
-                "victim",
+                &state.id_of("victim"),
                 vec![assoc_op("幽霊", "は", "残らない", 1.0, None)],
                 Deadline::unbounded(),
             ),
@@ -1046,44 +1022,39 @@ mod tests {
     }
 
     #[test]
-    fn a_create_racing_a_slow_delete_is_refused_not_interleaved() {
+    fn a_create_racing_a_slow_delete_lands_on_its_own_stem_untouched() {
         let dir = scratch_dir("delete-create-race");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state
-            .create("sake", ContextMeta::default())
-            .map_err(|_| "create")
-            .unwrap();
+        let old_id = state.create("sake", ContextMeta::default()).unwrap();
 
-        // Stall the delete mid-flight: it unregisters the name, then
+        // Stall the delete mid-flight: it unregisters the entry, then
         // must wait for this read guard before it may touch files —
-        // exactly the window where a create used to interleave and
-        // have its new generation unlinked from under it.
-        let entry = state.lookup("sake").unwrap();
+        // the window where the OLD name-keyed model had to refuse a
+        // same-name create (its new generation shared the doomed
+        // stem). Under minted ids the same create simply lands on a
+        // fresh stem the unlink loop can never touch.
+        let entry = state.lookup_named("sake").unwrap();
         let stall = entry.inner.read();
         let deleter = {
             let state = state.clone();
-            std::thread::spawn(move || state.delete("sake").unwrap().unwrap())
+            let old_id = old_id.clone();
+            std::thread::spawn(move || state.delete(&old_id).unwrap().unwrap())
         };
-        while state.lookup("sake").is_some() {
+        while state.lookup_named("sake").is_some() {
             std::thread::yield_now();
         }
-        assert!(
-            matches!(
-                state.create("sake", ContextMeta::default()),
-                Err(CreateError::AlreadyExists)
-            ),
-            "a mid-delete name must read as taken"
-        );
+        let new_id = state
+            .create("sake", ContextMeta::default())
+            .expect("a mid-delete name is free — ids cannot collide");
+        assert_ne!(new_id, old_id, "the recreate mints its own id");
 
         drop(stall);
         deleter.join().unwrap();
-        // The delete has fully finished: the name is free again and the
-        // recreate starts from a clean slate.
-        state
-            .create("sake", ContextMeta::default())
-            .map_err(|_| "recreate")
-            .unwrap();
-        assert!(image_path(&dir, &state.stem_of("sake").unwrap()).exists());
+        // The delete finished AFTER the create and removed only its
+        // own generation's files.
+        assert!(image_path(&dir, &new_id).exists());
+        assert!(!image_path(&dir, &old_id).exists());
+        assert_eq!(state.stem_of("sake").unwrap(), new_id);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1096,7 +1067,7 @@ mod tests {
         let fuzzy_cue = "青嶺の純米";
         let lands = |state: &AppState| {
             state
-                .read_context("sake", |context| {
+                .read_context(&state.id_of("sake"), |context| {
                     context
                         .resolve(fuzzy_cue)
                         .iter()
@@ -1122,7 +1093,7 @@ mod tests {
 
             // Tuning applies to the loaded context immediately.
             state
-                .update_meta("sake", None, None, Some(0.25), None)
+                .update_meta(&state.id_of("sake"), None, None, Some(0.25), None)
                 .unwrap()
                 .unwrap();
             assert!(lands(&state), "tuned floor must admit the cue");
@@ -1157,7 +1128,7 @@ mod tests {
             .unwrap();
 
         state
-            .update_meta("sake", None, None, Some(2.5), Some(-1.0))
+            .update_meta(&state.id_of("sake"), None, None, Some(2.5), Some(-1.0))
             .unwrap()
             .unwrap();
 
@@ -1196,14 +1167,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         state.flush_dirty();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             state.evict_entry("sake", &entry),
             "sanity: an unpinned context must evict cleanly"
@@ -1216,7 +1187,7 @@ mod tests {
         fs::write(&image, &bytes).unwrap();
 
         let error = state
-            .update_meta("sake", None, Some(true), None, None)
+            .update_meta(&state.id_of("sake"), None, Some(true), None, None)
             .expect("the context still exists")
             .expect_err("the forced preload must fail on the corrupt image");
         assert!(!error.to_string().is_empty());
@@ -1247,7 +1218,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                 Deadline::unbounded(),
             )
@@ -1263,7 +1234,9 @@ mod tests {
             .unwrap();
         let stem = state.stem_of("sake").unwrap();
 
-        state.rename_context("sake", "shochu").unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "shochu")
+            .unwrap();
 
         assert!(
             state.directory_entry("sake").is_none(),
@@ -1292,7 +1265,9 @@ mod tests {
             "group membership follows the rename, not a stale name"
         );
         let count = state
-            .read_context("shochu", |context| context.association_count())
+            .read_context(&state.id_of("shochu"), |context| {
+                context.association_count()
+            })
             .unwrap();
         assert_eq!(count, 1, "data is untouched");
 
@@ -1338,7 +1313,9 @@ mod tests {
         // A fresh boot picks up the hand-planted schema (matching the
         // digest above) before renaming.
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state.rename_context("sake", "shochu").unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "shochu")
+            .unwrap();
 
         assert_eq!(
             fs::read(schema_path(&dir, &stem)).unwrap(),
@@ -1374,7 +1351,7 @@ mod tests {
         let stem = state.stem_of("sake").unwrap();
         fs::write(schema_path(&dir, &stem), b"irrelevant to this test").unwrap();
 
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
 
         assert!(!schema_path(&dir, &stem).exists());
         drop(state);
@@ -1394,19 +1371,19 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        state.note_read("sake", false);
-        state.note_write("sake");
+        state.note_read(&state.id_of("sake"), false);
+        state.note_write(&state.id_of("sake"));
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
 
         // Counted while Cold — no flush or eviction will ever see these
         // before the rename runs.
-        state.note_read("sake", false);
-        state.note_read("sake", true);
-        state.note_write("sake");
+        state.note_read(&state.id_of("sake"), false);
+        state.note_read(&state.id_of("sake"), true);
+        state.note_write(&state.id_of("sake"));
 
-        state.rename_context("sake", "sake2").unwrap();
+        state.rename_context(&state.id_of("sake"), "sake2").unwrap();
 
         let usage = state
             .directory_entry("sake2")
@@ -1455,7 +1432,7 @@ mod tests {
                 .unwrap();
 
             fail_persistence_ops_after(failure);
-            let outcome = state.rename_context("sake", "shochu");
+            let outcome = state.rename_context(&state.id_of("sake"), "shochu");
             let past_end = clear_persistence_fault();
             let live_members = state.group("drinks").unwrap().contexts;
             drop(state);
@@ -1515,76 +1492,87 @@ mod tests {
     fn rename_context_error_cases() {
         let dir = scratch_dir("rename-context-errors");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state.create("sake", ContextMeta::default()).unwrap();
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
         state.create("beer", ContextMeta::default()).unwrap();
 
         assert!(matches!(
-            state.rename_context("missing", "whatever"),
+            state.rename_context(
+                &state.id_of("00000000-0000-4000-8000-000000000000"),
+                "whatever"
+            ),
             Err(RenameContextError::NotFound)
         ));
         assert!(matches!(
-            state.rename_context("sake", "beer"),
-            Err(RenameContextError::AlreadyExists)
-        ));
-        assert!(matches!(
-            state.rename_context("sake", ""),
+            state.rename_context(&sake, ""),
             Err(RenameContextError::InvalidName)
         ));
+        // Names are not unique (issue #961 decision 1): renaming onto
+        // a name already in use succeeds, and both contexts answer
+        // under it side by side.
+        state.rename_context(&sake, "beer").unwrap();
         assert!(
-            state.rename_context("sake", "sake").is_ok(),
+            state.directory_entry("beer").is_none(),
+            "two claimants: unique() refuses"
+        );
+        assert_eq!(
+            state
+                .directory()
+                .iter()
+                .filter(|entry| entry.name == "beer")
+                .count(),
+            2
+        );
+        state.rename_context(&sake, "sake").unwrap();
+        assert!(
+            state.rename_context(&sake, "sake").is_ok(),
             "renaming a name to itself is a no-op, not an error"
         );
         assert!(state.directory_entry("sake").is_some());
-        // The `from == to` short-circuit must not mask a NotFound: a
-        // self-rename of a name that never existed is still a refusal.
-        assert!(matches!(
-            state.rename_context("missing", "missing"),
-            Err(RenameContextError::NotFound)
-        ));
 
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Same fence a create races against a slow delete in
-    /// `a_create_racing_a_slow_delete_is_refused_not_interleaved`: a
-    /// rename reserves both its names in `pending.renames` before it
-    /// may touch any file, so a create for either name must be refused
-    /// until the rename settles, never interleaved with it.
+    /// The race the retired name reservations used to guard: a create
+    /// of either name while a rename is stalled mid-flight. Under
+    /// minted ids nothing collides — each create lands on its own
+    /// stem, the rename touches only its own sidecar — so both must
+    /// simply succeed, leaving duplicate display names behind (issue
+    /// #961 decision 1).
     #[test]
-    fn a_create_racing_a_pending_context_rename_is_refused_for_both_names() {
+    fn creates_racing_a_stalled_rename_land_beside_it() {
         let dir = scratch_dir("rename-create-race");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state.create("sake", ContextMeta::default()).unwrap();
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let stall = entry.inner.read();
         let renamer = {
             let state = state.clone();
-            std::thread::spawn(move || state.rename_context("sake", "shochu").unwrap())
+            let sake = sake.clone();
+            std::thread::spawn(move || state.rename_context(&sake, "shochu").unwrap())
         };
-        while !state.0.pending.lock().renames.contains("sake") {
-            std::thread::yield_now();
-        }
-        assert!(
-            matches!(
-                state.create("sake", ContextMeta::default()),
-                Err(CreateError::AlreadyExists)
-            ),
-            "the source name is reserved until the rename settles"
-        );
-        assert!(
-            matches!(
-                state.create("shochu", ContextMeta::default()),
-                Err(CreateError::AlreadyExists)
-            ),
-            "the destination name is reserved too, before any file lands there"
-        );
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("shochu", ContextMeta::default()).unwrap();
 
         drop(stall);
         renamer.join().unwrap();
-        assert!(state.directory_entry("shochu").is_some());
-        assert!(!state.0.pending.lock().renames.contains("sake"));
-        assert!(!state.0.pending.lock().renames.contains("shochu"));
+        // The renamed entry and the racing create now share "shochu".
+        assert_eq!(
+            state
+                .directory()
+                .iter()
+                .filter(|entry| entry.name == "shochu")
+                .count(),
+            2
+        );
+        assert_eq!(
+            state
+                .directory()
+                .iter()
+                .filter(|entry| entry.name == "sake")
+                .count(),
+            1
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1598,8 +1586,10 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
 
-        let entry = state.lookup("sake").unwrap();
-        state.rename_context("sake", "shochu").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "shochu")
+            .unwrap();
         assert!(
             entry.read_unless_deleted().is_some(),
             "a rename must not tombstone the entry — it is the same context"
@@ -1607,7 +1597,7 @@ mod tests {
         assert!(
             matches!(
                 state.add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                     Deadline::unbounded(),
                 ),
@@ -1617,7 +1607,7 @@ mod tests {
         );
         state
             .add_associations(
-                "shochu",
+                &state.id_of("shochu"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                 Deadline::unbounded(),
             )
@@ -1650,17 +1640,30 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
 
         let before_revision = state.directory_entry("sake").unwrap().revision.config;
-        let before_identity = state.lookup("sake").unwrap().inner.read().cache_identity;
+        let before_identity = state
+            .lookup_named("sake")
+            .unwrap()
+            .inner
+            .read()
+            .cache_identity;
 
         let installed = schema::install(valid_schema_document()).unwrap();
-        let document = state.put_schema("sake", installed).unwrap().unwrap();
+        let document = state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap();
         assert_eq!(document.mode, schema::SchemaMode::Strict);
 
         let entry = state.directory_entry("sake").unwrap();
         assert_eq!(entry.revision.config, before_revision + 1);
         assert_eq!(entry.schema_mode.as_deref(), Some("strict"));
 
-        let after_identity = state.lookup("sake").unwrap().inner.read().cache_identity;
+        let after_identity = state
+            .lookup_named("sake")
+            .unwrap()
+            .inner
+            .read()
+            .cache_identity;
         assert_ne!(
             before_identity, after_identity,
             "a schema PUT must re-mint cache_identity so a retrieval-cache key minted \
@@ -1689,12 +1692,23 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
 
         let installed = schema::install(valid_schema_document()).unwrap();
-        state.put_schema("sake", installed).unwrap().unwrap();
+        state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap();
         let revision_after_first = state.directory_entry("sake").unwrap().revision.config;
-        let identity_after_first = state.lookup("sake").unwrap().inner.read().cache_identity;
+        let identity_after_first = state
+            .lookup_named("sake")
+            .unwrap()
+            .inner
+            .read()
+            .cache_identity;
 
         let installed_again = schema::install(valid_schema_document()).unwrap();
-        state.put_schema("sake", installed_again).unwrap().unwrap();
+        state
+            .put_schema(&state.id_of("sake"), installed_again)
+            .unwrap()
+            .unwrap();
 
         let entry = state.directory_entry("sake").unwrap();
         assert_eq!(
@@ -1702,7 +1716,12 @@ mod tests {
             "identical content must not bump the revision"
         );
         assert_eq!(
-            state.lookup("sake").unwrap().inner.read().cache_identity,
+            state
+                .lookup_named("sake")
+                .unwrap()
+                .inner
+                .read()
+                .cache_identity,
             identity_after_first,
             "identical content must not re-mint cache_identity"
         );
@@ -1724,7 +1743,7 @@ mod tests {
         // label id `add_label_alias`'s canonical must resolve against.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op(
                     "蔵",
                     schema::SCHEMA_TYPE_LABEL,
@@ -1738,7 +1757,7 @@ mod tests {
             .unwrap();
         state
             .add_aliases(
-                "sake",
+                &state.id_of("sake"),
                 &BTreeMap::new(),
                 &BTreeMap::from([("種別".to_string(), schema::SCHEMA_TYPE_LABEL.to_string())]),
             )
@@ -1746,7 +1765,10 @@ mod tests {
             .unwrap();
 
         let installed = schema::install(valid_schema_document()).unwrap();
-        let error = state.put_schema("sake", installed).unwrap().unwrap_err();
+        let error = state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap_err();
         assert!(
             matches!(&error, PutSchemaError::ReservedAlias(alias) if alias == "種別"),
             "{error:?}"
@@ -1783,7 +1805,10 @@ mod tests {
 
         let installed = schema::install(valid_schema_document()).unwrap();
         fail_persistence_ops_after(2);
-        let error = state.put_schema("sake", installed).unwrap().unwrap_err();
+        let error = state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap_err();
         let exhausted = clear_persistence_fault();
         assert!(!exhausted, "the fault must have fired, not merely run out");
         assert!(matches!(error, PutSchemaError::Io(_)), "{error:?}");
@@ -1796,7 +1821,7 @@ mod tests {
         assert_eq!(after.schema_digest, before.schema_digest);
         assert_eq!(after.revision.config, before.revision.config);
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let inner = entry.inner.read();
         assert_eq!(inner.schema_digest, before.schema_digest);
         assert_eq!(inner.config_revision, before.revision.config);
@@ -1816,13 +1841,20 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
 
         assert!(
-            state.schema_of("sake").unwrap().unwrap().is_none(),
+            state
+                .schema_of(&state.id_of("sake"))
+                .unwrap()
+                .unwrap()
+                .is_none(),
             "a fresh context has no schema"
         );
-        assert!(state.schema_of("nope").is_none());
+        assert!(state.schema_of(&state.id_of("nope")).is_none());
         assert!(
             state
-                .put_schema("nope", schema::install(valid_schema_document()).unwrap())
+                .put_schema(
+                    &state.id_of("nope"),
+                    schema::install(valid_schema_document()).unwrap()
+                )
                 .is_none(),
             "a PUT against a context that never existed must answer the outer None, \
              not a PutSchemaError"
@@ -1843,12 +1875,15 @@ mod tests {
         let dir = scratch_dir("schema-of-deleted");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
 
-        assert!(state.schema_of("sake").is_none());
+        assert!(state.schema_of(&state.id_of("sake")).is_none());
         assert!(
             state
-                .put_schema("sake", schema::install(valid_schema_document()).unwrap())
+                .put_schema(
+                    &state.id_of("sake"),
+                    schema::install(valid_schema_document()).unwrap()
+                )
                 .is_none()
         );
 
@@ -1873,17 +1908,22 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
         let installed = schema::install(valid_schema_document()).unwrap();
-        state.put_schema("sake", installed).unwrap().unwrap();
-        state.rename_context("sake", "shochu").unwrap();
+        state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "shochu")
+            .unwrap();
         {
-            let entry = state.lookup("shochu").unwrap();
+            let entry = state.lookup_named("shochu").unwrap();
             let mut inner = entry.inner.write();
             inner.slot = Slot::Cold;
             inner.schema = None;
         }
         assert!(
             state
-                .lookup("shochu")
+                .lookup_named("shochu")
                 .unwrap()
                 .inner
                 .read()
@@ -1899,11 +1939,11 @@ mod tests {
         fs::write(&image, &bytes).unwrap();
 
         assert!(
-            matches!(state.schema_of("shochu"), Some(Err(_))),
+            matches!(state.schema_of(&state.id_of("shochu")), Some(Err(_))),
             "sanity: the corrupt image must make schema_of itself fail"
         );
         assert_eq!(
-            state.hidden_label("shochu"),
+            state.hidden_label(&state.id_of("shochu")),
             Some(schema::SCHEMA_TYPE_LABEL),
             "a schema-resolution failure must report hidden, not \
              silently unhide a schema-gated context"
@@ -1930,78 +1970,53 @@ mod tests {
         ));
         fs::create_dir_all(&marker).unwrap();
         assert!(
-            matches!(state.delete("sake"), Some(Err(DeleteError::Io(_)))),
+            matches!(
+                state.delete(&state.id_of("sake")),
+                Some(Err(DeleteError::Io(_)))
+            ),
             "an unremovable marker must surface through the delete"
         );
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// EVERY pending-operation membership makes a rename Busy on its
-    /// own — either name, any of the three sets.
+    /// The delete-vs-rename race the retired `pending.renames`
+    /// reservation used to guard, exercised at its two seams: a
+    /// rename whose entry a delete already tombstoned reports
+    /// NotFound (the sidecar the delete unlinked is never rewritten),
+    /// and the registry keeps no index row for either name — the
+    /// reindex-after-delete guard in `rename_context`.
     #[test]
-    fn any_pending_membership_alone_makes_a_rename_busy() {
-        let dir = scratch_dir("rename-busy-guards");
+    fn a_rename_losing_to_a_delete_reports_not_found_and_leaks_no_index_row() {
+        let dir = scratch_dir("delete-then-rename");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state
-            .create("from", ContextMeta::default())
-            .map_err(|_| "create")
-            .unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        let entry = state.lookup_named("sake").unwrap();
 
-        type Pick = fn(&mut PendingNames) -> &mut std::collections::HashSet<String>;
-        let deletes: Pick = |pending| &mut pending.deletes;
-        let creates: Pick = |pending| &mut pending.creates;
-        let renames: Pick = |pending| &mut pending.renames;
-        let scenarios: [(&str, Pick); 5] = [
-            ("from", deletes),
-            ("to", deletes),
-            ("to", creates),
-            ("from", renames),
-            ("to", renames),
-        ];
-        for (name, pick) in scenarios {
-            pick(&mut state.0.pending.lock()).insert(name.to_string());
-            assert!(
-                matches!(
-                    state.rename_context("from", "to"),
-                    Err(RenameContextError::Busy)
-                ),
-                "a pending {name} entry alone must refuse the rename"
-            );
-            pick(&mut state.0.pending.lock()).remove(name);
+        state.delete(&id).unwrap().unwrap();
+        assert!(
+            matches!(
+                state.rename_context(&id, "shochu"),
+                Err(RenameContextError::NotFound)
+            ),
+            "an unregistered id must not rename"
+        );
+        // The narrower window: the rename resolved its entry BEFORE
+        // the delete landed — the tombstone under the entry lock is
+        // what stops the sidecar write.
+        assert!(
+            matches!(
+                state.rename_entry(&entry, "shochu"),
+                Err(RenameContextError::NotFound)
+            ),
+            "a tombstoned entry must refuse the sidecar rewrite"
+        );
+        {
+            let registry = state.0.registry.read();
+            assert!(!registry.contains_name("sake"));
+            assert!(!registry.contains_name("shochu"));
         }
+        assert!(!meta_path(&dir, &id).exists(), "the delete's unlink stands");
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Regression for issue #561's item 8: a name mid-rename is a
-    /// refusal, not a failure — the `context` is untouched, so `delete`
-    /// must report [`DeleteError::MidRename`] distinctly from
-    /// [`DeleteError::Io`] (the API layer maps the two very
-    /// differently: a 409 with no audit line, versus a 500 with one —
-    /// see `api::contexts::delete_context`).
-    #[test]
-    fn a_mid_rename_delete_reports_mid_rename_not_io() {
-        let dir = scratch_dir("delete-mid-rename");
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state.create("sake", ContextMeta::default()).unwrap();
-
-        // Same direct-seed technique as
-        // `any_pending_membership_alone_makes_a_rename_busy`: a real
-        // concurrent rename would hold this for a window too narrow to
-        // land a second request on reliably, so this is the
-        // deterministic way to exercise the exact same in-memory guard
-        // `rename_context` itself takes.
-        state.0.pending.lock().renames.insert("sake".to_string());
-        assert!(
-            matches!(state.delete("sake"), Some(Err(DeleteError::MidRename))),
-            "a mid-rename delete must be refused as MidRename, not attempted"
-        );
-        assert!(
-            state.directory_entry("sake").is_some(),
-            "the refused delete must not have touched the context"
-        );
-
-        state.0.pending.lock().renames.remove("sake");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2020,7 +2035,7 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         state.flush_dirty();
-        let config = state.context_revision("sake").unwrap().config;
+        let config = state.context_revision(&state.id_of("sake")).unwrap().config;
 
         let lock_down = || {
             let mut perms = fs::metadata(&dir).unwrap().permissions();
@@ -2034,22 +2049,22 @@ mod tests {
         };
 
         lock_down();
-        let outcome = state.update_meta("sake", None, None, None, Some(0.9));
+        let outcome = state.update_meta(&state.id_of("sake"), None, None, None, Some(0.9));
         restore();
         assert!(matches!(outcome, Some(Err(_))));
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             config,
             "a failed meta save must leave the revision untouched"
         );
 
         let installed = schema::install(valid_schema_document()).unwrap();
         lock_down();
-        let outcome = state.put_schema("sake", installed);
+        let outcome = state.put_schema(&state.id_of("sake"), installed);
         restore();
         assert!(matches!(outcome, Some(Err(_))));
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             config,
             "a failed schema save must leave the revision untouched"
         );

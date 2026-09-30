@@ -2,7 +2,7 @@
   "contract": "mcp_contract",
   "operation": "assemble_evidence_tool_error",
   "request": {
-    "context": "mcp-error-corpus"
+    "context": "00000000-0000-4000-8000-000000000001"
   },
   "response": {
     "_meta": {

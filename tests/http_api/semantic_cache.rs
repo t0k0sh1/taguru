@@ -142,10 +142,14 @@ fn a_paraphrase_serves_the_canonical_page_and_every_tripwire_splits() {
     let env = semantic_env(&provider);
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let server = Server::start_with_env("semcache-guard", &env);
-    server.ok("PUT", "/contexts/mill", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        "/contexts",
+        Some(json!({"name": "mill", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({"passages": {"docs/mill.md":
             "The mill produces fresh oysters. Acme sells them while Globex ships 20 or 30 boxes."}})),
     );
@@ -153,7 +157,7 @@ fn a_paraphrase_serves_the_canonical_page_and_every_tripwire_splits() {
     let search = |query: &str| {
         server.ok(
             "POST",
-            "/contexts/mill/sources/search",
+            &format!("/contexts/{}/sources/search", server.cx("mill")),
             Some(json!({"query": query})),
         )
     };
@@ -215,17 +219,21 @@ fn a_write_turns_the_claim_stale_and_the_next_fill_recanonicalizes() {
     let env = semantic_env(&provider);
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let server = Server::start_with_env("semcache-stale", &env);
-    server.ok("PUT", "/contexts/mill", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        "/contexts",
+        Some(json!({"name": "mill", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({"passages": {"docs/mill.md": "The mill produces fresh oysters daily."}})),
     );
 
     let search = |query: &str| {
         server.ok(
             "POST",
-            "/contexts/mill/sources/search",
+            &format!("/contexts/{}/sources/search", server.cx("mill")),
             Some(json!({"query": query})),
         )
     };
@@ -237,7 +245,7 @@ fn a_write_turns_the_claim_stale_and_the_next_fill_recanonicalizes() {
     // The corpus moves: a second document lands in the passages lane.
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({"passages": {"docs/news.md": "News: the mill exports oysters overseas."}})),
     );
     let refreshed = search("is the mill producing oysters");
@@ -297,14 +305,14 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
     };
     for context in ["x", "y"] {
         call(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": "d"})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": "d"})),
             "atok",
         );
         call(
             "POST",
-            &format!("/contexts/{context}/sources"),
+            &format!("/contexts/{}/sources", server.cx(context)),
             Some(json!({"passages": {"docs/a.md": "The mill produces fresh oysters daily."}})),
             "atok",
         );
@@ -367,14 +375,14 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
     // bucket (the fill below is a miss, not a hit off the cross slot).
     let narrow_single = call(
         "POST",
-        "/contexts/x/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("x")),
         Some(json!({"query": "does the mill produce oysters"})),
         "ntok",
     );
     assert_eq!(semantic(&server, "miss"), 3);
     let wide_single = call(
         "POST",
-        "/contexts/x/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("x")),
         Some(json!({"query": "is the mill producing oysters"})),
         "wtok",
     );
@@ -400,20 +408,24 @@ fn the_tier_stays_silent_without_a_threshold_or_without_the_lane() {
         ("TAGURU_EMBED_PASSAGES", "1"),
     ];
     let server = Server::start_with_env("semcache-unset", &unset);
-    server.ok("PUT", "/contexts/mill", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        "/contexts",
+        Some(json!({"name": "mill", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({"passages": {"docs/mill.md": "The mill produces fresh oysters daily."}})),
     );
     server.ok(
         "POST",
-        "/contexts/mill/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mill")),
         Some(json!({"query": "does the mill produce oysters"})),
     );
     server.ok(
         "POST",
-        "/contexts/mill/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mill")),
         Some(json!({"query": "is the mill producing oysters"})),
     );
     for outcome in ["hit", "stale", "guarded", "miss"] {
@@ -425,20 +437,24 @@ fn the_tier_stays_silent_without_a_threshold_or_without_the_lane() {
     // Threshold set, embedding lane off: same silence.
     let no_lane = [("TAGURU_SEMANTIC_CACHE_THRESHOLD", "0.9")];
     let server = Server::start_with_env("semcache-nolane", &no_lane);
-    server.ok("PUT", "/contexts/mill", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        "/contexts",
+        Some(json!({"name": "mill", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({"passages": {"docs/mill.md": "The mill produces fresh oysters daily."}})),
     );
     server.ok(
         "POST",
-        "/contexts/mill/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mill")),
         Some(json!({"query": "does the mill produce oysters"})),
     );
     server.ok(
         "POST",
-        "/contexts/mill/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mill")),
         Some(json!({"query": "is the mill producing oysters"})),
     );
     for outcome in ["hit", "stale", "guarded", "miss"] {

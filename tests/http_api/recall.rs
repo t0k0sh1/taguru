@@ -27,10 +27,10 @@ use crate::support::*;
 #[test]
 fn cross_recall_aborts_naming_the_first_missing_context_by_list_order() {
     let server = Server::start("recall-fanout-abort");
-    server.ok("PUT", "/contexts/stays", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "stays"})));
     server.ok(
         "POST",
-        "/contexts/stays/associations",
+        &format!("/contexts/{}/associations", server.cx("stays")),
         Some(json!([
             {"subject": "蔵", "label": "産地", "object": "灘", "weight": 1.0, "source": "a.md"}
         ])),
@@ -75,7 +75,7 @@ fn cross_recall_mid_loop_pool_cut_still_yields_the_exact_global_top_limit() {
         ("r3", &[20.0, 19.0, 18.0, 17.0, 16.0, 15.0]),
     ];
     for (name, weights) in waves {
-        server.ok("PUT", &format!("/contexts/{name}"), None);
+        server.ok("POST", "/contexts", Some(json!({"name": name})));
         let ops: Vec<serde_json::Value> = weights
             .iter()
             .enumerate()
@@ -88,7 +88,7 @@ fn cross_recall_mid_loop_pool_cut_still_yields_the_exact_global_top_limit() {
             .collect();
         server.ok(
             "POST",
-            &format!("/contexts/{name}/associations"),
+            &format!("/contexts/{}/associations", server.cx(name)),
             Some(serde_json::Value::Array(ops)),
         );
     }

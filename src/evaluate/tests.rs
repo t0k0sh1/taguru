@@ -1729,17 +1729,17 @@ fn matching_block_does_not_claim_a_normalize_entry_comparison_for_associations()
 #[test]
 fn evaluate_only_touches_read_role_endpoints() {
     for (method, route) in [
-        (Method::POST, "/contexts/{name}/sources/search"),
+        (Method::POST, "/contexts/{id}/sources/search"),
         // #308 (ADR 0006 §5.4): --assembly's own passage-lane
-        // substitute, `POST /contexts/{name}/evidence`.
-        (Method::POST, "/contexts/{name}/evidence"),
-        (Method::POST, "/contexts/{name}/resolve"),
-        (Method::POST, "/contexts/{name}/resolve_label"),
-        (Method::POST, "/contexts/{name}/query"),
-        (Method::POST, "/contexts/{name}/citations"),
-        (Method::GET, "/contexts/{name}"),
-        (Method::GET, "/contexts/{name}/sources"),
-        (Method::GET, "/contexts/{name}/embeddings"),
+        // substitute, `POST /contexts/{id}/evidence`.
+        (Method::POST, "/contexts/{id}/evidence"),
+        (Method::POST, "/contexts/{id}/resolve"),
+        (Method::POST, "/contexts/{id}/resolve_label"),
+        (Method::POST, "/contexts/{id}/query"),
+        (Method::POST, "/contexts/{id}/citations"),
+        (Method::GET, "/contexts/{id}"),
+        (Method::GET, "/contexts/{id}/sources"),
+        (Method::GET, "/contexts/{id}/embeddings"),
     ] {
         assert_eq!(
             crate::auth::required_role(&method, route),

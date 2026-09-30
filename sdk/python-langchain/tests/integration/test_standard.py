@@ -8,14 +8,17 @@ from langchain_tests.integration_tests.retrievers import RetrieversIntegrationTe
 
 from taguru_langchain import TaguruRetriever
 
-from .conftest import SEEDED_CONTEXT
 
-
-@pytest.mark.usefixtures("seeded")
 class TestTaguruRetrieverStandard(RetrieversIntegrationTests):
     """Inherited: k constructor param, k invoke kwarg, invoke/ainvoke return
     Documents. The connection comes from TAGURU_URL/TAGURU_API_TOKEN, which
     the server fixture exports — the same zero-config path applications use."""
+
+    @pytest.fixture(autouse=True)
+    def _seeded_id(self, seeded: str) -> None:
+        # The retriever's `context` field takes the id (#964); the
+        # session-scoped fixture returns the seeded context's.
+        self._context_id = seeded
 
     @property
     def retriever_constructor(self) -> type[BaseRetriever]:
@@ -23,7 +26,7 @@ class TestTaguruRetrieverStandard(RetrieversIntegrationTests):
 
     @property
     def retriever_constructor_params(self) -> dict[str, object]:
-        return {"context": SEEDED_CONTEXT}
+        return {"context": self._context_id}
 
     @property
     def retriever_query_example(self) -> str:

@@ -296,11 +296,13 @@ impl AppState {
     /// folded into one helper.
     pub(super) fn storage_quota_excess(
         &self,
-        name: &str,
         inner: &EntryInner,
         entry: &Entry,
     ) -> Option<(u64, u64)> {
-        let ceiling = self.0.context_quotas.get(name)?.storage_bytes?;
+        // `TAGURU_CONTEXT_QUOTAS` still keys on display names (#966
+        // moves it to ids); the entry's current name is authoritative
+        // and already in hand under the caller's lock.
+        let ceiling = self.0.context_quotas.get(&inner.name)?.storage_bytes?;
         let disk = *entry.disk.lock();
         // A resident store knows its pending log; a cold one uses the
         // scan/eviction-seeded field — the same read `gauge_snapshot`
@@ -319,10 +321,10 @@ impl AppState {
     /// unknown `context` too: creation is never quota-gated (a declared
     /// name may not exist yet), and the growth gates inside the write
     /// path cover everything a fresh batch then writes.
-    pub fn storage_quota_refusal(&self, name: &str) -> Option<(u64, u64)> {
-        let entry = self.lookup(name)?;
+    pub fn storage_quota_refusal(&self, id: &str) -> Option<(u64, u64)> {
+        let entry = self.lookup_id(id)?;
         let inner = entry.read_unless_deleted()?;
-        self.storage_quota_excess(name, &inner, &entry)
+        self.storage_quota_excess(&inner, &entry)
     }
 
     /// The write path of the HTTP mutators: stage the whole batch in
@@ -345,12 +347,12 @@ impl AppState {
     /// the excess can be trimmed back out before this returns.
     pub(crate) fn logged_write<T>(
         &self,
-        name: &str,
+        id: &str,
         ops: &[WalOp],
         operate: impl FnOnce(&mut Context) -> T,
         applied: impl FnOnce(&T) -> usize,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.resolved_id(id)?;
         let mut wal_behind = false;
         let result = 'write: {
             // Same tombstone rule as with_hot: a delete that beat us to
@@ -360,7 +362,6 @@ impl AppState {
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -381,11 +382,11 @@ impl AppState {
             // refusal names the quota; the failing flush behind the cap is
             // already warned about from the flusher itself every tick.
             if ops.iter().any(WalOp::grows)
-                && let Some((used, ceiling)) = self.storage_quota_excess(name, &inner, &entry)
+                && let Some((used, ceiling)) = self.storage_quota_excess(&inner, &entry)
             {
                 self.0.metrics.record_storage_quota_refusal();
                 break 'write Err(AccessError::QuotaExceeded(storage_quota_message(
-                    name, used, ceiling,
+                    id, used, ceiling,
                 )));
             }
             let first_seq = inner.wal_seq;
@@ -397,7 +398,7 @@ impl AppState {
                 // Past the cap, refuse writes — loudly — instead.
                 if self.0.wal_max_bytes > 0 && inner.wal_bytes >= self.0.wal_max_bytes as u64 {
                     tracing::warn!(
-                        context = %name,
+                        context = %id,
                         wal_bytes = inner.wal_bytes,
                         cap = self.0.wal_max_bytes,
                         "WAL over its cap with the image failing to flush; write refused"
@@ -421,7 +422,7 @@ impl AppState {
                         // must too — the core durability promise just
                         // failed to engage.
                         self.0.metrics.record_wal_append(false);
-                        tracing::warn!(context = %name, %error, "WAL append failed; write refused");
+                        tracing::warn!(context = %id, %error, "WAL append failed; write refused");
                         // A failed append may still have leaked complete
                         // bytes (write landed, sync then failed, rollback
                         // failed too). Memory is untouched — `operate` never
@@ -443,7 +444,7 @@ impl AppState {
                                 if truncate_error.kind() == io::ErrorKind::NotFound => {}
                             Err(truncate_error) => {
                                 tracing::warn!(
-                                    context = %name, error = %truncate_error,
+                                    context = %id, error = %truncate_error,
                                     "WAL rollback after a failed append also failed; \
                                      flushing the image now to retire any leaked tail"
                                 );
@@ -530,7 +531,7 @@ impl AppState {
                             // close that crash window now rather
                             // than waiting out the flush interval.
                             tracing::warn!(
-                                context = %name, %error,
+                                context = %id, %error,
                                 "WAL re-append after a partial apply failed; \
                                  flushing the image now to re-cover memory"
                             );
@@ -556,7 +557,7 @@ impl AppState {
                         // landed, and a successful flush resets
                         // both anyway.
                         tracing::warn!(
-                            context = %name, %error,
+                            context = %id, %error,
                             "WAL truncate after a partial apply failed; \
                              flushing the image now to retire the untried tail"
                         );
@@ -590,7 +591,7 @@ impl AppState {
         // worth its own loud signal rather than blending into an
         // ordinary retry.
         if wal_behind {
-            warn_if_recovery_flush_missed(name, self.flush_entry(name, &entry));
+            warn_if_recovery_flush_missed(id, self.flush_entry(id, &entry));
         }
         self.touch(&entry);
         self.enforce_budget(&entry.id);
@@ -956,12 +957,12 @@ mod tests {
         // from disk, the second is a pure hit.
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert!(rendered(&state).contains("taguru_cache_loads_total{outcome=\"ok\"} 1"));
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert!(rendered(&state).contains("taguru_cache_hits_total 1"));
@@ -1040,14 +1041,14 @@ mod tests {
         // append alone carries the family past the one-byte ceiling.
         state
             .add_associations(
-                "capped",
+                &state.id_of("capped"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         let refused = state.add_associations(
-            "capped",
+            &state.id_of("capped"),
             vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
             Deadline::unbounded(),
         );
@@ -1057,7 +1058,7 @@ mod tests {
         assert!(message.contains("storage quota"), "{message}");
         assert!(message.contains("retract or compact"), "{message}");
         let aliases = state.add_aliases(
-            "capped",
+            &state.id_of("capped"),
             &BTreeMap::from([("酒蔵".to_string(), "蔵".to_string())]),
             &BTreeMap::new(),
         );
@@ -1067,9 +1068,11 @@ mod tests {
         );
 
         // The shrink paths stay open at the ceiling…
-        state.retract_source("capped", "keep.md").unwrap();
         state
-            .compact_context("capped", Deadline::unbounded())
+            .retract_source(&state.id_of("capped"), "keep.md")
+            .unwrap();
+        state
+            .compact_context(&state.id_of("capped"), Deadline::unbounded())
             .unwrap();
         // …and after a flush moves the bytes from the live lane into
         // the snapshot lanes (the WAL truncates; the image and meta
@@ -1078,14 +1081,18 @@ mod tests {
         state.flush_dirty();
         assert!(matches!(
             state.add_associations(
-                "capped",
+                &state.id_of("capped"),
                 vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             ),
             Err(AccessError::QuotaExceeded(_))
         ));
         // The lock-free read the import pre-check uses agrees.
-        assert!(state.storage_quota_refusal("capped").is_some());
+        assert!(
+            state
+                .storage_quota_refusal(&state.id_of("capped"))
+                .is_some()
+        );
 
         // An uncapped sibling never notices any of this.
         state
@@ -1094,13 +1101,13 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "free",
+                &state.id_of("free"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        assert_eq!(state.storage_quota_refusal("free"), None);
+        assert_eq!(state.storage_quota_refusal(&state.id_of("free")), None);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1142,19 +1149,19 @@ mod tests {
         // the way out, as any successful write is.
         state
             .add_associations(
-                "capped",
+                &state.id_of("capped"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("capped").unwrap();
+        let entry = state.lookup_named("capped").unwrap();
         let touch_after_success = entry.last_touch.load(Ordering::Relaxed);
         assert_ne!(touch_after_success, 0);
 
         // Second write refuses on the quota — and must still touch.
         let refused = state.add_associations(
-            "capped",
+            &state.id_of("capped"),
             vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
             Deadline::unbounded(),
         );
@@ -1197,17 +1204,17 @@ mod tests {
         // past the one-byte cap.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let touch_before = entry.last_touch.load(Ordering::Relaxed);
 
         let refused = state.add_associations(
-            "sake",
+            &state.id_of("sake"),
             vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
             Deadline::unbounded(),
         );
@@ -1259,7 +1266,7 @@ mod tests {
         // family past the one-byte storage ceiling.
         state
             .add_associations(
-                "capped",
+                &state.id_of("capped"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
@@ -1267,7 +1274,7 @@ mod tests {
             .unwrap();
 
         let refused = state.add_associations(
-            "capped",
+            &state.id_of("capped"),
             vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
             Deadline::unbounded(),
         );
@@ -1300,7 +1307,7 @@ mod tests {
         let wal_ops = vec![WalOp::Associate(assoc_op("蔵", "杜氏", "高瀬", 1.0, None))];
         state
             .logged_write(
-                "sake",
+                &state.id_of("sake"),
                 &wal_ops,
                 |context| apply_in_order(context, &wal_ops),
                 // Deliberately over-reports: claims 5 ops landed from a
@@ -1310,7 +1317,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let revision = entry.inner.read().graph_revision;
         assert_eq!(
             revision, 1,
@@ -1338,7 +1345,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "big",
+                    &state.id_of("big"),
                     vec![
                         assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                         assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1348,7 +1355,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state
-                .read_context("big", |context| context.footprint())
+                .read_context(&state.id_of("big"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1360,7 +1367,7 @@ mod tests {
             AppState::boot_with(dir.clone(), footprint / 2, None, BootOptions::default()).unwrap();
         state
             .add_associations(
-                "big",
+                &state.id_of("big"),
                 vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
@@ -1375,7 +1382,7 @@ mod tests {
         // ordinary sweep would give it) and sweep again under a
         // different `except` name — with nothing left resident, the
         // flag must clear rather than stay wedged.
-        let entry = state.lookup("big").unwrap();
+        let entry = state.lookup_named("big").unwrap();
         assert!(state.evict_entry("big", &entry));
         state.enforce_budget("unrelated");
         assert!(
@@ -1405,7 +1412,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "big",
+                    &state.id_of("big"),
                     vec![
                         assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                         assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1415,7 +1422,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             state
-                .read_context("big", |context| context.footprint())
+                .read_context(&state.id_of("big"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1428,7 +1435,7 @@ mod tests {
         // saturates.
         state
             .add_associations(
-                "big",
+                &state.id_of("big"),
                 vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
@@ -1473,7 +1480,7 @@ mod tests {
                     .unwrap();
                 state
                     .add_associations(
-                        name,
+                        &state.id_of(name),
                         vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                         Deadline::unbounded(),
                     )
@@ -1482,7 +1489,7 @@ mod tests {
             }
             state.flush_dirty();
             state
-                .read_context("a", |context| context.footprint())
+                .read_context(&state.id_of("a"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1494,11 +1501,11 @@ mod tests {
         let state =
             AppState::boot_with(dir.clone(), footprint, None, BootOptions::default()).unwrap();
         state
-            .read_context("a", |context| context.association_count())
+            .read_context(&state.id_of("a"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         state
-            .read_context("b", |context| context.association_count())
+            .read_context(&state.id_of("b"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
 
@@ -1539,7 +1546,7 @@ mod tests {
                     .unwrap();
                 state
                     .add_associations(
-                        name,
+                        &state.id_of(name),
                         vec![
                             assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                             assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1551,7 +1558,7 @@ mod tests {
             }
             state.flush_dirty();
             state
-                .read_context("old", |context| context.footprint())
+                .read_context(&state.id_of("old"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1577,7 +1584,7 @@ mod tests {
         // pushes the total past the budget and triggers the sweep).
         for name in ["old", "hog", "fresh"] {
             state
-                .read_context(name, |context| context.association_count())
+                .read_context(&state.id_of(name), |context| context.association_count())
                 .map_err(|_| "read")
                 .unwrap();
         }
@@ -1615,7 +1622,7 @@ mod tests {
                     .unwrap();
                 state
                     .add_associations(
-                        name,
+                        &state.id_of(name),
                         vec![
                             assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                             assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1627,7 +1634,7 @@ mod tests {
             }
             state.flush_dirty();
             state
-                .read_context("old", |context| context.footprint())
+                .read_context(&state.id_of("old"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1653,7 +1660,7 @@ mod tests {
         // pushes the total past the budget and triggers the sweep).
         for name in ["old", "quota_no_cache", "fresh"] {
             state
-                .read_context(name, |context| context.association_count())
+                .read_context(&state.id_of(name), |context| context.association_count())
                 .map_err(|_| "read")
                 .unwrap();
         }
@@ -1691,7 +1698,7 @@ mod tests {
                     .unwrap();
                 state
                     .add_associations(
-                        name,
+                        &state.id_of(name),
                         vec![
                             assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                             assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1703,7 +1710,7 @@ mod tests {
             }
             state.flush_dirty();
             state
-                .read_context("old", |context| context.footprint())
+                .read_context(&state.id_of("old"), |context| context.footprint())
                 .map_err(|_| "read")
                 .unwrap()
         };
@@ -1726,7 +1733,7 @@ mod tests {
         .unwrap();
         for name in ["old", "at_ceiling", "fresh"] {
             state
-                .read_context(name, |context| context.association_count())
+                .read_context(&state.id_of(name), |context| context.association_count())
                 .map_err(|_| "read")
                 .unwrap();
         }
@@ -1762,7 +1769,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                     Deadline::unbounded(),
                 )
@@ -1777,7 +1784,10 @@ mod tests {
         fs::write(&image, &corrupt).unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let AccessError::Load(first) = state.read_context("sake", |_| ()).unwrap_err() else {
+        let AccessError::Load(first) = state
+            .read_context(&state.id_of("sake"), |_| ())
+            .unwrap_err()
+        else {
             panic!("a corrupt image must refuse the read");
         };
         assert!(first.contains("corrupt"), "{first}");
@@ -1785,7 +1795,10 @@ mod tests {
         // Repair the file. Within the window the CACHED refusal still
         // answers — proof the disk is not consulted per request.
         fs::write(&image, &healthy).unwrap();
-        let AccessError::Load(second) = state.read_context("sake", |_| ()).unwrap_err() else {
+        let AccessError::Load(second) = state
+            .read_context(&state.id_of("sake"), |_| ())
+            .unwrap_err()
+        else {
             panic!("the quarantine must still refuse");
         };
         assert!(second.contains("quarantined"), "{second}");
@@ -1797,7 +1810,7 @@ mod tests {
         // Past the window, the retry sees the repaired image and heals.
         state.age_load_failures("sake", LOAD_FAILURE_RETRY);
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 1);
@@ -1824,7 +1837,7 @@ mod tests {
             .unwrap();
         // Touching b evicts a under the one-byte budget.
         state
-            .read_context("b", |context| context.association_count())
+            .read_context(&state.id_of("b"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         let body = rendered(&state);
@@ -1863,7 +1876,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op(
                         "青嶺酒造",
                         "創業年",
@@ -1882,7 +1895,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let recalled = state
-            .read_context("sake", |context| context.recall("青嶺酒造"))
+            .read_context(&state.id_of("sake"), |context| context.recall("青嶺酒造"))
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(recalled.len(), 1, "the acknowledged write must survive");
@@ -1916,7 +1929,7 @@ mod tests {
             // the apply partial.
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -1924,7 +1937,7 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([("kyo".to_string(), "京都酒造".to_string())]),
                     &BTreeMap::new(),
                 )
@@ -1938,7 +1951,7 @@ mod tests {
             wal::fail_appends_after(1);
             let partial = state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([
                         ("aomine".to_string(), "青嶺酒造".to_string()),
                         ("kyo".to_string(), "青嶺酒造".to_string()),
@@ -1956,7 +1969,7 @@ mod tests {
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let aliases = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context
                     .concept_aliases()
                     .into_iter()
@@ -1992,7 +2005,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "所在地", "京都酒造", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2000,7 +2013,7 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([("kyo".to_string(), "京都酒造".to_string())]),
                     &BTreeMap::new(),
                 )
@@ -2015,7 +2028,7 @@ mod tests {
             wal::fail_truncates_after(0);
             let partial = state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([
                         ("aomine".to_string(), "青嶺酒造".to_string()),
                         ("kyo".to_string(), "青嶺酒造".to_string()),
@@ -2034,7 +2047,7 @@ mod tests {
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let aliases = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context
                     .concept_aliases()
                     .into_iter()
@@ -2072,7 +2085,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "victim",
+                &state.id_of("victim"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -2083,7 +2096,7 @@ mod tests {
         // cloned out of the registry, the victim still dirty.
         let stale = state.snapshot();
         let stem = state.stem_of("victim").unwrap();
-        state.delete("victim").unwrap().unwrap();
+        state.delete(&state.id_of("victim")).unwrap().unwrap();
 
         // Even if a stale handle re-marks the entry dirty (delete does
         // clear the flag, but that is an optimization), the tombstone
@@ -2139,7 +2152,7 @@ mod tests {
             assert_eq!(state.gauge_snapshot().wal_bytes, 0);
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2159,7 +2172,7 @@ mod tests {
             // Leave an unflushed write behind for the reboot check.
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2195,14 +2208,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("a", "l", "b", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         let refused = state.add_associations(
-            "sake",
+            &state.id_of("sake"),
             vec![assoc_op("c", "l", "d", 1.0, None)],
             Deadline::unbounded(),
         );
@@ -2228,7 +2241,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -2245,7 +2258,7 @@ mod tests {
         // The disk goes bad: the next flush fails, health turns with it.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -2280,14 +2293,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         entry.flushing.store(true, Ordering::Relaxed);
         assert!(
             !state.flush_entry("sake", &entry),
@@ -2328,7 +2341,7 @@ mod tests {
                     for index in 0..100 {
                         state
                             .add_associations(
-                                "sake",
+                                &state.id_of("sake"),
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
                                 Deadline::unbounded(),
                             )
@@ -2351,7 +2364,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 100, "every acknowledged write must survive");
@@ -2369,7 +2382,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -2380,18 +2393,18 @@ mod tests {
 
         // Pinning moves it out of the budget's world…
         state
-            .update_meta("sake", None, Some(true), None, None)
+            .update_meta(&state.id_of("sake"), None, Some(true), None, None)
             .unwrap()
             .unwrap();
         assert_eq!(state.0.resident_estimate.load(Ordering::Relaxed), 0);
         // …and unpinning brings it back.
         state
-            .update_meta("sake", None, Some(false), None, None)
+            .update_meta(&state.id_of("sake"), None, Some(false), None, None)
             .unwrap()
             .unwrap();
         assert!(state.0.resident_estimate.load(Ordering::Relaxed) >= after_write);
 
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
         assert_eq!(state.0.resident_estimate.load(Ordering::Relaxed), 0);
 
         let _ = fs::remove_dir_all(dir);
@@ -2415,7 +2428,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -2423,7 +2436,7 @@ mod tests {
             .unwrap();
         assert!(state.0.resident_estimate.load(Ordering::Relaxed) > 0);
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert_eq!(
             state.0.resident_estimate.load(Ordering::Relaxed),
@@ -2450,7 +2463,7 @@ mod tests {
                     .unwrap();
                 state
                     .add_associations(
-                        name,
+                        &state.id_of(name),
                         vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                         Deadline::unbounded(),
                     )
@@ -2465,7 +2478,7 @@ mod tests {
             // reaches the victim through its stale handle. Whatever the
             // iteration order, the end state must be identical: the
             // victim stays deleted.
-            let decoy = state.lookup("decoy").unwrap();
+            let decoy = state.lookup_named("decoy").unwrap();
             let hold = decoy.inner.write();
             let flusher = {
                 let state = state.clone();
@@ -2475,7 +2488,7 @@ mod tests {
             };
             thread::sleep(Duration::from_millis(20)); // flusher snapshots, then parks on the decoy
             let stem = state.stem_of("victim").unwrap();
-            state.delete("victim").unwrap().unwrap();
+            state.delete(&state.id_of("victim")).unwrap().unwrap();
             drop(hold);
             flusher.join().unwrap();
 
@@ -2517,7 +2530,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "創業年", "1907年", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2525,7 +2538,7 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([("Aomine".to_string(), "青嶺酒造".to_string())]),
                     &BTreeMap::new(),
                 )
@@ -2536,7 +2549,7 @@ mod tests {
             state.flush_dirty();
             assert_eq!(
                 state
-                    .remove_aliases("sake", &["Aomine".to_string()], &[])
+                    .remove_aliases(&state.id_of("sake"), &["Aomine".to_string()], &[])
                     .unwrap()
                     .unwrap(),
                 1
@@ -2544,7 +2557,9 @@ mod tests {
         }
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let aliases = reborn
-            .read_context("sake", |context| context.concept_aliases().len())
+            .read_context(&reborn.id_of("sake"), |context| {
+                context.concept_aliases().len()
+            })
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(aliases, 0, "the un-flushed removal must replay");
@@ -2564,7 +2579,7 @@ mod tests {
             wal_file = wal_path(&dir, &state.stem_of("sake").unwrap());
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2585,7 +2600,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (weight, count) = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 let assoc = &context.query(Some("青嶺酒造"), Some("代表銘柄"), Some("青嶺"))[0];
                 (assoc.weight, assoc.count)
             })
@@ -2612,7 +2627,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第2段落")),
                         assoc_op("青嶺酒造", "仕込み水", "伏流水", 1.0, Some("第5段落")),
@@ -2623,20 +2638,22 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([("Aomine".to_string(), "青嶺酒造".to_string())]),
                     &BTreeMap::new(),
                 )
                 .unwrap()
                 .unwrap();
-            let (touched, _) = state.retract_source("sake", "第5段落").unwrap();
+            let (touched, _) = state
+                .retract_source(&state.id_of("sake"), "第5段落")
+                .unwrap();
             assert_eq!(touched, 1);
             // No flush — every one of those op kinds must replay.
         }
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let matches = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("Aomine"), Some("仕込み水"), None)
             })
             .map_err(|_| "read")
@@ -2665,7 +2682,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2673,7 +2690,7 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([
                         ("Aomine".to_string(), "青嶺酒造".to_string()),
                         ("AomineShuzo".to_string(), "青嶺酒造".to_string()),
@@ -2689,7 +2706,7 @@ mod tests {
             // and never even attempts "AomineShuzo".
             let outcome = state
                 .remove_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &[
                         "Aomine".to_string(),
                         "NONEXISTENT".to_string(),
@@ -2710,7 +2727,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let untried = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("AomineShuzo"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
@@ -2721,7 +2738,7 @@ mod tests {
             "the untried alias must survive: the live batch never touched it, so replay must not either"
         );
         let removed = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("Aomine"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
@@ -2747,14 +2764,14 @@ mod tests {
         fs::create_dir_all(wal_path(&dir, &state.stem_of("sake").unwrap())).unwrap();
 
         let outcome = state.add_associations(
-            "sake",
+            &state.id_of("sake"),
             vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
             Deadline::unbounded(),
         );
         assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
         // Refused cleanly: nothing reached the graph.
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 0);
@@ -2782,7 +2799,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "所在地", "京都", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2801,14 +2818,15 @@ mod tests {
             wal::append_batch(&path, top + 1, &[WalOp::Associate(refused.clone())]).unwrap();
 
             wal::fail_appends_after(0);
-            let outcome = state.add_associations("sake", vec![refused], Deadline::unbounded());
+            let outcome =
+                state.add_associations(&state.id_of("sake"), vec![refused], Deadline::unbounded());
             assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
             // NO flush_dirty: dropping the state here is the crash.
         }
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let leaked = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context.query(Some("青嶺酒造"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
@@ -2818,7 +2836,7 @@ mod tests {
             "a record leaked by the refused append must not replay as acknowledged: {leaked:?}"
         );
         let kept = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context.query(Some("青嶺酒造"), Some("所在地"), None)
             })
             .map_err(|_| "read")
@@ -2847,7 +2865,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "所在地", "京都", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2861,14 +2879,15 @@ mod tests {
 
             wal::fail_appends_after(0);
             wal::fail_truncates_after(0);
-            let outcome = state.add_associations("sake", vec![refused], Deadline::unbounded());
+            let outcome =
+                state.add_associations(&state.id_of("sake"), vec![refused], Deadline::unbounded());
             assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
             // NO flush_dirty: dropping the state here is the crash.
         }
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let leaked = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context.query(Some("青嶺酒造"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
@@ -2878,7 +2897,7 @@ mod tests {
             "a record leaked by the refused append must not replay as acknowledged: {leaked:?}"
         );
         let kept = reborn
-            .read_context("sake", |context| {
+            .read_context(&reborn.id_of("sake"), |context| {
                 context.query(Some("青嶺酒造"), Some("所在地"), None)
             })
             .map_err(|_| "read")
@@ -2912,7 +2931,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -2928,7 +2947,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 0);
@@ -2976,7 +2995,7 @@ mod tests {
                     for index in 0..WRITES {
                         state
                             .add_associations(
-                                name,
+                                &state.id_of(name),
                                 vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
                                 Deadline::unbounded(),
                             )
@@ -2997,7 +3016,7 @@ mod tests {
         // wrote — there is no WAL to replay. Every write must be there.
         for name in ["sake", "wine"] {
             let count = state
-                .read_context(name, |context| context.association_count())
+                .read_context(&state.id_of(name), |context| context.association_count())
                 .map_err(|_| "read")
                 .unwrap();
             assert_eq!(count, WRITES, "context '{name}' lost writes to the race");
@@ -3051,11 +3070,11 @@ mod tests {
             })
             .collect();
         state
-            .add_associations("sake", seed, Deadline::unbounded())
+            .add_associations(&state.id_of("sake"), seed, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let flusher = {
             let state = state.clone();
             let entry = Arc::clone(&entry);
@@ -3082,7 +3101,7 @@ mod tests {
         // the flush captured its (soon to be stale) snapshot.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("b", "l", "o", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -3103,7 +3122,7 @@ mod tests {
             let state = state.clone();
             thread::spawn(move || {
                 state.add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("c", "l", "o", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3118,7 +3137,7 @@ mod tests {
 
         const EXPECTED: usize = 50_000 + 2; // the seed, plus "b" and "c"
         let live = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(live, EXPECTED, "the race lost a write in memory");
@@ -3126,7 +3145,7 @@ mod tests {
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let recovered = reborn
-            .read_context("sake", |context| context.association_count())
+            .read_context(&reborn.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(
@@ -3187,11 +3206,11 @@ mod tests {
             .collect();
         const SEEDED: usize = 50_000;
         state
-            .add_associations("sake", seed, Deadline::unbounded())
+            .add_associations(&state.id_of("sake"), seed, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let flusher = {
             let state = state.clone();
             let entry = Arc::clone(&entry);
@@ -3210,7 +3229,7 @@ mod tests {
         // re-locks to publish: exactly the window the fix closes.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("racer", "l", "o", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -3271,11 +3290,11 @@ mod tests {
             })
             .collect();
         state
-            .add_associations("big", seed, Deadline::unbounded())
+            .add_associations(&state.id_of("big"), seed, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("big").unwrap();
+        let entry = state.lookup_named("big").unwrap();
         let evictor = {
             let state = state.clone();
             let entry = Arc::clone(&entry);
@@ -3346,7 +3365,7 @@ mod tests {
                 for index in 0..ROUNDS {
                     state
                         .add_associations(
-                            "sake",
+                            &state.id_of("sake"),
                             vec![assoc_op(&format!("s{index}"), "l", "o", 1.0, None)],
                             Deadline::unbounded(),
                         )
@@ -3359,7 +3378,7 @@ mod tests {
             let state = state.clone();
             thread::spawn(move || {
                 for _ in 0..ROUNDS {
-                    let _ = state.compact_context("sake", Deadline::unbounded());
+                    let _ = state.compact_context(&state.id_of("sake"), Deadline::unbounded());
                 }
             })
         };
@@ -3370,7 +3389,7 @@ mod tests {
         compactor.join().unwrap();
 
         let expected = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(expected, ROUNDS, "the race lost associations in memory");
@@ -3382,7 +3401,7 @@ mod tests {
 
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let recovered = reborn
-            .read_context("sake", |context| context.association_count())
+            .read_context(&reborn.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(
@@ -3406,7 +3425,7 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                     Deadline::unbounded(),
                 )
@@ -3427,7 +3446,7 @@ mod tests {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             assert_eq!(
                 state
-                    .read_context("sake", |context| context.association_count())
+                    .read_context(&state.id_of("sake"), |context| context.association_count())
                     .unwrap(),
                 1,
                 "flush failure at step {failure} lost or duplicated the write"
@@ -3460,7 +3479,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                 Deadline::unbounded(),
             )
@@ -3483,7 +3502,7 @@ mod tests {
             "a failed image commit must not report the context as flushed"
         );
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.dirty.load(Ordering::Relaxed),
             "a failed publish must re-mark the entry dirty for the next tick's retry"
@@ -3505,7 +3524,7 @@ mod tests {
         let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(
             reborn
-                .read_context("sake", |context| context.association_count())
+                .read_context(&reborn.id_of("sake"), |context| context.association_count())
                 .unwrap(),
             1,
             "WAL replay must reconstruct what the ahead-of-image sidecar already claimed"
@@ -3537,7 +3556,7 @@ mod tests {
         // Touching b evicts a (least recently used, and b is protected
         // as the context just used) — flushing a's dirty write first.
         state
-            .read_context("b", |context| context.association_count())
+            .read_context(&state.id_of("b"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         let loaded = loaded_map(&state);
@@ -3546,7 +3565,7 @@ mod tests {
 
         // The evicted write must have survived the disk roundtrip.
         let recalled = state
-            .read_context("a", |context| context.recall("私").len())
+            .read_context(&state.id_of("a"), |context| context.recall("私").len())
             .map_err(|_| "reload")
             .unwrap();
         assert_eq!(recalled, 1);
@@ -3571,11 +3590,11 @@ mod tests {
             "仕込み水は雲居山の伏流水。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         // The first eviction does the work and reports it.
         assert!(state.evict_entry("sake", &entry));
         // The second finds the slot cold and every cache already cleared,
@@ -3619,7 +3638,7 @@ mod tests {
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             state.logged_write(
-                "sake",
+                &state.id_of("sake"),
                 &ops,
                 |context| {
                     // Only the first op of the batch applies before the
@@ -3638,7 +3657,7 @@ mod tests {
         );
 
         let recalled = state
-            .read_context("sake", |context| context.recall("青嶺酒造"))
+            .read_context(&state.id_of("sake"), |context| context.recall("青嶺酒造"))
             .expect("the context that panicked stays usable — the lock never poisoned");
         assert_eq!(
             recalled.len(),
@@ -3674,14 +3693,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         let count = state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 1);
@@ -3704,7 +3723,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3712,7 +3731,7 @@ mod tests {
                 .unwrap();
             state
                 .add_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &BTreeMap::from([
                         ("Aomine".to_string(), "青嶺酒造".to_string()),
                         ("AomineShuzo".to_string(), "青嶺酒造".to_string()),
@@ -3722,14 +3741,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let entry = state.lookup("sake").unwrap();
+            let entry = state.lookup_named("sake").unwrap();
             let seq_before = entry.inner.read().wal_seq;
 
             // The deterministic partial batch the tail-replay test
             // uses: op 1 applies, op 2 refuses, op 3 goes untried.
             let outcome = state
                 .remove_aliases(
-                    "sake",
+                    &state.id_of("sake"),
                     &[
                         "Aomine".to_string(),
                         "NONEXISTENT".to_string(),
@@ -3761,7 +3780,7 @@ mod tests {
             // WAL alone must carry all of it through the restart.
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3771,21 +3790,21 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let removed = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("Aomine"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
             .unwrap();
         assert!(removed.is_empty(), "the applied removal must replay");
         let untried = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("AomineShuzo"), Some("代表銘柄"), None)
             })
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(untried.len(), 1, "the untried alias must survive");
         let later = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("高瀬"), Some("出身"), None)
             })
             .map_err(|_| "read")
@@ -3824,7 +3843,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3832,26 +3851,29 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
             state
-                .refresh_embeddings("sake", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             let mut passages = BTreeMap::new();
             passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             // Evict once: the passage log compacts into a snapshot
             // (the passages lane), and the sidecars land on disk.
-            let entry = state.lookup("sake").unwrap();
+            let entry = state.lookup_named("sake").unwrap();
             state.evict_entry("sake", &entry);
             // Fresh pending bytes in both live lanes, left unflushed.
             let mut more = BTreeMap::new();
             more.insert("第2章".to_string(), "仕込み水は伏流水。".to_string());
-            state.store_passages("sake", plain(more)).unwrap().unwrap();
+            state
+                .store_passages(&state.id_of("sake"), plain(more))
+                .unwrap()
+                .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3876,7 +3898,7 @@ mod tests {
             },
         )
         .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let disk = *entry.disk.lock();
         let inner = entry.inner.read();
         let passages_wal = entry
@@ -3901,7 +3923,7 @@ mod tests {
             + passages_wal;
         drop(inner);
         assert_eq!(
-            state.storage_quota_refusal("sake"),
+            state.storage_quota_refusal(&state.id_of("sake")),
             Some((expected, 1)),
             "used must be the exact five-lane sum"
         );
@@ -3948,7 +3970,7 @@ mod tests {
         // exactly on the NotFound arm.
         wal::fail_appends_after(0);
         let outcome = state.add_associations(
-            "sake",
+            &state.id_of("sake"),
             vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
             Deadline::unbounded(),
         );
@@ -3982,7 +4004,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -3992,14 +4014,14 @@ mod tests {
             // makes the eviction's out-of-lock flush attempts no-ops,
             // forcing the LOCK-HELD fallback save — the path that
             // stamps the watermark itself and truncates the log.
-            let entry = state.lookup("sake").unwrap();
+            let entry = state.lookup_named("sake").unwrap();
             entry.flushing.store(true, Ordering::Relaxed);
             assert!(state.evict_entry("sake", &entry));
             entry.flushing.store(false, Ordering::Relaxed);
             // The next write's seq is the first one PAST the image.
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -4010,7 +4032,7 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let survived = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("高瀬"), Some("出身"), None)
             })
             .map_err(|_| "read")
@@ -4039,16 +4061,16 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         state
-            .update_meta("sake", None, Some(true), None, None)
+            .update_meta(&state.id_of("sake"), None, Some(true), None, None)
             .unwrap()
             .unwrap();
 
@@ -4084,14 +4106,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         entry.flushing.store(true, Ordering::Relaxed);
 
         fail_persistence_ops_after(0);
@@ -4133,7 +4155,7 @@ mod tests {
             let mut passages = BTreeMap::new();
             passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -4152,10 +4174,17 @@ mod tests {
         )
         .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.bm25_dirty.load(Ordering::Relaxed),
             "the search built the index locally; it is dirty by construction"
@@ -4215,7 +4244,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -4224,23 +4253,30 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let inner = entry.inner.read();
         let Slot::Hot(context) = &inner.slot else {
             panic!("the writes above leave the slot hot");
@@ -4293,10 +4329,10 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         // First eviction compacts the pending log into the snapshot.
         assert!(state.evict_entry("sake", &entry));
         let snapshot = crate::registry::passages_path(&dir, &state.stem_of("sake").unwrap());
@@ -4304,7 +4340,14 @@ mod tests {
 
         // Resident again with nothing pending …
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         // … a second eviction must leave the snapshot file alone.
@@ -4475,10 +4518,10 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let clock_before = state.0.clock.load(Ordering::Relaxed);
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         let clock_after = state.0.clock.load(Ordering::Relaxed);
@@ -4507,14 +4550,21 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         state.flush_bm25("sake", &entry);
         assert!(
             !entry.bm25_dirty.load(Ordering::Relaxed),
@@ -4524,7 +4574,7 @@ mod tests {
         let mut update = BTreeMap::new();
         update.insert("doc-b".to_string(), "仕込み水は伏流水。".to_string());
         state
-            .store_passages("sake", plain(update))
+            .store_passages(&state.id_of("sake"), plain(update))
             .unwrap()
             .unwrap();
         assert!(
@@ -4548,7 +4598,7 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
 
         entry.bm25_dirty.store(true, Ordering::Relaxed);
         *entry.bm25.write() = None;
@@ -4584,18 +4634,25 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         state.flush_bm25("sake", &entry);
         assert!(bm25_path(&dir, &entry.id).exists());
 
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
         assert!(
             !bm25_path(&dir, &entry.id).exists(),
             "sanity: delete must have removed the sidecar already"
@@ -4648,7 +4705,7 @@ mod tests {
         // the deferral never engages.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -4656,7 +4713,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -4695,7 +4752,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("a", "l1", "b", 1.0, Some("s1")),
                     assoc_op("c", "l2", "d", 1.0, Some("s1")),
@@ -4705,9 +4762,24 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert_eq!(state.count_source_edges("sake", "s1").unwrap(), 2);
-        assert_eq!(state.count_source_edges("sake", "s2").unwrap(), 1);
-        assert_eq!(state.count_source_edges("sake", "absent").unwrap(), 0);
+        assert_eq!(
+            state
+                .count_source_edges(&state.id_of("sake"), "s1")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            state
+                .count_source_edges(&state.id_of("sake"), "s2")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .count_source_edges(&state.id_of("sake"), "absent")
+                .unwrap(),
+            0
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -4724,16 +4796,16 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("s1"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let generation = entry.inner.read().image_generation;
         state
-            .compact_context("sake", Deadline::unbounded())
+            .compact_context(&state.id_of("sake"), Deadline::unbounded())
             .unwrap();
         assert_eq!(
             entry.inner.read().image_generation,
