@@ -286,6 +286,16 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
+    // The up-front existence check's own wording — the apply path's
+    // late NoContext (a destination deleted mid-flight) says something
+    // else, so this pins that the check ran before anything did.
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("never creates one"),
+        "{refused}"
+    );
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
     assert_eq!(
         refused["retryable_after_correction"],

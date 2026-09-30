@@ -266,6 +266,15 @@ pub(super) struct CrossTargets {
     pub(super) ids: Arc<[String]>,
 }
 
+/// The cross pool's trim threshold: double the page, so the trim keeps
+/// the top `limit` with slack. Any threshold at or above `limit` keeps
+/// results identical (the trim itself preserves the top of the pool),
+/// which makes the factor invisible to output tests — the unit pin in
+/// this file's tests is what holds it in place.
+pub(crate) fn cross_pool_high_water(limit: usize) -> usize {
+    limit * 2
+}
+
 impl CrossTargets {
     /// name → id over the aligned lists — names are unique within one
     /// resolved request (the dedup + ambiguity refusal in
@@ -463,7 +472,7 @@ async fn cross_matches(
                 empties.push(matches.is_empty());
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
-                if pool.len() >= limit * 2 {
+                if pool.len() >= cross_pool_high_water(limit) {
                     pool = cross_page_by(pool, Some(limit), after, names).1;
                 }
             }
@@ -1153,6 +1162,15 @@ pub async fn cross_query(
 mod tests {
     use super::*;
     use crate::registry::ContextMeta;
+
+    /// The cross pool's trim threshold, pinned literally: any factor at
+    /// or above 1× keeps results identical (the trim preserves the top
+    /// of the pool), so no output test can hold the 2× slack in place.
+    #[test]
+    fn the_cross_pool_high_water_is_double_the_page() {
+        assert_eq!(cross_pool_high_water(5), 10);
+        assert_eq!(cross_pool_high_water(0), 0);
+    }
 
     /// A fresh, on-disk-backed [`AppState`] — the same construction
     /// `api::groups`'s own `scratch_state` uses, kept local for the

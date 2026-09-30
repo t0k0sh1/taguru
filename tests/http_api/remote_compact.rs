@@ -604,3 +604,45 @@ fn an_empty_server_sweep_reports_zero_rewritten() {
         "{stdout}"
     );
 }
+
+/// Issue #964: the per-context remote compact resolves each ID to its
+/// display name before compacting. A row that carries no name — a
+/// shape no real build serves, so only a stub can force it — is a
+/// counted per-item failure: exit 1 and a summary that says nothing
+/// was rewritten, never a clean 0.
+#[test]
+fn a_row_without_a_name_is_a_counted_resolve_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            r#"{"status":"ok"}"#,
+            r#"{"result":{"id":"00000000-0000-4000-8000-000000000001"}}"#,
+        ];
+        for body in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "compact",
+            "--url",
+            &format!("http://{addr}"),
+            "00000000-0000-4000-8000-000000000001",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("the row carries no name"), "{stderr}");
+    assert!(stdout.contains("0 of 1 context(s) rewritten"), "{stdout}");
+}

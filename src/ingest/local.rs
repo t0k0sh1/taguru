@@ -386,17 +386,13 @@ pub(super) fn run_local(
     if state.embeddings_configured() {
         for name in &touched {
             // `touched` carries the stream's display names; the
-            // refresh calls are id-keyed (#964). A name that no longer
-            // resolves (deleted or made ambiguous since its batch
-            // applied) is a counted failure, never a silent skip.
+            // refresh calls are id-keyed (#964). Every touched name
+            // just applied a batch in THIS single-process run —
+            // `apply_batch` refuses an ambiguous name before touching
+            // it and nothing else mutates the registry meanwhile — so
+            // resolution cannot fail here.
             let Some(id) = state.context_id_of(name) else {
-                eprintln!(
-                    "taguru: import: {name}: embedding refresh skipped — the name no \
-                     longer resolves to one context; refresh by id via POST \
-                     /contexts/{{id}}/embeddings/refresh"
-                );
-                embed_failures += 1;
-                continue;
+                unreachable!("context '{name}' applied a batch but no longer resolves");
             };
             match state.refresh_embeddings(&id, Deadline::unbounded()) {
                 None | Some(Ok((0, _))) => {}

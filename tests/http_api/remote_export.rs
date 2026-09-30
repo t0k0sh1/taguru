@@ -849,3 +849,49 @@ fn an_uncreatable_out_directory_refuses_the_remote_export() {
     );
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// Issue #964: the subset remote export resolves each ID to its
+/// display name (the stream and the file carry it) before fetching. A
+/// row with no `name` — a shape no real build serves — is a counted
+/// per-item failure, never a silently empty success.
+#[test]
+fn a_row_without_a_name_is_a_counted_resolve_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            r#"{"status":"ok"}"#,
+            r#"{"record_formats":["2026-09-17"]}"#,
+            r#"{"result":{"id":"00000000-0000-4000-8000-000000000001"}}"#,
+        ];
+        for body in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let out = crate::support::common::scratch_dir("remote-export-no-name-row");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &format!("http://{addr}"),
+            "--out",
+            out.to_str().unwrap(),
+            "00000000-0000-4000-8000-000000000001",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("the row carries no name"), "{stderr}");
+    assert!(stdout.contains("0 of 1 context(s)"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&out);
+}

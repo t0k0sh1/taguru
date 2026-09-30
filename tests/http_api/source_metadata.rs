@@ -532,6 +532,16 @@ fn explain_names_filtered_out_before_the_lanes() {
         "{filtered}"
     );
 
+    // Empty-read accounting: the served explanation above reached
+    // scoring (productive), the filtered_out one never did — exactly
+    // one of the two explains so far counts toward `usage.empty_reads`.
+    let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
+    assert_eq!(
+        row["usage"]["empty_reads"],
+        json!(1),
+        "one unproductive explain (filtered_out), one productive (served): {row}"
+    );
+
     // An eligible target under the same filter is ranked against the
     // ELIGIBLE field only: unfiltered, all three sources' matching
     // paragraphs rank; filtered to a.md's tag, only a.md's does.
@@ -615,4 +625,48 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let envelope: Value =
         serde_json::from_str(explained["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(envelope["result"]["verdict"], "filtered_out", "{envelope}");
+}
+
+/// Cross-`context` matches resolve their section/locator markers
+/// through the (display name → id) bridge the resolved target list
+/// carries (#964) — page entries are tagged with names while the
+/// marker read is id-keyed, so a broken bridge would silently drop
+/// every marker from every cross match.
+#[test]
+fn cross_recall_matches_resolve_section_markers_through_the_name_id_bridge() {
+    let server = Server::start("cross-recall-markers");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "marked", "description": "d"})),
+    );
+    let id = server.cx("marked");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/sources"),
+        Some(json!({
+            "passages": {"docs/a.md": "第一段落。\n\n杜氏の話。"},
+            "sections": {"docs/a.md": [{"paragraph": 1, "section": "人物"}]},
+        })),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(
+            json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
+                     "source": "docs/a.md", "paragraph": 1}]),
+        ),
+    );
+
+    let page = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["marked"], "cue": "蔵"})),
+    );
+    let attribution = &page["matches"][0]["attributions"][0];
+    assert_eq!(
+        attribution["section"],
+        json!("人物"),
+        "the stored section must ride the cross match: {page}"
+    );
 }

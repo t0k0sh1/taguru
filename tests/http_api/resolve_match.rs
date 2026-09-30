@@ -393,3 +393,63 @@ fn resolve_caps_its_candidate_flood_like_every_other_match_endpoint() {
     );
     assert_eq!(five.as_array().unwrap().len(), 5, "{five}");
 }
+
+/// `explore` and `paths` count toward `usage.empty_reads` exactly when
+/// they answer nothing — a productive walk must not read as an empty
+/// one (the directory's routing signal), and vice versa.
+#[test]
+fn explore_and_paths_count_empty_reads_only_when_empty() {
+    let server = Server::start("explore-empty-reads");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "walks", "description": "d"})),
+    );
+    let id = server.cx("walks");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(json!([
+            {"subject": "a", "label": "l", "object": "b", "weight": 1.0},
+            // A disconnected island, so a paths call between the two
+            // components can answer zero trails without a refusal.
+            {"subject": "c", "label": "l", "object": "d", "weight": 1.0},
+        ])),
+    );
+    let empty_reads = |server: &Server| {
+        server.ok("GET", &format!("/contexts/{id}"), None)["usage"]["empty_reads"].clone()
+    };
+
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/explore"),
+        Some(json!({"origins": ["a"]})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/paths"),
+        Some(json!({"origins": ["a"], "targets": ["b"]})),
+    );
+    assert_eq!(
+        empty_reads(&server),
+        json!(0),
+        "productive walks are not empty reads"
+    );
+
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/explore"),
+        Some(json!({"origins": ["ghost"]})),
+    );
+    assert_eq!(empty_reads(&server), json!(1), "an empty explore counts");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/paths"),
+        Some(json!({"origins": ["a"], "targets": ["c"]})),
+    );
+    assert_eq!(
+        empty_reads(&server),
+        json!(2),
+        "a pathless paths call counts"
+    );
+}

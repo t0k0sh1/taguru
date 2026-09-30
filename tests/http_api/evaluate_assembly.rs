@@ -591,4 +591,8 @@ fn compare_warns_when_the_two_runs_used_different_budgets() {
     );
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("budget differs"), "{stderr}");
+    // The warning spells out both sides' limits — a warning that names
+    // no numbers would leave the operator diffing evaluation.json by
+    // hand to learn WHAT differed.
+    assert!(stderr.contains("max_items="), "{stderr}");
 }

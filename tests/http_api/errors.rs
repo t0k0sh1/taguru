@@ -229,6 +229,23 @@ fn errors_carry_the_documented_machine_readable_code() {
     );
     assert_eq!(code_of(status, &body), (404, "no_context".into()), "{body}");
 
+    // An ALTERNATE spelling of a valid UUID (uppercase here; braces and
+    // urn: forms parse the same way) must refuse, not alias the
+    // canonical id — ids are exactly the lowercase hyphenated column
+    // GET /contexts serves, and two spellings reaching one context
+    // would give it two addresses.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts/00000000-0000-4000-8000-00000000DEAD/recall",
+        Some(json!({"cue": "x"})),
+        key,
+    );
+    assert_eq!(
+        code_of(status, &body),
+        (400, "invalid_argument".into()),
+        "{body}"
+    );
+
     // A refused value (a weight the graph must never accumulate) →
     // invalid_argument.
     let (status, body) = server.call_with_token(

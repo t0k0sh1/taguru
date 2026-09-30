@@ -195,6 +195,15 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
 }
 
+/// Whether CONTEXT arguments run on the sequential path — `--parallel 1`
+/// (or the flag absent) must not pay the work-queue setup. Sequential
+/// and parallel runs print byte-identical output by contract, so this
+/// boundary is invisible to output tests; the unit pin below is what
+/// holds it in place.
+fn runs_sequentially(parallel: usize) -> bool {
+    parallel <= 1
+}
+
 fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
     crate::ingest::init_logging();
     let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None, None) {
@@ -232,7 +241,7 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
     };
     let mut failures = 0usize;
     let mut reports: Vec<MaintenanceCompactionEntry> = Vec::new();
-    if parallel <= 1 {
+    if runs_sequentially(parallel) {
         for id in &names {
             let outcome = state.compact_context(id, Deadline::unbounded());
             if !report_outcome(&display_of(id), &outcome, as_json, &mut reports) {
@@ -550,7 +559,7 @@ fn run_remote_contexts(api: &Api, names: &[String], parallel: usize, as_json: bo
         }
     }
     let mut reports: Vec<MaintenanceCompactionEntry> = Vec::new();
-    if parallel <= 1 {
+    if runs_sequentially(parallel) {
         for (id, name) in &resolved {
             if !report_remote_outcome(name, &remote_compact_one(api, id), as_json, &mut reports) {
                 failures += 1;
@@ -731,7 +740,17 @@ fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactOutcome, MaintenanceCompactionOutcome, success_line};
+    use super::{CompactOutcome, MaintenanceCompactionOutcome, runs_sequentially, success_line};
+
+    /// The sequential/parallel boundary, pinned literally: both paths
+    /// print identical output by contract, so no output test can hold
+    /// this predicate in place.
+    #[test]
+    fn parallel_one_and_absent_stay_sequential() {
+        assert!(runs_sequentially(0));
+        assert!(runs_sequentially(1));
+        assert!(!runs_sequentially(2));
+    }
 
     #[test]
     fn every_usage_variable_is_a_known_key() {

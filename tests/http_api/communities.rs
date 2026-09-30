@@ -1291,3 +1291,78 @@ fn json_mode_emits_the_report_structs() {
     assert_eq!(report["summaries_reused"], json!(0), "{report}");
     assert_eq!(report["dry_run"], json!(false), "{report}");
 }
+
+/// `search_communities` ranks with ONE extra slot beyond the caller's
+/// limit, so the manifest passage (always a candidate — its JSON text
+/// shares terms with any query about the corpus' own vocabulary) can
+/// be filtered out below without costing a community hit. The source
+/// context's name rides inside the manifest JSON, making a query for
+/// it the worst case: the manifest ranks, and without the extra slot
+/// one real community would be crowded off a full page.
+#[test]
+fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
+    let server = Server::start("communities-manifest-slot");
+    // The source context's NAME carries the query term, so the
+    // manifest (which embeds `source_context`) matches the query.
+    server.ok("POST", "/contexts", Some(json!({"name": "酒造りの記録"})));
+    let source_id = server.cx("酒造りの記録");
+    server.ok(
+        "POST",
+        &format!("/contexts/{source_id}/associations"),
+        Some(json!([{"subject": "a1", "label": "l", "object": "a2", "weight": 1.0}])),
+    );
+    let revision = server.ok("GET", &format!("/contexts/{source_id}"), None)["revision"].clone();
+
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "酒造りの記録::communities"})),
+    );
+    let derived_id = server.cx("酒造りの記録::communities");
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context": "酒造りの記録",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+            {"id": "L0-1", "level": 0, "fingerprint": "00bb00bb00bb00bb", "concept_count": 2},
+        ],
+    });
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived_id}/sources"),
+        Some(json!({"passages": {
+            "community:L0-0": "酒造りの記録のうち、蔵の共同体の要約。",
+            "community:L0-1": "酒造りの記録のうち、杜氏の共同体の要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived_id}/associations"),
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 2.0},
+            {"subject": "community:L0-1", "label": "contains", "object": "a2", "weight": 2.0},
+        ])),
+    );
+
+    let page = server.ok(
+        "POST",
+        &format!("/contexts/{source_id}/communities/search"),
+        Some(json!({"query": "酒造りの記録", "limit": 2})),
+    );
+    let communities: Vec<&str> = page["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["community"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        communities.len(),
+        2,
+        "both communities must fill the page — the manifest's rank is absorbed \
+         by the extra slot, never at a community's expense: {page}"
+    );
+}

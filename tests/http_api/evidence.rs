@@ -952,3 +952,52 @@ fn reranker_privacy_leaks_no_candidate_text_or_credential_into_metrics() {
         "a configured provider's breaker family must render: {metrics_text}"
     );
 }
+
+/// The assembly lanes report to `usage.empty_reads` exactly when a
+/// lane came back empty — a productive query or activate lane counted
+/// as an empty read would poison the directory's routing signal on
+/// every evidence call.
+#[test]
+fn productive_assembly_lanes_are_not_counted_as_empty_reads() {
+    let server = Server::start("evidence-empty-read-accounting");
+    seed_mixed_corpus(&server, "sake");
+    let id = server.cx("sake");
+    let empty_reads = |server: &Server| {
+        server.ok("GET", &format!("/contexts/{id}"), None)["usage"]["empty_reads"].clone()
+    };
+
+    // Origins resolve, the query lane's label matches, passages and
+    // citations land: every lane that runs is productive.
+    let package = server.ok(
+        "POST",
+        &format!("/contexts/{id}/evidence"),
+        Some(json!({"origins": ["青嶺酒造"], "labels": ["杜氏"]})),
+    );
+    assert_eq!(
+        package["plan"]["lanes"]["query"]["ran"],
+        json!(true),
+        "{package}"
+    );
+    assert_eq!(
+        package["plan"]["lanes"]["activate"]["ran"],
+        json!(true),
+        "{package}"
+    );
+    assert_eq!(
+        empty_reads(&server),
+        json!(0),
+        "productive lanes are not empty reads"
+    );
+
+    // The same lanes over a ghost origin and an unknown label all come
+    // back empty — and every one of them counts.
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/evidence"),
+        Some(json!({"origins": ["存在しない"], "labels": ["無関係"]})),
+    );
+    assert!(
+        empty_reads(&server).as_u64().unwrap() > 0,
+        "empty lanes must count"
+    );
+}

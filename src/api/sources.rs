@@ -1925,7 +1925,7 @@ pub async fn cross_search_passages(
                         .enumerate()
                         .map(|(rank, hit)| (index, rank, hit)),
                 );
-                if pool.len() >= limit * 2 {
+                if pool.len() >= super::recall::cross_pool_high_water(limit) {
                     cut(&mut pool);
                 }
             }

@@ -147,3 +147,53 @@ fn compact_rewrites_the_passage_log_when_one_exists() {
     );
     assert_eq!(outcome["passages_compacted"], json!(false), "{outcome}");
 }
+
+/// `usage.writes` moves exactly with EFFECTIVE retractions: an
+/// association-only retraction (no passage to remove) is a write, and
+/// a found-nothing repeat is not — a no-op bumping the counter would
+/// make the directory's last-write signal lie.
+#[test]
+fn only_an_effective_retraction_counts_as_a_write() {
+    let server = Server::start("retract-write-accounting");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    let id = server.cx("sake");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(
+            json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0,
+                     "source": "a.md"}]),
+        ),
+    );
+    let writes = |server: &Server| {
+        server.ok("GET", &format!("/contexts/{id}"), None)["usage"]["writes"].clone()
+    };
+    let before = writes(&server).as_u64().unwrap();
+
+    let effective = server.ok(
+        "POST",
+        &format!("/contexts/{id}/sources/retract"),
+        Some(json!({"source": "a.md"})),
+    );
+    assert_eq!(effective["passage_removed"], json!(false), "{effective}");
+    assert_eq!(
+        writes(&server).as_u64().unwrap(),
+        before + 1,
+        "an association-only retraction is a write"
+    );
+
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/sources/retract"),
+        Some(json!({"source": "a.md"})),
+    );
+    assert_eq!(
+        writes(&server).as_u64().unwrap(),
+        before + 1,
+        "a found-nothing repeat is not a write"
+    );
+}

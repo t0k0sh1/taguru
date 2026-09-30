@@ -175,3 +175,37 @@ fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() 
         .collect();
     assert_eq!(names, vec!["date"], "keyset picks up after the cursor");
 }
+
+/// The `(name, id)` keyset cursor (#964): with `after` AND `after_id`,
+/// the page resumes strictly past the cursor pair — the cursor row
+/// itself must never repeat, and a same-named sibling after it must.
+/// Only duplicate names can tell the pair comparison from a plain
+/// name comparison, so the fixture creates two.
+#[test]
+fn the_after_id_cursor_resumes_inside_a_same_named_group_without_repeating() {
+    let server = Server::start("dirpage-after-id");
+    let first = server.create_context("dup");
+    let second = server.create_context("dup");
+    let (low, high) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+
+    let page = server.ok(
+        "GET",
+        &format!("/contexts?limit=2&after=dup&after_id={low}"),
+        None,
+    );
+    let ids: Vec<&str> = page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![high.as_str()],
+        "the cursor row must be excluded, its same-named sibling served: {page}"
+    );
+}
