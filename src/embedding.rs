@@ -404,7 +404,7 @@ mod local {
             let cache = super::model_cache_dir()
                 .ok_or_else(|| "no home directory to cache the model under".to_string())?;
             let engine = fastembed::TextEmbedding::try_new(
-                fastembed::InitOptions::new(model)
+                fastembed::TextInitOptions::new(model)
                     .with_cache_dir(cache)
                     .with_show_download_progress(true),
             )
