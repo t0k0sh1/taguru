@@ -23,9 +23,9 @@ export const FACT_ONLY_ASSOCIATION = {
 };
 
 const GROUP_ROWS: Record<string, unknown> = {
-  brewery: { id: "brewery", description: "蔵元一式", contexts: ["sake", "tea"], groups: [] },
-  parent: { id: "parent", description: "", contexts: ["sake"], groups: ["childg"] },
-  childg: { id: "childg", description: "", contexts: ["tea"], groups: [] },
+  brewery: { id: "brewery", description: "蔵元一式", context_ids: ["id-sake", "id-tea"], groups: [] },
+  parent: { id: "parent", description: "", context_ids: ["id-sake"], groups: ["childg"] },
+  childg: { id: "childg", description: "", context_ids: ["id-tea"], groups: [] },
 };
 
 const ok = (result: unknown): Response =>
@@ -162,23 +162,26 @@ export class FakeServer {
       // The cross-context search: one tagged hit per named context,
       // already rank-interleaved the way the server merges, the plan
       // listing every target (#151).
-      const { contexts } = body as { contexts: string[] };
+      const { context_ids: contextIds } = body as { context_ids: string[] };
+      const nameOf = (id: string): string => id.replace(/^id-/, "");
       return ok({
         plan: {
-          contexts: contexts.map((name) => ({
-            context: name,
+          contexts: contextIds.map((id) => ({
+            context_id: id,
+            context_name: nameOf(id),
             lanes: {
               bm25: { ran: true },
               vector: { ran: false, reason: "no embedding provider is configured" },
             },
           })),
         },
-        hits: contexts.map((name) => ({
-          context: name,
-          source: `docs/${name}.md`,
+        hits: contextIds.map((id) => ({
+          context_id: id,
+          context_name: nameOf(id),
+          source: `docs/${nameOf(id)}.md`,
           paragraph: 0,
           score: 2.0,
-          text: `${name} の段落。`,
+          text: `${nameOf(id)} の段落。`,
           lanes: { bm25: { rank: 0, score: 2.0 } },
         })),
       });
@@ -215,7 +218,8 @@ export class FakeServer {
         plan: {
           contexts: [
             {
-              context: "sake",
+              context_id: "id-sake",
+              context_name: "sake",
               lanes: {
                 bm25: { ran: true },
                 vector: { ran: false, reason: "no embedding provider is configured" },

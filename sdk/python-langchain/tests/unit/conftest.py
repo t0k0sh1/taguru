@@ -36,11 +36,11 @@ GROUP_ROWS = {
     "brewery": {
         "id": "brewery",
         "description": "蔵元一式",
-        "contexts": ["sake", "tea"],
+        "context_ids": ["id-sake", "id-tea"],
         "groups": [],
     },
-    "parent": {"id": "parent", "description": "", "contexts": ["sake"], "groups": ["childg"]},
-    "childg": {"id": "childg", "description": "", "contexts": ["tea"], "groups": []},
+    "parent": {"id": "parent", "description": "", "context_ids": ["id-sake"], "groups": ["childg"]},
+    "childg": {"id": "childg", "description": "", "context_ids": ["id-tea"], "groups": []},
 }
 
 
@@ -200,7 +200,8 @@ class FakeServer:
                     "plan": {
                         "contexts": [
                             {
-                                "context": name,
+                                "context_id": context_id,
+                                "context_name": context_id.removeprefix("id-"),
                                 "lanes": {
                                     "bm25": {"ran": True},
                                     "vector": {
@@ -209,19 +210,20 @@ class FakeServer:
                                     },
                                 },
                             }
-                            for name in body["contexts"]
+                            for context_id in body["context_ids"]
                         ]
                     },
                     "hits": [
                         {
-                            "context": name,
-                            "source": f"docs/{name}.md",
+                            "context_id": context_id,
+                            "context_name": context_id.removeprefix("id-"),
+                            "source": f"docs/{context_id.removeprefix('id-')}.md",
                             "paragraph": 0,
                             "score": 2.0,
-                            "text": f"{name} の段落。",
+                            "text": f"{context_id.removeprefix('id-')} の段落。",
                             "lanes": {"bm25": {"rank": 0, "score": 2.0}},
                         }
-                        for name in body["contexts"]
+                        for context_id in body["context_ids"]
                     ],
                 }
             )
@@ -264,7 +266,8 @@ class FakeServer:
                     "plan": {
                         "contexts": [
                             {
-                                "context": "sake",
+                                "context_id": "id-sake",
+                                "context_name": "sake",
                                 "lanes": {
                                     "bm25": {"ran": True},
                                     "vector": {
