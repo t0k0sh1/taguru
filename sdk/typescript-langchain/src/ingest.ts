@@ -5,6 +5,8 @@
  * replace, no source-id fallback, live vocabulary seeding, dry_run).
  */
 
+import { randomUUID } from "node:crypto";
+
 import type { DocumentInterface } from "@langchain/core/documents";
 import type { BaseLanguageModelInput } from "@langchain/core/language_models/base";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
@@ -539,6 +541,11 @@ export class TaguruIngester {
   private readonly client: Taguru;
   private readonly create_context: boolean;
   private readonly context_description: string | undefined;
+  // The id a first ingest registers the context under (#965): a source
+  // header names its context by id, so a context that does not exist yet
+  // needs one chosen client-side — once per ingester, so every batch of
+  // the run (and a dry run's NDJSON, applied later) agrees on it.
+  private mintedContextId: string | null = null;
   private readonly structuredLlm: Runnable<BaseLanguageModelInput, StructuredOutputResult> | null;
   private readonly on_event: IngestEventCallback | undefined;
 
@@ -974,7 +981,8 @@ export class TaguruIngester {
     outcome.invalid_dropped = extraction.dropped;
     const description = this.create_context ? (this.context_description ?? null) : null;
     const ndjson = renderBatch(
-      this.context,
+      await this.headerContextId(),
+      this.create_context ? this.context : null,
       options.source,
       description,
       extraction,
@@ -1132,6 +1140,19 @@ export class TaguruIngester {
       );
     }
     return matches[0] ?? null;
+  }
+
+  /**
+   * The id every batch header names: the existing context's, or — on a
+   * first ingest — one minted here, stable for this ingester's lifetime.
+   */
+  private async headerContextId(): Promise<string> {
+    const existing = await this.contextId();
+    if (existing !== null) {
+      return existing;
+    }
+    this.mintedContextId ??= randomUUID();
+    return this.mintedContextId;
   }
 
   /**

@@ -1847,7 +1847,8 @@ function byAliasThenCanonical(a: [string, string], b: [string, string]): number 
  * pointers a few lines below.
  */
 export function renderBatch(
-  context: string,
+  contextId: string,
+  createName: string | null,
   source: string,
   description: string | null,
   extraction: Extraction,
@@ -1859,10 +1860,12 @@ export function renderBatch(
     type: "source",
     version: FORMAT_VERSION,
     id: source,
-    context,
+    context_id: contextId,
   };
-  if (description !== null) {
-    header["create"] = { description };
+  // A create block exists exactly when the writer names the context it
+  // would create (#965): the name is what the server registers it under.
+  if (createName !== null) {
+    header["create"] = { name: createName, description: description ?? "" };
   }
   const lines = [JSON.stringify(header)];
   if (passage !== null) {

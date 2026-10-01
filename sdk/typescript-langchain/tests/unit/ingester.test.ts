@@ -167,6 +167,7 @@ describe("TaguruIngester", () => {
     expect(server.imported).toHaveLength(1);
     const lines = server.imported[0]!.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines[0].type).toBe("source");
+    expect(lines[0].context_id).toBe("id-sake");
     expect(lines[0].create).toBeUndefined();
     expect(lines[1]).toEqual({ passage: DOC_TEXT }); // verbatim, unchunked
     expect(lines[2]).toEqual({ paragraph: 1, question: "杜氏は誰?" });
@@ -214,7 +215,7 @@ describe("TaguruIngester", () => {
     // (issue #347).
     const server = new FakeServer();
     server.importResultOverride = {
-      context: "sake",
+      context_id: "id-sake",
       source: "docs/aomine.md",
       created: false,
       retracted: 0,
@@ -274,7 +275,7 @@ describe("TaguruIngester", () => {
       context_description: "酒蔵の知識",
     }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     const header = JSON.parse(server.imported[0]!.split("\n", 1)[0]!);
-    expect(header.create).toEqual({ description: "酒蔵の知識" });
+    expect(header.create).toEqual({ name: "sake", description: "酒蔵の知識" });
   });
 
   it("requires a source id on documents", async () => {

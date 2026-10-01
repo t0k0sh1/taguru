@@ -200,7 +200,7 @@ class FakeServer {
       this.imported.push(typeof init?.body === "string" ? init.body : "");
       const batchResult =
         this.importResultOverride ?? {
-          context: "sake",
+          context_id: "id-sake",
           source: "docs/aomine.md",
           created: false,
           retracted: 0,
@@ -836,7 +836,7 @@ describe("syncObjectStorage", () => {
   test("locators and sections dropped are surfaced on the report", async () => {
     const server = new FakeServer();
     server.importResultOverride = {
-      context: "sake",
+      context_id: "id-sake",
       source: "s3://reports/a.md",
       created: true,
       retracted: 0,
