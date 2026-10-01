@@ -256,7 +256,10 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
         stdout.contains("import: 0 of 1 schema record(s) installed"),
         "{stdout}"
     );
-    assert!(stderr.contains("context 'nowhere'"), "{stderr}");
+    assert!(
+        stderr.contains("context '20aeff04-94e8-48d1-88c7-04e1f488a589'"),
+        "{stderr}"
+    );
 
     // A group naming a member that does not exist.
     let group = batches.join("group.jsonl");
@@ -773,10 +776,9 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
 #[test]
 fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() {
     let server = Server::start("http-assoc-paragraph");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の記憶"}),
     );
     server.ok(
         "POST",
@@ -1638,10 +1640,9 @@ fn the_import_endpoint_reports_dropped_association_paragraphs() {
 #[test]
 fn a_context_round_trips_through_the_export_endpoint_and_import() {
     let server = Server::start("http-export-roundtrip");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.25})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.25}),
     );
     server.ok(
         "POST",
@@ -1911,24 +1912,19 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
+    let create = |id: &str, name: &str| {
+        let header = json!({
+            "type": "source", "context_id": id, "id": "seed:create",
+            "create": {"name": name, "description": "d"},
+        });
+        post_import(&server, &format!("{header}\n"), Some("atok"))
+    };
     assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "sake", "description": "d"})),
-            "atok"
-        )
-        .0,
+        create("cef2e28b-43f0-4b6c-8201-abab0785399f", "sake").0,
         200
     );
     assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "bunko", "description": "d"})),
-            "atok"
-        )
-        .0,
+        create("98a4dbfd-92a8-4c44-be61-6b69e8c34c26", "bunko").0,
         200
     );
 
@@ -2211,10 +2207,9 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
 #[test]
 fn aliases_withdraw_and_the_spelling_is_reusable() {
     let server = Server::start("alias-remove");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "c", "description": "d"})),
+    server.create_with_id(
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        json!({"name": "c", "description": "d"}),
     );
     server.ok(
         "POST",
@@ -2434,10 +2429,9 @@ const DOMAIN_VIOLATION_BATCH: &str = "{\"type\": \"source\", \"context_id\": \"c
 #[test]
 fn import_report_line_names_schema_warnings_in_warn_mode() {
     let server = Server::start("schema-import-cli-warn");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     server.ok(
         "PUT",
@@ -2464,10 +2458,9 @@ fn import_report_line_names_schema_warnings_in_warn_mode() {
 #[test]
 fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
     let server = Server::start("schema-import-cli-strict");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     server.ok(
         "PUT",

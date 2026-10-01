@@ -83,6 +83,17 @@ impl Batch {
         self.associations.len() + self.concepts.len() + self.labels.len()
     }
 
+    /// What an operator-facing line calls this batch's `context` when
+    /// no server state is at hand (the offline and remote CLI reports):
+    /// the create block's name when the header carries one, the bare id
+    /// otherwise. Never used for a lookup — [`Self::context_id`] is the
+    /// key.
+    pub(crate) fn label(&self) -> &str {
+        self.create
+            .as_ref()
+            .map_or(self.context_id.as_str(), |spec| spec.name.as_str())
+    }
+
     /// The name a message, a grant check, or a quota lookup should
     /// call this batch's `context`: the registered display name when
     /// the id exists, the create block's name when this batch is about

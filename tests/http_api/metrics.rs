@@ -18,11 +18,11 @@ fn schema_document(mode: &str) -> serde_json::Value {
     })
 }
 
-/// A domain violation against `context` — `田中` typed `Person`,
+/// A domain violation against the context with id `context_id` — `田中` typed `Person`,
 /// disjoint from `杜氏`'s declared `domain: [Brewery]`.
-fn domain_violation_batch(context: &str, source: &str) -> String {
+fn domain_violation_batch(context_id: &str, source: &str) -> String {
     format!(
-        "{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"{source}\"}}\n\
+        "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"{source}\"}}\n\
          {{\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \
          \"weight\": 1.0}}\n\
          {{\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": \
@@ -438,7 +438,7 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         &format!("/contexts/{}/schema", server.cx("sake")),
         Some(schema_document("strict")),
     );
-    let strict_batch = domain_violation_batch("sake", "a.md");
+    let strict_batch = domain_violation_batch(&server.cx("sake"), "a.md");
 
     // The preview must not touch the counters at all.
     let (status, body) = post_import_dry_run(&server, &strict_batch, None);
@@ -487,7 +487,11 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         &format!("/contexts/{}/schema", server.cx("nomi")),
         Some(schema_document("warn")),
     );
-    let (status, body) = post_import(&server, &domain_violation_batch("nomi", "a.md"), None);
+    let (status, body) = post_import(
+        &server,
+        &domain_violation_batch(&server.cx("nomi"), "a.md"),
+        None,
+    );
     assert_eq!(status, 200, "{body}");
 
     let (_, text) = server.call("GET", "/metrics", None);

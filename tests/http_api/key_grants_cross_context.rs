@@ -315,16 +315,19 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     // Import carries its contexts in the body; the grant is checked
     // batch by batch before anything applies. (Import itself is an
     // admin verb, so even the granted context refuses for a writer.)
-    let batch = "{\"type\": \"source\", \"context_id\": \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\", \"id\": \"s\"}\n";
-    let (status, _) = post_import(&server, batch, Some("stok"));
+    let batch = format!(
+        "{{\"type\": \"source\", \"context_id\": \"{}\", \"id\": \"s\"}}\n",
+        server.cx("bunko")
+    );
+    let (status, _) = post_import(&server, &batch, Some("stok"));
     assert_eq!(status, 403);
-    let (status, scoped_admin) = post_import(&server, batch, Some("atok"));
+    let (status, scoped_admin) = post_import(&server, &batch, Some("atok"));
     assert_eq!(status, 200, "{scoped_admin}");
 
     // The body-carried-context refusal: curator is admin (clears the
     // role gate) but scoped to sake, so an out-of-grant bunko batch is
     // refused by the per-batch check, and an in-grant sake batch lands.
-    let (status, out_of_grant) = post_import(&server, batch, Some("ctok"));
+    let (status, out_of_grant) = post_import(&server, &batch, Some("ctok"));
     assert_eq!(status, 403, "{out_of_grant}");
     assert!(
         out_of_grant["error"]
@@ -340,16 +343,22 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         json!("nothing_written"),
         "{out_of_grant}"
     );
-    let sake_batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s\"}\n";
-    let (status, in_grant) = post_import(&server, sake_batch, Some("ctok"));
+    let sake_batch = format!(
+        "{{\"type\": \"source\", \"context_id\": \"{}\", \"id\": \"s\"}}\n",
+        server.cx("sake")
+    );
+    let (status, in_grant) = post_import(&server, &sake_batch, Some("ctok"));
     assert_eq!(status, 200, "{in_grant}");
 
     // A schema record's context is judged by the same grant, one step
     // earlier than groups (schemas install before groups restore) —
     // and with the same nothing-written integrity claim.
-    let schema_record = "{\"type\": \"schema\", \"context_id\": \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\", \"mode\": \"warn\", \
-                         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
-    let (status, schema_refused) = post_import(&server, schema_record, Some("ctok"));
+    let schema_record = format!(
+        "{{\"type\": \"schema\", \"context_id\": \"{}\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n",
+        server.cx("bunko")
+    );
+    let (status, schema_refused) = post_import(&server, &schema_record, Some("ctok"));
     assert_eq!(status, 403, "{schema_refused}");
     assert!(
         schema_refused["error"]
@@ -1131,10 +1140,10 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     let import_status = test_agent()
         .post(format!("{base}/import"))
         .header("Authorization", "Bearer opskey")
-        .send(
-            "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
-             {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
-        )
+        .send(format!(
+            "{{\"type\": \"source\", \"context_id\": \"{sake}\", \"id\": \"b.md\"}}\n\
+             {{\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}}\n"
+        ))
         .unwrap_or_else(|error| panic!("import: {error}"))
         .status()
         .as_u16();
@@ -1219,7 +1228,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
     assert_eq!(aliases_removed["fields"]["context"], json!(sake));
     assert_eq!(aliases_removed["fields"]["key"], json!("default"));
     let imported = audit_line("import source applied");
-    assert_eq!(imported["fields"]["context"], json!("sake"));
+    assert_eq!(imported["fields"]["context"], json!(sake));
     assert_eq!(imported["fields"]["source"], json!("b.md"));
     assert_eq!(imported["fields"]["key"], json!("default"));
     let compacted = audit_line("context compacted");

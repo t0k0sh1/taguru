@@ -32,7 +32,10 @@ fn kinds(page: &Value) -> Vec<String> {
 #[test]
 fn every_write_entrance_feeds_the_expected_event() {
     let server = Server::start("changes-events");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
     let cursor = tail_cursor(&server, "sake");
 
     // One write call = one aggregated event, however many lines it carried.
@@ -127,7 +130,10 @@ fn every_write_entrance_feeds_the_expected_event() {
 #[test]
 fn an_import_feeds_the_same_events_as_its_component_writes() {
     let server = Server::start("changes-import");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
     let cursor = tail_cursor(&server, "sake");
 
     let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc.md\"}\n\
@@ -156,7 +162,10 @@ fn an_import_feeds_the_same_events_as_its_component_writes() {
 #[test]
 fn limit_pages_with_more_and_the_cursor_walks_the_gap() {
     let server = Server::start("changes-paging");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
     let cursor = tail_cursor(&server, "sake");
     for index in 0..3 {
         server.ok(
@@ -199,7 +208,10 @@ fn limit_pages_with_more_and_the_cursor_walks_the_gap() {
 #[test]
 fn limit_zero_is_floored_to_one_not_left_as_a_non_advancing_page() {
     let server = Server::start("changes-limit-zero");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
     let cursor = tail_cursor(&server, "sake");
     for index in 0..2 {
         server.ok(
@@ -231,7 +243,10 @@ fn limit_zero_is_floored_to_one_not_left_as_a_non_advancing_page() {
 #[test]
 fn lost_positions_answer_stale_cursor_and_unknown_contexts_404() {
     let server = Server::start("changes-stale");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
 
     for cursor in ["garbage", "cf1-00000000000000aa-7"] {
         let (status, body) = server.call(
@@ -254,7 +269,10 @@ fn lost_positions_answer_stale_cursor_and_unknown_contexts_404() {
     // though the name answers again.
     let cursor = tail_cursor(&server, "sake");
     server.ok("DELETE", &format!("/contexts/{}", server.cx("sake")), None);
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake"}),
+    );
     let (status, body) = server.call(
         "GET",
         &format!("/contexts/{}/changes?since={cursor}", server.cx("sake")),

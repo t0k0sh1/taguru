@@ -1349,7 +1349,7 @@ fn export_one(
                 // declaration (and an export is a read besides).
                 AccessError::QuotaExceeded(error) => error,
             })?;
-    let rendered = render(name, &snapshot, Deadline::unbounded())?;
+    let rendered = render(id, &snapshot, Deadline::unbounded())?;
     let path = out.join(file_name);
     // Stage + fsync + rename, never a truncating write in place: a
     // backup that "wrote" but never reached the platter is worse than a

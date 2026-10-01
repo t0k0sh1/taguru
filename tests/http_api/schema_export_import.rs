@@ -12,9 +12,9 @@ use serde_json::json;
 
 use crate::support::*;
 
-fn schema_line(context: &str, mode: &str) -> String {
+fn schema_line(context_id: &str, mode: &str) -> String {
     format!(
-        "{{\"type\": \"schema\", \"context\": \"{context}\", \"mode\": \"{mode}\", \
+        "{{\"type\": \"schema\", \"context_id\": \"{context_id}\", \"mode\": \"{mode}\", \
          \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
          \"relations\": {{\"杜氏\": {{\"domain\": [\"Brewery\"], \"range\": []}}}}}}\n"
     )
@@ -35,12 +35,12 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
           \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
          {schema_record}\
          {{\"type\": \"group\", \"id\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
-        schema_record = schema_line("sake", "warn"),
+        schema_record = schema_line("cef2e28b-43f0-4b6c-8201-abab0785399f", "warn"),
     );
     let (status, outcome) = post_import(&server, &stream, None);
     assert_eq!(status, 200, "{outcome}");
     assert_eq!(
-        outcome["result"]["schemas"][0]["context"], "sake",
+        outcome["result"]["schemas"][0]["context_id"], "cef2e28b-43f0-4b6c-8201-abab0785399f",
         "{outcome}"
     );
     assert_eq!(outcome["result"]["schemas"][0]["mode"], "warn", "{outcome}");
@@ -67,7 +67,10 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
 
     // A stream with no schema record at all keeps the response shape
     // byte-identical to before this feature — no `schemas` key.
-    server.ok("POST", "/contexts", Some(json!({"name": "plain", })));
+    server.create_with_id(
+        "a116c9ed-46d6-4077-b4a4-3317d30fd88f",
+        json!({"name": "plain", }),
+    );
     let (status, plain) = post_import(
         &server,
         "{\"type\": \"source\", \"context_id\": \"a116c9ed-46d6-4077-b4a4-3317d30fd88f\", \"id\": \"b.md\"}\n",
@@ -101,21 +104,26 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
             ),
         ],
     );
-    let create = |name: &str| {
-        server.call_with_token(
-            "POST",
-            "/contexts",
-            Some(json!({"name": name, "description": "d"})),
-            Some("atok"),
-        )
+    let create = |id: &str, name: &str| {
+        let header = json!({
+            "type": "source", "context_id": id, "id": "seed:create",
+            "create": {"name": name, "description": "d"},
+        });
+        post_import(&server, &format!("{header}\n"), Some("atok"))
     };
-    assert_eq!(create("sake").0, 200);
-    assert_eq!(create("bunko").0, 200);
+    assert_eq!(
+        create("cef2e28b-43f0-4b6c-8201-abab0785399f", "sake").0,
+        200
+    );
+    assert_eq!(
+        create("98a4dbfd-92a8-4c44-be61-6b69e8c34c26", "bunko").0,
+        200
+    );
     let stream = format!(
         "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
-        schema_record = schema_line("bunko", "warn"),
+        schema_record = schema_line("98a4dbfd-92a8-4c44-be61-6b69e8c34c26", "warn"),
     );
     let (status, refusal) = post_import(&server, &stream, Some("wtok"));
     assert_eq!(status, 403, "{refusal}");
@@ -164,7 +172,7 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
           \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
-        schema_record = schema_line("ghost", "warn"),
+        schema_record = schema_line("ead6ef03-d61e-460c-933d-6d450c50a1e5", "warn"),
     );
     let (status, refusal) = post_import(&server, &stream, None);
     assert_eq!(status, 404, "{refusal}");
@@ -172,7 +180,7 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
         refusal["error"]
             .as_str()
             .unwrap()
-            .contains("context 'ghost'"),
+            .contains("context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'"),
         "{refusal}"
     );
 
@@ -195,15 +203,14 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
 #[test]
 fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
     let server = Server::start("schema-stream-partial-integrity");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     let stream = format!(
         "{first}{second}",
-        first = schema_line("sake", "warn"),
-        second = schema_line("ghost", "warn"),
+        first = schema_line("cef2e28b-43f0-4b6c-8201-abab0785399f", "warn"),
+        second = schema_line("ead6ef03-d61e-460c-933d-6d450c50a1e5", "warn"),
     );
     let (status, refusal) = post_import(&server, &stream, None);
     assert_eq!(status, 404, "{refusal}");
@@ -231,10 +238,9 @@ fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
 #[test]
 fn cli_export_and_import_url_round_trip_a_schema_record() {
     let source = Server::start("schema-cli-source");
-    source.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
+    source.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の知識"}),
     );
     source.ok(
         "PUT",
@@ -269,10 +275,9 @@ fn cli_export_and_import_url_round_trip_a_schema_record() {
     );
 
     let target = Server::start("schema-cli-target");
-    target.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の知識"})),
+    target.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の知識"}),
     );
     let (code, stdout, stderr) = run_cli(
         &[

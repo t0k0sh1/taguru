@@ -517,7 +517,12 @@ fn build_corpus(
         Ok(resolved) => resolved,
         Err(message) => return corpus_block(context, "failed", Some(message)),
     };
-    match resolved.map(|corpus_id| api.get_envelope(&["contexts", &corpus_id])) {
+    // An existing corpus keeps its id; a first run mints the one the
+    // rewritten headers' create block registers under the corpus name.
+    let corpus_id = resolved
+        .clone()
+        .unwrap_or_else(crate::registry::mint_context_id);
+    match resolved.map(|existing_id| api.get_envelope(&["contexts", &existing_id])) {
         Some(Ok(entry)) => {
             let existing = entry
                 .get("description")
@@ -585,7 +590,7 @@ fn build_corpus(
     let mut failed = 0usize;
     let mut failures = Vec::new();
     for file in &batch_files {
-        match rewrite_and_import(api, file, context, &marker) {
+        match rewrite_and_import(api, file, &corpus_id, context, &marker) {
             Ok(()) => imported += 1,
             Err(message) => {
                 failed += 1;
@@ -600,13 +605,9 @@ fn build_corpus(
         reason: (!failures.is_empty()).then(|| failures.join("; ")),
         segments_imported: imported,
         segments_failed: failed,
-        // The freshly imported corpus reads by id (#964); best-effort
-        // like the fetch itself.
-        passage_vectors: api
-            .context_id_by_name(context)
-            .ok()
-            .flatten()
-            .and_then(|corpus_id| fetch_passage_vectors(api, &corpus_id)),
+        // The freshly imported corpus reads by id; best-effort like
+        // the fetch itself.
+        passage_vectors: fetch_passage_vectors(api, &corpus_id),
     }
 }
 
@@ -673,15 +674,21 @@ fn list_batch_files(cell_dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// Rewrites one batch file's header line — `context` replaced,
-/// `create.description` stamped with this run's ownership marker,
-/// unconditionally (so a first import creates the `context` under it,
-/// and a resumed run's re-import still carries it) — and sends the
-/// result as one `POST /import` request. Every other line rides
-/// through byte-for-byte.
-fn rewrite_and_import(api: &Api, path: &Path, context: &str, marker: &str) -> Result<(), String> {
+/// Rewrites one batch file's header line — `context_id` replaced with
+/// the corpus's id, `create` stamped with the corpus's name and this
+/// run's ownership marker, unconditionally (so a first import creates
+/// the `context` under it, and a resumed run's re-import still carries
+/// it) — and sends the result as one `POST /import` request. Every
+/// other line rides through byte-for-byte.
+fn rewrite_and_import(
+    api: &Api,
+    path: &Path,
+    corpus_id: &str,
+    context: &str,
+    marker: &str,
+) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let rewritten = rewrite_batch_header(&text, context, marker)
+    let rewritten = rewrite_batch_header(&text, corpus_id, context, marker)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     api.import_chunk(&rewritten, false)
         .map(|_| ())
@@ -689,21 +696,31 @@ fn rewrite_and_import(api: &Api, path: &Path, context: &str, marker: &str) -> Re
 }
 
 /// The pure half of [`rewrite_and_import`]: parses line 1 as the batch
-/// header, replaces `context`, and stamps `create.description` with
-/// `marker` — unconditionally, overwriting whatever `create` block (if
-/// any) the extract cell wrote, since #260 always owns the corpus it
-/// imports into. Every following line is copied verbatim (blank lines
-/// dropped), never re-parsed, so a fact line's own formatting can never
-/// drift from what `taguru extract` wrote.
-fn rewrite_batch_header(text: &str, context: &str, marker: &str) -> Result<String, String> {
+/// header, replaces `context_id`, and stamps `create` with the corpus
+/// name and `marker` as its description — unconditionally, overwriting
+/// whatever `create` block (if any) the extract cell wrote, since #260
+/// always owns the corpus it imports into. Every following line is
+/// copied verbatim (blank lines dropped), never re-parsed, so a fact
+/// line's own formatting can never drift from what `taguru extract`
+/// wrote.
+fn rewrite_batch_header(
+    text: &str,
+    corpus_id: &str,
+    context: &str,
+    marker: &str,
+) -> Result<String, String> {
     let mut lines = text.lines();
     let Some(header_line) = lines.next() else {
         return Err("empty source file".to_string());
     };
     let mut header: Value = serde_json::from_str(header_line)
         .map_err(|error| format!("header is not JSON: {error}"))?;
-    header["context"] = Value::String(context.to_string());
-    header["create"] = serde_json::json!({ "description": marker });
+    header["context_id"] = Value::String(corpus_id.to_string());
+    header["create"] = serde_json::json!({ "name": context, "description": marker });
+    // The pre-#965 spelling of the column must not ride along.
+    if let Some(object) = header.as_object_mut() {
+        object.remove("context");
+    }
 
     let mut rewritten = header.to_string();
     for line in lines {

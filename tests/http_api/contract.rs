@@ -690,7 +690,7 @@ fn import_with_schema_reports_the_schema_outcome() {
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        body["result"]["schemas"][0]["context"], "corpus-g",
+        body["result"]["schemas"][0]["context_id"], "aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb",
         "{body}"
     );
     http_fixture(
@@ -1357,7 +1357,7 @@ fn promote_applies_and_a_dry_run_previews() {
         Some(json!({"concepts": {"たかせ": "高瀬", "あおみね": "青嶺"}})),
     );
 
-    let request = json!({"into": "corpus-p", "sources": ["session:w:a"]});
+    let request = json!({"into": server.cx("corpus-p"), "sources": ["session:w:a"]});
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/promote?dry_run=true", server.cx("scratch-w")),

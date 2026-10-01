@@ -45,10 +45,9 @@ fn domain_violation_batch() -> String {
 }
 
 fn seed(server: &Server, mode: &str) {
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     server.ok(
         "PUT",
@@ -284,10 +283,9 @@ fn a_type_declared_after_the_fact_it_types_still_validates() {
 #[test]
 fn a_batch_label_alias_resolving_to_the_reserved_label_refuses_in_every_mode() {
     let server = Server::start("schema-import-reserved");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     // Interns `schema:type` as an ordinary label before any schema
     // exists (guard 1) — the same precedent

@@ -53,10 +53,10 @@ adr/0003-extraction-model-benchmark.md.
 ";
 
 const USAGE: &str = "\
-usage: taguru benchmark extract --models FILE --context NAME --out DIR
+usage: taguru benchmark extract --models FILE --context ID --out DIR
                       [--runs N] [--questions N] [--fact-budget N]
                       [--no-passage] [--lossy] [--candidates] [--vocabulary PATH]
-                      [--description TEXT]
+                      [--name NAME] [--description TEXT]
                       [--parallel N] [--max-output-tokens N]
                       [--max-attempts N] CORPUS_DIR
 
@@ -81,7 +81,9 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
 
   --models FILE        model matrix (see docs/benchmark.html for the
                       schema)
-  --context NAME      the context every cell's source files target
+  --context ID        the context (by id) every cell's source files target
+  --name NAME         display name for the create block (forwarded to every
+                      cell's --name; --description needs it)
   --out DIR           results directory; re-running the same --out
                       resumes — a cell already recorded complete or
                       failed is never re-run
@@ -140,7 +142,12 @@ struct BenchArgs {
     models: PathBuf,
     out: PathBuf,
     runs: usize,
+    /// The context every cell targets, by id (#965) — forwarded as every
+    /// cell's `--context`.
     context: String,
+    /// `--name`, forwarded to every cell: the display name of the
+    /// header's create block. Present exactly when a create block is.
+    create_name: Option<String>,
     questions: usize,
     fact_budget: Option<usize>,
     no_passage: bool,
@@ -172,6 +179,7 @@ impl BenchArgs {
         let mut candidates = false;
         let mut vocabulary: Option<PathBuf> = None;
         let mut description: Option<String> = None;
+        let mut create_name: Option<String> = None;
         let mut parallel: Option<usize> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut max_attempts: Option<usize> = None;
@@ -276,6 +284,15 @@ impl BenchArgs {
                             "benchmark",
                             "--vocabulary needs a path and may only be given once",
                         ));
+                    }
+                },
+                "--name" => match rest.next() {
+                    Some(name) if create_name.is_none() => create_name = Some(name.clone()),
+                    Some(_) => {
+                        return Err(subcommand_usage_error("benchmark", "--name given twice"));
+                    }
+                    None => {
+                        return Err(subcommand_usage_error("benchmark", "--name needs a name"));
                     }
                 },
                 "--description" => match rest.next() {
@@ -400,16 +417,37 @@ impl BenchArgs {
         let Some(context) = context else {
             return Err(subcommand_usage_error(
                 "benchmark",
-                "--context NAME is required",
+                "--context ID is required",
             ));
         };
-        if context.len() > MAX_CONTEXT_NAME_BYTES {
+        if !crate::registry::is_context_id(&context) {
             return Err(subcommand_usage_error(
                 "benchmark",
                 &format!(
-                    "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
-                    context.len()
+                    "--context '{}' is not a context id: it takes a lowercase hyphenated \
+                     UUID — the id column of GET /contexts, or a fresh one (e.g. from \
+                     uuidgen) alongside --name — not the context's name",
+                    context
+                        .chars()
+                        .take(MAX_CONTEXT_NAME_BYTES)
+                        .collect::<String>()
                 ),
+            ));
+        }
+        if let Some(name) = &create_name {
+            if name.is_empty() || name.len() > MAX_CONTEXT_NAME_BYTES {
+                return Err(subcommand_usage_error(
+                    "benchmark",
+                    &format!(
+                        "--name of {} bytes must be 1..={MAX_CONTEXT_NAME_BYTES} bytes",
+                        name.len()
+                    ),
+                ));
+            }
+        } else if description.is_some() {
+            return Err(subcommand_usage_error(
+                "benchmark",
+                "--description needs --name: the create block names the context it would create",
             ));
         }
         if let Some(text) = &description
@@ -464,6 +502,7 @@ impl BenchArgs {
             out,
             runs: runs.unwrap_or(1),
             context,
+            create_name,
             questions,
             fact_budget,
             no_passage,
@@ -492,7 +531,10 @@ mod args_tests {
     #[test]
     fn required_flags_are_enforced() {
         assert_eq!(args(&[]).unwrap_err(), 2);
-        assert_eq!(args(&["--context", "c"]).unwrap_err(), 2);
+        assert_eq!(
+            args(&["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"]).unwrap_err(),
+            2
+        );
     }
 
     /// `--redact` takes an optional group like extract's own;
@@ -501,7 +543,14 @@ mod args_tests {
     fn redact_flags_parse_like_extracts_own() {
         let dir = std::env::temp_dir();
         let corpus = dir.to_str().unwrap();
-        let base = ["--models", "m.json", "--context", "c", "--out", "o"];
+        let base = [
+            "--models",
+            "m.json",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+        ];
         let with = |extra: &[&str]| {
             let mut words: Vec<&str> = base.to_vec();
             words.extend_from_slice(extra);
@@ -552,7 +601,7 @@ mod args_tests {
             "--models",
             "m.json",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--redact",
@@ -624,7 +673,7 @@ mod args_tests {
                 "--models",
                 "m.json",
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--out",
                 "o",
                 "--runs",
@@ -639,7 +688,7 @@ mod args_tests {
                 "--models",
                 "m.json",
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--out",
                 "o",
                 "--max-attempts",
@@ -660,7 +709,7 @@ mod args_tests {
         for duplicated in [
             ["--models", "m2.json"],
             ["--out", "o2"],
-            ["--context", "c2"],
+            ["--context", "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20"],
             ["--runs", "2"],
             ["--questions", "1"],
             ["--fact-budget", "5"],
@@ -670,7 +719,14 @@ mod args_tests {
             ["--max-attempts", "3"],
             ["--vocabulary", "v2"],
         ] {
-            let mut words = vec!["--models", "m.json", "--context", "c", "--out", "o"];
+            let mut words = vec![
+                "--models",
+                "m.json",
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--out",
+                "o",
+            ];
             // A first occurrence for the flags the base line lacks, so
             // the duplicate below is always the second one seen.
             if !words.contains(&duplicated[0]) {
@@ -694,7 +750,7 @@ mod args_tests {
             "--models",
             "m.json",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--vocabulary",
@@ -710,7 +766,15 @@ mod args_tests {
         let dir = std::env::temp_dir();
         let corpus = dir.to_str().unwrap();
         assert_eq!(
-            args(&["--models", "m.json", "--context", "c", "--out", "o"]).unwrap_err(),
+            args(&[
+                "--models",
+                "m.json",
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--out",
+                "o"
+            ])
+            .unwrap_err(),
             2,
             "no corpus is a usage error"
         );
@@ -719,7 +783,7 @@ mod args_tests {
                 "--models",
                 "m.json",
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--out",
                 "o",
                 corpus,
@@ -740,7 +804,7 @@ mod args_tests {
                 "--models",
                 "m.json",
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--out",
                 "o",
                 "--questions",
@@ -761,7 +825,7 @@ mod args_tests {
             "--models",
             "m.json",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--runs",
@@ -770,7 +834,7 @@ mod args_tests {
         ])
         .expect("valid arguments must parse");
         assert_eq!(parsed.runs, 3);
-        assert_eq!(parsed.context, "c");
+        assert_eq!(parsed.context, "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5");
         assert_eq!(parsed.corpus, corpus);
         assert_eq!(parsed.max_attempts, crate::extract::DEFAULT_MAX_ATTEMPTS);
         assert_eq!(parsed.parallel, 1);
@@ -3085,6 +3149,9 @@ fn run_cell(
     }
     if bench_args.no_passage {
         cmd.arg("--no-passage");
+    }
+    if let Some(name) = &bench_args.create_name {
+        cmd.arg("--name").arg(name);
     }
     if let Some(description) = &bench_args.description {
         cmd.arg("--description").arg(description);

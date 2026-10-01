@@ -17,10 +17,9 @@ use crate::support::*;
 /// structure, a dated supersession under a functional-tendency label,
 /// a sign-contested edge, and an undatable associations-only source.
 fn seed(server: &Server) {
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "整理"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "整理"}),
     );
     server.ok(
         "POST",
@@ -497,7 +496,7 @@ fn stub_dismiss(calls: Arc<Mutex<usize>>) -> String {
 fn overwrite_manifest(server: &Server, manifest_text: &str) {
     let batch = format!(
         "{}\n{}\n",
-        json!({"type": "source", "context_id": "294d84cc-05bc-4698-832b-f1b285bbcdc7",
+        json!({"type": "source", "context_id": server.cx("sake::consolidation"),
                "id": "consolidation:manifest"}),
         json!({"passage": manifest_text}),
     );

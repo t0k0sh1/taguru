@@ -2,7 +2,7 @@
   "contract": "http_contract",
   "method": "POST",
   "operation": "import_with_schema",
-  "request": "{\"type\": \"source\", \"context\": \"corpus-g\", \"id\": \"doc.md\", \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"type\": \"schema\", \"context\": \"corpus-g\", \"mode\": \"warn\", \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \"range\": [\"Concept\"]}}}\n",
+  "request": "{\"type\": \"source\", \"context_id\": \"aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb\", \"id\": \"doc.md\", \"create\": {\"name\": \"corpus-g\", \"description\": \"wire-contract schema-carrying import\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"type\": \"schema\", \"context_id\": \"aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb\", \"mode\": \"warn\", \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \"range\": [\"Concept\"]}}}\n",
   "response": {
     "result": {
       "batches": [
@@ -10,7 +10,7 @@
           "aliases": 0,
           "association_paragraphs_dropped": 0,
           "associations": 1,
-          "context": "corpus-g",
+          "context_id": "aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb",
           "created": true,
           "locators_dropped": 0,
           "locators_stored": 0,
@@ -27,7 +27,7 @@
       ],
       "schemas": [
         {
-          "context": "corpus-g",
+          "context_id": "aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb",
           "mode": "warn",
           "relations": 1,
           "types": 1

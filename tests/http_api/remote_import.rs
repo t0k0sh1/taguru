@@ -618,10 +618,12 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
             "2 source(s) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
         ),
         format!(
-            "1 schema record(s) after this chunk were never sent, from {path}: context 'a' schema"
+            "1 schema record(s) after this chunk were never sent, from {path}: context 'ca978112-ca1b-4dca-bac2-31b39a23dc4d' schema"
         ),
         format!("1 group record(s) after this chunk were never sent, from {path}: group 'g'"),
-        format!("this chunk carried 1 unit: {path}: context 'missing' source 'bad.md'"),
+        format!(
+            "this chunk carried 1 unit: {path}: context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' source 'bad.md'"
+        ),
     ] {
         assert!(stderr.contains(&line), "missing {line:?} in: {stderr}");
     }
@@ -683,7 +685,7 @@ fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field()
         report["error"]
             .as_str()
             .unwrap()
-            .contains("context 'missing' does not exist"),
+            .contains("context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' does not exist"),
         "{report}"
     );
     let landed: Vec<&str> = report["batches"]
@@ -692,7 +694,11 @@ fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field()
         .iter()
         .map(|outcome| outcome["context_id"].as_str().unwrap())
         .collect();
-    assert_eq!(landed, vec!["a"], "{report}");
+    assert_eq!(
+        landed,
+        vec!["ca978112-ca1b-4dca-bac2-31b39a23dc4d"],
+        "{report}"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
 }
@@ -1118,7 +1124,7 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("chunk 1/1 refused"), "{stderr}");
     let addressed = format!(
-        "taguru: import: {}: context 'a' source 'b.md': associations[1].subject: expected ",
+        "taguru: import: {}: context 'ca978112-ca1b-4dca-bac2-31b39a23dc4d' source 'b.md': associations[1].subject: expected ",
         violating.display()
     );
     assert!(stderr.contains(&addressed), "{stderr}");
@@ -1139,10 +1145,15 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
     let batches = batch_dir("remote-import-drop-queued");
     let file = batches.join("seed.jsonl");
     let mut stream = String::new();
-    for context in ["a", "b", "c", "d"] {
+    for (context, id) in [
+        ("a", "ca978112-ca1b-4dca-bac2-31b39a23dc4d"),
+        ("b", "3e23e816-0039-494a-b389-4f6564e1b134"),
+        ("c", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"),
+        ("d", "18ac3e73-43f0-4689-8c51-0e93f9352611"),
+    ] {
         stream.push_str(&format!(
-            "{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"{context}.md\", \
-             \"create\": {{\"description\": \"d\"}}}}\n\
+            "{{\"type\": \"source\", \"context_id\": \"{id}\", \"id\": \"{context}.md\", \
+             \"create\": {{\"name\": \"{context}\", \"description\": \"d\"}}}}\n\
              {{\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n"
         ));
     }

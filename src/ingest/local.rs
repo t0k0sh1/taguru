@@ -54,7 +54,7 @@ pub(super) fn run_local(
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_source_message(&batch.context_id, &batch.source, earlier)
+                            duplicate_source_message(batch.label(), &batch.source, earlier)
                         );
                         file_broken = true;
                         continue;

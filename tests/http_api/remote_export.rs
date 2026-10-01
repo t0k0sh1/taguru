@@ -454,7 +454,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /contexts, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -506,7 +506,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("the response carries context 'other'"),
+        stderr.contains("the response carries context 'd9298a10-d1b0-4358-b7dc-4bd85dac641b'"),
         "{stderr}"
     );
     assert!(stderr.contains("the response names group 'h'"), "{stderr}");
@@ -538,7 +538,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -674,7 +674,7 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#,
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#,
             ),
             ("HTTP/1.1 200 OK", r#"{"result":{"total":1,"contexts":[]}}"#),
             // GET /contexts/sake/export: a per-context failure.
@@ -743,7 +743,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /contexts: one context, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"contexts":[{"id":"id-sake","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -793,7 +793,10 @@ fn per_item_failures_count_and_the_rest_still_lands() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("context 'sake' (id-sake): context 'sake': not a taguru export stream"),
+        stderr.contains(
+            "context 'sake' (cef2e28b-43f0-4b6c-8201-abab0785399f): context 'sake': not a \
+             taguru export stream"
+        ),
         "{stderr}"
     );
     assert!(stderr.contains("group 'g'"), "{stderr}");
