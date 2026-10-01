@@ -9,6 +9,34 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (file format + wire) — import, export, promote and
+  `extract` address a `context` by id** (#965, ADR 0045 §2.7; rides the
+  same unreleased `http_contract` 2): a source header's `context` is
+  now `context_id` (a lowercase hyphenated UUID — a non-UUID is
+  refused by name, like a non-UUID path segment), and its `create`
+  block gains a required `name`. `create` means "if no `context`
+  carries this `context_id`, create it under this `name`", so a file
+  that creates a `context` picks its id itself (a fresh UUID) and every
+  later file repeats it; an existing id is used as is and `create` is
+  ignored. A schema record's `context` is `context_id` too, and an
+  export stream writes the id (with `create.name`) — a restore into
+  another data directory reproduces the same id, a restore under a new
+  id is an explicit rewrite. The import response's
+  `batches[i].context` / `schemas[i].context` became `context_id`, and
+  promote's `into` is the destination's id (a name is a 400). There is
+  no compatibility with the old column: a file or response still
+  carrying `context` fails with "unknown field `context`".
+  `taguru extract --context` and `taguru benchmark extract --context`
+  take an id; the new `--name` (with `--description`) adds the create
+  block. A router in front of shards sends a header whose id no shard
+  carries to `create.name`'s shard, and to the first shard when there
+  is no create block (which then refuses in the single-instance words).
+  Grants and quotas are still keyed on display names (#966), and group
+  records and cross-search bodies still name their members (a later
+  #965 step). The Python/TypeScript SDKs rename `ImportOutcome.context`
+  and `SchemaImportOutcome.context` to `context_id`, and the LangChain
+  ingesters write the new header (client-minting the id on a first
+  ingest).
 - **Breaking (wire) — `/contexts/{…}` paths take the context ID, and
   the directory row carries `id` and `name` as separate columns**
   (#964, ADR 0045; rides the same unreleased `http_contract` 2 as
@@ -23,12 +51,11 @@ Entries that change an on-disk format or a response shape say so.
   id)` (`after` + new `after_id`), and rename changes only the `name`
   column — the id, and so every path and cursor, never moves. Name
   boundaries that stay until #965/#966 keep working on display names:
-  cross-search `contexts` bodies, import-stream headers, group member
-  lists, and grant allow-lists (an ambiguous name is its own 409/403,
+  cross-search `contexts` bodies, group member lists, and grant
+  allow-lists (an ambiguous name is its own 409/403,
   never silently resolved). MCP `context` tool arguments now take ids
   (`create_context` takes `name`; argument renames are #967), CLI
-  `--context`/CONTEXT arguments take ids (`taguru extract --context`
-  stays a name — it writes the stream header), and the SDKs follow:
+  `--context`/CONTEXT arguments take ids, and the SDKs follow:
   `client.context(id)` / `contexts.create(name=…) -> row`,
   `DirectoryEntry.name`, and `after_id` paging. Single-context search
   responses report `plan.contexts` by display name, matching hits and
