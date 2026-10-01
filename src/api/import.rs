@@ -1376,6 +1376,43 @@ mod tests {
         .await
     }
 
+    /// A batch that got partway (`Partial`) wrote something: its
+    /// context's write counter moves exactly when `applied > 0`.
+    #[test]
+    fn a_partial_refusal_counts_as_a_write_only_when_something_landed() {
+        let state = scratch_state("partial-note-write");
+        state.create("sake", ContextMeta::default()).unwrap();
+        let context_id = state.id_of("sake");
+        let stream = format!(
+            "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"a.md\"}}\n"
+        );
+        let parsed = crate::ingest::parse_stream(std::io::Cursor::new(stream)).unwrap();
+        let batch = &parsed.batches[0];
+        let refuse = |applied: usize| {
+            import_refusal(
+                &state,
+                batch,
+                crate::ingest::ApplyRefusal::Partial {
+                    applied,
+                    message: "boom".to_string(),
+                    full: false,
+                },
+                "",
+                0,
+                0,
+                false,
+                Instant::now(),
+            )
+        };
+        let writes = || state.directory_entry("sake").unwrap().usage.writes;
+
+        assert_eq!(writes(), 0);
+        refuse(0);
+        assert_eq!(writes(), 0, "nothing landed: not a write");
+        refuse(3);
+        assert_eq!(writes(), 1, "three ops landed: one write noted");
+    }
+
     /// `true` once `context` has an installed schema, `false` for a
     /// schema-free (or nonexistent) `context` — never distinguishes the
     /// two, since every scenario these tests build already knows which

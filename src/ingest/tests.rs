@@ -1341,6 +1341,50 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
 /// AND, so a routine re-import that supplies a replacement passage
 /// must report `passage_dropped: false` from both entrances alike.
 #[test]
+fn a_preview_lets_a_later_batch_ride_the_create_of_an_earlier_one_in_the_stream() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-ingest-preview-seeded-create-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+    let first = parse(
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \"create\": {\"name\": \"sake\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    let later = parse(
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
+         {\"subject\": \"蔵\", \"label\": \"産地\", \"object\": \"灘\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+
+    // Alone, the later batch names a context that does not exist and
+    // carries no create block: refused.
+    assert!(matches!(
+        preview_batch(&state, &later, &PreviewSeeds::default()),
+        Err(ApplyRefusal::NoContext(_))
+    ));
+
+    // After the first batch previews clean and is absorbed, the real
+    // import's first batch would have created the context — the later
+    // one previews clean, and the context itself is still never made.
+    let mut seeds = PreviewSeeds::default();
+    let created = preview_batch(&state, &first, &seeds).unwrap();
+    assert!(created.created);
+    seeds.absorb(&first);
+    let followed = preview_batch(&state, &later, &seeds).unwrap();
+    assert!(!followed.created, "the earlier batch's create stands in");
+    assert!(
+        !state.context_id_exists("cef2e28b-43f0-4b6c-8201-abab0785399f"),
+        "a preview creates nothing"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
     let dir = std::env::temp_dir().join(format!(
         "taguru-ingest-passage-replace-parity-{}",

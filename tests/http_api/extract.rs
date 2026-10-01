@@ -5578,6 +5578,57 @@ fn changing_structured_output_mode_forces_a_re_extraction() {
 }
 
 #[test]
+fn changing_the_create_block_forces_a_re_extraction() {
+    // `--name` and `--description` are baked into every emitted header
+    // (#965), so a changed one must re-extract instead of skipping and
+    // leaving the old header in place; an unchanged one skips.
+    let docs = batch_dir("extract-createmanifest-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-createmanifest-out");
+    let id = "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5";
+
+    let extract = |extra: &[&str], expect_written: bool| {
+        let (url, requests) = if expect_written {
+            stub_chat_server(vec![json!({"associations": []}).to_string()])
+        } else {
+            (
+                "http://127.0.0.1:9".to_string(),
+                std::thread::spawn(Vec::new),
+            )
+        };
+        let provider = [
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ];
+        let mut args = vec!["--context", id];
+        args.extend(extra);
+        args.push(doc.to_str().unwrap());
+        let (code, stdout, _) = run_extract(&out, &provider, &args);
+        assert_eq!(code, 0, "{stdout}");
+        if expect_written {
+            assert!(stdout.contains("1 written"), "{extra:?}: {stdout}");
+            assert_eq!(requests.join().unwrap().len(), 1, "{extra:?}");
+        } else {
+            assert!(stdout.contains("1 unchanged"), "{extra:?}: {stdout}");
+        }
+    };
+
+    extract(&[], true);
+    // No create block -> a name: the header changes.
+    extract(&["--name", "specs"], true);
+    // Unchanged: skipped.
+    extract(&["--name", "specs"], false);
+    // A new name, then a new description: each re-extracts.
+    extract(&["--name", "manuals"], true);
+    extract(&["--name", "manuals", "--description", "d"], true);
+    extract(&["--name", "manuals", "--description", "d"], false);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
 fn changing_max_output_tokens_forces_a_re_extraction() {
     let docs = batch_dir("extract-budgetmanifest-docs");
     let doc = docs.join("a.md");

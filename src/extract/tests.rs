@@ -7410,6 +7410,36 @@ fn references_skip_the_title_the_path_and_minutes_labels_even_when_quoted() {
 }
 
 #[test]
+fn name_flag_parses_once_and_is_bounded() {
+    fn parse(extra: &[&str]) -> Result<Args, i32> {
+        let mut words = vec![
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+        ];
+        words.extend(extra);
+        words.push("d.md");
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let longest = "n".repeat(crate::api::MAX_CONTEXT_NAME_BYTES);
+    let too_long = "n".repeat(crate::api::MAX_CONTEXT_NAME_BYTES + 1);
+    assert_eq!(
+        parse(&["--name", "sake"]).unwrap().create_name.as_deref(),
+        Some("sake")
+    );
+    assert_eq!(
+        parse(&["--name", &longest]).unwrap().create_name.as_deref(),
+        Some(longest.as_str()),
+        "a name of exactly the limit is accepted"
+    );
+    assert!(matches!(parse(&["--name", &too_long]), Err(2)));
+    assert!(matches!(parse(&["--name", ""]), Err(2)));
+    assert!(matches!(parse(&["--name", "a", "--name", "b"]), Err(2)));
+    assert!(matches!(parse(&["--name"]), Err(2)));
+}
+
+#[test]
 fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())

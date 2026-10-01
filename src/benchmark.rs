@@ -738,6 +738,41 @@ mod args_tests {
         }
     }
 
+    /// `--name` (#965) parses once, carries its value, and is bounded to
+    /// the server's own context-name limit — the boundary itself is fine.
+    #[test]
+    fn name_flag_parses_once_and_is_bounded() {
+        let dir = std::env::temp_dir();
+        let corpus = dir.to_str().unwrap();
+        let parse = |extra: &[&str]| {
+            let mut words = vec![
+                "--models",
+                "m.json",
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--out",
+                "o",
+            ];
+            words.extend(extra);
+            words.push(corpus);
+            args(&words)
+        };
+        let longest = "n".repeat(MAX_CONTEXT_NAME_BYTES);
+        let too_long = "n".repeat(MAX_CONTEXT_NAME_BYTES + 1);
+        assert_eq!(
+            parse(&["--name", "bench"]).unwrap().create_name.as_deref(),
+            Some("bench")
+        );
+        assert_eq!(
+            parse(&["--name", &longest]).unwrap().create_name.as_deref(),
+            Some(longest.as_str()),
+            "a name of exactly the limit is accepted"
+        );
+        assert_eq!(parse(&["--name", &too_long]).unwrap_err(), 2);
+        assert_eq!(parse(&["--name", ""]).unwrap_err(), 2);
+        assert_eq!(parse(&["--name", "a", "--name", "b"]).unwrap_err(), 2);
+    }
+
     /// The happy path the duplicate test above cannot see: a single
     /// `--vocabulary` must parse and carry its path (a mutated guard
     /// that rejects every occurrence would still pass the
