@@ -348,7 +348,7 @@ pub(super) fn run_local(
                         json_groups.push(crate::api::GroupImportOutcome {
                             name: name.clone(),
                             outcome: outcome.as_str(),
-                            contexts: record.contexts.len(),
+                            contexts: record.context_ids.len(),
                             groups: record.groups.len(),
                         });
                     } else {
@@ -592,7 +592,7 @@ fn describe_schema(context: &str, installed: &schema::InstalledSchema) -> String
 fn describe_group(name: &str, record: &GroupRecord) -> String {
     format!(
         "group '{name}': {} member context(s), {} child group(s)",
-        record.contexts.len(),
+        record.context_ids.len(),
         record.groups.len()
     )
 }

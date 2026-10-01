@@ -148,13 +148,22 @@ enum Owner {
 }
 
 /// [`locate_owner`]'s verdict: the owning shard, a clean "no shard
-/// holds it" (every shard answered 404), or a response that already is
-/// the answer (a refusal passed through, an unreachable shard, a
-/// mid-move stray held by several).
+/// holds it" (every shard answered 404), a response that already is
+/// the answer (a refusal passed through, a mid-move stray held by
+/// several), or — no reachable shard holds it but some could not be
+/// asked — `Unreached`: the ready-made `shard_unreachable` refusal
+/// beside the shards it names. Most callers just answer with the
+/// refusal; a fan-out search instead sends the id to those shards, so
+/// a dead shard degrades to a labeled partial exactly as it did when
+/// the route map placed contexts statically.
 pub(super) enum Located {
     Shard(usize),
     Missing,
     Answered(Response),
+    Unreached {
+        shards: Vec<usize>,
+        refusal: Response,
+    },
 }
 
 /// [`resolve_owner`] for callers that treat "nowhere" as a state, not
@@ -187,6 +196,7 @@ pub(super) async fn locate_owner(
     let mut owners: Vec<usize> = Vec::new();
     let mut refused: Option<ShardAnswer> = None;
     let mut unreached: Vec<String> = Vec::new();
+    let mut unreached_shards: Vec<usize> = Vec::new();
     for (shard, outcome) in outcomes {
         match outcome {
             Ok(answer) if answer.status.is_success() => owners.push(shard),
@@ -195,7 +205,10 @@ pub(super) async fn locate_owner(
             // the answer, in the shard's own shape.
             Ok(answer) if answer.status == StatusCode::NOT_FOUND => {}
             Ok(answer) => refused = refused.or(Some(answer)),
-            Err(error) => unreached.push(format!("{}: {error}", map.url(shard))),
+            Err(error) => {
+                unreached.push(format!("{}: {error}", map.url(shard)));
+                unreached_shards.push(shard);
+            }
         }
     }
     match owners.as_slice() {
@@ -205,15 +218,18 @@ pub(super) async fn locate_owner(
                 return Located::Answered(passthrough(answer));
             }
             if !unreached.is_empty() {
-                return Located::Answered(api::error(
-                    ErrorCode::ShardUnreachable,
-                    format!(
-                        "context '{id}' was not found on any reachable shard, and these \
-                         could not be asked: {}",
-                        unreached.join("; ")
+                return Located::Unreached {
+                    shards: unreached_shards,
+                    refusal: api::error(
+                        ErrorCode::ShardUnreachable,
+                        format!(
+                            "context '{id}' was not found on any reachable shard, and these \
+                             could not be asked: {}",
+                            unreached.join("; ")
+                        ),
+                        started_at,
                     ),
-                    started_at,
-                ));
+                };
             }
             Located::Missing
         }
@@ -245,6 +261,7 @@ async fn resolve_owner(
     match locate_owner(state, map, id, headers, deadline, started_at).await {
         Located::Shard(shard) => Owner::Shard(shard),
         Located::Answered(response) => Owner::Answered(response),
+        Located::Unreached { refusal, .. } => Owner::Answered(refusal),
         Located::Missing => Owner::Answered(api::error(
             ErrorCode::NoContext,
             format!("context '{id}' not found"),

@@ -313,7 +313,7 @@ struct GroupLine {
     #[serde(default)]
     description: String,
     #[serde(default)]
-    contexts: Vec<String>,
+    context_ids: Vec<String>,
     #[serde(default)]
     groups: Vec<String>,
 }
@@ -337,16 +337,19 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
     )?;
     let mut record = GroupRecord {
         description: line.description,
-        contexts: BTreeSet::new(),
+        context_ids: BTreeSet::new(),
         groups: BTreeSet::new(),
     };
     for (field, names, set) in [
-        ("contexts", line.contexts, &mut record.contexts),
+        ("context_ids", line.context_ids, &mut record.context_ids),
         ("groups", line.groups, &mut record.groups),
     ] {
         for member in names {
             check_size(number, field, &member, MAX_CONTEXT_NAME_BYTES)?;
             check_nonempty(number, field, &member)?;
+            if field == "context_ids" {
+                check_context_id_in(number, field, &member)?;
+            }
             set.insert(member);
         }
         if set.len() > MAX_GROUP_MEMBERS {
@@ -988,6 +991,20 @@ fn check_context_id(number: usize, value: &str) -> Result<(), String> {
             "line {number}: '{value}' is not a context id: context_id takes a lowercase \
              hyphenated UUID — the id column of GET /contexts, or a fresh one (e.g. from \
              uuidgen) alongside create — not the context's name"
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_context_id`] for a member of a list column (a group
+/// record's `context_ids`): the same canonical-UUID test, the refusal
+/// naming the column the value sat in. The caller already ran the size
+/// cap.
+fn check_context_id_in(number: usize, field: &str, value: &str) -> Result<(), String> {
+    if !crate::registry::is_context_id(value) {
+        return Err(format!(
+            "line {number}: '{value}' is not a context id: {field} takes lowercase hyphenated \
+             UUIDs — the id column of GET /contexts — not the contexts' names"
         ));
     }
     Ok(())

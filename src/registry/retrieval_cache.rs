@@ -78,10 +78,15 @@ pub(crate) fn budget_seats_nothing(budget: usize) -> bool {
 /// operation's response can depend on.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct TargetFingerprint {
-    /// The `context`'s id — the addressable key, so a rename neither
-    /// splits nor poisons the cache and two same-named `contexts`
-    /// never share an entry.
+    /// The `context`'s id — the addressable key, so two same-named
+    /// `contexts` never share an entry.
     pub id: String,
+    /// The `context`'s display name at key time. Cached responses carry
+    /// it (`context_name` on every cross-search tag and plan entry,
+    /// #965), and a rename moves no revision counter — so the name is
+    /// part of the key: a rename costs one cold miss, never a served
+    /// page that still shows the old name.
+    pub name: String,
     /// [`super::EntryInner::cache_identity`] at key time.
     pub identity: u64,
     /// [`op_lanes`]' pair, in that fixed per-op order.
@@ -300,6 +305,7 @@ impl AppState {
                 let inner = entry.read_unless_deleted()?;
                 Some(TargetFingerprint {
                     id: id.clone(),
+                    name: inner.name.clone(),
                     identity: inner.cache_identity,
                     lanes: op_lanes(op, entry.revision_snapshot(&inner)),
                 })
@@ -352,6 +358,7 @@ mod tests {
             op: RetrievalCacheOp::Recall,
             targets: Box::new([TargetFingerprint {
                 id: "c".to_string(),
+                name: "c".to_string(),
                 identity: 1,
                 lanes: [0, 0],
             }]),

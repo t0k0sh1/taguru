@@ -360,7 +360,7 @@ fn cross_query_type_filter_is_evaluated_per_target_schema() {
         "POST",
         "/query",
         Some(json!({
-            "contexts": ["typed", "untyped"],
+            "context_ids": [server.cx("typed"), server.cx("untyped")],
             "label": ["杜氏", "所在"],
             "subject_types": "Brewery",
         })),
@@ -369,7 +369,11 @@ fn cross_query_type_filter_is_evaluated_per_target_schema() {
     // untyped 霧沢町 edge and every one of "untyped"'s edges (no
     // installed schema at all, §6.3 guard 1) are filtered out.
     assert_eq!(answer["total"], json!(1), "{answer}");
-    assert_eq!(answer["matches"][0]["context"], json!("typed"), "{answer}");
+    assert_eq!(
+        answer["matches"][0]["context_name"],
+        json!("typed"),
+        "{answer}"
+    );
     assert_eq!(
         answer["matches"][0]["subject"],
         json!("青嶺酒造"),

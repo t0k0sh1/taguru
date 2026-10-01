@@ -24,7 +24,8 @@
       "plan": {
         "contexts": [
           {
-            "context": "corpus-c",
+            "context_id": "00000000-0000-4000-8000-000000000001",
+            "context_name": "corpus-c",
             "lanes": {
               "bm25": {
                 "ran": true

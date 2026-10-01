@@ -265,7 +265,7 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let group = batches.join("group.jsonl");
     std::fs::write(
         &group,
-        format!("{batch}{{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"nowhere\"]}}\n"),
+        format!("{batch}{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"20aeff04-94e8-48d1-88c7-04e1f488a589\"]}}\n"),
     )
     .unwrap();
     let data_dir = common::scratch_dir("http-import-exit-group");
@@ -539,7 +539,7 @@ fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
          \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n\
-         {\"type\": \"group\", \"id\": \"brewers\", \"contexts\": [\"sake\"]}\n",
+         {\"type\": \"group\", \"id\": \"brewers\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .unwrap();
 
@@ -1353,7 +1353,7 @@ fn dry_run_and_a_real_import_reach_the_same_predicted_alias_rejection() {
 #[test]
 fn import_dry_run_skips_group_records() {
     let server = Server::start("http-import-dry-run-groups");
-    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n\
+    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n\
                   {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
                    \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n";
     let (status, preview) = post_import_dry_run(&server, stream, None);
@@ -1782,8 +1782,8 @@ fn import_restores_group_records_after_the_batches() {
     // not stream order — and `kura` names `kid`, which only this same
     // stream brings.
     let stream = "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
-                   \"contexts\": [\"sake\", \"bunko\"], \"groups\": [\"kid\"]}\n\
-                  {\"type\": \"group\", \"id\": \"kid\", \"contexts\": [\"bunko\"]}\n\
+                   \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\"], \"groups\": [\"kid\"]}\n\
+                  {\"type\": \"group\", \"id\": \"kid\", \"context_ids\": [\"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\"]}\n\
                   {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
                    \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
@@ -1801,7 +1801,11 @@ fn import_restores_group_records_after_the_batches() {
     assert_eq!(restored[0]["contexts"], json!(2), "{first}");
     assert_eq!(restored[0]["groups"], json!(1), "{first}");
     let row = server.ok("GET", "/groups/kura", None);
-    assert_eq!(row["contexts"], json!(["bunko", "sake"]), "{row}");
+    assert_eq!(
+        row["context_ids"],
+        server.cx_sorted(&["bunko", "sake"]),
+        "{row}"
+    );
     assert_eq!(row["groups"], json!(["kid"]), "{row}");
     assert_eq!(row["description"], json!("蔵まとめ"), "{row}");
 
@@ -1822,7 +1826,7 @@ fn import_restores_group_records_after_the_batches() {
     assert!(plain["result"].get("groups").is_none(), "{plain}");
 
     // A restore REPLACES the record: whatever it omits drops.
-    let shrunk = "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let shrunk = "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
     let (status, third) = post_import(&server, shrunk, None);
     assert_eq!(status, 200, "{third}");
     assert_eq!(
@@ -1831,7 +1835,7 @@ fn import_restores_group_records_after_the_batches() {
         "{third}"
     );
     let row = server.ok("GET", "/groups/kura", None);
-    assert_eq!(row["contexts"], json!(["sake"]), "{row}");
+    assert_eq!(row["context_ids"], server.cx_sorted(&["sake"]), "{row}");
     assert_eq!(row["groups"], json!([]), "{row}");
     assert_eq!(
         row["description"],
@@ -1849,12 +1853,15 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
     let server = Server::start("http-import-group-refuse");
     let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
                    \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
-                  {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n";
+                  {\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 404, "{refusal}");
     assert_eq!(refusal["code"], json!("no_context"), "{refusal}");
     assert!(
-        refusal["error"].as_str().unwrap().contains("ghost"),
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("ead6ef03-d61e-460c-933d-6d450c50a1e5"),
         "{refusal}"
     );
     // The batch landed; no group did.
@@ -1867,7 +1874,7 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
     assert_eq!(status, 404, "{gone}");
 
     // A child that neither exists nor rides the stream: no_group.
-    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"], \
+    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"], \
                    \"groups\": [\"nope\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 404, "{refusal}");
@@ -1931,7 +1938,7 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     // Out of grant through the record's own members: the whole request
     // refuses — the in-grant batch beside it included.
     let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s.md\"}\n\
-                  {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+                  {\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\"]}\n";
     let (status, refusal) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
     assert!(
@@ -1947,17 +1954,17 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     );
 
     // Inside the grant the same key restores normally.
-    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    let stream = "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
     let (status, applied) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 200, "{applied}");
 
     // The replace side is judged too: shrinking a standing group that
     // bundles an out-of-grant member would release that member, so the
     // context-scoped replace refuses.
-    let wide = "{\"type\": \"group\", \"id\": \"wide\", \"contexts\": [\"sake\", \"bunko\"]}\n";
+    let wide = "{\"type\": \"group\", \"id\": \"wide\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\"]}\n";
     let (status, seeded) = post_import(&server, wide, Some("atok"));
     assert_eq!(status, 200, "{seeded}");
-    let shrink = "{\"type\": \"group\", \"id\": \"wide\", \"contexts\": [\"sake\"]}\n";
+    let shrink = "{\"type\": \"group\", \"id\": \"wide\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
     let (status, refusal) = post_import(&server, shrink, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
 }
@@ -2094,7 +2101,7 @@ fn a_group_exports_as_one_import_record() {
             "PUT",
             "/groups/kura",
             Some(
-                json!({"description": "蔵まとめ", "contexts": ["sake", "bunko"],
+                json!({"description": "蔵まとめ", "context_ids": [server.cx("sake"), server.cx("bunko")],
                         "groups": ["kid"]})
             ),
             "atok"
@@ -2112,7 +2119,7 @@ fn a_group_exports_as_one_import_record() {
     assert_eq!(
         exported,
         json!({"type": "group", "version": "2026-10-01", "id": "kura", "description": "蔵まとめ",
-               "contexts": ["bunko", "sake"], "groups": ["kid"]})
+               "context_ids": server.cx_sorted(&["bunko", "sake"]), "groups": ["kid"]})
     );
 
     // Deleting and re-importing the record restores the group whole.
@@ -2126,13 +2133,21 @@ fn a_group_exports_as_one_import_record() {
         "{restored}"
     );
     let (_, row) = call("GET", "/groups/kura", None, "atok");
-    assert_eq!(row["result"]["contexts"], json!(["bunko", "sake"]), "{row}");
+    assert_eq!(
+        row["result"]["context_ids"],
+        server.cx_sorted(&["bunko", "sake"]),
+        "{row}"
+    );
 
     // A context-scoped key exports its grant's slice — the row it can
     // read IS the record it takes away.
     let (status, sliced) = call("GET", "/groups/kura/export", None, "ctok");
     assert_eq!(status, 200, "{sliced}");
-    assert_eq!(sliced["contexts"], json!(["sake"]), "{sliced}");
+    assert_eq!(
+        sliced["context_ids"],
+        server.cx_sorted(&["sake"]),
+        "{sliced}"
+    );
 
     // Unknown group: the ordinary 404.
     let (status, missing) = call("GET", "/groups/ghost/export", None, "atok");

@@ -463,7 +463,7 @@ mod tests {
 
         let record = groups::GroupRecord {
             description: "蔵まとめ".to_string(),
-            contexts: std::collections::BTreeSet::from(["sake".to_string()]),
+            context_ids: std::collections::BTreeSet::from(["sake".to_string()]),
             groups: std::collections::BTreeSet::new(),
         };
         fs::write(
@@ -475,7 +475,7 @@ mod tests {
         let (_, groups) = state.group_page(None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].0, "kura");
-        assert_eq!(groups[0].1.contexts.len(), 1);
+        assert_eq!(groups[0].1.context_ids.len(), 1);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -505,7 +505,7 @@ mod tests {
         // for.
         let parent = groups::GroupRecord {
             description: "parent".to_string(),
-            contexts: std::collections::BTreeSet::new(),
+            context_ids: std::collections::BTreeSet::new(),
             groups: std::collections::BTreeSet::from(["child".to_string()]),
         };
         fs::write(
@@ -550,7 +550,7 @@ mod tests {
         // An existing, already-loaded group with a good record...
         let kura = groups::GroupRecord {
             description: "蔵まとめ".to_string(),
-            contexts: std::collections::BTreeSet::new(),
+            context_ids: std::collections::BTreeSet::new(),
             groups: std::collections::BTreeSet::new(),
         };
         fs::write(

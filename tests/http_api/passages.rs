@@ -47,7 +47,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     // The response-level plan (#151): the same story the per-hit
     // evidence cannot tell — the semantic lane never ran here, and why.
     let plan = &page["plan"]["contexts"][0];
-    assert_eq!(plan["context"], "sake", "{page}");
+    assert_eq!(plan["context_name"], "sake", "{page}");
     assert_eq!(plan["lanes"]["bm25"]["ran"], json!(true), "{page}");
     assert_eq!(plan["lanes"]["vector"]["ran"], json!(false), "{page}");
     assert_eq!(
@@ -579,17 +579,23 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     let across = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["fruit"], "query": "みかん", "semantic_floor": 0.2})),
+        Some(
+            json!({"context_ids": [server.cx("fruit")], "query": "みかん", "semantic_floor": 0.2}),
+        ),
     );
     assert_eq!(across["hits"].as_array().unwrap().len(), 1, "{across}");
-    assert_eq!(across["hits"][0]["context"], json!("fruit"), "{across}");
+    assert_eq!(
+        across["hits"][0]["context_name"],
+        json!("fruit"),
+        "{across}"
+    );
     assert_eq!(
         across["hits"][0]["source"],
         json!("docs/apple.md"),
         "{across}"
     );
     let cross_plan = &across["plan"]["contexts"][0];
-    assert_eq!(cross_plan["context"], json!("fruit"), "{across}");
+    assert_eq!(cross_plan["context_name"], json!("fruit"), "{across}");
     assert!(
         (cross_plan["lanes"]["vector"]["floor"].as_f64().unwrap() - 0.2).abs() < 1e-6,
         "{across}"
@@ -621,7 +627,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     let split = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["fruit", "veggie"], "query": "みかん"})),
+        Some(json!({"context_ids": [server.cx("fruit"), server.cx("veggie")], "query": "みかん"})),
     );
     let floors: Vec<f64> = split["plan"]["contexts"]
         .as_array()

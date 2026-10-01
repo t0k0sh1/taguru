@@ -457,7 +457,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let recalled = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["izakaya", "sakagura"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("izakaya"), server.cx("sakagura")], "cue": "蔵"})),
     );
     assert_eq!(recalled["total"], json!(2), "{recalled}");
     let tag_of = |matches: &Value, object: &str| -> String {
@@ -466,7 +466,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
             .unwrap()
             .iter()
             .find(|found| found["object"] == json!(object))
-            .unwrap_or_else(|| panic!("no match with object {object}: {matches}"))["context"]
+            .unwrap_or_else(|| panic!("no match with object {object}: {matches}"))["context_name"]
             .as_str()
             .unwrap()
             .to_string()
@@ -478,17 +478,21 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let cut = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["izakaya", "sakagura"], "cue": "蔵", "limit": 1})),
+        Some(json!({"context_ids": [server.cx("izakaya"), server.cx("sakagura")], "cue": "蔵", "limit": 1})),
     );
     assert_eq!(cut["total"], json!(2), "{cut}");
     assert_eq!(cut["matches"].as_array().unwrap().len(), 1, "{cut}");
-    assert_eq!(cut["matches"][0]["context"], json!("sakagura"), "{cut}");
+    assert_eq!(
+        cut["matches"][0]["context_name"],
+        json!("sakagura"),
+        "{cut}"
+    );
 
     // Naming a context twice is redundant, not double.
     let deduped = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["izakaya", "izakaya", "sakagura"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("izakaya"), server.cx("izakaya"), server.cx("sakagura")], "cue": "蔵"})),
     );
     assert_eq!(deduped["total"], json!(2), "{deduped}");
 
@@ -496,10 +500,12 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let queried = server.ok(
         "POST",
         "/query",
-        Some(json!({"contexts": ["izakaya", "sakagura"], "label": "杜氏"})),
+        Some(
+            json!({"context_ids": [server.cx("izakaya"), server.cx("sakagura")], "label": "杜氏"}),
+        ),
     );
     assert_eq!(queried["total"], json!(1), "{queried}");
-    assert_eq!(queried["matches"][0]["context"], json!("sakagura"));
+    assert_eq!(queried["matches"][0]["context_name"], json!("sakagura"));
     assert_eq!(queried["matches"][0]["object"], json!("高瀬"));
 
     // The text lane: hits carry their context and interleave by
@@ -517,19 +523,21 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let hits = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["izakaya", "sakagura"], "query": "蔵元"})),
+        Some(
+            json!({"context_ids": [server.cx("izakaya"), server.cx("sakagura")], "query": "蔵元"}),
+        ),
     );
     let hits = hits["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
-    assert_eq!(hits[0]["context"], json!("izakaya"), "{hits:?}");
-    assert_eq!(hits[1]["context"], json!("sakagura"), "{hits:?}");
+    assert_eq!(hits[0]["context_name"], json!("izakaya"), "{hits:?}");
+    assert_eq!(hits[1]["context_name"], json!("sakagura"), "{hits:?}");
     assert_eq!(hits[0]["source"], json!("iz.md"), "{hits:?}");
 
     // Refusals, each before anything is searched.
     let (status, empty) = server.call(
         "POST",
         "/recall",
-        Some(json!({"contexts": [], "cue": "蔵"})),
+        Some(json!({"context_ids": [], "cue": "蔵"})),
     );
     assert_eq!(status, 400, "{empty}");
     assert_eq!(empty["code"], json!("invalid_argument"), "{empty}");
@@ -537,12 +545,12 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let (status, missing) = server.call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["izakaya", "ghost"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("izakaya"), GHOST_ID], "cue": "蔵"})),
     );
     assert_eq!(status, 404, "{missing}");
     assert_eq!(missing["code"], json!("no_context"), "{missing}");
     assert!(
-        missing["error"].as_str().unwrap().contains("'ghost'"),
+        missing["error"].as_str().unwrap().contains(GHOST_ID),
         "{missing}"
     );
 
@@ -550,7 +558,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     let (status, over) = server.call(
         "POST",
         "/query",
-        Some(json!({"contexts": flood, "label": "l"})),
+        Some(json!({"context_ids": flood, "label": "l"})),
     );
     assert_eq!(status, 400, "{over}");
     assert_eq!(over["code"], json!("over_limit"), "{over}");
@@ -562,7 +570,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
         Some(json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "contexts": ["izakaya", "sakagura"], "cue": "蔵",
+                "context_ids": [server.cx("izakaya"), server.cx("sakagura")], "cue": "蔵",
             }},
         })),
     );
@@ -581,7 +589,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "context": "izakaya", "contexts": ["sakagura"], "cue": "蔵",
+                "context": "izakaya", "context_ids": [server.cx("sakagura")], "cue": "蔵",
             }},
         })),
     );
@@ -619,7 +627,7 @@ fn cross_recall_merges_four_targets_gathered_concurrently() {
     let recalled = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["c1", "c2", "c3", "c4"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("c1"), server.cx("c2"), server.cx("c3"), server.cx("c4")], "cue": "蔵"})),
     );
     assert_eq!(recalled["total"], json!(4), "{recalled}");
     let matches = recalled["matches"].as_array().unwrap();
@@ -628,7 +636,7 @@ fn cross_recall_merges_four_targets_gathered_concurrently() {
     // or misrouted by the concurrent gather.
     let contexts: Vec<&str> = matches
         .iter()
-        .map(|m| m["context"].as_str().unwrap())
+        .map(|m| m["context_name"].as_str().unwrap())
         .collect();
     assert_eq!(contexts, vec!["c4", "c3", "c2", "c1"], "{recalled}");
     let objects: Vec<&str> = matches
@@ -662,21 +670,29 @@ fn cross_recall_pages_with_a_cursor_across_contexts() {
     let first = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1})),
+        Some(json!({"context_ids": [server.cx("zeta"), server.cx("alpha")], "cue": "蔵", "limit": 1})),
     );
     assert_eq!(first["total"], json!(2), "{first}");
     let matches = first["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1);
+    // The context ID breaks the identical-triple tie, lexicographically
+    // (#965: names repeat, ids do not) — not the ['zeta', 'alpha']
+    // request order.
+    let (alpha, zeta) = (server.cx("alpha"), server.cx("zeta"));
+    let (tied_first, tied_second) = if alpha < zeta {
+        ("alpha", "zeta")
+    } else {
+        ("zeta", "alpha")
+    };
     assert_eq!(
-        matches[0]["context"],
-        json!("alpha"),
-        "context breaks the identical-triple tie, lexicographically — \
-         not the ['zeta', 'alpha'] request order: {first}"
+        matches[0]["context_name"],
+        json!(tied_first),
+        "the lesser id leads the identical-triple tie: {first}"
     );
 
     let cursor_from = |m: &Value| {
         json!({
-            "weight": m["weight"], "context": m["context"],
+            "weight": m["weight"], "context_id": m["context_id"],
             "subject": m["subject"], "label": m["label"], "object": m["object"],
         })
     };
@@ -684,34 +700,34 @@ fn cross_recall_pages_with_a_cursor_across_contexts() {
         "POST",
         "/recall",
         Some(json!({
-            "contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1,
+            "context_ids": [server.cx("zeta"), server.cx("alpha")], "cue": "蔵", "limit": 1,
             "after": cursor_from(&matches[0]),
         })),
     );
     assert_eq!(second["total"], json!(2), "total stays constant: {second}");
     let matches = second["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0]["context"], json!("zeta"), "{second}");
+    assert_eq!(matches[0]["context_name"], json!(tied_second), "{second}");
 
     let third = server.ok(
         "POST",
         "/recall",
         Some(json!({
-            "contexts": ["zeta", "alpha"], "cue": "蔵", "limit": 1,
+            "context_ids": [server.cx("zeta"), server.cx("alpha")], "cue": "蔵", "limit": 1,
             "after": cursor_from(&matches[0]),
         })),
     );
     assert_eq!(third["matches"], json!([]), "the walk has ended: {third}");
 
-    // A cross-context cursor's extra `context` field is REQUIRED — a
-    // bare MatchCursor-shaped `after` (missing `context`) is a 422
+    // A cross-context cursor's extra `context_id` field is REQUIRED — a
+    // bare MatchCursor-shaped `after` (missing `context_id`) is a 422
     // (body fails to deserialize), not silently accepted with that
     // field dropped.
     let (status, refusal) = server.call(
         "POST",
         "/recall",
         Some(json!({
-            "contexts": ["zeta", "alpha"], "cue": "蔵",
+            "context_ids": [server.cx("zeta"), server.cx("alpha")], "cue": "蔵",
             "after": {"weight": 1.0, "subject": "蔵", "label": "銘柄", "object": "青嶺"},
         })),
     );
@@ -751,12 +767,12 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     server.ok(
         "PUT",
         "/groups/sakaya",
-        Some(json!({"contexts": ["izakaya"]})),
+        Some(json!({"context_ids": [server.cx("izakaya")]})),
     );
     server.ok(
         "PUT",
         "/groups/nomiya",
-        Some(json!({"contexts": ["sakagura"], "groups": ["sakaya"]})),
+        Some(json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"]})),
     );
 
     // One group name reaches both contexts through the nesting.
@@ -771,7 +787,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let deduped = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["izakaya"], "groups": ["nomiya", "sakaya"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("izakaya")], "groups": ["nomiya", "sakaya"], "cue": "蔵"})),
     );
     assert_eq!(deduped["total"], json!(2), "{deduped}");
 
@@ -782,7 +798,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         Some(json!({"groups": ["nomiya"], "label": "杜氏"})),
     );
     assert_eq!(queried["total"], json!(1), "{queried}");
-    assert_eq!(queried["matches"][0]["context"], json!("sakagura"));
+    assert_eq!(queried["matches"][0]["context_name"], json!("sakagura"));
 
     // Passage rank ties: contexts named directly lead, group-resolved
     // members follow — sakagura outranks izakaya arriving via sakaya.
@@ -799,12 +815,14 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let hits = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["sakagura"], "groups": ["sakaya"], "query": "蔵元"})),
+        Some(
+            json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"], "query": "蔵元"}),
+        ),
     );
     let hits = hits["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
-    assert_eq!(hits[0]["context"], json!("sakagura"), "{hits:?}");
-    assert_eq!(hits[1]["context"], json!("izakaya"), "{hits:?}");
+    assert_eq!(hits[0]["context_name"], json!("sakagura"), "{hits:?}");
+    assert_eq!(hits[1]["context_name"], json!("izakaya"), "{hits:?}");
 
     // An empty group is an empty result, not an error…
     server.ok("PUT", "/groups/kara", Some(json!({})));
@@ -917,7 +935,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, inside) = call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("sake")], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 200, "{inside}");
@@ -926,7 +944,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, live) = call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "bunko"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 403, "{live}");
@@ -944,15 +962,12 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, ghost) = call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "ghost"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("sake"), GHOST_ID], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 403, "{ghost}");
     assert_eq!(
-        ghost["error"]
-            .as_str()
-            .unwrap()
-            .replace("'ghost'", "'bunko'"),
+        ghost["error"].as_str().unwrap().replace(GHOST_ID, "bunko"),
         live["error"].as_str().unwrap(),
         "the refusals must differ in nothing but the echoed name"
     );
@@ -962,7 +977,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, truth) = call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "ghost"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("sake"), GHOST_ID], "cue": "蔵"})),
         "atok",
     );
     assert_eq!(status, 404, "{truth}");
@@ -972,14 +987,14 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, _) = call(
         "POST",
         "/query",
-        Some(json!({"contexts": ["sake", "bunko"], "label": "l"})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")], "label": "l"})),
         "stok",
     );
     assert_eq!(status, 403);
     let (status, _) = call(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["sake", "bunko"], "query": "蔵元"})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")], "query": "蔵元"})),
         "stok",
     );
     assert_eq!(status, 403);
@@ -1009,7 +1024,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, _) = call(
         "PUT",
         "/groups/zenbu",
-        Some(json!({"contexts": ["sake", "bunko"]})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
         "atok",
     );
     assert_eq!(status, 200);
@@ -1022,7 +1037,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     assert_eq!(status, 200, "{sliced}");
     assert_eq!(sliced["result"]["total"], json!(1), "{sliced}");
     assert_eq!(
-        sliced["result"]["matches"][0]["context"],
+        sliced["result"]["matches"][0]["context_name"],
         json!("sake"),
         "{sliced}"
     );
@@ -1036,7 +1051,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, _) = call(
         "PUT",
         "/groups/soto",
-        Some(json!({"contexts": ["bunko"]})),
+        Some(json!({"context_ids": [server.cx("bunko")]})),
         "atok",
     );
     assert_eq!(status, 200);
@@ -1055,7 +1070,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, direct) = call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["bunko"], "groups": ["zenbu"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("bunko")], "groups": ["zenbu"], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 403, "{direct}");

@@ -370,16 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn the_projection_splits_members_by_owner_and_keeps_children_whole() {
-        let map = RouteMap::parse("a = http://a:1\nb = http://b:1\n").unwrap();
-        assert_eq!(map.project(["a", "b"], 0), vec!["a".to_string()]);
-        assert_eq!(map.project(["a", "b"], 1), vec!["b".to_string()]);
-        // A member no shard owns projects nowhere — the owning-shard
-        // refusal downstream is what reports it.
-        assert!(map.project(["stray"], 0).is_empty());
-    }
-
-    #[test]
     fn abort_precedence_matches_the_single_instance_check_order() {
         assert!(abort_rank(Some("forbidden")) < abort_rank(Some("no_context")));
         assert!(abort_rank(Some("no_context")) < abort_rank(Some("no_group")));

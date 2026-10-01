@@ -90,16 +90,6 @@ impl AppState {
         }
     }
 
-    /// [`Self::context_revision`] for the one caller that still keys
-    /// on display names — the `group` fingerprint, whose records hold
-    /// member names until #965. `None` for a missing OR ambiguous
-    /// name, which the fingerprint treats like any vanished member.
-    pub fn context_revision_named(&self, name: &str) -> Option<ContextRevision> {
-        let entry = self.lookup_named(name)?;
-        let inner = entry.read_unless_deleted()?;
-        Some(entry.revision_snapshot(&inner))
-    }
-
     /// One directory row by id, or `None` for an unknown `context` —
     /// `GET /contexts/{id}`'s read.
     pub fn directory_entry_by_id(&self, id: &str) -> Option<DirectoryEntry> {

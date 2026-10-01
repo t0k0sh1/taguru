@@ -296,8 +296,11 @@ fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
     );
 
     // The cross-context route refuses the same way...
-    let (status, parsed) =
-        server.call("POST", "/query", Some(json!({"contexts": ["empty-query"]})));
+    let (status, parsed) = server.call(
+        "POST",
+        "/query",
+        Some(json!({"context_ids": [server.cx("empty-query")]})),
+    );
     assert_eq!(status, 400, "{parsed}");
     assert!(
         parsed["error"]
@@ -312,7 +315,7 @@ fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
         "POST",
         "/query",
         Some(json!({
-            "contexts": ["empty-query"],
+            "context_ids": [server.cx("empty-query")],
             "subject": null,
             "label": null,
             "object": null
@@ -331,7 +334,7 @@ fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
     server.ok(
         "POST",
         "/query",
-        Some(json!({"contexts": ["empty-query"], "object": "x"})),
+        Some(json!({"context_ids": [server.cx("empty-query")], "object": "x"})),
     );
 
     // The refusal reaches through the MCP tool-call path as well.

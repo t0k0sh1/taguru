@@ -344,13 +344,13 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
     let cross = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["sake", "beer"], "query": "共通語の資料", "tags": ["酒"]})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("beer")], "query": "共通語の資料", "tags": ["酒"]})),
     );
     let contexts: Vec<&str> = cross["hits"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|hit| hit["context"].as_str().unwrap())
+        .map(|hit| hit["context_name"].as_str().unwrap())
         .collect();
     assert!(!contexts.is_empty() && contexts.iter().all(|context| *context == "sake"));
     assert_eq!(
@@ -669,7 +669,7 @@ fn cross_recall_matches_resolve_section_markers_through_the_name_id_bridge() {
     let page = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["marked"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("marked")], "cue": "蔵"})),
     );
     let attribution = &page["matches"][0]["attributions"][0];
     assert_eq!(

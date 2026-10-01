@@ -16,8 +16,8 @@ use super::aliases::{KeysetQuery, keyset_bounds};
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found, key_name,
-    nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
+    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found, invalid_context_ids,
+    key_name, nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
 };
 
 /// A bounded `group`-directory page; `total` counts the whole directory,
@@ -38,19 +38,20 @@ pub struct GroupEntry {
     #[serde(rename = "id")]
     pub name: String,
     pub description: String,
-    /// Member `context` names, sorted. For a `context`-scoped key this
-    /// carries only the members its grant allows.
-    pub contexts: Vec<String>,
+    /// Member `context` ids, sorted (#965). For a `context`-scoped key
+    /// this carries only the members its grant allows.
+    pub context_ids: Vec<String>,
     /// Child `group` names, sorted — never grant-filtered (so the set
     /// moves straight from the record): like the row itself, a `group`'s
     /// name is an organizational label, not `context` content, and the
-    /// `contexts` BEHIND a child stay filtered wherever they are served.
+    /// `context_ids` BEHIND a child stay filtered wherever they are served.
     pub groups: BTreeSet<String>,
     /// Change token over the `group`'s transitive member `contexts`: a
-    /// stable hash of each visible member's name and revision counters
+    /// stable hash of each visible member's id and revision counters
     /// (see `ContextRevision`), so a `group`-level cache invalidates
     /// exactly when a relevant member changed — a member write, an
-    /// embedding refresh, a rename, or a membership edit all move it;
+    /// embedding refresh, or a membership edit all move it (a rename
+    /// does not: members are ids, #965);
     /// anything else leaves it alone. Computed over the slice the
     /// caller's key can see, so it leaks no change-signal about
     /// `contexts` beyond a scoped grant. Compare for equality only, and
@@ -60,6 +61,18 @@ pub struct GroupEntry {
     /// reads an empty token instead of refusing the row.
     #[serde(default)]
     pub fingerprint: String,
+}
+
+/// [`scope_allows`] for a member held by id: grants still speak display
+/// names (#966 moves them to ids), so the id is read back to its
+/// current name first. A member the registry no longer holds is judged
+/// as its bare id, which no name-keyed grant allows — filtered out.
+pub(super) fn scope_allows_id(
+    state: &AppState,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
+    id: &str,
+) -> bool {
+    grant.is_none() || scope_allows(grant, &state.name_of_stem(id))
 }
 
 /// Whether the key's grant lets it see the named `context` — no grant
@@ -97,7 +110,7 @@ fn group_entry(
     Ok(GroupEntry {
         name,
         description: record.description,
-        contexts: scoped_member_contexts(record.contexts, grant),
+        context_ids: scoped_member_contexts(state, record.context_ids, grant),
         groups: record.groups,
         fingerprint,
     })
@@ -155,10 +168,10 @@ fn group_fingerprint(
         if deadline.expired() || injected_fingerprint_loop_expiry() {
             return Err(DeadlineExceeded);
         }
-        if !scope_allows(grant, &context) {
+        if !scope_allows_id(state, grant, &context) {
             continue;
         }
-        let Some(revision) = state.context_revision_named(&context) else {
+        let Some(revision) = state.context_revision(&context) else {
             continue;
         };
         digest = crate::hash::fnv1a_fold(digest, (context.len() as u64).to_le_bytes());
@@ -223,12 +236,13 @@ fn injected_fingerprint_loop_expiry() -> bool {
 /// generic over the collection each output shape wants, so the
 /// surfaces cannot drift in what a context-scoped key sees.
 pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
-    contexts: BTreeSet<String>,
+    state: &AppState,
+    context_ids: BTreeSet<String>,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> C {
-    contexts
+    context_ids
         .into_iter()
-        .filter(|context| scope_allows(grant, context))
+        .filter(|id| scope_allows_id(state, grant, id))
         .collect()
 }
 
@@ -263,6 +277,24 @@ pub(super) fn scope_refusal<'a>(
     ))
 }
 
+/// [`scope_refusal`] over `context` ids: grants judge display names
+/// (#966 moves them to ids), so each id is read back to its current
+/// name once, here — which is also how the refusal names the context,
+/// the way its operator wrote the grant.
+pub(super) fn scope_refusal_ids(
+    state: &AppState,
+    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
+    key: &Option<axum::Extension<crate::auth::AuthKey>>,
+    ids: &BTreeSet<String>,
+    started_at: Instant,
+) -> Option<Response> {
+    if grant.is_none() {
+        return None;
+    }
+    let names: BTreeSet<String> = ids.iter().map(|id| state.name_of_stem(id)).collect();
+    scope_refusal(grant, key, &names, started_at)
+}
+
 /// The gate every `group` write runs, wrapped around
 /// [`scope_refusal`]: resolves what the operation involves — the
 /// transitive `context` closures of the `closure_roots` `groups` plus the
@@ -282,7 +314,7 @@ fn scoped_group_refusal<'r, 'd>(
     }
     let mut involved = state.group_context_closures(closure_roots);
     involved.extend(direct.into_iter().cloned());
-    scope_refusal(grant, key, &involved, started_at)
+    scope_refusal_ids(state, grant, key, &involved, started_at)
 }
 
 /// The `group` directory: every `group`'s name, description, member
@@ -348,8 +380,8 @@ pub async fn get_group(
 #[serde(default)]
 pub struct CreateGroupRequest {
     pub description: String,
-    /// Initial member `context` names; every one must already exist.
-    pub contexts: Vec<String>,
+    /// Initial member `context` ids (#965); every one must already exist.
+    pub context_ids: Vec<String>,
     /// Initial child `group` names; every one must already exist, and
     /// the nesting that results must stay acyclic and at most
     /// [`MAX_GROUP_DEPTH`] `groups` tall.
@@ -380,10 +412,13 @@ pub async fn create_group(
     ) {
         return refusal;
     }
-    if let Some(refusal) = overlong("contexts", request.contexts.len(), started_at) {
+    if let Some(refusal) = overlong("context_ids", request.context_ids.len(), started_at) {
         return refusal;
     }
     if let Some(refusal) = overlong("groups", request.groups.len(), started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = invalid_context_ids("context_ids", &request.context_ids, started_at) {
         return refusal;
     }
     // A context-scoped key is judged against everything the new group would
@@ -394,7 +429,7 @@ pub async fn create_group(
         &grant,
         &key,
         request.groups.iter().map(String::as_str),
-        &request.contexts,
+        &request.context_ids,
         started_at,
     ) {
         return refusal;
@@ -408,7 +443,7 @@ pub async fn create_group(
         state.create_group(
             &name,
             request.description,
-            request.contexts.into_iter().collect(),
+            request.context_ids.into_iter().collect(),
             request.groups.into_iter().collect(),
         )
     }) {
@@ -458,8 +493,8 @@ pub async fn create_group(
 #[serde(default)]
 pub struct UpdateGroupRequest {
     pub description: Option<String>,
-    pub add_contexts: Vec<String>,
-    pub remove_contexts: Vec<String>,
+    pub add_context_ids: Vec<String>,
+    pub remove_context_ids: Vec<String>,
     pub add_groups: Vec<String>,
     pub remove_groups: Vec<String>,
 }
@@ -483,11 +518,23 @@ pub async fn update_group(
     {
         return refusal;
     }
-    if let Some(refusal) = overlong("add_contexts", request.add_contexts.len(), started_at) {
+    if let Some(refusal) = overlong("add_context_ids", request.add_context_ids.len(), started_at) {
         return refusal;
     }
-    if let Some(refusal) = overlong("remove_contexts", request.remove_contexts.len(), started_at) {
+    if let Some(refusal) = overlong(
+        "remove_context_ids",
+        request.remove_context_ids.len(),
+        started_at,
+    ) {
         return refusal;
+    }
+    for (field, ids) in [
+        ("add_context_ids", &request.add_context_ids),
+        ("remove_context_ids", &request.remove_context_ids),
+    ] {
+        if let Some(refusal) = invalid_context_ids(field, ids, started_at) {
+            return refusal;
+        }
     }
     if let Some(refusal) = overlong("add_groups", request.add_groups.len(), started_at) {
         return refusal;
@@ -507,7 +554,10 @@ pub async fn update_group(
             .into_iter()
             .chain(request.add_groups.iter().map(String::as_str))
             .chain(request.remove_groups.iter().map(String::as_str)),
-        request.add_contexts.iter().chain(&request.remove_contexts),
+        request
+            .add_context_ids
+            .iter()
+            .chain(&request.remove_context_ids),
         started_at,
     ) {
         return refusal;
@@ -521,8 +571,8 @@ pub async fn update_group(
         state.update_group(
             &name,
             request.description,
-            request.add_contexts.into_iter().collect(),
-            request.remove_contexts.into_iter().collect(),
+            request.add_context_ids.into_iter().collect(),
+            request.remove_context_ids.into_iter().collect(),
             request.add_groups.into_iter().collect(),
             request.remove_groups.into_iter().collect(),
         )
@@ -735,7 +785,7 @@ mod tests {
             .create_group(
                 group,
                 "d".to_string(),
-                BTreeSet::from([context.to_string()]),
+                BTreeSet::from([state.id_of(context)]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -794,7 +844,11 @@ mod tests {
             .create_group(
                 "kura",
                 "d".to_string(),
-                BTreeSet::from(["sake".to_string(), "bunko".to_string(), "cha".to_string()]),
+                BTreeSet::from([
+                    state.id_of("sake"),
+                    state.id_of("bunko"),
+                    state.id_of("cha"),
+                ]),
                 BTreeSet::new(),
             )
             .unwrap();

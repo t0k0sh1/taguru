@@ -42,18 +42,18 @@ pub fn route_tool(
         Ok(format!("/groups/{}", segment(need(arguments, key)?)))
     };
     // The search tools target one context or several: `context`
-    // prefixes the per-context path; `contexts` and/or `groups`
+    // prefixes the per-context path; `context_ids` and/or `groups`
     // (arrays, riding the body) mean the cross-context route — no
     // prefix. `context` beside either is ambiguous, and none at all
     // names no target.
     let search_base = || -> Result<String, String> {
         let given = |key: &str| arguments.get(key).is_some_and(|value| !value.is_null());
-        match (given("context"), given("contexts") || given("groups")) {
+        match (given("context"), given("context_ids") || given("groups")) {
             (true, true) => {
-                Err("pass either 'context' or 'contexts'/'groups', not both".to_string())
+                Err("pass either 'context' or 'context_ids'/'groups', not both".to_string())
             }
             (false, false) => Err(
-                "missing required argument 'context' (or 'contexts'/'groups', to search several at once)"
+                "missing required argument 'context' (or 'context_ids'/'groups', to search several at once)"
                     .to_string(),
             ),
             (true, false) => context_path("context"),
@@ -138,7 +138,7 @@ pub fn route_tool(
         "create_group" => (
             "PUT",
             group_path("name")?,
-            Some(pick(arguments, &["description", "contexts", "groups"])),
+            Some(pick(arguments, &["description", "context_ids", "groups"])),
         ),
         "update_group" => (
             "PATCH",
@@ -147,8 +147,8 @@ pub fn route_tool(
                 arguments,
                 &[
                     "description",
-                    "add_contexts",
-                    "remove_contexts",
+                    "add_context_ids",
+                    "remove_context_ids",
                     "add_groups",
                     "remove_groups",
                 ],
@@ -269,7 +269,7 @@ pub fn route_tool(
             Some(pick(
                 arguments,
                 &[
-                    "contexts",
+                    "context_ids",
                     "groups",
                     "subject",
                     "label",
@@ -292,7 +292,13 @@ pub fn route_tool(
                 Some(pick(
                     arguments,
                     &[
-                        "contexts", "groups", "cue", "limit", "after", "since", "until",
+                        "context_ids",
+                        "groups",
+                        "cue",
+                        "limit",
+                        "after",
+                        "since",
+                        "until",
                     ],
                 )),
             )
@@ -442,7 +448,7 @@ pub fn route_tool(
                 Some(pick(
                     arguments,
                     &[
-                        "contexts",
+                        "context_ids",
                         "groups",
                         "query",
                         "limit",

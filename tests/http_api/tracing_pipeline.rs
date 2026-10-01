@@ -264,7 +264,7 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
     let found = server.ok(
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["sake", "kura"], "query": "杜氏"})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("kura")], "query": "杜氏"})),
     );
     assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
 
@@ -353,7 +353,7 @@ fn a_cross_cache_hit_answers_with_one_childless_span() {
         server.ok(
             "POST",
             "/sources/search",
-            Some(json!({"contexts": ["sake"], "query": "杜氏"})),
+            Some(json!({"context_ids": [server.cx("sake")], "query": "杜氏"})),
         )
     };
     let first = search(&server);

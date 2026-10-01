@@ -174,13 +174,13 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     let (status, body) = server.call(
         "POST",
         "/query",
-        Some(json!({"contexts": ["sake"], "subject": "蔵", "until": 1500})),
+        Some(json!({"context_ids": [server.cx("sake")], "subject": "蔵", "until": 1500})),
     );
     assert_eq!(status, 400, "{body}");
     let (status, _) = server.call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake"], "cue": "蔵", "since": 1})),
+        Some(json!({"context_ids": [server.cx("sake")], "cue": "蔵", "since": 1})),
     );
     assert_eq!(status, 400);
 

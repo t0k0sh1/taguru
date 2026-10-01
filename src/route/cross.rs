@@ -25,14 +25,21 @@ pub(super) async fn cross_recall(
     api::AppJson(request): api::AppJson<api::CrossRecallRequest>,
 ) -> Response {
     let limit = request.limit;
-    let contexts = request.contexts.clone();
+    let context_ids = request.context_ids.clone();
     let groups = request.groups.clone();
     let base = match reserialize(&request) {
         Ok(base) => base,
         Err(refusal) => return *refusal,
     };
     merge_matches(
-        state, headers, deadline, "/recall", contexts, groups, limit, base,
+        state,
+        headers,
+        deadline,
+        "/recall",
+        context_ids,
+        groups,
+        limit,
+        base,
     )
     .await
 }
@@ -44,14 +51,21 @@ pub(super) async fn cross_query(
     api::AppJson(request): api::AppJson<api::CrossQueryRequest>,
 ) -> Response {
     let limit = request.limit;
-    let contexts = request.contexts.clone();
+    let context_ids = request.context_ids.clone();
     let groups = request.groups.clone();
     let base = match reserialize(&request) {
         Ok(base) => base,
         Err(refusal) => return *refusal,
     };
     merge_matches(
-        state, headers, deadline, "/query", contexts, groups, limit, base,
+        state,
+        headers,
+        deadline,
+        "/query",
+        context_ids,
+        groups,
+        limit,
+        base,
     )
     .await
 }
@@ -67,14 +81,24 @@ async fn merge_matches(
     headers: HeaderMap,
     deadline: Deadline,
     path: &str,
-    contexts: Vec<String>,
+    context_ids: Vec<String>,
     groups: Vec<String>,
     limit: Option<usize>,
     base: Value,
 ) -> Response {
     let started_at = Instant::now();
     let map = state.map();
-    let scatter = match plan_scatter(&map, &contexts, &groups, started_at) {
+    let scatter = match plan_scatter(
+        &state,
+        &map,
+        &context_ids,
+        &groups,
+        &headers,
+        deadline,
+        started_at,
+    )
+    .await
+    {
         Ok(scatter) => scatter,
         Err(refusal) => return *refusal,
     };
@@ -102,7 +126,7 @@ async fn merge_matches(
                 total += page.result.total;
                 matches.extend(page.result.matches);
                 if let Some(plan) = page.result.plan {
-                    searched.extend(plan.contexts);
+                    searched.extend(plan.context_ids);
                 }
             }
             Err(error) => {
@@ -121,14 +145,14 @@ async fn merge_matches(
         api::cross_rank(
             (
                 a.inner.weight,
-                a.context.as_str(),
+                a.context_id.as_str(),
                 a.inner.subject.as_str(),
                 a.inner.label.as_str(),
                 a.inner.object.as_str(),
             ),
             (
                 b.inner.weight,
-                b.context.as_str(),
+                b.context_id.as_str(),
                 b.inner.subject.as_str(),
                 b.inner.label.as_str(),
                 b.inner.object.as_str(),
@@ -141,23 +165,23 @@ async fn merge_matches(
         api::MAX_MATCH_LIMIT,
     ));
     // The merged plan re-seats the union of the shard plans into the
-    // single-instance effective order: direct names in request order,
-    // group-resolved members after them in name order (the shards
+    // single-instance effective order: direct ids in request order,
+    // group-resolved members after them in id order (the shards
     // resolved the groups — the router only reorders). A dead shard's
     // contexts are honestly absent: they were not searched, and the
     // `unreached` labels beside the plan say why.
-    let mut contexts: Vec<String> = scatter
+    let mut context_ids: Vec<String> = scatter
         .direct
         .iter()
-        .filter(|name| searched.remove(name.as_str()))
+        .filter(|id| searched.remove(id.as_str()))
         .cloned()
         .collect();
-    contexts.extend(searched);
+    context_ids.extend(searched);
     router_ok(
         api::CrossMatchPage {
             total,
             matches,
-            plan: Some(api::MatchPlan { contexts }),
+            plan: Some(api::MatchPlan { context_ids }),
         },
         gathered.unreached,
         started_at,
@@ -176,7 +200,17 @@ pub(super) async fn cross_search_passages(
         Err(refusal) => return *refusal,
     };
     let map = state.map();
-    let scatter = match plan_scatter(&map, &request.contexts, &request.groups, started_at) {
+    let scatter = match plan_scatter(
+        &state,
+        &map,
+        &request.context_ids,
+        &request.groups,
+        &headers,
+        deadline,
+        started_at,
+    )
+    .await
+    {
         Ok(scatter) => scatter,
         Err(refusal) => return *refusal,
     };
@@ -212,7 +246,7 @@ pub(super) async fn cross_search_passages(
             Ok(page) => {
                 let mut rank_of: BTreeMap<String, usize> = BTreeMap::new();
                 for hit in page.result.hits {
-                    let rank = rank_of.entry(hit.context.clone()).or_insert(0);
+                    let rank = rank_of.entry(hit.context_id.clone()).or_insert(0);
                     let seat = *rank;
                     *rank += 1;
                     pool.push((seat, hit));
@@ -235,19 +269,24 @@ pub(super) async fn cross_search_passages(
         .direct
         .iter()
         .enumerate()
-        .map(|(position, name)| (name.clone(), position))
+        .map(|(position, id)| (id.clone(), position))
         .collect();
     let resolved: BTreeSet<String> = plan_entries
         .iter()
-        .map(|entry| entry.context.clone())
-        .filter(|name| !seat.contains_key(name))
+        .map(|entry| entry.context_id.clone())
+        .filter(|id| !seat.contains_key(id))
         .collect();
-    for (position, name) in resolved.into_iter().enumerate() {
-        seat.insert(name, scatter.direct.len() + position);
+    for (position, id) in resolved.into_iter().enumerate() {
+        seat.insert(id, scatter.direct.len() + position);
     }
-    pool.sort_by_key(|(rank, hit)| (*rank, seat.get(&hit.context).copied().unwrap_or(usize::MAX)));
+    pool.sort_by_key(|(rank, hit)| {
+        (
+            *rank,
+            seat.get(&hit.context_id).copied().unwrap_or(usize::MAX),
+        )
+    });
     pool.truncate(api::clamp(request.limit, 5, api::MAX_MATCH_LIMIT));
-    plan_entries.sort_by_key(|entry| seat.get(&entry.context).copied().unwrap_or(usize::MAX));
+    plan_entries.sort_by_key(|entry| seat.get(&entry.context_id).copied().unwrap_or(usize::MAX));
     router_ok(
         api::CrossPassagePage {
             plan: api::SearchPlan {

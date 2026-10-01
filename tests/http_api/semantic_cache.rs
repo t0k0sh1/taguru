@@ -320,7 +320,9 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
     call(
         "PUT",
         "/groups/g",
-        Some(json!({"description": "", "contexts": ["x", "y"], "groups": []})),
+        Some(
+            json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+        ),
         "atok",
     );
 
@@ -342,7 +344,7 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|hit| hit["context"] == "x"),
+            .all(|hit| hit["context_name"] == "x"),
         "the narrow grant sees its slice, never the wide fill: {narrow_page}"
     );
     assert_eq!(

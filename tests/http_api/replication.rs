@@ -153,7 +153,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     server.ok(
         "PUT",
         "/groups/breweries",
-        Some(json!({"contexts": ["sake"]})),
+        Some(json!({"context_ids": [server.cx("sake")]})),
     );
     std::fs::write(server.data_dir.join("oauth.json"), b"{\"grants\":[]}").unwrap();
 
@@ -725,7 +725,7 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
     first.ok(
         "PUT",
         "/groups/breweries",
-        Some(json!({"contexts": ["sake"]})),
+        Some(json!({"context_ids": [first.cx("sake")]})),
     );
     wait_for("the source baseline", || {
         bucket
@@ -985,7 +985,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     writer.ok(
         "PUT",
         "/groups/breweries",
-        Some(json!({"contexts": ["sake"]})),
+        Some(json!({"context_ids": [writer.cx("sake")]})),
     );
     // The writer keeps running (unlike the bucket-boot test's graceful
     // stop), so "complete exists" alone could be an EARLIER cycle's

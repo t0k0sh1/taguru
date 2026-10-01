@@ -177,7 +177,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     assert!(hit["text"].as_str().unwrap().contains("夏目漱石"));
     let members = hit["members"].as_array().unwrap();
     assert_eq!(members[0]["name"], "a1", "strongest member first");
-    assert_eq!(page["plan"]["contexts"][0]["context"], "sci");
+    assert_eq!(page["plan"]["contexts"][0]["context_name"], "sci");
 
     // A source-graph write flips the verdict IMMEDIATELY — the cached
     // entry cannot answer, because the source's current graph revision
@@ -1216,13 +1216,17 @@ fn group_traversal_derives_each_member_and_into_renames() {
     let server = Server::start("communities-group");
     seed_two_cliques(&server, "m1");
     seed_two_cliques(&server, "m2");
-    server.ok("PUT", "/groups/child", Some(json!({"contexts": ["m2"]})));
+    server.ok(
+        "PUT",
+        "/groups/child",
+        Some(json!({"context_ids": [server.cx("m2")]})),
+    );
     server.ok(
         "PUT",
         "/groups/kura",
-        Some(json!({"contexts": ["m1"], "groups": ["child"]})),
+        Some(json!({"context_ids": [server.cx("m1")], "groups": ["child"]})),
     );
-    server.ok("PUT", "/groups/hollow", Some(json!({"contexts": []})));
+    server.ok("PUT", "/groups/hollow", Some(json!({"context_ids": []})));
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let chat_url = stub_chat(Arc::clone(&requests));

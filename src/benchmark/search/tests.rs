@@ -278,7 +278,7 @@ fn rewrite_batch_header_drops_blank_lines() {
 #[test]
 fn extract_hits_prefers_the_typed_plan_and_hits_shape() {
     let value = serde_json::json!({
-        "plan": {"contexts": [{"context": "ctx1", "lanes": {
+        "plan": {"contexts": [{"context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "context_name": "ctx1", "lanes": {
             "bm25": {"ran": true},
             "vector": {"ran": false, "reason": "no embedding provider is configured"}
         }}]},
@@ -291,7 +291,8 @@ fn extract_hits_prefers_the_typed_plan_and_hits_shape() {
     assert!(hits[0].lanes.bm25.is_some());
     assert!(hits[0].lanes.vector.is_none());
     let plan = plan.unwrap();
-    assert_eq!(plan.context, "ctx1");
+    assert_eq!(plan.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
+    assert_eq!(plan.context_name, "ctx1");
     assert!(plan.lanes.bm25.ran);
     assert!(!plan.lanes.vector.ran);
     assert_eq!(

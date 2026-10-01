@@ -20,7 +20,7 @@ fn groups_ride_the_mcp_transport() {
     let created = tool(
         1,
         "create_group",
-        json!({"name": "drinks", "description": "飲料", "contexts": ["sake"]}),
+        json!({"name": "drinks", "description": "飲料", "context_ids": [server.cx("sake")]}),
     );
     assert!(created.get("isError").is_none(), "{created}");
     // Nesting rides the same tools: a child at create, deltas at update.
@@ -34,16 +34,16 @@ fn groups_ride_the_mcp_transport() {
     let listed = tool(3, "list_groups", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"drinks\""), "{text}");
-    assert!(text.contains("\"sake\""), "{text}");
+    assert!(text.contains(&server.cx("sake")), "{text}");
 
     let updated = tool(
         4,
         "update_group",
-        json!({"name": "drinks", "remove_contexts": ["sake"]}),
+        json!({"name": "drinks", "remove_context_ids": [server.cx("sake")]}),
     );
     assert!(updated.get("isError").is_none(), "{updated}");
     let text = updated["content"][0]["text"].as_str().unwrap();
-    assert!(!text.contains("\"sake\""), "{text}");
+    assert!(!text.contains(&server.cx("sake")), "{text}");
 
     let deleted = tool(5, "delete_group", json!({"name": "drinks"}));
     assert!(deleted.get("isError").is_none(), "{deleted}");
@@ -104,7 +104,7 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
     server.ok(
         "PUT",
         "/groups/kirisawa",
-        Some(json!({"description": "霧沢の酒", "contexts": ["brewery", "region"]})),
+        Some(json!({"description": "霧沢の酒", "context_ids": [server.cx("brewery"), server.cx("region")]})),
     );
 
     // 「青嶺酒造はどの県にあるか」— 所在地 (brewery) と 所在する県
@@ -127,9 +127,13 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
             .find(|m| m["subject"] == json!(subject))
             .unwrap_or_else(|| panic!("missing fact for {subject}: {answer}"))
     };
-    assert_eq!(fact("青嶺酒造")["context"], json!("brewery"), "{answer}");
+    assert_eq!(
+        fact("青嶺酒造")["context_name"],
+        json!("brewery"),
+        "{answer}"
+    );
     assert_eq!(fact("青嶺酒造")["object"], json!("霧沢町"), "{answer}");
-    assert_eq!(fact("霧沢町")["context"], json!("region"), "{answer}");
+    assert_eq!(fact("霧沢町")["context_name"], json!("region"), "{answer}");
     assert_eq!(fact("霧沢町")["object"], json!("雲居県"), "{answer}");
 
     // 「蔵開きの祭りについて知っていること」— recall がグループ越しに
@@ -144,7 +148,7 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| m["context"].as_str().unwrap())
+        .map(|m| m["context_name"].as_str().unwrap())
         .collect();
     assert!(
         contexts.contains(&"brewery") && contexts.contains(&"region"),
@@ -392,7 +396,7 @@ fn flush_and_export_ride_the_mcp_transport() {
     server.ok(
         "PUT",
         "/groups/kura",
-        Some(json!({"description": "蔵元一式", "contexts": ["sake"]})),
+        Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
     );
 
     let tool = |id: u64, name: &str, arguments: Value| server.call_tool(id, name, arguments);
@@ -547,7 +551,7 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
     server.ok(
         "PUT",
         "/groups/breweries",
-        Some(json!({"description": "g", "contexts": ["sake"]})),
+        Some(json!({"description": "g", "context_ids": [server.cx("sake")]})),
     );
 
     let call = |name: &str, arguments: Value| {
@@ -574,7 +578,7 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
 
     let group = call("get_group", json!({"name": "breweries"}));
     assert_eq!(group["id"], json!("breweries"));
-    assert_eq!(group["contexts"], json!(["sake"]));
+    assert_eq!(group["context_ids"], server.cx_sorted(&["sake"]));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
@@ -1128,7 +1132,11 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
     );
     // The fallback search's plan rides beside its hits (#151).
     let search_plan = &fallback_envelope["search_plan"]["contexts"][0];
-    assert_eq!(search_plan["context"], json!("sake"), "{fallback_envelope}");
+    assert_eq!(
+        search_plan["context_name"],
+        json!("sake"),
+        "{fallback_envelope}"
+    );
     assert_eq!(
         search_plan["lanes"]["bm25"]["ran"],
         json!(true),

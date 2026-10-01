@@ -15,6 +15,15 @@ use serde_json::{Value, json};
 
 use crate::support::*;
 
+/// The ids `seed`'s stream gives its three contexts — fixed, so the
+/// single instance and the sharded fleet carry the same ones.
+const SAKE_ID: &str = "cef2e28b-43f0-4b6c-8201-abab0785399f";
+const GLOSSARY_ID: &str = "3f5dcb46-d438-4c49-bd38-6708b01a8d0a";
+const BREWERIES_ID: &str = "96ba89e7-84ee-4b65-b772-bdf9ae741e0d";
+/// Canonical ids no test creates, distinct from each other.
+const ABSENT_A: &str = "00000000-0000-4000-8000-0000000000a1";
+const ABSENT_B: &str = "00000000-0000-4000-8000-0000000000a2";
+
 /// Fields legitimately different between two servers answering the
 /// same question: the latency stamp, the directory's usage timestamps
 /// (unix seconds — two runs may straddle a tick), and residency
@@ -142,7 +151,7 @@ fn seed(server: &Server) {
         // batch chunk happened to land on.
         "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
           \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"group\", \"id\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
+        "{\"type\": \"group\", \"id\": \"jp\", \"description\": \"日本酒\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\"]}\n",
     );
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
@@ -156,7 +165,7 @@ fn seed(server: &Server) {
     server.ok(
         "PUT",
         "/groups/all",
-        Some(json!({"description": "全部", "contexts": ["breweries"], "groups": ["jp"]})),
+        Some(json!({"description": "全部", "context_ids": [BREWERIES_ID], "groups": ["jp"]})),
     );
 }
 
@@ -238,9 +247,9 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // responses. Cross recall with contexts, with groups (nested),
     // and mixed.
     for body in [
-        json!({"contexts": ["sake", "breweries", "glossary"], "cue": "青嶺"}),
+        json!({"context_ids": [SAKE_ID, BREWERIES_ID, GLOSSARY_ID], "cue": "青嶺"}),
         json!({"groups": ["all"], "cue": "辛口"}),
-        json!({"contexts": ["breweries"], "groups": ["jp"], "cue": "青嶺"}),
+        json!({"context_ids": [BREWERIES_ID], "groups": ["jp"], "cue": "青嶺"}),
     ] {
         let answer = assert_equivalent(&single, &router, "POST", "/recall", Some(body));
         assert!(
@@ -259,7 +268,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     let last = &matches[1];
     let after = json!({
         "weight": last["weight"],
-        "context": last["context"],
+        "context_id": last["context_id"],
         "subject": last["subject"],
         "label": last["label"],
         "object": last["object"],
@@ -285,7 +294,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // The passage merge: per-context rank interleaving, scores
     // per-context, both shard splits and the group path.
     for body in [
-        json!({"contexts": ["sake", "glossary", "breweries"], "query": "麹"}),
+        json!({"context_ids": [SAKE_ID, GLOSSARY_ID, BREWERIES_ID], "query": "麹"}),
         json!({"groups": ["all"], "query": "麹", "limit": 2}),
     ] {
         let answer = assert_equivalent(&single, &router, "POST", "/sources/search", Some(body));
@@ -311,11 +320,13 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "POST",
         "/sources/search",
-        Some(json!({"contexts": ["sake", "glossary"], "query": "麹の使い方", "tags": ["仕込み"]})),
+        Some(
+            json!({"context_ids": [SAKE_ID, GLOSSARY_ID], "query": "麹の使い方", "tags": ["仕込み"]}),
+        ),
     );
     let hits = filtered["result"]["hits"].as_array().unwrap();
     assert!(
-        !hits.is_empty() && hits.iter().all(|hit| hit["context"] == "sake"),
+        !hits.is_empty() && hits.iter().all(|hit| hit["context_name"] == "sake"),
         "only the tagged source's context may answer through the router: {filtered}"
     );
     assert_eq!(
@@ -389,14 +400,14 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "PATCH",
         "/groups/jp",
-        Some(json!({"remove_contexts": ["glossary"]})),
+        Some(json!({"remove_context_ids": [GLOSSARY_ID]})),
     );
     assert_equivalent(
         &single,
         &router,
         "PATCH",
         "/groups/jp",
-        Some(json!({"add_contexts": ["glossary"]})),
+        Some(json!({"add_context_ids": [GLOSSARY_ID]})),
     );
     // Removals are an idempotent set difference on a single instance —
     // never existence-checked — so a name no shard places must not be
@@ -406,7 +417,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "PATCH",
         "/groups/jp",
-        Some(json!({"remove_contexts": ["never-existed"]})),
+        Some(json!({"remove_context_ids": [GHOST_ID]})),
     );
     // ADDITIONS keep the existence check — `project_body`'s refusal
     // for an unplaced member must be the shard's own nonexistent-member
@@ -416,7 +427,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "PATCH",
         "/groups/jp",
-        Some(json!({"add_contexts": ["never-existed"]})),
+        Some(json!({"add_context_ids": [GHOST_ID]})),
     );
     assert_equivalent(&single, &router, "GET", "/groups/jp", None);
 
@@ -434,7 +445,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "missing", "alsomissing"], "cue": "x"})),
+        Some(json!({"context_ids": [SAKE_ID, ABSENT_A, ABSENT_B], "cue": "x"})),
     );
     assert_equivalent(
         &single,
@@ -480,12 +491,12 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     let single_tool = single.call_tool(
         1,
         "recall",
-        json!({"contexts": ["sake", "glossary"], "cue": "辛口"}),
+        json!({"context_ids": [SAKE_ID, GLOSSARY_ID], "cue": "辛口"}),
     );
     let router_tool = router.call_tool(
         1,
         "recall",
-        json!({"contexts": ["sake", "glossary"], "cue": "辛口"}),
+        json!({"context_ids": [SAKE_ID, GLOSSARY_ID], "cue": "辛口"}),
     );
     assert_eq!(single_tool["isError"], router_tool["isError"]);
     let parse = |tool: &Value| -> Value {
@@ -575,7 +586,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let (status, body) = router.call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "glossary"], "cue": "麹"})),
+        Some(json!({"context_ids": [sake_id, glossary_id], "cue": "麹"})),
     );
     assert_eq!(status, 401, "{body}");
 
@@ -583,7 +594,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let (status, body) = router.call_with_token(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "glossary"], "cue": "麹"})),
+        Some(json!({"context_ids": [sake_id, glossary_id], "cue": "麹"})),
         token,
     );
     assert_eq!(status, 200, "{body}");
@@ -596,12 +607,12 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     // router's preflight must keep that — the in-grant batch ahead of
     // the record must NOT have been applied when the refusal comes
     // back from the group projection on another shard.
-    let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"scoped-doc\"}\n",
-        "{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}\n",
-        "{\"type\": \"group\", \"id\": \"overreach\", \"contexts\": [\"sake\", \"glossary\"]}\n",
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": \"{sake_id}\", \"id\": \"scoped-doc\"}}\n\
+         {{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}}\n\
+         {{\"type\": \"group\", \"id\": \"overreach\", \"context_ids\": [\"{sake_id}\", \"{glossary_id}\"]}}\n",
     );
-    let (status, body) = post_import(&router, stream, Some("hush"));
+    let (status, body) = post_import(&router, &stream, Some("hush"));
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["code"], "forbidden", "{body}");
     let (status, body) = router.call_with_token(
@@ -624,7 +635,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let (status, body) = router.call_with_token(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["sake", "glossary"], "cue": "麹"})),
+        Some(json!({"context_ids": [sake_id, glossary_id], "cue": "麹"})),
         token,
     );
     assert_eq!(status, 200, "{body}");
@@ -633,7 +644,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
         .as_array()
         .expect("unreached must be labeled");
     assert_eq!(unreached.len(), 1, "{body}");
-    assert_eq!(unreached[0]["contexts"], json!(["glossary"]), "{body}");
+    assert_eq!(unreached[0]["contexts"], json!([glossary_id]), "{body}");
     assert!(
         unreached[0]["shard"]
             .as_str()
@@ -687,7 +698,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
         let (status, body) = router.call_with_token(
             "POST",
             "/recall",
-            Some(json!({"contexts": ["sake", "glossary"], "cue": "麹"})),
+            Some(json!({"context_ids": [sake_id, glossary_id], "cue": "麹"})),
             token,
         );
         if status == 200 && body["result"]["total"] == 2 && body.get("unreached").is_none() {
@@ -867,13 +878,14 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })));
+    let ctx_a = router.create_context("ctx_a");
+    let ctx_b = router.create_context("ctx_b");
 
     // A record NO shard holds answers "created" — every projection is
     // created, and a created projection carrying members must not slip
     // into the "replaced" arm (this pins the branch order too).
-    let stream = "{\"type\": \"group\", \"id\": \"g0\", \"contexts\": [\"ctx_a\"]}\n";
+    let stream =
+        &format!("{{\"type\": \"group\", \"id\": \"g0\", \"context_ids\": [\"{ctx_a}\"]}}\n");
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -884,12 +896,13 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
 
     // Shard A already holds g's projection; shard B has never heard of
     // it — the drifted state a re-import heals.
-    shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
+    shard_a.ok("PUT", "/groups/g", Some(json!({"context_ids": [ctx_a]})));
 
     // The same membership shard A already holds: A answers
     // "unchanged", B "created" with an empty projection — nothing in
     // the union changed.
-    let stream = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\"]}\n";
+    let stream =
+        &format!("{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n");
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -900,7 +913,9 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
 
     // The record gains ctx_b: shard B's projection now carries a
     // member, so the union's row really changed.
-    let stream = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ctx_b\"]}\n";
+    let stream = &format!(
+        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\", \"{ctx_b}\"]}}\n"
+    );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -921,10 +936,12 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         &format!("ctx_c = {}\nctx_d = {}\n", shard_c.base, shard_d.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_c", })));
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_d", })));
-    shard_c.ok("PUT", "/groups/g2", Some(json!({"contexts": ["ctx_c"]})));
-    let stream = "{\"type\": \"group\", \"id\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
+    let ctx_c = router.create_context("ctx_c");
+    let ctx_d = router.create_context("ctx_d");
+    shard_c.ok("PUT", "/groups/g2", Some(json!({"context_ids": [ctx_c]})));
+    let stream = &format!(
+        "{{\"type\": \"group\", \"id\": \"g2\", \"context_ids\": [\"{ctx_c}\", \"{ctx_d}\"]}}\n"
+    );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -950,10 +967,10 @@ fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    shard_a.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
+    let ctx_a = shard_a.create_context("ctx_a");
+    shard_a.ok("PUT", "/groups/g", Some(json!({"context_ids": [ctx_a]})));
     let healed = router.ok("GET", "/groups/g", None);
-    assert_eq!(healed["contexts"], json!(["ctx_a"]), "{healed}");
+    assert_eq!(healed["context_ids"], json!([ctx_a]), "{healed}");
 
     // An erroring shard: same fleet shape, but shard B answers 500 to
     // everything — the union must refuse with the shard's own status,
@@ -1090,7 +1107,7 @@ fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
         "no batch and no schema landed before this refusal: {body}"
     );
 
-    let group_only = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ghost\"]}\n";
+    let group_only = "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n";
     let (status, body) = post_import(&router, group_only, None);
     assert_eq!(status, 404, "{body}");
     assert_ne!(
@@ -1124,7 +1141,7 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
          {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
          {{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1155,7 +1172,7 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
     let stream = format!(
         "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
          {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1185,7 +1202,7 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
     let stream = format!(
         "{{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1223,7 +1240,7 @@ fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
     let stream = concat!(
         "{\"type\": \"source\", \"context_id\": \"6030dd60-5e04-40cb-8aae-bd67951549b7\", \"id\": \"doc\", \"create\": {\"name\": \"stubbed\"}}\n",
         "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"groups\": [\"nowhere\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1594,7 +1611,7 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
         &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    let sake = router.create_context("sake");
 
     // A JSON array is valid JSON and not a group request. (A single
     // instance reads it as a positional struct — serde's doing — and
@@ -1615,7 +1632,7 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
     let (status, refusal) = router.call(
         "PATCH",
         "/groups/g",
-        Some(json!({"add_contexts": ["sake", 42]})),
+        Some(json!({"add_context_ids": [sake, 42]})),
     );
     assert_eq!(status, 422, "{refusal}");
     assert_eq!(refusal["code"], "malformed_request", "{refusal}");
@@ -1623,19 +1640,24 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
         refusal["error"]
             .as_str()
             .unwrap()
-            .contains("add_contexts[1]"),
+            .contains("add_context_ids[1]"),
         "{refusal}"
     );
     let entry = router.ok("GET", "/groups/g", None);
-    assert_eq!(entry["contexts"], json!([]), "{entry}");
+    assert_eq!(entry["context_ids"], json!([]), "{entry}");
 
     // 1001 members over two shards: each shard's slice would pass its
     // own cap, so the router judges the whole list.
-    let members: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
-    let (status, refusal) =
-        router.call("PATCH", "/groups/g", Some(json!({"add_contexts": members})));
+    let members: Vec<String> = (0..1001)
+        .map(|i| format!("00000000-0000-4000-8000-{i:012x}"))
+        .collect();
+    let (status, refusal) = router.call(
+        "PATCH",
+        "/groups/g",
+        Some(json!({"add_context_ids": members})),
+    );
     assert_eq!(status, 400, "{refusal}");
     assert_eq!(refusal["code"], "over_limit", "{refusal}");
     let entry = router.ok("GET", "/groups/g", None);
-    assert_eq!(entry["contexts"], json!([]), "{entry}");
+    assert_eq!(entry["context_ids"], json!([]), "{entry}");
 }

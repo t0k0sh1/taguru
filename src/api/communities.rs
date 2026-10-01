@@ -730,11 +730,11 @@ pub async fn search_communities(
             recorded_graph: found.recorded_graph,
             current_graph: current.graph,
         },
-        // The plan entry names the SOURCE context (by display name,
-        // like every other response body until #965) — the caller
-        // asked about it; which artifact answered is `derived`'s job.
+        // The plan entry names the SOURCE context — the caller asked
+        // about it; which artifact answered is `derived`'s job.
         plan: SearchPlan {
             contexts: vec![SearchContextPlan::of(
+                &id,
                 &state.name_of_stem(&id),
                 &found.lanes,
                 None,

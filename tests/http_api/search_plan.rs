@@ -351,7 +351,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     server.ok(
         "PUT",
         "/groups/minerals",
-        Some(json!({"description": "", "contexts": ["amber", "quartz"], "groups": []})),
+        Some(json!({"description": "", "context_ids": [server.cx("amber"), server.cx("quartz")], "groups": []})),
     );
 
     let single = server.ok(
@@ -362,7 +362,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     assert_eq!(single["total"], json!(0), "{single}");
     assert_eq!(
         single["plan"],
-        json!({"contexts": ["amber"]}),
+        json!({"context_ids": [server.cx("amber")]}),
         "zero matches still carry the plan: {single}"
     );
 
@@ -371,22 +371,22 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     let cross = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["quartz"], "groups": ["minerals"], "cue": "何もない"})),
+        Some(json!({"context_ids": [server.cx("quartz")], "groups": ["minerals"], "cue": "何もない"})),
     );
     assert_eq!(
         cross["plan"],
-        json!({"contexts": ["quartz", "amber"]}),
+        json!({"context_ids": [server.cx("quartz"), server.cx("amber")]}),
         "{cross}"
     );
 
     let queried = server.ok(
         "POST",
         "/query",
-        Some(json!({"contexts": ["quartz"], "groups": ["minerals"], "subject": "誰か"})),
+        Some(json!({"context_ids": [server.cx("quartz")], "groups": ["minerals"], "subject": "誰か"})),
     );
     assert_eq!(
         queried["plan"],
-        json!({"contexts": ["quartz", "amber"]}),
+        json!({"context_ids": [server.cx("quartz"), server.cx("amber")]}),
         "{queried}"
     );
 }
