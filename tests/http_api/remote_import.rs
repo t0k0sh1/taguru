@@ -356,7 +356,10 @@ fn remote_json_matches_the_local_jsons_own_shape() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(remote["dry_run"], serde_json::json!(false));
     let remote_outcome = &remote["batches"][0];
-    assert_eq!(remote_outcome["context"], serde_json::json!("sake"));
+    assert_eq!(
+        remote_outcome["context_id"],
+        serde_json::json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(remote_outcome["created"], serde_json::json!(true));
     assert_eq!(remote_outcome["associations"], serde_json::json!(1));
     assert!(remote.get("groups").is_none(), "{remote}");
@@ -408,7 +411,10 @@ fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(report["dry_run"], serde_json::json!(true));
     let outcome = &report["batches"][0];
-    assert_eq!(outcome["context"], serde_json::json!("sake"));
+    assert_eq!(
+        outcome["context_id"],
+        serde_json::json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(
         outcome["created"],
         serde_json::json!(true),
@@ -684,7 +690,7 @@ fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field()
         .as_array()
         .unwrap()
         .iter()
-        .map(|outcome| outcome["context"].as_str().unwrap())
+        .map(|outcome| outcome["context_id"].as_str().unwrap())
         .collect();
     assert_eq!(landed, vec!["a"], "{report}");
 

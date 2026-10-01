@@ -427,7 +427,10 @@ fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(local["dry_run"], json!(false));
     let local_outcome = &local["batches"][0];
-    assert_eq!(local_outcome["context"], json!("sake"));
+    assert_eq!(
+        local_outcome["context_id"],
+        json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(local_outcome["source"], json!("doc-guide"));
     assert_eq!(local_outcome["created"], json!(true));
     assert_eq!(local_outcome["associations"], json!(1));
@@ -485,11 +488,17 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     // human-readable path does; only the middle one is missing.
     let landed = report["batches"].as_array().unwrap();
     assert_eq!(landed.len(), 2, "{report}");
-    assert_eq!(landed[0]["context"], "a");
-    assert_eq!(landed[1]["context"], "c");
+    assert_eq!(
+        landed[0]["context_id"],
+        "ca978112-ca1b-4dca-bac2-31b39a23dc4d"
+    );
+    assert_eq!(
+        landed[1]["context_id"],
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"
+    );
 
     let failed = &report["failed_batches"][0];
-    assert_eq!(failed["context"], "missing");
+    assert_eq!(failed["context_id"], "ffa63583-dfa6-406b-87d2-84b86b0d693a");
     assert_eq!(failed["source"], "bad.md");
     assert!(
         failed["error"]
@@ -543,7 +552,10 @@ fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(report["dry_run"], json!(true));
     let outcome = &report["batches"][0];
-    assert_eq!(outcome["context"], json!("sake"));
+    assert_eq!(
+        outcome["context_id"],
+        json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(outcome["associations"], json!(1));
     assert_eq!(outcome["aliases"], json!(1));
     assert_eq!(

@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// The shard that answers for an import record whose context id no
+/// shard holds and that names no route: any shard would refuse it the
+/// same way, so the router asks the first.
+const FIRST_SHARD: usize = 0;
+
 pub(super) async fn route_import(
     State(state): State<RouterState>,
     headers: HeaderMap,
@@ -49,33 +54,29 @@ pub(super) async fn route_import(
                 {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
-                    Located::Missing => {
-                        let Some(spec) = &batch.create else {
-                            return api::error(
-                                ErrorCode::NoContext,
-                                format!(
-                                    "source '{}': context '{}' does not exist on any shard \
-                                     and the source file brought no create block; nothing \
-                                     was applied",
-                                    batch.source, batch.context_id
-                                ),
-                                started_at,
-                            );
-                        };
-                        let Some(shard) = map.shard_of(&spec.name) else {
-                            return api::error(
-                                ErrorCode::NoContext,
-                                format!(
-                                    "source '{}': context '{}' (create name '{}') has no \
-                                     route-map entry and no '*' fallback (TAGURU_ROUTE_MAP); \
-                                     nothing was applied",
-                                    batch.source, batch.context_id, spec.name
-                                ),
-                                started_at,
-                            );
-                        };
-                        shard
-                    }
+                    Located::Missing => match &batch.create {
+                        Some(spec) => {
+                            let Some(shard) = map.shard_of(&spec.name) else {
+                                return api::error(
+                                    ErrorCode::NoContext,
+                                    format!(
+                                        "source '{}': context '{}' (create name '{}') has no \
+                                         route-map entry and no '*' fallback \
+                                         (TAGURU_ROUTE_MAP); nothing was applied",
+                                        batch.source, batch.context_id, spec.name
+                                    ),
+                                    started_at,
+                                );
+                            };
+                            shard
+                        }
+                        // No shard holds the id and nothing says where to
+                        // create it: ask the first shard, which refuses in
+                        // its own words at the stage a single instance
+                        // would — the router stays equivalent instead of
+                        // inventing a refusal of its own.
+                        None => FIRST_SHARD,
+                    },
                 };
                 owner_of.insert(batch.context_id.clone(), shard);
                 shard
@@ -106,18 +107,9 @@ pub(super) async fn route_import(
                 match locate_owner(&state, &map, context_id, &headers, deadline, started_at).await {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
-                    Located::Missing => {
-                        return api::error(
-                            ErrorCode::NoContext,
-                            format!(
-                                "schema record: context '{context_id}' does not exist on any \
-                             shard — a schema record's context must already exist (created \
-                             by an earlier source file of the same stream, or previously); \
-                             nothing was applied"
-                            ),
-                            started_at,
-                        );
-                    }
+                    // An id no shard holds: the first shard refuses it in
+                    // its own words, as for a batch above.
+                    Located::Missing => FIRST_SHARD,
                 }
             }
         };

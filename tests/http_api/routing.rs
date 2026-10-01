@@ -101,17 +101,11 @@ fn normalized(value: &Value) -> Value {
 /// passage stores, a multi-batch import whose batches alternate
 /// shards, and group writes that need member projection.
 fn seed(server: &Server) {
-    for (name, description) in [
-        ("sake", "銘柄と蔵元の知識"),
-        ("breweries", "蔵元の台帳"),
-        ("glossary", "酒の用語集"),
-    ] {
-        server.ok(
-            "POST",
-            "/contexts",
-            Some(json!({"name": name, "description": description})),
-        );
-    }
+    // The contexts are created by the stream's own create blocks, under
+    // fixed ids: the header names a context by id (#965), and the
+    // create block's NAME is what the router's route map places on a
+    // shard. The same ids on both topologies keep every response
+    // comparable without canonicalizing them.
     // sake and breweries live on shard A, glossary on shard B (see the
     // fleet's map) — this stream's batches run A, B, A, so the router
     // must split it into three chunks and reassemble the outcomes in
@@ -129,17 +123,17 @@ fn seed(server: &Server) {
     // forwards the filter through its scatter-gather re-serialization;
     // both texts share 麹 for the rank-interleaved passage merge.
     let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-a\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-a\", \"create\": {\"name\": \"sake\", \"description\": \"銘柄と蔵元の知識\"}}\n",
         "{\"passage\": \"麹と水で仕込む。\\n\\n辛口の酒は麹の使い方で決まる。\", \
           \"stored_at\": 1700000000, \"tags\": [\"仕込み\"]}\n",
         "{\"subject\": \"青嶺\", \"label\": \"銘柄である\", \"object\": \"酒\", \"weight\": 2.0}\n",
         "{\"subject\": \"辛口\", \"label\": \"特徴\", \"object\": \"酒\", \"weight\": 1.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"type\": \"source\", \"context_id\": \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\", \"id\": \"doc-b\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\", \"id\": \"doc-b\", \"create\": {\"name\": \"glossary\", \"description\": \"酒の用語集\"}}\n",
         "{\"passage\": \"麹（こうじ）は蒸した米に麹菌を生やしたもの。\", \"stored_at\": 1700000001}\n",
         "{\"subject\": \"辛口\", \"label\": \"意味する\", \"object\": \"甘くない\", \"weight\": 2.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"type\": \"source\", \"context_id\": \"96ba89e7-84ee-4b65-b772-bdf9ae741e0d\", \"id\": \"doc-c\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"96ba89e7-84ee-4b65-b772-bdf9ae741e0d\", \"id\": \"doc-c\", \"create\": {\"name\": \"breweries\", \"description\": \"蔵元の台帳\"}}\n",
         "{\"subject\": \"青嶺酒造\", \"label\": \"造る\", \"object\": \"青嶺\", \"weight\": -2.5}\n",
         // A schema record (ADR 0009 §13, #384): sake lives on shard A —
         // this proves the router's OWN routing table for schema
@@ -153,8 +147,8 @@ fn seed(server: &Server) {
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
     assert_eq!(
-        outcome["result"]["schemas"][0]["context"],
-        json!("sake"),
+        outcome["result"]["schemas"][0]["context_id"],
+        json!("cef2e28b-43f0-4b6c-8201-abab0785399f"),
         "the router's own schema-routing table must land the record and report it: {outcome}"
     );
     // A nested group whose direct member and child live on different
@@ -762,24 +756,25 @@ fn schema_outcomes_answer_in_stream_order_not_shard_number_order() {
         &[],
     );
 
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })));
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    let ctx_b = router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })))["id"].clone();
 
-    let stream = concat!(
-        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"schema\", \"context_id\": \"95bfaef9-c0e5-4b4e-b190-ac513437c3b7\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-    );
-    let (status, body) = post_import(&router, stream, None);
+    let schema_line = |id: &Value| {
+        format!(
+            "{{\"type\": \"schema\", \"context_id\": {id}, \"mode\": \"warn\", \
+             \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
+        )
+    };
+    let stream = format!("{}{}", schema_line(&ctx_a), schema_line(&ctx_b));
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 200, "{body}");
     let schemas = body["result"]["schemas"].as_array().expect("schemas array");
     assert_eq!(
         schemas
             .iter()
-            .map(|s| s["context"].clone())
+            .map(|s| s["context_id"].clone())
             .collect::<Vec<_>>(),
-        vec![json!("ctx_a"), json!("ctx_b")],
+        vec![ctx_a, ctx_b],
         "{body}"
     );
 }
@@ -800,17 +795,19 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
         &format!("ctx_ok = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_ok", })));
-    // `ghost` is intentionally never created — the second schema
-    // record's context does not exist on its own shard.
+    let ctx_ok = router.ok("POST", "/contexts", Some(json!({"name": "ctx_ok", })))["id"].clone();
+    // The second schema record names an id no shard holds — the router
+    // hands it to the first shard (the one holding `ctx_ok`), which
+    // refuses it mid-apply, after the first record landed.
+    let ghost = "ead6ef03-d61e-460c-933d-6d450c50a1e5";
 
-    let stream = concat!(
-        "{\"type\": \"schema\", \"context_id\": \"fcfec05a-7189-4690-9983-dfaca77715e4\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    let stream = format!(
+        "{{\"type\": \"schema\", \"context_id\": {ctx_ok}, \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
+         {{\"type\": \"schema\", \"context_id\": \"{ghost}\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
     );
-    let (status, body) = post_import(&router, stream, None);
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(
         body["integrity"],
@@ -1036,18 +1033,19 @@ fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    // ctx_b is never created, and its batch carries no create meta —
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    let ctx_b = router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })))["id"].clone();
+    // ctx_b's batch names an alias whose canonical nothing interns —
     // stream-level parsing accepts it, so only the owning shard's own
     // dry run can refuse it.
-    let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
-        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"type\": \"source\", \"context_id\": \"95bfaef9-c0e5-4b4e-b190-ac513437c3b7\", \"id\": \"b.md\"}\n",
-        "{\"subject\": \"p\", \"label\": \"q\", \"object\": \"r\", \"weight\": 1.0}\n",
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
+         {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
+         {{\"type\": \"source\", \"context_id\": {ctx_b}, \"id\": \"b.md\"}}\n\
+         {{\"alias\": \"p\", \"canonical\": \"nowhere\", \"kind\": \"concept\"}}\n"
     );
-    let (status, body) = post_import(&router, stream, None);
-    assert_eq!(status, 404, "{body}");
+    let (status, body) = post_import(&router, &stream, None);
+    assert_eq!(status, 409, "{body}");
     assert_eq!(
         body["integrity"],
         json!("nothing_written"),
@@ -1115,20 +1113,20 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
     // The batch AND a schema land first; the group names `ghost`,
     // which is routable (so the router accepts the stream) but never
     // created, so shard B's live-state validation refuses on the real
     // run — and the rewrap must name BOTH landed counts, the
     // both-nonzero arm of its landed message.
-    let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
-        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
+         {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
+         {{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
+         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
     );
-    let (status, body) = post_import(&router, stream, None);
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
     assert_eq!(body["durable_batches"], json!(1), "{body}");
@@ -1153,13 +1151,13 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
-        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
+         {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
+         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
     );
-    let (status, body) = post_import(&router, stream, None);
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
     assert_eq!(body["durable_batches"], json!(1), "{body}");
@@ -1183,13 +1181,13 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
         &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
-    let stream = concat!(
-        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    let stream = format!(
+        "{{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
+         {{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}}\n"
     );
-    let (status, body) = post_import(&router, stream, None);
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
     assert!(
@@ -1214,17 +1212,18 @@ fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
     let shard = Server::start("rewrap-count-real");
     let router = Server::start_router(
         "rewrap-count",
-        &format!("stubbed = {}\nghost = {}\n", stub.endpoint, shard.base),
+        &format!("ghost = {}\nstubbed = {}\n", shard.base, stub.endpoint),
         &[],
     );
-    // `ghost` is never created: its schema record passes the dry-run
-    // preflight (scope checks only) and refuses on the real run —
-    // AFTER the stub shard's batch chunk landed.
+    // The batch creates its context on the stub shard by name. `ghost`
+    // is never created: the group record naming it passes the dry-run
+    // preflight (group validation runs against live state, after the
+    // batches) and refuses on the real run — AFTER the stub shard's
+    // batch chunk landed.
     let stream = concat!(
-        "{\"type\": \"source\", \"context_id\": \"6030dd60-5e04-40cb-8aae-bd67951549b7\", \"id\": \"doc\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"6030dd60-5e04-40cb-8aae-bd67951549b7\", \"id\": \"doc\", \"create\": {\"name\": \"stubbed\"}}\n",
         "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
-        "{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
-         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ghost\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
