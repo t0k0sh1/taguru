@@ -435,15 +435,15 @@ def test_promote_moves_a_source_and_previews_with_dry_run(client: Taguru, fresh_
     destination_id = client.contexts.create(destination).id
     scratch = client.context(context_id)
 
-    preview = scratch.promote(destination, ["docs/aomine.md"], dry_run=True)
+    preview = scratch.promote(destination_id, ["docs/aomine.md"], dry_run=True)
     assert len(preview.batches) == 1
     assert preview.audit is None
     # A dry run writes nothing.
     assert client.context(destination_id).list_sources().total == 0
 
-    outcome = scratch.promote(destination, ["docs/aomine.md"])
+    outcome = scratch.promote(destination_id, ["docs/aomine.md"])
     assert outcome.batches[0].source == "docs/aomine.md"
-    assert outcome.batches[0].context == destination
+    assert outcome.batches[0].context_id == destination_id
     assert outcome.audit is not None
     assert outcome.audit["detector"] == "consolidation/1"
     assert client.context(destination_id).list_sources().total == 1

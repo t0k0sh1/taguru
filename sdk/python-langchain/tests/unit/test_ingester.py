@@ -210,7 +210,7 @@ def test_ingest_text_builds_the_batch_and_imports(
     assert len(fake_server.imported) == 1
     lines = [json.loads(line) for line in fake_server.imported[0].strip().split("\n")]
     assert lines[0]["type"] == "source"
-    assert lines[0]["context"] == "sake"
+    assert lines[0]["context_id"] == "id-sake"
     assert lines[0]["id"] == "docs/aomine.md"
     assert "create" not in lines[0]
     assert lines[1] == {"passage": DOC_TEXT}  # verbatim, unchunked, unlabeled
@@ -269,7 +269,7 @@ def test_ingest_text_propagates_section_and_locator_counts_from_the_server(
     sections_stored``/``sections_dropped``/``locators_stored``/
     ``locators_dropped`` onto ``IngestOutcome`` (issue #347)."""
     fake_server.import_result_override = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "docs/aomine.md",
         "created": False,
         "retracted": 0,
@@ -379,7 +379,7 @@ def test_create_context_stamps_the_header(
     )
     ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     header = json.loads(fake_server.imported[0].split("\n", 1)[0])
-    assert header["create"] == {"description": "酒蔵の知識"}
+    assert header["create"] == {"name": "sake", "description": "酒蔵の知識"}
 
 
 def test_documents_require_a_source_id(sync_client: Taguru, async_client: AsyncTaguru) -> None:

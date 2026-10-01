@@ -1596,7 +1596,8 @@ def _line(obj: dict[str, Any]) -> str:
 
 
 def render_batch(
-    context: str,
+    context_id: str,
+    create_name: str | None,
     source: str,
     description: str | None,
     extraction: Extraction,
@@ -1620,10 +1621,12 @@ def render_batch(
         "type": "source",
         "version": FORMAT_VERSION,
         "id": source,
-        "context": context,
+        "context_id": context_id,
     }
-    if description is not None:
-        header["create"] = {"description": description}
+    # A create block exists exactly when the writer names the context it
+    # would create (#965): the name is what the server registers it under.
+    if create_name is not None:
+        header["create"] = {"name": create_name, "description": description or ""}
     lines = [_line(header)]
     if passage is not None:
         lines.append(_line({"passage": passage}))

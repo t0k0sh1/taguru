@@ -1030,7 +1030,7 @@ class SchemaImportOutcome:
     (ADR 0009 §13).
     """
 
-    context: str
+    context_id: str
     mode: str
     types: int
     relations: int
@@ -1056,7 +1056,7 @@ class AddAssociationsResult:
 class ImportOutcome:
     """Outcome of one applied source (retract-then-apply)."""
 
-    context: str
+    context_id: str
     source: str
     created: bool
     retracted: int

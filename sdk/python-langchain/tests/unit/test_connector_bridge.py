@@ -144,7 +144,7 @@ def test_ingest_outcome_counters_come_from_the_servers_import_outcome(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
     fake_server.import_result_override = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "doc.md",
         "created": True,
         "retracted": 0,

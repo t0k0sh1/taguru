@@ -259,7 +259,7 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
 
 def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     outcome = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "a",
         "created": True,
         "retracted": 0,
@@ -278,7 +278,7 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     client = sync_client(lambda _req: ok_response(outcome))
     result = client.import_batches('{"type": "source"}')
     assert len(result.batches) == 1
-    assert result.batches[0].context == "sake"
+    assert result.batches[0].context_id == "sake"
     # The new locator counters (#346) must survive normalization, not just
     # be accepted by the decoder — a regression could drop them silently.
     assert result.batches[0].locators_stored == 3
@@ -292,7 +292,7 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
 
 async def test_async_import_batches_decodes_locator_counts() -> None:
     outcome = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "a",
         "created": True,
         "retracted": 0,
@@ -316,7 +316,7 @@ async def test_async_import_batches_decodes_locator_counts() -> None:
 
 def test_import_carries_group_restore_outcomes() -> None:
     outcome = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "a",
         "created": True,
         "retracted": 0,
@@ -352,7 +352,7 @@ async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monke
     path = tmp_path / "batch.jsonl"
     path.write_text('{"type": "source"}\n', encoding="utf-8")
     outcome = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "a",
         "created": True,
         "retracted": 0,
@@ -606,7 +606,7 @@ def test_wrong_envelope_shape_error_names_the_status_and_body() -> None:
 
 def test_import_result_threads_schemas_issues_and_violations_through() -> None:
     outcome = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "a",
         "created": True,
         "retracted": 0,
@@ -628,14 +628,15 @@ def test_import_result_threads_schemas_issues_and_violations_through() -> None:
         {
             "batches": [outcome],
             "groups": [{"name": "g", "outcome": "created", "contexts": 1, "groups": 0}],
-            "schemas": [{"context": "sake", "mode": "warn", "types": 2, "relations": 1}],
+            "schemas": [{"context_id": "sake", "mode": "warn", "types": 2, "relations": 1}],
         },
         issues=[issue],
         schema_violations=4,
     )
     assert [group.name for group in result.groups] == ["g"]
     decoded_schemas = [
-        (schema.context, schema.mode, schema.types, schema.relations) for schema in result.schemas
+        (schema.context_id, schema.mode, schema.types, schema.relations)
+        for schema in result.schemas
     ]
     assert decoded_schemas == [("sake", "warn", 2, 1)]
     assert result.issues == [issue]

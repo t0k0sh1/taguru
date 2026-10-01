@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from taguru import (
@@ -88,12 +90,17 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     # Everything taguru writes carries the format version (ADR 0042).
     assert '"version":"2026-09-17"' in stream
 
+    # The stream names its context by id (#965): a restore under a fresh id
+    # and name is a copy, not a replace of the original.
     restored_name = f"{fresh_name}-restored"
-    result = client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))
-    assert all(outcome.context == restored_name for outcome in result.batches)
+    restored_id = str(uuid.uuid4())
+    restore = stream.replace(context_id, restored_id).replace(
+        f'"{fresh_name}"', f'"{restored_name}"'
+    )
+    result = client.import_batches(restore)
+    assert all(outcome.context_id == restored_id for outcome in result.batches)
     assert any(outcome.created for outcome in result.batches)
 
-    restored_id = next(row.id for row in client.contexts.iter() if row.name == restored_name)
     restored = client.context(restored_id)
     assert restored.query(subject="青嶺酒造", label="杜氏").matches[0].object == "高瀬"
     assert restored.lookup_passages(["docs/aomine.md"]).passages["docs/aomine.md"] == AOMINE_DOC
@@ -102,7 +109,7 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     # Re-importing the same stream is a per-source replace: weights must not
     # double-count.
     before = restored.query(subject="青嶺酒造", label="杜氏").matches[0]
-    client.import_batches(stream.replace(f'"{fresh_name}"', f'"{restored_name}"'))
+    client.import_batches(restore)
     after = restored.query(subject="青嶺酒造", label="杜氏").matches[0]
     assert after.weight == before.weight
     assert after.count == before.count
@@ -124,9 +131,10 @@ def test_export_stream_and_file(client: Taguru, fresh_name: str, tmp_path) -> No
 
 
 def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
+    new_id = str(uuid.uuid4())
     batch = (
-        f'{{"type": "source", "context": "{fresh_name}", "id": "f.md", '
-        f'"create": {{"description": "from file"}}}}\n'
+        f'{{"type": "source", "context_id": "{new_id}", "id": "f.md", '
+        f'"create": {{"name": "{fresh_name}", "description": "from file"}}}}\n'
         '{"passage": "ファイルからの本文。"}\n'
         '{"subject": "a", "label": "b", "object": "c", "weight": 1.0}\n'
     )
@@ -136,5 +144,6 @@ def test_import_file(client: Taguru, fresh_name: str, tmp_path) -> None:
     assert result.batches[0].created
     assert result.batches[0].associations == 1
     assert result.batches[0].passage_stored
-    context_id = next(row.id for row in client.contexts.iter() if row.name == fresh_name)
-    client.contexts.delete(context_id)
+    assert result.batches[0].context_id == new_id
+    assert next(row.name for row in client.contexts.iter() if row.id == new_id) == fresh_name
+    client.contexts.delete(new_id)
