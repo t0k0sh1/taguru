@@ -12,9 +12,9 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
     let server = Server::start("groups-crud");
     for name in ["apple", "banana", "cherry"] {
         server.ok(
-            "PUT",
-            &format!("/contexts/{name}"),
-            Some(json!({"description": name})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": name, "description": name})),
         );
     }
 
@@ -75,7 +75,12 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
 
     // Groups and contexts are separate namespaces: one name, both kinds.
     server.ok("PUT", "/groups/apple", Some(json!({"description": "同名"})));
-    assert_eq!(server.call("GET", "/contexts/apple", None).0, 200);
+    assert_eq!(
+        server
+            .call("GET", &format!("/contexts/{}", server.cx("apple")), None)
+            .0,
+        200
+    );
     assert_eq!(server.call("GET", "/groups/apple", None).0, 200);
 
     // DELETE removes the bundling alone; the members live on.
@@ -83,7 +88,9 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
     assert_eq!(server.call("GET", "/groups/fruit", None).0, 404);
     for name in ["banana", "cherry"] {
         assert_eq!(
-            server.call("GET", &format!("/contexts/{name}"), None).0,
+            server
+                .call("GET", &format!("/contexts/{}", server.cx(name)), None)
+                .0,
             200
         );
     }
@@ -104,8 +111,8 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
     assert_eq!(refused["code"], json!("no_context"));
     assert_eq!(server.call("GET", "/groups/g", None).0, 404);
 
-    server.ok("PUT", "/contexts/a", None);
-    server.ok("PUT", "/contexts/b", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "a"})));
+    server.ok("POST", "/contexts", Some(json!({"name": "b"})));
     server.ok("PUT", "/groups/g", Some(json!({"contexts": ["a", "b"]})));
 
     // An add naming a missing context refuses whole: membership as was.
@@ -123,7 +130,7 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
     );
 
     // Deleting a member context drops it from the group, immediately.
-    server.ok("DELETE", "/contexts/a", None);
+    server.ok("DELETE", &format!("/contexts/{}", server.cx("a")), None);
     assert_eq!(
         server.ok("GET", "/groups/g", None)["contexts"],
         json!(["b"])
@@ -154,7 +161,7 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
 #[test]
 fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     let server = Server::start("groups-total-cap");
-    server.ok("PUT", "/contexts/a", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "a"})));
     server.ok("PUT", "/groups/g", Some(json!({"contexts": ["a"]})));
     server.ok("PUT", "/groups/kid", None);
     server.ok("PATCH", "/groups/g", Some(json!({"add_groups": ["kid"]})));
@@ -200,7 +207,7 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
 fn groups_nest_with_a_depth_cap_and_no_cycles() {
     let server = Server::start("groups-nesting");
     for name in ["a", "b"] {
-        server.ok("PUT", &format!("/contexts/{name}"), None);
+        server.ok("POST", "/contexts", Some(json!({"name": name})));
     }
     server.ok("PUT", "/groups/leaf", Some(json!({"contexts": ["a"]})));
     server.ok(
@@ -270,7 +277,12 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     server.ok("DELETE", "/groups/leaf", None);
     assert_eq!(server.ok("GET", "/groups/top", None)["groups"], json!([]));
     assert_eq!(server.ok("GET", "/groups/mid", None)["groups"], json!([]));
-    assert_eq!(server.call("GET", "/contexts/a", None).0, 200);
+    assert_eq!(
+        server
+            .call("GET", &format!("/contexts/{}", server.cx("a")), None)
+            .0,
+        200
+    );
 
     // The children list rides the same input ceiling as contexts.
     let over_cap: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
@@ -284,7 +296,7 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
 #[test]
 fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     let server = Server::start("groups-restart");
-    server.ok("PUT", "/contexts/sake", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     server.ok(
         "PUT",
         "/groups/drinks",
@@ -343,7 +355,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     };
     for context in ["sake", "bunko"] {
         assert_eq!(
-            call("PUT", &format!("/contexts/{context}"), None, "atok").0,
+            call("POST", "/contexts", Some(json!({"name": context})), "atok").0,
             200
         );
     }
@@ -524,7 +536,11 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
     use std::os::unix::fs::PermissionsExt;
 
     let server = Server::start("group-unlink-fail");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
         "/groups/kura",
@@ -577,9 +593,9 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
 fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     let server = Server::start("group-fingerprint");
     for name in ["apple", "banana", "outside"] {
-        server.ok("PUT", &format!("/contexts/{name}"), None);
+        server.ok("POST", "/contexts", Some(json!({"name": name})));
     }
-    let row = server.ok("GET", "/contexts/apple", None);
+    let row = server.ok("GET", &format!("/contexts/{}", server.cx("apple")), None);
     assert_eq!(
         row["revision"],
         json!({"graph": 0, "passages": 0, "config": 0}),
@@ -610,7 +626,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     server.ok("GET", "/contexts", None);
     server.ok(
         "POST",
-        "/contexts/apple/query",
+        &format!("/contexts/{}/query", server.cx("apple")),
         Some(json!({"subject": "蔵"})),
     );
     assert_eq!(fingerprint(&server), start);
@@ -618,7 +634,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     // A graph write to a direct member moves it…
     server.ok(
         "POST",
-        "/contexts/apple/associations",
+        &format!("/contexts/{}/associations", server.cx("apple")),
         Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0}])),
     );
     let after_direct = fingerprint(&server);
@@ -627,7 +643,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     // …a passage write to a member reached only through the child too…
     server.ok(
         "POST",
-        "/contexts/banana/sources",
+        &format!("/contexts/{}/sources", server.cx("banana")),
         Some(json!({"passages": {"doc": "バナナの原文。"}})),
     );
     let after_nested = fingerprint(&server);
@@ -636,7 +652,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     // …while the same writes to a non-member change nothing.
     server.ok(
         "POST",
-        "/contexts/outside/associations",
+        &format!("/contexts/{}/associations", server.cx("outside")),
         Some(json!([{"subject": "a", "label": "b", "object": "c", "weight": 1.0}])),
     );
     assert_eq!(fingerprint(&server), after_nested);
@@ -644,7 +660,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     // The config lane (a floor edit) counts as a member change too.
     server.ok(
         "PATCH",
-        "/contexts/apple",
+        &format!("/contexts/{}", server.cx("apple")),
         Some(json!({"semantic_floor": 0.5})),
     );
     let after_config = fingerprint(&server);
@@ -665,7 +681,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["id"] == json!("apple"))
+        .find(|row| row["name"] == json!("apple"))
         .unwrap();
     assert_eq!(apple["revision"]["graph"], json!(1), "{apple}");
     assert_eq!(apple["revision"]["config"], json!(1), "{apple}");
@@ -673,7 +689,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["id"] == json!("banana"))
+        .find(|row| row["name"] == json!("banana"))
         .unwrap();
     assert_eq!(banana["revision"]["passages"], json!(1), "{banana}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());

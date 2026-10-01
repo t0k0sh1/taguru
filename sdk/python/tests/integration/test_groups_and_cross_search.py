@@ -16,12 +16,16 @@ from taguru import (
 )
 
 
-def seeded_pair(client: Taguru, base: str) -> tuple[str, str]:
-    """Two contexts holding one distinct fact (graph + passage) each."""
+def seeded_pair(client: Taguru, base: str) -> tuple[str, str, str, str]:
+    """Two contexts holding one distinct fact (graph + passage) each.
+
+    Returns ``(sake_name, tea_name, sake_id, tea_id)`` — group members
+    and cross-search bodies take the names (until #965), while every
+    ``/contexts/{id}/…`` call takes the ids (#964)."""
     sake, tea = f"{base}-sake", f"{base}-tea"
-    client.contexts.create(sake, description="酒蔵の知識")
-    client.contexts.create(tea, description="茶園の知識")
-    client.context(sake).add_associations(
+    sake_id = client.contexts.create(sake, description="酒蔵の知識").id
+    tea_id = client.contexts.create(tea, description="茶園の知識").id
+    client.context(sake_id).add_associations(
         [
             {
                 "subject": "青嶺酒造",
@@ -33,7 +37,7 @@ def seeded_pair(client: Taguru, base: str) -> tuple[str, str]:
             }
         ]
     )
-    client.context(tea).add_associations(
+    client.context(tea_id).add_associations(
         [
             {
                 "subject": "青嶺茶園",
@@ -45,13 +49,13 @@ def seeded_pair(client: Taguru, base: str) -> tuple[str, str]:
             }
         ]
     )
-    client.context(sake).store_passages({"sake.md": "青嶺酒造の代表銘柄は「青嶺」である。"})
-    client.context(tea).store_passages({"tea.md": "青嶺茶園の代表銘柄は「露霜」である。"})
-    return sake, tea
+    client.context(sake_id).store_passages({"sake.md": "青嶺酒造の代表銘柄は「青嶺」である。"})
+    client.context(tea_id).store_passages({"tea.md": "青嶺茶園の代表銘柄は「露霜」である。"})
+    return sake, tea, sake_id, tea_id
 
 
 def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
-    sake, tea = seeded_pair(client, fresh_name)
+    sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group, child = f"{fresh_name}-g", f"{fresh_name}-child"
 
     assert not client.groups.exists(group)
@@ -97,11 +101,11 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
         client.groups.get(renamed_group)
     assert gone.value.code == "no_group"
     assert client.groups.exists(child)
-    assert client.contexts.exists(sake)
+    assert client.contexts.exists(sake_id)
 
     client.groups.delete(child)
-    client.contexts.delete(sake)
-    client.contexts.delete(tea)
+    client.contexts.delete(sake_id)
+    client.contexts.delete(tea_id)
 
 
 def test_group_writes_need_the_write_role(
@@ -113,7 +117,7 @@ def test_group_writes_need_the_write_role(
 
 
 def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) -> None:
-    sake, tea = seeded_pair(client, fresh_name)
+    sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group = f"{fresh_name}-g"
     client.groups.create(group, contexts=[sake, tea])
 
@@ -145,12 +149,12 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
     assert missing.value.code == "no_group"
 
     client.groups.delete(group)
-    client.contexts.delete(sake)
-    client.contexts.delete(tea)
+    client.contexts.delete(sake_id)
+    client.contexts.delete(tea_id)
 
 
 def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
-    sake, tea = seeded_pair(client, fresh_name)
+    sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group = f"{fresh_name}-g"
     client.groups.create(group, description="蔵元一式", contexts=[sake, tea])
 
@@ -171,5 +175,5 @@ def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None
     assert client.groups.get(group).contexts == sorted([sake, tea])
 
     client.groups.delete(group)
-    client.contexts.delete(sake)
-    client.contexts.delete(tea)
+    client.contexts.delete(sake_id)
+    client.contexts.delete(tea_id)

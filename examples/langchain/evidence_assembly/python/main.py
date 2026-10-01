@@ -181,13 +181,16 @@ def main() -> int:
         for outcome in outcomes:
             print(f"ingested {outcome.source}: {outcome.associations} facts, {outcome.aliases} aliases")
 
-        # -- read: POST /contexts/{name}/evidence directly, no assembly-lane
+        # -- read: POST /contexts/{id}/evidence directly, no assembly-lane
         #    intermediary — this is the same call `taguru evaluate --assembly`
         #    drives for the equal-budget comparison documented on
         #    docs/evidence.html. Context.assemble_evidence(), not a bare
         #    client-level call — every read/write method is bound to one
         #    context, named after the server's own vocabulary.
-        context = client.context("aomine-evidence")
+        #    Paths address a context by id (#964), so look it up by the
+        #    name the ingester created it under.
+        context_id = next(row.id for row in client.contexts.iter() if row.name == "aomine-evidence")
+        context = client.context(context_id)
         print(f"\n== {QUERY} ==")
         generous = context.assemble_evidence(origins=["青嶺酒造"], text_fallback_query=QUERY)
         print_package("generous budget (server defaults)", generous)

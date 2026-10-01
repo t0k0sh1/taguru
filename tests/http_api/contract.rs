@@ -148,14 +148,14 @@ fn http_fixture(
     );
 }
 
-/// [`http_fixture`] pinned to `POST /contexts/{name}/evidence` — every
+/// [`http_fixture`] pinned to `POST /contexts/{id}/evidence` — every
 /// evidence-assembly and evidence-error fixture below targets this one
 /// endpoint, so only `operation`/`request`/`status`/`response` vary.
 fn evidence_fixture(operation: &str, request: Value, status: u16, response: Value) {
     http_fixture(
         operation,
         "POST",
-        "/contexts/{name}/evidence",
+        "/contexts/{id}/evidence",
         Some(request),
         status,
         response,
@@ -181,7 +181,8 @@ fn mcp_fixture(operation: &str, route: &str, request: Value, status: u16, respon
 
 #[test]
 fn version_and_health() {
-    let server = Server::start("contract-probes");
+    let server =
+        Server::start_with_env("contract-probes", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
 
     let (status, body) = server.call("GET", "/version", None);
     assert_eq!(status, 200, "{body}");
@@ -196,13 +197,13 @@ fn version_and_health() {
 
 fn seed_basic_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "wire-contract corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "wire-contract corpus"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 2.0,
              "source": "doc.md", "paragraph": 0},
@@ -214,7 +215,7 @@ fn seed_basic_corpus(server: &Server, name: &str) {
     // just an always-null field the golden could never actually prove.
     server.ok(
         "POST",
-        &format!("/contexts/{name}/sources"),
+        &format!("/contexts/{}/sources", server.cx(name)),
         Some(json!({
             "passages": {"doc.md": "alpha connects to beta."},
             "locators": {"doc.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
@@ -224,11 +225,16 @@ fn seed_basic_corpus(server: &Server, name: &str) {
 
 #[test]
 fn recall_match_page_and_contexts_list() {
-    let server = Server::start("contract-recall");
+    let server =
+        Server::start_with_env("contract-recall", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
     seed_basic_corpus(&server, "corpus-a");
 
     let request = json!({"cue": "alpha"});
-    let (status, body) = server.call("POST", "/contexts/corpus-a/recall", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/recall", server.cx("corpus-a")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert!(
         !body["result"]["matches"].as_array().unwrap().is_empty(),
@@ -237,7 +243,7 @@ fn recall_match_page_and_contexts_list() {
     http_fixture(
         "recall",
         "POST",
-        "/contexts/{name}/recall",
+        "/contexts/{id}/recall",
         Some(request),
         status,
         body,
@@ -250,27 +256,54 @@ fn recall_match_page_and_contexts_list() {
         "{body}"
     );
     http_fixture("contexts_list", "GET", "/contexts", None, status, body);
+
+    // The create's answer is the new row, id included — the value
+    // every other path is built from (#964), so its shape is pinned
+    // exactly like the listing's.
+    let request = json!({"name": "corpus-created", "description": "wire-contract corpus"});
+    let (status, body) = server.call("POST", "/contexts", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert!(body["result"]["id"].is_string(), "{body}");
+    http_fixture(
+        "contexts_create",
+        "POST",
+        "/contexts",
+        Some(request),
+        status,
+        body,
+    );
 }
 
 #[test]
 fn explore_and_activate_pages() {
-    let server = Server::start("contract-explore");
+    let server = Server::start_with_env(
+        "contract-explore",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_basic_corpus(&server, "corpus-b");
 
     let request = json!({"origins": ["alpha"]});
-    let (status, body) = server.call("POST", "/contexts/corpus-b/explore", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/explore", server.cx("corpus-b")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     http_fixture(
         "explore",
         "POST",
-        "/contexts/{name}/explore",
+        "/contexts/{id}/explore",
         Some(request),
         status,
         body,
     );
 
     let request = json!({"origins": ["alpha"]});
-    let (status, body) = server.call("POST", "/contexts/corpus-b/activate", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/activate", server.cx("corpus-b")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert!(
         !body["result"]["matches"].as_array().unwrap().is_empty(),
@@ -279,14 +312,18 @@ fn explore_and_activate_pages() {
     http_fixture(
         "activate",
         "POST",
-        "/contexts/{name}/activate",
+        "/contexts/{id}/activate",
         Some(request),
         status,
         body,
     );
 
     let request = json!({"origins": ["alpha"], "targets": ["beta"]});
-    let (status, body) = server.call("POST", "/contexts/corpus-b/paths", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/paths", server.cx("corpus-b")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert!(
         !body["result"]["matches"].as_array().unwrap().is_empty(),
@@ -295,7 +332,7 @@ fn explore_and_activate_pages() {
     http_fixture(
         "paths",
         "POST",
-        "/contexts/{name}/paths",
+        "/contexts/{id}/paths",
         Some(request),
         status,
         body,
@@ -308,15 +345,22 @@ fn explore_and_activate_pages() {
 /// every GET fixture's, is not part of the recorded request.
 #[test]
 fn changes_feed_page() {
-    let server = Server::start("contract-changes");
+    let server = Server::start_with_env(
+        "contract-changes",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_basic_corpus(&server, "corpus-cf");
 
-    let tail = server.ok("GET", "/contexts/corpus-cf/changes", None);
+    let tail = server.ok(
+        "GET",
+        &format!("/contexts/{}/changes", server.cx("corpus-cf")),
+        None,
+    );
     let cursor = tail["next"].as_str().expect("a tail always has a cursor");
 
     server.ok(
         "POST",
-        "/contexts/corpus-cf/associations",
+        &format!("/contexts/{}/associations", server.cx("corpus-cf")),
         Some(json!([
             {"subject": "beta", "label": "connects_to", "object": "gamma", "weight": 1.0},
         ])),
@@ -324,7 +368,10 @@ fn changes_feed_page() {
 
     let (status, body) = server.call(
         "GET",
-        &format!("/contexts/corpus-cf/changes?since={cursor}"),
+        &format!(
+            "/contexts/{}/changes?since={cursor}",
+            server.cx("corpus-cf")
+        ),
         None,
     );
     assert_eq!(status, 200, "{body}");
@@ -336,7 +383,7 @@ fn changes_feed_page() {
     http_fixture(
         "changes",
         "GET",
-        "/contexts/{name}/changes",
+        "/contexts/{id}/changes",
         None,
         status,
         body,
@@ -344,7 +391,10 @@ fn changes_feed_page() {
 
     let (status, body) = server.call(
         "GET",
-        "/contexts/corpus-cf/changes?since=cf1-0000000000000000-999",
+        &format!(
+            "/contexts/{}/changes?since=cf1-0000000000000000-999",
+            server.cx("corpus-cf")
+        ),
         None,
     );
     assert_eq!(status, 410, "{body}");
@@ -352,7 +402,7 @@ fn changes_feed_page() {
     http_fixture(
         "changes_stale_cursor",
         "GET",
-        "/contexts/{name}/changes",
+        "/contexts/{id}/changes",
         None,
         status,
         body,
@@ -365,11 +415,14 @@ fn changes_feed_page() {
 
 #[test]
 fn sources_search_passage_page() {
-    let server = Server::start("contract-sources-search");
-    server.ok("PUT", "/contexts/corpus-c", None);
+    let server = Server::start_with_env(
+        "contract-sources-search",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "corpus-c"})));
     server.ok(
         "POST",
-        "/contexts/corpus-c/sources",
+        &format!("/contexts/{}/sources", server.cx("corpus-c")),
         Some(json!({"passages": {
             "doc.md": "青嶺酒造は雲居県霧沢町の蔵元である。"
         }})),
@@ -378,7 +431,7 @@ fn sources_search_passage_page() {
     let request = json!({"query": "酒造"});
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-c/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("corpus-c")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -389,7 +442,7 @@ fn sources_search_passage_page() {
     http_fixture(
         "sources_search",
         "POST",
-        "/contexts/{name}/sources/search",
+        "/contexts/{id}/sources/search",
         Some(request),
         status,
         body,
@@ -402,17 +455,25 @@ fn sources_search_passage_page() {
 /// already uses) — no LLM stub needed for a deterministic fixture.
 #[test]
 fn communities_search_community_page() {
-    let server = Server::start("contract-communities-search");
-    server.ok("PUT", "/contexts/corpus-d", None);
+    let server = Server::start_with_env(
+        "contract-communities-search",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "corpus-d"})));
     server.ok(
         "POST",
-        "/contexts/corpus-d/associations",
+        &format!("/contexts/{}/associations", server.cx("corpus-d")),
         Some(json!([
             {"subject": "a1", "label": "近い", "object": "a2", "weight": 2.0},
         ])),
     );
-    let revision = server.ok("GET", "/contexts/corpus-d", None)["revision"].clone();
-    server.ok("PUT", "/contexts/corpus-d::communities", None);
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("corpus-d")), None)["revision"].clone();
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "corpus-d::communities"})),
+    );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -425,7 +486,7 @@ fn communities_search_community_page() {
     });
     server.ok(
         "POST",
-        "/contexts/corpus-d::communities/sources",
+        &format!("/contexts/{}/sources", server.cx("corpus-d::communities")),
         Some(json!({"passages": {
             "community:L0-0": "この共同体のテーマは酒造りの歴史です。",
             "communities:manifest": manifest.to_string(),
@@ -433,7 +494,10 @@ fn communities_search_community_page() {
     );
     server.ok(
         "POST",
-        "/contexts/corpus-d::communities/associations",
+        &format!(
+            "/contexts/{}/associations",
+            server.cx("corpus-d::communities")
+        ),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
             {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
@@ -443,7 +507,7 @@ fn communities_search_community_page() {
     let request = json!({"query": "酒造りの歴史"});
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-d/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("corpus-d")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -454,7 +518,7 @@ fn communities_search_community_page() {
     http_fixture(
         "communities_search",
         "POST",
-        "/contexts/{name}/communities/search",
+        "/contexts/{id}/communities/search",
         Some(request),
         status,
         body,
@@ -466,21 +530,28 @@ fn communities_search_community_page() {
 
 #[test]
 fn store_passages_response_shape() {
-    let server = Server::start("contract-store-passages");
-    server.ok("PUT", "/contexts/corpus-e", None);
+    let server = Server::start_with_env(
+        "contract-store-passages",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "corpus-e"})));
 
     let request = json!({
         "passages": {"doc.md": "導入。\n\n本編。"},
         "sections": {"doc.md": [{"paragraph": 1, "section": "本編"}]},
         "locators": {"doc.md": [{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}]},
     });
-    let (status, body) = server.call("POST", "/contexts/corpus-e/sources", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("corpus-e")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["locators_stored"], json!(1), "{body}");
     http_fixture(
         "store_passages",
         "POST",
-        "/contexts/{name}/sources",
+        "/contexts/{id}/sources",
         Some(request),
         status,
         body,
@@ -488,7 +559,7 @@ fn store_passages_response_shape() {
 }
 
 /// S5 (#383): `warn` mode's `issues`/`schema_violations` on
-/// `POST /contexts/{name}/associations` are new, wire-visible fields
+/// `POST /contexts/{id}/associations` are new, wire-visible fields
 /// on `ApiResponse` — additive (`HTTP_CONTRACT` unchanged, both are
 /// `skip_serializing_if`-omitted on every response with nothing to
 /// say), but still a shape an SDK consumer needs pinned so it stops
@@ -496,11 +567,14 @@ fn store_passages_response_shape() {
 /// context actually turns `warn` on.
 #[test]
 fn add_associations_warn_mode_response_shape() {
-    let server = Server::start("contract-associations-warn");
-    server.ok("PUT", "/contexts/corpus-g", None);
+    let server = Server::start_with_env(
+        "contract-associations-warn",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "corpus-g"})));
     server.ok(
         "PUT",
-        "/contexts/corpus-g/schema",
+        &format!("/contexts/{}/schema", server.cx("corpus-g")),
         Some(json!({
             "type": "schema",
             "mode": "warn",
@@ -516,7 +590,7 @@ fn add_associations_warn_mode_response_shape() {
     ]);
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-g/associations",
+        &format!("/contexts/{}/associations", server.cx("corpus-g")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -526,7 +600,7 @@ fn add_associations_warn_mode_response_shape() {
     http_fixture(
         "add_associations_warn",
         "POST",
-        "/contexts/{name}/associations",
+        "/contexts/{id}/associations",
         Some(request),
         status,
         body,
@@ -535,7 +609,8 @@ fn add_associations_warn_mode_response_shape() {
 
 #[test]
 fn import_reports_locator_bookkeeping() {
-    let server = Server::start("contract-import");
+    let server =
+        Server::start_with_env("contract-import", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
     let batch = "{\"type\": \"source\", \"context\": \"corpus-f\", \"id\": \"doc.md\", \
                  \"create\": {\"description\": \"wire-contract import corpus\"}}\n\
                  {\"passage\": \"導入。\\n\\n本編。\"}\n\
@@ -570,7 +645,10 @@ fn import_reports_locator_bookkeeping() {
 /// reliably enough for a recorded fixture.
 #[test]
 fn import_refusal_pins_the_durable_prefix_fields() {
-    let server = Server::start("contract-import-refusal");
+    let server = Server::start_with_env(
+        "contract-import-refusal",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     let stream = "{\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-1\", \
                    \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
@@ -597,7 +675,10 @@ fn import_refusal_pins_the_durable_prefix_fields() {
 /// `types`/`relations`, no outcome verb) separately.
 #[test]
 fn import_with_schema_reports_the_schema_outcome() {
-    let server = Server::start("contract-import-schema");
+    let server = Server::start_with_env(
+        "contract-import-schema",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     let stream = "{\"type\": \"source\", \"context\": \"corpus-g\", \"id\": \"doc.md\", \
                   \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
@@ -627,13 +708,13 @@ fn import_with_schema_reports_the_schema_outcome() {
 
 fn seed_evidence_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "evidence wire-contract corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "evidence wire-contract corpus"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/sources"),
+        &format!("/contexts/{}/sources", server.cx(name)),
         Some(json!({
             "passages": {
                 "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
@@ -645,7 +726,7 @@ fn seed_evidence_corpus(server: &Server, name: &str) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "docs/kura.md", "paragraph": 0},
@@ -657,11 +738,18 @@ fn seed_evidence_corpus(server: &Server, name: &str) {
 /// `plan` — the baseline shape.
 #[test]
 fn evidence_mixed_lanes() {
-    let server = Server::start("contract-evidence-mixed");
+    let server = Server::start_with_env(
+        "contract-evidence-mixed",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_evidence_corpus(&server, "sake");
 
     let request = json!({"origins": ["青嶺酒造"]});
-    let (status, body) = server.call("POST", "/contexts/sake/evidence", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     let items = body["result"]["items"].as_array().unwrap();
     assert!(
@@ -677,8 +765,11 @@ fn evidence_mixed_lanes() {
 /// both populated (ADR 0006 §8/§9).
 #[test]
 fn evidence_budget_constrained() {
-    let server = Server::start("contract-evidence-budget");
-    server.ok("PUT", "/contexts/budget-corpus", None);
+    let server = Server::start_with_env(
+        "contract-evidence-budget",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "budget-corpus"})));
     let associations: Vec<Value> = (0..5)
         .map(|index| {
             json!({"subject": format!("s{index}"), "label": "rel",
@@ -687,7 +778,7 @@ fn evidence_budget_constrained() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/budget-corpus/associations",
+        &format!("/contexts/{}/associations", server.cx("budget-corpus")),
         Some(Value::Array(associations)),
     );
 
@@ -697,7 +788,7 @@ fn evidence_budget_constrained() {
     });
     let (status, body) = server.call(
         "POST",
-        "/contexts/budget-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("budget-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -724,11 +815,14 @@ fn evidence_budget_constrained() {
 /// directly.
 #[test]
 fn evidence_duplicate_passage() {
-    let server = Server::start("contract-evidence-dup");
-    server.ok("PUT", "/contexts/dup-corpus", None);
+    let server = Server::start_with_env(
+        "contract-evidence-dup",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "dup-corpus"})));
     server.ok(
         "POST",
-        "/contexts/dup-corpus/sources",
+        &format!("/contexts/{}/sources", server.cx("dup-corpus")),
         Some(json!({"passages": {
             "a.md": "the quick brown fox jumps over the lazy dog",
             "b.md": "the quick brown fox jumps over the lazy dogs"
@@ -741,7 +835,7 @@ fn evidence_duplicate_passage() {
     });
     let (status, body) = server.call(
         "POST",
-        "/contexts/dup-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("dup-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -766,11 +860,18 @@ fn evidence_duplicate_passage() {
 /// populated (ADR 0006 §9).
 #[test]
 fn evidence_contradiction_group() {
-    let server = Server::start("contract-evidence-contradiction");
-    server.ok("PUT", "/contexts/contradiction-corpus", None);
+    let server = Server::start_with_env(
+        "contract-evidence-contradiction",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     server.ok(
         "POST",
-        "/contexts/contradiction-corpus/sources",
+        "/contexts",
+        Some(json!({"name": "contradiction-corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("contradiction-corpus")),
         Some(json!({
             "passages": {
                 "s1.md": "猫は哺乳類である。",
@@ -784,7 +885,10 @@ fn evidence_contradiction_group() {
     );
     server.ok(
         "POST",
-        "/contexts/contradiction-corpus/associations",
+        &format!(
+            "/contexts/{}/associations",
+            server.cx("contradiction-corpus")
+        ),
         Some(json!([
             {"subject": "猫", "label": "is_a", "object": "哺乳類", "weight": 1.0,
              "source": "s1.md", "paragraph": 0},
@@ -796,7 +900,7 @@ fn evidence_contradiction_group() {
     let request = json!({"origins": ["猫"]});
     let (status, body) = server.call(
         "POST",
-        "/contexts/contradiction-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("contradiction-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -816,11 +920,14 @@ fn evidence_contradiction_group() {
 /// on, pinning `plan.reranker.reason`.
 #[test]
 fn evidence_communities_degrade_and_rerank_reason() {
-    let server = Server::start("contract-evidence-communities");
-    server.ok("PUT", "/contexts/comm-corpus", None);
+    let server = Server::start_with_env(
+        "contract-evidence-communities",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "comm-corpus"})));
     server.ok(
         "POST",
-        "/contexts/comm-corpus/associations",
+        &format!("/contexts/{}/associations", server.cx("comm-corpus")),
         Some(json!([{"subject": "alpha", "label": "rel", "object": "beta", "weight": 1.0}])),
     );
 
@@ -831,7 +938,7 @@ fn evidence_communities_degrade_and_rerank_reason() {
     });
     let (status, body) = server.call(
         "POST",
-        "/contexts/comm-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("comm-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -856,11 +963,17 @@ fn evidence_communities_degrade_and_rerank_reason() {
 
 #[test]
 fn error_no_context() {
-    let server = Server::start("contract-error-no-context");
+    let server = Server::start_with_env(
+        "contract-error-no-context",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     let request = json!({"origins": ["x"]});
+    // A well-formed id nothing answers to — an unknown context is a
+    // 404 (an id-SHAPED mistake would be the 400 the extractor pins
+    // elsewhere).
     let (status, body) = server.call(
         "POST",
-        "/contexts/does-not-exist/evidence",
+        "/contexts/00000000-0000-4000-8000-00000000dead/evidence",
         Some(request.clone()),
     );
     assert_eq!(status, 404, "{body}");
@@ -869,12 +982,19 @@ fn error_no_context() {
 
 #[test]
 fn error_over_limit() {
-    let server = Server::start("contract-error-over-limit");
-    server.ok("PUT", "/contexts/over-limit-corpus", None);
+    let server = Server::start_with_env(
+        "contract-error-over-limit",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "over-limit-corpus"})),
+    );
     let request = json!({"origins": vec!["x"; 1001]});
     let (status, body) = server.call(
         "POST",
-        "/contexts/over-limit-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("over-limit-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 400, "{body}");
@@ -884,12 +1004,19 @@ fn error_over_limit() {
 
 #[test]
 fn error_malformed_request() {
-    let server = Server::start("contract-error-malformed");
-    server.ok("PUT", "/contexts/malformed-corpus", None);
+    let server = Server::start_with_env(
+        "contract-error-malformed",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "malformed-corpus"})),
+    );
     let request = json!({"origins": ["x"], "budget": "not-an-object"});
     let (status, body) = server.call(
         "POST",
-        "/contexts/malformed-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("malformed-corpus")),
         Some(request.clone()),
     );
     assert_eq!(status, 422, "{body}");
@@ -905,6 +1032,7 @@ fn error_forbidden() {
     let server = Server::start_with_env(
         "contract-error-forbidden",
         &[
+            ("TAGURU_TEST_DETERMINISTIC_IDS", "1"),
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
             (
                 "TAGURU_KEY_GRANTS",
@@ -912,12 +1040,16 @@ fn error_forbidden() {
             ),
         ],
     );
-    let (status, body) =
-        server.call_with_token("PUT", "/contexts/forbidden-corpus", None, Some("atok"));
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "forbidden-corpus"})),
+        Some("atok"),
+    );
     assert_eq!(status, 200, "{body}");
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/forbidden-corpus/associations",
+        &format!("/contexts/{}/associations", server.cx("forbidden-corpus")),
         Some(json!([{"subject": "a", "label": "rel", "object": "b", "weight": 1.0}])),
         Some("atok"),
     );
@@ -926,7 +1058,7 @@ fn error_forbidden() {
     let request = json!({"origins": ["a"], "include_communities": true});
     let (status, body) = server.call_with_token(
         "POST",
-        "/contexts/forbidden-corpus/evidence",
+        &format!("/contexts/{}/evidence", server.cx("forbidden-corpus")),
         Some(request.clone()),
         Some("rtok"),
     );
@@ -939,7 +1071,10 @@ fn error_forbidden() {
 
 #[test]
 fn mcp_tools_list_assemble_evidence_schema() {
-    let server = Server::start("contract-mcp-schema");
+    let server = Server::start_with_env(
+        "contract-mcp-schema",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -968,15 +1103,18 @@ fn mcp_tools_list_assemble_evidence_schema() {
 
 #[test]
 fn mcp_assemble_evidence_call() {
-    let server = Server::start("contract-mcp-call");
-    server.ok("PUT", "/contexts/mcp-corpus", None);
+    let server = Server::start_with_env(
+        "contract-mcp-call",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "mcp-corpus"})));
     server.ok(
         "POST",
-        "/contexts/mcp-corpus/associations",
+        &format!("/contexts/{}/associations", server.cx("mcp-corpus")),
         Some(json!([{"subject": "a", "label": "rel", "object": "b", "weight": 1.0}])),
     );
 
-    let arguments = json!({"context": "mcp-corpus", "origins": ["a"]});
+    let arguments = json!({"context": server.cx("mcp-corpus"), "origins": ["a"]});
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -999,10 +1137,17 @@ fn mcp_assemble_evidence_call() {
 /// never a JSON-RPC abort (ADR 0005 §2.4).
 #[test]
 fn mcp_assemble_evidence_missing_origins_is_a_tool_error() {
-    let server = Server::start("contract-mcp-error");
-    server.ok("PUT", "/contexts/mcp-error-corpus", None);
+    let server = Server::start_with_env(
+        "contract-mcp-error",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "mcp-error-corpus"})),
+    );
 
-    let arguments = json!({"context": "mcp-error-corpus"});
+    let arguments = json!({"context": server.cx("mcp-error-corpus")});
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -1173,20 +1318,23 @@ fn shapes_required_request_fields_are_present_in_every_matching_fixture() {
 /// the fixture pins).
 #[test]
 fn promote_applies_and_a_dry_run_previews() {
-    let server = Server::start("contract-promote");
-    server.ok(
-        "PUT",
-        "/contexts/scratch-w",
-        Some(json!({"description": "wire-contract session notes"})),
-    );
-    server.ok(
-        "PUT",
-        "/contexts/corpus-p",
-        Some(json!({"description": "wire-contract permanent corpus"})),
+    let server = Server::start_with_env(
+        "contract-promote",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
     );
     server.ok(
         "POST",
-        "/contexts/scratch-w/associations",
+        "/contexts",
+        Some(json!({"name": "scratch-w", "description": "wire-contract session notes"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "corpus-p", "description": "wire-contract permanent corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("scratch-w")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "session:w:a", "paragraph": 0},
@@ -1196,7 +1344,7 @@ fn promote_applies_and_a_dry_run_previews() {
     );
     server.ok(
         "POST",
-        "/contexts/scratch-w/sources",
+        &format!("/contexts/{}/sources", server.cx("scratch-w")),
         Some(json!({
             "passages": {"session:w:a": "蔵の杜氏は高瀬。"},
             "dates": {"session:w:a": 1000},
@@ -1205,14 +1353,14 @@ fn promote_applies_and_a_dry_run_previews() {
     );
     server.ok(
         "POST",
-        "/contexts/scratch-w/aliases",
+        &format!("/contexts/{}/aliases", server.cx("scratch-w")),
         Some(json!({"concepts": {"たかせ": "高瀬", "あおみね": "青嶺"}})),
     );
 
     let request = json!({"into": "corpus-p", "sources": ["session:w:a"]});
     let (status, body) = server.call(
         "POST",
-        "/contexts/scratch-w/promote?dry_run=true",
+        &format!("/contexts/{}/promote?dry_run=true", server.cx("scratch-w")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1223,13 +1371,17 @@ fn promote_applies_and_a_dry_run_previews() {
     http_fixture(
         "promote_dry_run",
         "POST",
-        "/contexts/{name}/promote?dry_run=true",
+        "/contexts/{id}/promote?dry_run=true",
         Some(request.clone()),
         status,
         body,
     );
 
-    let (status, body) = server.call("POST", "/contexts/scratch-w/promote", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/promote", server.cx("scratch-w")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["aliases_dropped"], json!(1), "{body}");
     assert_eq!(
@@ -1240,7 +1392,7 @@ fn promote_applies_and_a_dry_run_previews() {
     http_fixture(
         "promote",
         "POST",
-        "/contexts/{name}/promote",
+        "/contexts/{id}/promote",
         Some(request),
         status,
         body,
@@ -1253,13 +1405,13 @@ fn promote_applies_and_a_dry_run_previews() {
 /// response carries no wall-clock value anywhere.
 fn seed_consolidation_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "consolidation contract corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "consolidation contract corpus"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
             {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
@@ -1273,7 +1425,7 @@ fn seed_consolidation_corpus(server: &Server, name: &str) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/sources"),
+        &format!("/contexts/{}/sources", server.cx(name)),
         Some(json!({
             "passages": {"doc-a": "旧情報。", "doc-b": "新情報。"},
             "dates": {"doc-a": 1000, "doc-b": 2000}
@@ -1283,12 +1435,15 @@ fn seed_consolidation_corpus(server: &Server, name: &str) {
 
 #[test]
 fn consolidation_audit_shape() {
-    let server = Server::start("contract-consolidation");
+    let server = Server::start_with_env(
+        "contract-consolidation",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_consolidation_corpus(&server, "fix");
     let request = json!({"checks": ["merge", "contradiction", "staleness"]});
     let (status, body) = server.call(
         "POST",
-        "/contexts/fix/consolidation/audit",
+        &format!("/contexts/{}/consolidation/audit", server.cx("fix")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1300,7 +1455,7 @@ fn consolidation_audit_shape() {
     http_fixture(
         "consolidation_audit",
         "POST",
-        "/contexts/{name}/consolidation/audit",
+        "/contexts/{id}/consolidation/audit",
         Some(request),
         status,
         body,
@@ -1309,7 +1464,10 @@ fn consolidation_audit_shape() {
 
 #[test]
 fn mcp_tools_list_audit_consolidation_schema() {
-    let server = Server::start("contract-mcp-consolidation");
+    let server = Server::start_with_env(
+        "contract-mcp-consolidation",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -1349,15 +1507,18 @@ fn mcp_tools_list_audit_consolidation_schema() {
 /// the same response envelope can take.
 #[test]
 fn associations_store_response_shape() {
-    let server = Server::start("contract-associations-store");
-    server.ok("PUT", "/contexts/corpus-l", None);
+    let server = Server::start_with_env(
+        "contract-associations-store",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
+    server.ok("POST", "/contexts", Some(json!({"name": "corpus-l"})));
 
     let request = json!([
         {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0, "source": "doc.md"},
     ]);
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-l/associations",
+        &format!("/contexts/{}/associations", server.cx("corpus-l")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1365,7 +1526,7 @@ fn associations_store_response_shape() {
     http_fixture(
         "associations_store",
         "POST",
-        "/contexts/{name}/associations",
+        "/contexts/{id}/associations",
         Some(request),
         status,
         body,
@@ -1374,13 +1535,13 @@ fn associations_store_response_shape() {
 
 fn seed_aliases_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "wire-contract aliases corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "wire-contract aliases corpus"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "PostgreSQL 16", "label": "採用", "object": "DB", "weight": 1.0,
              "source": "doc.md"},
@@ -1390,29 +1551,40 @@ fn seed_aliases_corpus(server: &Server, name: &str) {
 
 #[test]
 fn aliases_register_list_and_remove() {
-    let server = Server::start("contract-aliases");
+    let server = Server::start_with_env(
+        "contract-aliases",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_aliases_corpus(&server, "corpus-h");
 
     let request = json!({"concepts": {"Postgres": "PostgreSQL 16"}});
-    let (status, body) = server.call("POST", "/contexts/corpus-h/aliases", Some(request.clone()));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/aliases", server.cx("corpus-h")),
+        Some(request.clone()),
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"], json!(1), "{body}");
     http_fixture(
         "aliases_register",
         "POST",
-        "/contexts/{name}/aliases",
+        "/contexts/{id}/aliases",
         Some(request),
         status,
         body,
     );
 
-    let (status, body) = server.call("GET", "/contexts/corpus-h/aliases", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/aliases", server.cx("corpus-h")),
+        None,
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["total"], json!(1), "{body}");
     http_fixture(
         "aliases_list",
         "GET",
-        "/contexts/{name}/aliases",
+        "/contexts/{id}/aliases",
         None,
         status,
         body,
@@ -1421,7 +1593,7 @@ fn aliases_register_list_and_remove() {
     let request = json!({"concepts": ["Postgres"]});
     let (status, body) = server.call(
         "DELETE",
-        "/contexts/corpus-h/aliases",
+        &format!("/contexts/{}/aliases", server.cx("corpus-h")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1429,7 +1601,7 @@ fn aliases_register_list_and_remove() {
     http_fixture(
         "aliases_remove",
         "DELETE",
-        "/contexts/{name}/aliases",
+        "/contexts/{id}/aliases",
         Some(request),
         status,
         body,
@@ -1438,41 +1610,45 @@ fn aliases_register_list_and_remove() {
 
 #[test]
 fn coverage_labels_embeddings_and_unreachable() {
-    let server = Server::start("contract-coverage");
-    server.ok(
-        "PUT",
-        "/contexts/corpus-i",
-        Some(json!({"description": "wire-contract coverage corpus"})),
+    let server = Server::start_with_env(
+        "contract-coverage",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
     );
     server.ok(
         "POST",
-        "/contexts/corpus-i/associations",
+        "/contexts",
+        Some(json!({"name": "corpus-i", "description": "wire-contract coverage corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("corpus-i")),
         Some(json!([
             {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0,
              "source": "doc.md"},
         ])),
     );
 
-    let (status, body) = server.call("GET", "/contexts/corpus-i/labels", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/labels", server.cx("corpus-i")),
+        None,
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["labels"], json!(["connects_to"]), "{body}");
-    http_fixture(
-        "labels",
-        "GET",
-        "/contexts/{name}/labels",
-        None,
-        status,
-        body,
-    );
+    http_fixture("labels", "GET", "/contexts/{id}/labels", None, status, body);
 
     // No embedding provider configured in this harness — pins the
     // `provider_model: null` shape, the common no-embeddings deployment.
-    let (status, body) = server.call("GET", "/contexts/corpus-i/embeddings", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/embeddings", server.cx("corpus-i")),
+        None,
+    );
     assert_eq!(status, 200, "{body}");
     http_fixture(
         "embeddings_status",
         "GET",
-        "/contexts/{name}/embeddings",
+        "/contexts/{id}/embeddings",
         None,
         status,
         body,
@@ -1483,7 +1659,7 @@ fn coverage_labels_embeddings_and_unreachable() {
     let request = json!({"origins": ["gamma"]});
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-i/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("corpus-i")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1494,7 +1670,7 @@ fn coverage_labels_embeddings_and_unreachable() {
     http_fixture(
         "unreachable_from",
         "POST",
-        "/contexts/{name}/unreachable_from",
+        "/contexts/{id}/unreachable_from",
         Some(request),
         status,
         body,
@@ -1506,13 +1682,13 @@ fn coverage_labels_embeddings_and_unreachable() {
 /// explains its weight) for the drift audit's `unsourced` section.
 fn seed_vocabulary_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "wire-contract vocabulary corpus"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "wire-contract vocabulary corpus"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
             {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
@@ -1523,13 +1699,16 @@ fn seed_vocabulary_corpus(server: &Server, name: &str) {
 
 #[test]
 fn vocabulary_audit_shape() {
-    let server = Server::start("contract-vocabulary");
+    let server = Server::start_with_env(
+        "contract-vocabulary",
+        &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
+    );
     seed_vocabulary_corpus(&server, "corpus-j");
 
     let request = json!({});
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-j/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("corpus-j")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1543,7 +1722,7 @@ fn vocabulary_audit_shape() {
     http_fixture(
         "vocabulary_audit",
         "POST",
-        "/contexts/{name}/vocabulary/audit",
+        "/contexts/{id}/vocabulary/audit",
         Some(request),
         status,
         body,
@@ -1552,13 +1731,14 @@ fn vocabulary_audit_shape() {
 
 #[test]
 fn drift_audit_shape() {
-    let server = Server::start("contract-drift");
+    let server =
+        Server::start_with_env("contract-drift", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
     seed_vocabulary_corpus(&server, "corpus-k");
 
     let request = json!({"include_twins": true});
     let (status, body) = server.call(
         "POST",
-        "/contexts/corpus-k/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("corpus-k")),
         Some(request.clone()),
     );
     assert_eq!(status, 200, "{body}");
@@ -1576,7 +1756,7 @@ fn drift_audit_shape() {
     http_fixture(
         "drift_audit",
         "POST",
-        "/contexts/{name}/drift/audit",
+        "/contexts/{id}/drift/audit",
         Some(request),
         status,
         body,

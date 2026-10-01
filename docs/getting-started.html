@@ -162,13 +162,14 @@ taguru version</code></pre>
   <section id="first">
     <h2>3. The first memory</h2>
     <p class="section-sub">Create a <code>context</code>, store an association, pull the thread. One round trip over plain HTTP.</p>
-    <pre><code>curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
-  -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
+    <pre><code><span class="c"># the create answers the new context's row — its id is what every later path takes</span>
+CTX=$(curl -sX POST localhost:8248/contexts -H 'Content-Type: application/json' \
+  -d '{"name":"sake","description":"青嶺酒造という架空の酒蔵の知識"}' | jq -r .result.id)
 
-curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/associations -H 'Content-Type: application/json' \
   -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
 
-curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'</code></pre>
     <p>
       The <code>activate</code> response is a list of associations ordered by strength, each row

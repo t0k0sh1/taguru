@@ -54,18 +54,18 @@ impl AppState {
     /// statistics stay corpus-global — see [`crate::bm25::Bm25Index::search`].
     pub fn search_passages(
         &self,
-        name: &str,
+        id: &str,
         query: &str,
         limit: usize,
         floor_override: Option<f32>,
         filter: Option<&crate::passages::SourceFilter>,
         deadline: Deadline,
     ) -> Option<io::Result<PassageSearch>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         if limit == 0 {
             tracing::info!(taguru.reason = "zero_limit", "taguru.skip");
             return entry.read_unless_deleted().map(|_fence| {
-                self.short_circuit_filter_report(&entry, name, filter)
+                self.short_circuit_filter_report(&entry, id, filter)
                     .map(|filter| PassageSearch {
                         hits: Vec::new(),
                         lanes: PassageSearchLanes::ZeroLimit,
@@ -77,7 +77,7 @@ impl AppState {
         if query_grams.is_empty() {
             tracing::info!(taguru.reason = "no_query_terms", "taguru.skip");
             return entry.read_unless_deleted().map(|_fence| {
-                self.short_circuit_filter_report(&entry, name, filter)
+                self.short_circuit_filter_report(&entry, id, filter)
                     .map(|filter| PassageSearch {
                         hits: Vec::new(),
                         lanes: PassageSearchLanes::NoQueryTerms,
@@ -104,7 +104,7 @@ impl AppState {
             // separately where `VectorLaneStatus::QueryEmbeddingFailed`
             // is known (`semantic_work`, below).
             tracing::warn!(
-                context = %name,
+                context = %id,
                 reason = %error,
                 "passage query embedding failed; serving the lexical lane alone"
             );
@@ -141,7 +141,7 @@ impl AppState {
                 total: *total,
             });
 
-        let index = match self.bm25_index(&entry, &store, name, deadline) {
+        let index = match self.bm25_index(&entry, &store, id, deadline) {
             Ok(index) => index,
             Err(DeadlineExceeded) => return Some(Err(io::Error::other(DeadlineExceeded))),
         };
@@ -298,7 +298,7 @@ impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn explain_passage_search(
         &self,
-        name: &str,
+        id: &str,
         query: &str,
         source: &str,
         paragraph: Option<u32>,
@@ -307,7 +307,7 @@ impl AppState {
         filter: Option<&crate::passages::SourceFilter>,
         deadline: Deadline,
     ) -> Option<io::Result<PassageExplainLookup>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let query_terms = deduped_spelled_query_terms(query);
         let query_grams: Vec<u64> = query_terms.iter().map(|&(_, gram)| gram).collect();
 
@@ -352,7 +352,7 @@ impl AppState {
         let eligibility = filter.map(|filter| store.eligible_sources(filter));
         let eligible = eligibility.as_ref().map(|(set, _)| set);
 
-        let index = match self.bm25_index(&entry, &store, name, deadline) {
+        let index = match self.bm25_index(&entry, &store, id, deadline) {
             Ok(index) => index,
             Err(DeadlineExceeded) => return Some(Err(io::Error::other(DeadlineExceeded))),
         };
@@ -1134,7 +1134,7 @@ mod tests {
             "蔵開きの祭りでは、雲居山の伏流水で仕込んだ新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
@@ -1142,7 +1142,7 @@ mod tests {
         // must still hand back the passage that answers it, first.
         let hits = state
             .search_passages(
-                "sake",
+                &state.id_of("sake"),
                 "精米歩合はどこまで磨く?",
                 3,
                 None,
@@ -1159,7 +1159,7 @@ mod tests {
         assert!(
             state
                 .search_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     "unrelated english words",
                     3,
                     None,
@@ -1173,7 +1173,14 @@ mod tests {
         );
         assert!(
             state
-                .search_passages("nope", "x", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("nope"),
+                    "x",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
                 .is_none()
         );
 
@@ -1211,13 +1218,13 @@ mod tests {
                 .to_string(),
         );
         state
-            .store_passages("papers", plain(passages))
+            .store_passages(&state.id_of("papers"), plain(passages))
             .unwrap()
             .unwrap();
 
         let hits = state
             .search_passages(
-                "papers",
+                &state.id_of("papers"),
                 "ambition must be made to counteract ambition",
                 2,
                 None,
@@ -1252,13 +1259,20 @@ mod tests {
             "impl AppState { pub fn boot_with(dir: PathBuf) -> Self { todo!() } }".to_string(),
         );
         state
-            .store_passages("code", plain(passages))
+            .store_passages(&state.id_of("code"), plain(passages))
             .unwrap()
             .unwrap();
 
         for query in ["state", "State", "app", "path"] {
             let hits = state
-                .search_passages("code", query, 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("code"),
+                    query,
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap()
                 .hits;
@@ -1287,13 +1301,13 @@ mod tests {
             "青嶺酒造は雲居県霧沢町の蔵元である。\n\n原料米には山田錦を使い、精米歩合は50パーセントまで磨く。\n\n蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let hits = state
             .search_passages(
-                "sake",
+                &state.id_of("sake"),
                 "精米歩合はどこまで磨く?",
                 3,
                 None,
@@ -1327,14 +1341,21 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         // First search builds the resident index.
         assert!(
             !state
-                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "創業はいつ",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .hits
@@ -1349,19 +1370,36 @@ mod tests {
             "第2章".to_string(),
             "杜氏の高瀬は南部杜氏の出身。".to_string(),
         );
-        state.store_passages("sake", plain(more)).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("sake"), plain(more))
+            .unwrap()
+            .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏の出身",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
         assert_eq!(hits[0].source, "第2章");
 
         // And a retraction disappears the same way.
-        state.retract_source("sake", "第2章").unwrap();
+        state.retract_source(&state.id_of("sake"), "第2章").unwrap();
         assert!(
             state
-                .search_passages("sake", "杜氏の出身", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "杜氏の出身",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .hits
@@ -1385,12 +1423,19 @@ mod tests {
             let mut passages = BTreeMap::new();
             passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             // First search builds and marks dirty; the tick persists.
             state
-                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "創業はいつ",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1400,12 +1445,19 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "創業はいつ",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
         assert_eq!(hits[0].source, "第1章");
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             !entry.bm25_dirty.load(Ordering::Relaxed),
             "a clean sidecar loads as-is — nothing drifted, nothing re-tokenized"
@@ -1436,11 +1488,18 @@ mod tests {
             passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
             passages.insert("空欄".to_string(), "   \n\n\t \n".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state
-                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "創業はいつ",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1448,12 +1507,19 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let hits = state
-            .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "創業はいつ",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
         assert_eq!(hits[0].source, "第1章");
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             !entry.bm25_dirty.load(Ordering::Relaxed),
             "a whitespace-only source must not read as drifted on a clean sidecar"
@@ -1475,11 +1541,18 @@ mod tests {
             passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
             passages.insert("第2章".to_string(), "仕込み水は伏流水。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state
-                .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "杜氏",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap();
             state.flush_dirty(); // the sidecar now says 高瀬
@@ -1491,11 +1564,18 @@ mod tests {
         let mut edited = BTreeMap::new();
         edited.insert("第1章".to_string(), "杜氏は佐伯に交代した。".to_string());
         state
-            .store_passages("sake", plain(edited))
+            .store_passages(&state.id_of("sake"), plain(edited))
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("sake", "杜氏は誰", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏は誰",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -1504,7 +1584,7 @@ mod tests {
             "the digest mismatch must repair 第1章 from the store, got {:?}",
             hits[0].text
         );
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.bm25_dirty.load(Ordering::Relaxed),
             "a repair leaves the sidecar stale until the next tick"
@@ -1527,14 +1607,21 @@ mod tests {
             "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         let stem = state.stem_of("sake").unwrap();
         fs::write(bm25_path(&dir, &stem), b"not an index").unwrap();
 
         let hits = state
-            .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "蔵開きの祭り",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -1562,19 +1649,26 @@ mod tests {
             "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         assert!(
             !state
-                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "蔵開きの祭り",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .hits
                 .is_empty()
         );
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
             entry.bm25.read().is_none(),
@@ -1582,7 +1676,14 @@ mod tests {
         );
         assert_eq!(
             state
-                .search_passages("sake", "蔵開きの祭り", 3, None, None, Deadline::unbounded())
+                .search_passages(
+                    &state.id_of("sake"),
+                    "蔵開きの祭り",
+                    3,
+                    None,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .hits[0]
@@ -1616,11 +1717,11 @@ mod tests {
             "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let store = state.entry_passages(&entry, &entry.id).unwrap();
 
         // Build path: nothing resident yet.
@@ -1686,11 +1787,11 @@ mod tests {
             "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let store = state.entry_passages(&entry, &entry.id).unwrap();
         let record = store.get("第1章").unwrap();
 
@@ -1736,11 +1837,11 @@ mod tests {
             "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let store = state.entry_passages(&entry, &entry.id).unwrap();
         let already_expired = Deadline::after(std::time::Duration::ZERO);
 
@@ -1810,11 +1911,11 @@ mod tests {
             passages.insert(format!("decoy-{i:02}"), "DECOYMARKER".to_string());
         }
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -1828,13 +1929,13 @@ mod tests {
             edited.insert(format!("decoy-{i:02}"), "DECOYMARKER-EDITED".to_string());
         }
         state
-            .store_passages("sake", plain(edited))
+            .store_passages(&state.id_of("sake"), plain(edited))
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "QUERYMARKER",
                 "target-doc",
                 None,
@@ -1864,7 +1965,14 @@ mod tests {
         );
 
         let hits = state
-            .search_passages("sake", "QUERYMARKER", 2, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "QUERYMARKER",
+                2,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -1946,15 +2054,18 @@ mod tests {
                 },
             );
         }
-        state.store_passages("sake", passages).unwrap().unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "QUERYMARKER",
                 "target-doc",
                 None,
@@ -1990,7 +2101,7 @@ mod tests {
 
         let hits = state
             .search_passages(
-                "sake",
+                &state.id_of("sake"),
                 "QUERYMARKER",
                 reach,
                 None,
@@ -2029,9 +2140,12 @@ mod tests {
                 meta: crate::passages::SourceMeta::default(),
             },
         );
-        state.store_passages("fruit", passages).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("fruit"), passages)
+            .unwrap()
+            .unwrap();
         let outcome = state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2044,7 +2158,14 @@ mod tests {
         // both rows point at the same paragraph, so the lane must fold
         // them into one hit at the question row's better rank.
         let hits = state
-            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "アップル",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2078,16 +2199,23 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "アップル", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "アップル",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2121,17 +2249,17 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = state
             .search_passages(
-                "fruit",
+                &state.id_of("fruit"),
                 "りんごは真っ赤",
                 3,
                 None,
@@ -2173,11 +2301,11 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -2188,12 +2316,19 @@ mod tests {
             "りんごは青森の名産である。".to_string(),
         );
         state
-            .store_passages("fruit", plain(edited))
+            .store_passages(&state.id_of("fruit"), plain(edited))
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "りんご",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2257,16 +2392,23 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "りんご",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2295,12 +2437,19 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "りんご", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "りんご",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2330,16 +2479,23 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "みかん",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2369,20 +2525,27 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .update_meta("fruit", None, None, None, Some(0.2))
+            .update_meta(&state.id_of("fruit"), None, None, None, Some(0.2))
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "みかん",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2414,16 +2577,23 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = state
-            .search_passages("fruit", "みかん", 3, Some(0.2), None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "みかん",
+                3,
+                Some(0.2),
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2438,11 +2608,18 @@ mod tests {
         assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
 
         state
-            .update_meta("fruit", None, None, None, Some(0.2))
+            .update_meta(&state.id_of("fruit"), None, None, None, Some(0.2))
             .unwrap()
             .unwrap();
         let hits = state
-            .search_passages("fruit", "みかん", 3, Some(0.5), None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("fruit"),
+                "みかん",
+                3,
+                Some(0.5),
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;
@@ -2480,17 +2657,17 @@ mod tests {
             "みかんとりんごを箱に詰めた。".to_string(),
         );
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let found = state
             .search_passages(
-                "fruit",
+                &state.id_of("fruit"),
                 "りんごは美味しい",
                 3,
                 None,
@@ -2548,17 +2725,17 @@ mod tests {
             "みかんとりんごを箱に詰めた。".to_string(),
         );
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "fruit",
+                &state.id_of("fruit"),
                 "りんごは美味しい",
                 "doc-a",
                 None,
@@ -2621,7 +2798,10 @@ mod tests {
                 meta: crate::passages::SourceMeta::default(),
             },
         );
-        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
 
         let filter = crate::passages::SourceFilter {
             tags: vec!["酒".to_string()],
@@ -2630,7 +2810,7 @@ mod tests {
         };
         let found = state
             .search_passages(
-                "sake",
+                &state.id_of("sake"),
                 "杜氏",
                 0,
                 None,
@@ -2682,7 +2862,10 @@ mod tests {
                 meta: crate::passages::SourceMeta::default(),
             },
         );
-        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
 
         let filter = crate::passages::SourceFilter {
             tags: vec!["酒".to_string()],
@@ -2692,7 +2875,14 @@ mod tests {
         // An empty query yields no searchable terms at all — distinct
         // from a query that has terms but shares none with the corpus.
         let found = state
-            .search_passages("sake", "", 3, None, Some(&filter), Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "",
+                3,
+                None,
+                Some(&filter),
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert!(matches!(found.lanes, PassageSearchLanes::NoQueryTerms));
@@ -2721,17 +2911,17 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "fruit",
+                &state.id_of("fruit"),
                 "みかん",
                 "doc-a",
                 None,
@@ -2792,17 +2982,17 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "fruit",
+                &state.id_of("fruit"),
                 "りんご",
                 "doc-a",
                 None,
@@ -2897,15 +3087,15 @@ mod tests {
             passages.insert(format!("decoy-{i}"), "さしすせそ。".to_string());
         }
         state
-            .store_passages("big", plain(passages))
+            .store_passages(&state.id_of("big"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("big", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("big"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        let vectors = state.entry_passage_vectors(&state.lookup("big").unwrap(), "big");
+        let vectors = state.entry_passage_vectors(&state.lookup_named("big").unwrap(), "big");
         assert!(
             !vectors.ann_built(),
             "lazy: nothing has searched this store yet"
@@ -2916,7 +3106,7 @@ mod tests {
         // approximates` says yes to.
         let explanation = state
             .explain_passage_search(
-                "big",
+                &state.id_of("big"),
                 "あいうえお",
                 "target-doc",
                 None,
@@ -2962,15 +3152,22 @@ mod tests {
             "麹室の湿度は五十パーセント。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "麹室の湿度",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
             bm25_path(&dir, &entry.id).exists(),
@@ -2978,10 +3175,17 @@ mod tests {
         );
         // The next residency loads it clean instead of re-tokenizing.
         state
-            .search_passages("sake", "麹室の湿度", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "麹室の湿度",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(!entry.bm25_dirty.load(Ordering::Relaxed));
 
         let _ = fs::remove_dir_all(dir);
@@ -3006,13 +3210,13 @@ mod tests {
             "仕込み水は伏流水。\n\n杜氏の交代が続いた。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "杜氏",
                 "doc-b",
                 None,
@@ -3080,11 +3284,14 @@ mod tests {
                 meta: crate::passages::SourceMeta::default(),
             },
         );
-        state.store_passages("sake", submissions).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("sake"), submissions)
+            .unwrap()
+            .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "杜氏",
                 "doc-c",
                 None,
@@ -3139,18 +3346,18 @@ mod tests {
         passages.insert("doc-x".to_string(), "りんごは真っ赤に実った。".to_string());
         passages.insert("doc-y".to_string(), "アップルパイの記録。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let explain = |state: &AppState, source: &str| {
             let explanation = state
                 .explain_passage_search(
-                    "fruit",
+                    &state.id_of("fruit"),
                     "みかん",
                     source,
                     None,
@@ -3181,7 +3388,7 @@ mod tests {
         let mut edited = BTreeMap::new();
         edited.insert("doc-x".to_string(), "青りんごに切り替えた。".to_string());
         state
-            .store_passages("fruit", plain(edited))
+            .store_passages(&state.id_of("fruit"), plain(edited))
             .unwrap()
             .unwrap();
         assert!(
@@ -3215,13 +3422,13 @@ mod tests {
         passages.insert("doc-4".to_string(), "杜氏と杜氏の記録。".to_string());
         passages.insert("doc-5".to_string(), "杜氏の単独記録。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let explanation = state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "杜氏",
                 "doc-3",
                 None,
@@ -3272,12 +3479,12 @@ mod tests {
         passages.insert("doc-4".to_string(), "杜氏と杜氏の記録。".to_string());
         passages.insert("doc-5".to_string(), "杜氏の単独記録。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
             .explain_passage_search(
-                "sake",
+                &state.id_of("sake"),
                 "杜氏",
                 "doc-3",
                 None,
@@ -3294,7 +3501,16 @@ mod tests {
         assert!(expired.expired());
 
         let explanation = state
-            .explain_passage_search("sake", "杜氏", "doc-3", None, 1, None, None, expired)
+            .explain_passage_search(
+                &state.id_of("sake"),
+                "杜氏",
+                "doc-3",
+                None,
+                1,
+                None,
+                None,
+                expired,
+            )
             .unwrap()
             .unwrap();
         let PassageExplainLookup::Explained(explanation) = explanation else {
@@ -3427,26 +3643,40 @@ mod tests {
         passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
         passages.insert("doc-b".to_string(), "仕込み水は伏流水。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         // Persist the two-source sidecar, then retract one source and
         // drop the in-memory index so the next search must reload.
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
-        state.retract_source("sake", "doc-b").unwrap();
-        let entry = state.lookup("sake").unwrap();
+        state.retract_source(&state.id_of("sake"), "doc-b").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.bm25.read().is_none(),
             "the eviction dropped the index"
         );
 
         let hits = state
-            .search_passages("sake", "伏流水", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "伏流水",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap()
             .hits;

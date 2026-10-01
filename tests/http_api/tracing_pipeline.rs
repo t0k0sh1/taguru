@@ -9,20 +9,20 @@ use crate::support::*;
 
 fn seed_sake_context(server: &Server) {
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の記憶"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
         }})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "docs/kura.md", "paragraph": 0},
@@ -52,7 +52,7 @@ fn a_composed_retrieve_exports_one_root_with_a_phase_span_per_step() {
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "retrieve", "arguments": {
-            "context": "sake", "origins": ["青嶺酒造"],
+            "context": server.cx("sake"), "origins": ["青嶺酒造"],
             "text_fallback_query": "杜氏は誰か", "text_fallback_only_if_empty": false
         }}
     });
@@ -132,7 +132,7 @@ fn skipped_steps_are_recorded_as_events_with_stable_reason_codes() {
         1,
         "retrieve",
         json!({
-            "context": "sake", "origins": ["青嶺酒造"],
+            "context": server.cx("sake"), "origins": ["青嶺酒造"],
             "describe_first": false, "fetch_citations": false
         }),
     );
@@ -190,7 +190,7 @@ fn a_cache_hit_answers_with_one_span_and_no_lane_children() {
     let search = |server: &Server| {
         server.ok(
             "POST",
-            "/contexts/sake/sources/search",
+            &format!("/contexts/{}/sources/search", server.cx("sake")),
             Some(json!({"query": "杜氏"})),
         )
     };
@@ -248,10 +248,14 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
         ],
     );
     seed_sake_context(&server);
-    server.ok("PUT", "/contexts/kura", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/kura/sources",
+        "/contexts",
+        Some(json!({"name": "kura", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("kura")),
         Some(json!({"passages": {
             "docs/toji.md": "杜氏の高瀬は霧沢町の生まれである。"
         }})),
@@ -404,7 +408,7 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
 
     let found = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "杜氏"})),
     );
     assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
@@ -419,7 +423,7 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     // consumes entirely into that status rather than leaving as an
     // attribute (so `attribute(span, "otel.status_code")` is always
     // `None`, regardless of the actual status).
-    let request_span = tree.one("POST /contexts/{name}/sources/search");
+    let request_span = tree.one("POST /contexts/{id}/sources/search");
     assert_eq!(status_code(request_span), 0, "{request_span:?}");
     let passage_search = tree.one("taguru.passage_search");
     assert_eq!(status_code(passage_search), 0, "{passage_search:?}");
@@ -462,7 +466,7 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
     let result = server.call_tool(
         1,
         "retrieve",
-        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
 
@@ -473,12 +477,12 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
     // item and reports once, in aggregate.
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。\n\n杜氏の唄の第二段。"}})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "唄", "object": "杜氏唄", "weight": 0.5,
              "source": "docs/uta.md", "paragraph": 1},
@@ -486,13 +490,13 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。"}})),
     );
     let result = server.call_tool(
         2,
         "retrieve",
-        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
 
@@ -554,7 +558,7 @@ fn a_requested_rerank_without_a_provider_exports_outcome_not_configured() {
 
     server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
     );
 
@@ -605,7 +609,7 @@ fn a_rerank_provider_failure_exports_outcome_provider_error() {
     // fewer would refuse as `empty_pool` before the provider is tried.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "所在", "object": "霧沢町", "weight": 0.9,
              "source": "docs/kura.md", "paragraph": 0},
@@ -614,7 +618,7 @@ fn a_rerank_provider_failure_exports_outcome_provider_error() {
 
     server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
     );
 
@@ -656,14 +660,19 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     // reason and records no hit count.
     server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "include_communities": true})),
     );
 
     // Build the artifact by hand through the same API the CLI uses
     // (the `communities.rs` test's recipe), then ask again.
-    let revision = server.ok("GET", "/contexts/sake", None)["revision"].clone();
-    server.ok("PUT", "/contexts/sake::communities", None);
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["revision"].clone();
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake::communities"})),
+    );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -676,7 +685,7 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     });
     server.ok(
         "POST",
-        "/contexts/sake::communities/sources",
+        &format!("/contexts/{}/sources", server.cx("sake::communities")),
         Some(json!({"passages": {
             "community:L0-0": "青嶺酒造と杜氏たちの共同体についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -684,7 +693,7 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "include_communities": true})),
     );
 
@@ -745,14 +754,14 @@ fn an_assemble_evidence_call_exports_its_root_and_phase_tree() {
 
     server.ok(
         "POST",
-        "/contexts/sake/evidence",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"], "labels": ["杜氏"]})),
     );
 
     let _ = server.stop_gracefully();
     let tree = SpanTree::new(collector.spans());
 
-    let request_span = tree.one("POST /contexts/{name}/evidence");
+    let request_span = tree.one("POST /contexts/{id}/evidence");
     let root = tree.one("taguru.assemble_evidence");
     assert_eq!(
         root["parentSpanId"], request_span["spanId"],
@@ -817,11 +826,15 @@ fn the_lane_spans_ride_the_thread_scope_into_the_search_trace() {
     let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let server = Server::start_with_env("tracing-lane-spans", &borrowed);
     seed_sake_context(&server);
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
     server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "杜氏"})),
     );
 
@@ -942,11 +955,15 @@ fn an_unbounded_explain_records_the_effective_ann_pool() {
     let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let server = Server::start_with_env("tracing-explain-ann-pool", &borrowed);
     seed_sake_context(&server);
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
     server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "杜氏", "source": "docs/kura.md"})),
     );
 
@@ -982,11 +999,15 @@ fn a_ran_vector_lane_records_the_effective_floor() {
     // Vectors must exist or the lane resolves `no_vectors` instead of
     // running — the forced refresh covers the context deterministically
     // (the `search_plan.rs` recipe).
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
     server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "杜氏", "semantic_floor": 0.5})),
     );
 
@@ -1032,18 +1053,18 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     const OBJECT_NONCE: &str = "SENTINEL-OBJECT-a821";
 
     server.ok(
-        "PUT",
-        "/contexts/sentinel",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sentinel", "description": "d"})),
     );
     server.ok(
         "POST",
-        "/contexts/sentinel/sources",
+        &format!("/contexts/{}/sources", server.cx("sentinel")),
         Some(json!({"passages": {SOURCE_NONCE: format!("{PASSAGE_NONCE} {CONCEPT_NONCE}")}})),
     );
     server.ok(
         "POST",
-        "/contexts/sentinel/associations",
+        &format!("/contexts/{}/associations", server.cx("sentinel")),
         Some(json!([{
             "subject": CONCEPT_NONCE, "label": "sentinel-label", "object": OBJECT_NONCE,
             "weight": 1.0, "source": SOURCE_NONCE, "paragraph": 0
@@ -1051,7 +1072,7 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     );
     server.ok(
         "POST",
-        "/contexts/sentinel/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sentinel")),
         Some(json!({"query": QUERY_NONCE})),
     );
     server.call_tool(

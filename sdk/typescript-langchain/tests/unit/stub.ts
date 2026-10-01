@@ -84,6 +84,38 @@ export class FakeServer {
         { status: 200 },
       );
     }
+    if (path === "/contexts" && (init?.method ?? "GET") === "GET") {
+      // The ingester/retriever resolve their configured context NAMES
+      // to the ids every /contexts/{id}/… route takes (#964) — routed
+      // above `calls.push` like /version, so the resolution round trip
+      // doesn't pollute the exact call-list assertions below.
+      const row = (name: string) => ({
+        id: `id-${name}`,
+        name,
+        description: "",
+        pinned: false,
+        loaded: false,
+        dice_floor: null,
+        semantic_floor: null,
+        stats: {
+          associations: 0,
+          concepts: 0,
+          labels: 0,
+          sources: 0,
+          footprint_bytes: 0,
+          dead_edges: 0,
+          dead_attributions: 0,
+          arena_slack: 0,
+          unsourced_edges: 0,
+          unsourced_weight: 0,
+          top_concepts: [],
+          label_sample: [],
+        },
+        usage: { reads: 0, empty_reads: 0, writes: 0, last_read_epoch: 0, last_write_epoch: 0 },
+      });
+      const rows = url.searchParams.get("after") === null ? [row("sake"), row("tea")] : [];
+      return ok({ total: 2, contexts: rows });
+    }
     let body: unknown = null;
     if (typeof init?.body === "string") {
       try {

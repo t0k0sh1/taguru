@@ -69,7 +69,7 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                     "params": {"name": "describe",
-                               "arguments": {"context": "nope", "concept": "x"}}})),
+                               "arguments": {"context": "00000000-0000-4000-8000-00000000dead", "concept": "x"}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -87,7 +87,7 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 60, "method": "tools/call",
                     "params": {"name": "store_passages",
-                               "arguments": {"context": "remote",
+                               "arguments": {"context": server.cx("remote"),
                                              "passages": {"big.md": big}}}})),
     );
     assert_eq!(status, 200);
@@ -119,10 +119,10 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
 #[test]
 fn paths_tool_executes_end_to_end_through_mcp() {
     let server = Server::start("mcp-paths");
-    server.ok("PUT", "/contexts/sake", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
             {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0},
@@ -134,7 +134,7 @@ fn paths_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": "paths",
-                               "arguments": {"context": "sake",
+                               "arguments": {"context": server.cx("sake"),
                                              "origins": ["青嶺酒造"],
                                              "targets": ["南部杜氏"]}}})),
     );
@@ -155,7 +155,7 @@ fn paths_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "paths",
-                               "arguments": {"context": "sake", "origins": ["青嶺酒造"]}}})),
+                               "arguments": {"context": server.cx("sake"), "origins": ["青嶺酒造"]}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
@@ -232,13 +232,13 @@ fn mcp_rejects_batches_and_undecodable_messages() {
 fn cite_passage_tool_executes_end_to_end_through_mcp() {
     let server = Server::start("mcp-citation");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
                 原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
@@ -278,7 +278,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": "sake", "source": "docs/aomine.md", "paragraph": 1}}})),
+                               "arguments": {"context": server.cx("sake"), "source": "docs/aomine.md", "paragraph": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(reply["result"].get("isError").is_none(), "{reply}");
@@ -293,7 +293,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": "sake", "source": "docs/ghost.md", "paragraph": 0}}})),
+                               "arguments": {"context": server.cx("sake"), "source": "docs/ghost.md", "paragraph": 0}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -307,7 +307,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": "sake", "source": "docs/aomine.md", "index": 1}}})),
+                               "arguments": {"context": server.cx("sake"), "source": "docs/aomine.md", "index": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(via_index["result"].get("isError").is_none(), "{via_index}");
@@ -323,14 +323,14 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
 #[test]
 fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
     let server = Server::start("mcp-structured");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let (status, reply) = server.call(
         "POST",
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": "sake", "associations": [
+                   "arguments": {"context": server.cx("sake"), "associations": [
                        {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
                    ]}}})),
     );
@@ -370,7 +370,7 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": "sake", "associations": [
+                   "arguments": {"context": server.cx("sake"), "associations": [
                        {"subject": "s", "label": "l", "object": "o", "weight": 1.0}
                    ]}}})),
     );
@@ -388,7 +388,7 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         "POST",
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": {"name": "add_associations", "arguments": {"context": "sake"}}})),
+                    "params": {"name": "add_associations", "arguments": {"context": server.cx("sake")}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(route_error["result"]["isError"], true, "{route_error}");
@@ -412,10 +412,10 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
 #[test]
 fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
     let server = Server::start("mcp-schema-structured");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema",
             "mode": "strict",
@@ -430,7 +430,7 @@ fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": "sake", "associations": [
+                   "arguments": {"context": server.cx("sake"), "associations": [
                        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
                        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}
                    ]}}})),
@@ -460,7 +460,7 @@ fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
 #[test]
 fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
     let server = Server::start("mcp-schema-tools");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
 
     let document = json!({
         "type": "schema",
@@ -476,7 +476,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
         0,
         "put_schema",
         json!({
-            "context": "sake",
+            "context": server.cx("sake"),
             "type": "schema",
             "version": "2099-01-01",
             "mode": "warn",
@@ -493,7 +493,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
         1,
         "put_schema",
         json!({
-            "context": "sake",
+            "context": server.cx("sake"),
             "type": "schema",
             "mode": "warn",
             "closed_labels": false,
@@ -503,7 +503,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
     );
     assert!(put_reply.get("isError").is_none(), "{put_reply}");
 
-    let get_reply = server.call_tool(2, "get_schema", json!({"context": "sake"}));
+    let get_reply = server.call_tool(2, "get_schema", json!({"context": server.cx("sake")}));
     assert!(get_reply.get("isError").is_none(), "{get_reply}");
     // A success carries no `structuredContent` (`tool_response`'s `Ok`
     // arm) — the tool's `content[0].text` is the raw HTTP response
@@ -519,10 +519,10 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
 #[test]
 fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
     let server = Server::start("mcp-schema-audit-tools");
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
              "weight": 1.0, "source": "a.md"},
@@ -542,15 +542,19 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
     let validate_reply = server.call_tool(
         1,
         "validate_schema",
-        json!({"context": "sake", "document": document}),
+        json!({"context": server.cx("sake"), "document": document}),
     );
     assert!(validate_reply.get("isError").is_none(), "{validate_reply}");
     let text = validate_reply["content"][0]["text"].as_str().unwrap();
     let body: Value = serde_json::from_str(text).unwrap();
     assert_eq!(body["result"]["total"], json!(1), "{text}");
 
-    server.ok("PUT", "/contexts/sake/schema", Some(document));
-    let audit_reply = server.call_tool(2, "audit_schema", json!({"context": "sake"}));
+    server.ok(
+        "PUT",
+        &format!("/contexts/{}/schema", server.cx("sake")),
+        Some(document),
+    );
+    let audit_reply = server.call_tool(2, "audit_schema", json!({"context": server.cx("sake")}));
     assert!(audit_reply.get("isError").is_none(), "{audit_reply}");
     let text = audit_reply["content"][0]["text"].as_str().unwrap();
     let body: Value = serde_json::from_str(text).unwrap();

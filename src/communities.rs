@@ -6,7 +6,7 @@
 //! model: the data-directory lock is exclusive with no read-only mode,
 //! so a verb that must coexist with a live server (or a replica, or a
 //! router) has exactly one door. Detection runs ON the server
-//! (`GET /contexts/{name}/communities` — the graph never crosses the
+//! (`GET /contexts/{id}/communities` — the graph never crosses the
 //! wire raw); this command diffs the result against the previous
 //! artifact, asks the LLM for summaries of what actually changed, and
 //! writes the artifact back through `POST /import` as an ordinary
@@ -51,7 +51,7 @@ graph, this command summarizes each one with the extract LLM and
 writes the result back as an ordinary context (default
 'NAME::communities') — membership and hierarchy as associations,
 summaries as passages, and a manifest recording the source revision
-the artifact was derived from. `POST /contexts/{name}/communities/search`
+the artifact was derived from. `POST /contexts/{id}/communities/search`
 then serves ranked summaries with an honest staleness verdict.
 
 Incremental: a community whose content fingerprint is unchanged reuses
@@ -191,14 +191,53 @@ pub fn run(args: &[String]) -> i32 {
     }
     let api = Api::new(base);
 
-    let contexts = match &group {
-        None => vec![context.expect("checked above")],
+    // `--context` takes the id (#964); `--group` expansion yields
+    // member display names (group records hold names until #965),
+    // each resolved to its id here. Either way the display name is
+    // in hand too: the derived artifact's default name is built from
+    // it, never from the id.
+    let contexts: Vec<(String, String)> = match &group {
+        None => {
+            let id = context.expect("checked above");
+            match api.get(&["contexts", &id]) {
+                Ok(row) => match row["name"].as_str() {
+                    Some(name) => vec![(id, name.to_string())],
+                    None => {
+                        eprintln!("taguru: communities: context '{id}': the row carries no name");
+                        return 1;
+                    }
+                },
+                Err(error) => {
+                    eprintln!("taguru: communities: context '{id}': {error}");
+                    return 1;
+                }
+            }
+        }
         Some(group) => match group_members(&api, group) {
             Ok(members) if members.is_empty() => {
                 eprintln!("taguru: communities: group '{group}' reaches no contexts");
                 return 1;
             }
-            Ok(members) => members,
+            Ok(members) => {
+                let mut resolved = Vec::with_capacity(members.len());
+                for name in members {
+                    match api.context_id_by_name(&name) {
+                        Ok(Some(id)) => resolved.push((id, name)),
+                        Ok(None) => {
+                            eprintln!(
+                                "taguru: communities: group member '{name}' does not resolve \
+                                 to a context"
+                            );
+                            return 1;
+                        }
+                        Err(error) => {
+                            eprintln!("taguru: communities: {error}");
+                            return 1;
+                        }
+                    }
+                }
+                resolved
+            }
             Err(error) => {
                 eprintln!("taguru: communities: {error}");
                 return 1;
@@ -208,9 +247,9 @@ pub fn run(args: &[String]) -> i32 {
 
     let mut failed = false;
     let mut reports = Vec::new();
-    for name in &contexts {
+    for (id, name) in &contexts {
         let derived = into.clone().unwrap_or_else(|| derived_context_name(name));
-        match derive(&api, name, &derived, dry_run) {
+        match derive(&api, id, name, &derived, dry_run) {
             Ok(report) => {
                 if !as_json {
                     print!("{}", report.render());
@@ -237,18 +276,27 @@ pub fn run(args: &[String]) -> i32 {
     if failed { 1 } else { 0 }
 }
 
-/// One `context`'s derivation, start to finish.
-fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report, String> {
+/// One `context`'s derivation, start to finish. `id` addresses the
+/// source (paths take ids, #964); `name` is its display name, which
+/// the manifest and the report carry.
+fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Result<Report, String> {
     // The analysis stream carries the revision snapshot the server cut
     // it at — that, not a separately-read revision, is what the
     // manifest records.
-    let stream = api.get_raw(&["contexts", name, "communities"])?;
+    let stream = api.get_raw(&["contexts", id, "communities"])?;
     let analysis = parse_analysis(&stream)?;
 
+    // The derived artifact is addressed by NAME on the import wire
+    // (its header creates it) but by id on every read — resolved
+    // once here; `None` is a first run.
+    let derived_id = api.context_id_by_name(derived)?;
     // The previous manifest, if an artifact exists: the fingerprint
     // ledger this run diffs against. An algorithm change invalidates
     // every fingerprint — incomparable digests must not "match".
-    let previous = read_manifest(api, derived)?;
+    let previous = match &derived_id {
+        Some(derived_id) => read_manifest(api, derived_id, derived)?,
+        None => None,
+    };
     let comparable = previous
         .as_ref()
         .is_some_and(|manifest| manifest.algorithm == analysis.header.algorithm);
@@ -316,7 +364,12 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
     // exactly like fresh communities do.
     let mut old_texts: BTreeMap<String, String> = BTreeMap::new();
     if !reused_sources.is_empty() {
-        old_texts = lookup_passages(api, derived, &reused_sources)?;
+        // A nonempty reuse set implies a manifest was read, which
+        // implies the artifact resolved above.
+        let derived_id = derived_id
+            .as_deref()
+            .ok_or_else(|| format!("derived context '{derived}' vanished mid-run"))?;
+        old_texts = lookup_passages(api, derived_id, &reused_sources)?;
     }
     let torn = reused_sources
         .iter()
@@ -386,9 +439,22 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
 
     // Vanished communities go last: at every earlier failure point the
     // old sources still exist and the (old or new) manifest accounts
-    // for them.
-    for id in &vanished {
-        retract_source(api, derived, &format!("{COMMUNITY_SOURCE_PREFIX}{id}"))?;
+    // for them. Retraction reads the artifact's id fresh — the import
+    // above may have just created it.
+    if !vanished.is_empty() {
+        let derived_id = match derived_id {
+            Some(derived_id) => derived_id,
+            None => api
+                .context_id_by_name(derived)?
+                .ok_or_else(|| format!("derived context '{derived}' vanished after import"))?,
+        };
+        for community in &vanished {
+            retract_source(
+                api,
+                &derived_id,
+                &format!("{COMMUNITY_SOURCE_PREFIX}{community}"),
+            )?;
+        }
     }
     Ok(report)
 }
@@ -542,9 +608,13 @@ fn render_batches(
 /// or its manifest record does not exist yet (a first run), an error
 /// only for a manifest that exists but does not parse — that needs a
 /// human, not a silent full rebuild.
-fn read_manifest(api: &Api, derived: &str) -> Result<Option<CommunitiesManifest>, String> {
+fn read_manifest(
+    api: &Api,
+    derived_id: &str,
+    derived: &str,
+) -> Result<Option<CommunitiesManifest>, String> {
     let body = json!({"sources": [MANIFEST_SOURCE]});
-    let result = match api.post_envelope(&["contexts", derived, "sources", "lookup"], &body) {
+    let result = match api.post_envelope(&["contexts", derived_id, "sources", "lookup"], &body) {
         Ok(result) => result,
         Err(ApiFailure::NotFound { .. }) => return Ok(None),
         Err(ApiFailure::Other(error)) => return Err(error),
@@ -664,7 +734,7 @@ impl Report {
 }
 
 /// The analysis stream, parsed: header line plus one community per
-/// line (the wire shape of `GET /contexts/{name}/communities`).
+/// line (the wire shape of `GET /contexts/{id}/communities`).
 struct Analysis {
     header: AnalysisHeader,
     communities: Vec<AnalysisCommunity>,

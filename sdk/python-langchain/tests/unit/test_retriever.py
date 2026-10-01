@@ -126,7 +126,9 @@ def test_cross_contexts_tag_documents_and_share_one_text_call(
     # The graph lane ran per context; the text lane rode the server's own
     # cross-context search — one top-level call naming both targets.
     resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
-    assert resolves == ["/contexts/sake/resolve", "/contexts/tea/resolve"]
+    # Cross targets are display names; the graph lane resolves each to
+    # its id and addresses the per-context routes with it (#964).
+    assert resolves == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [{"contexts": ["sake", "tea"], "query": "青嶺酒造", "limit": 5}]
 
@@ -175,7 +177,8 @@ async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fe
 def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    fake_server.fail_contexts.add("tea")
+    # The graph lane addresses tea by its id (#964).
+    fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
         contexts=["sake", "tea"], client=sync_client, async_client=async_client
     )
@@ -194,7 +197,8 @@ def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_erro
 async def test_async_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    fake_server.fail_contexts.add("tea")
+    # The graph lane addresses tea by its id (#964).
+    fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
         contexts=["sake", "tea"], client=sync_client, async_client=async_client
     )

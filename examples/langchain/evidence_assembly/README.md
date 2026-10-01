@@ -3,7 +3,7 @@
 The same two-document fictional-brewery corpus `rag_qa/` uses goes in
 through `TaguruIngester`. The read side calls the core SDK's
 `Context.assemble_evidence()`/`assembleEvidence()` directly —
-`POST /contexts/{name}/evidence` — under two budgets for the same
+`POST /contexts/{id}/evidence` — under two budgets for the same
 query: generous (server defaults, nothing omitted) and tight
 (`max_items: 1`, forcing a choice). This is the same call
 [`taguru evaluate --assembly`](https://t0k0sh1.github.io/taguru/evidence.html#equal-budget)

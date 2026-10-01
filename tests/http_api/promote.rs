@@ -13,18 +13,18 @@ use crate::support::*;
 /// alias per fate (carried / left behind).
 fn seed(server: &Server) {
     server.ok(
-        "PUT",
-        "/contexts/scratch-claude",
-        Some(json!({"description": "session notes"})),
-    );
-    server.ok(
-        "PUT",
-        "/contexts/perm",
-        Some(json!({"description": "permanent"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "scratch-claude", "description": "session notes"})),
     );
     server.ok(
         "POST",
-        "/contexts/scratch-claude/associations",
+        "/contexts",
+        Some(json!({"name": "perm", "description": "permanent"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("scratch-claude")),
         Some(json!([
             {"subject": "DB", "label": "採用", "object": "PostgreSQL 16", "weight": 1.0,
              "source": "session:claude:a/note", "paragraph": 0},
@@ -40,7 +40,7 @@ fn seed(server: &Server) {
     );
     server.ok(
         "POST",
-        "/contexts/scratch-claude/sources",
+        &format!("/contexts/{}/sources", server.cx("scratch-claude")),
         Some(json!({
             "passages": {"session:claude:a/note": "DB は PostgreSQL 16。"},
             "dates": {"session:claude:a/note": 1785974400},
@@ -49,7 +49,7 @@ fn seed(server: &Server) {
     );
     server.ok(
         "POST",
-        "/contexts/scratch-claude/aliases",
+        &format!("/contexts/{}/aliases", server.cx("scratch-claude")),
         Some(json!({"concepts": {
             "Postgres": "PostgreSQL 16",
             "従来鍵": "旧鍵"
@@ -64,7 +64,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
 
     let promoted = server.ok(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"]
@@ -98,7 +98,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     // under the SAME session source id.
     let looked_up = server.ok(
         "POST",
-        "/contexts/perm/sources/lookup",
+        &format!("/contexts/{}/sources/lookup", server.cx("perm")),
         Some(json!({"sources": ["session:claude:a/note"]})),
     );
     assert_eq!(
@@ -106,7 +106,11 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         json!("DB は PostgreSQL 16。"),
         "{looked_up}"
     );
-    let sources = server.ok("GET", "/contexts/perm/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("perm")),
+        None,
+    );
     let entry = &sources["entries"][0];
     assert_eq!(entry["name"], json!("session:claude:a/note"), "{sources}");
     assert_eq!(entry["date"], json!(1785974400), "{sources}");
@@ -117,7 +121,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     // stay-behind source's share and its own fact never left scratch.
     let runner = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "CI", "label": "テストランナー"})),
     );
     assert_eq!(runner["matches"][0]["count"], json!(1), "{runner}");
@@ -128,20 +132,20 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     assert_eq!(attributions[0]["source"], json!("session:claude:b"));
     let stayed = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "旧鍵"})),
     );
     assert_eq!(stayed["total"], json!(0), "{stayed}");
     // The carried alias resolves in perm; the paragraph locator rides.
     let db = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "DB", "label": "採用"})),
     );
     assert_eq!(db["matches"][0]["attributions"][0]["paragraph"], json!(0));
     let resolved = server.ok(
         "POST",
-        "/contexts/perm/resolve",
+        &format!("/contexts/{}/resolve", server.cx("perm")),
         Some(json!({"cue": "Postgres"})),
     );
     assert_eq!(
@@ -154,7 +158,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     // The scratch is untouched — retiring it stays an explicit step.
     let scratch = server.ok(
         "POST",
-        "/contexts/scratch-claude/query",
+        &format!("/contexts/{}/query", server.cx("scratch-claude")),
         Some(json!({"subject": "旧鍵"})),
     );
     assert_eq!(scratch["total"], json!(1), "{scratch}");
@@ -163,7 +167,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     // not double, and the outcome says what was replaced.
     let again = server.ok(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"],
@@ -180,7 +184,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     );
     let runner = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "CI", "label": "テストランナー"})),
     );
     assert_eq!(runner["matches"][0]["count"], json!(1), "{runner}");
@@ -194,7 +198,10 @@ fn a_dry_run_previews_the_same_shape_and_writes_nothing() {
 
     let preview = server.ok(
         "POST",
-        "/contexts/scratch-claude/promote?dry_run=true",
+        &format!(
+            "/contexts/{}/promote?dry_run=true",
+            server.cx("scratch-claude")
+        ),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"]
@@ -213,11 +220,15 @@ fn a_dry_run_previews_the_same_shape_and_writes_nothing() {
         "{preview}"
     );
 
-    let sources = server.ok("GET", "/contexts/perm/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("perm")),
+        None,
+    );
     assert_eq!(sources["total"], json!(0), "{sources}");
     let db = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "DB"})),
     );
     assert_eq!(db["total"], json!(0), "a preview must write nothing: {db}");
@@ -231,7 +242,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // No sources: choosing the keepers is the caller's judgment.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": []})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -242,7 +253,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let over_cap: Vec<String> = (0..1001).map(|i| format!("session:claude:{i}")).collect();
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": over_cap})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -258,7 +269,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // Promoting into itself moves nothing anywhere.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "scratch-claude", "sources": ["session:claude:b"]})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -270,11 +281,21 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // A missing destination refuses — promote never creates one.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "nope", "sources": ["session:claude:b"]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
+    // The up-front existence check's own wording — the apply path's
+    // late NoContext (a destination deleted mid-flight) says something
+    // else, so this pins that the check ran before anything did.
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("never creates one"),
+        "{refused}"
+    );
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
     assert_eq!(
         refused["retryable_after_correction"],
@@ -286,7 +307,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // sourceless weight cannot travel with a promotion.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["export:unsourced"]})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -299,7 +320,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // retract-then-apply it would otherwise no-op silently.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:b", "session:claude:typo"]
@@ -323,7 +344,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     );
     let db = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "DB"})),
     );
     assert_eq!(db["total"], json!(0), "nothing may have applied: {db}");
@@ -336,7 +357,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let fake_sources: Vec<String> = (0..25).map(|i| format!("session:claude:typo{i}")).collect();
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": fake_sources})),
     );
     assert_eq!(status, 404, "{refused}");
@@ -347,12 +368,12 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     // attribution rows (count 0) must not count as "exists here".
     server.ok(
         "POST",
-        "/contexts/scratch-claude/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("scratch-claude")),
         Some(json!({"source": "session:claude:b"})),
     );
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["session:claude:b"]})),
     );
     assert_eq!(
@@ -370,7 +391,7 @@ fn the_destination_schema_judges_the_promoted_batches() {
     // scratch's a/note batch must refuse whole, exactly as an import.
     server.ok(
         "PUT",
-        "/contexts/perm/schema",
+        &format!("/contexts/{}/schema", server.cx("perm")),
         Some(json!({
             "type": "schema", "mode": "strict", "closed_labels": true,
             "types": {},
@@ -380,14 +401,14 @@ fn the_destination_schema_judges_the_promoted_batches() {
 
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["session:claude:a/note"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
     let db = server.ok(
         "POST",
-        "/contexts/perm/query",
+        &format!("/contexts/{}/query", server.cx("perm")),
         Some(json!({"subject": "DB"})),
     );
     assert_eq!(
@@ -401,10 +422,14 @@ fn the_destination_schema_judges_the_promoted_batches() {
     // of the schema-clean source.
     server.ok(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["session:claude:b"], "audit": false})),
     );
-    let schema = server.ok("GET", "/contexts/perm/schema", None);
+    let schema = server.ok(
+        "GET",
+        &format!("/contexts/{}/schema", server.cx("perm")),
+        None,
+    );
     assert_eq!(schema["mode"], json!("strict"), "{schema}");
 }
 
@@ -429,16 +454,16 @@ fn a_context_scoped_key_needs_the_destination_in_its_grant() {
     };
     for (context, description) in [("scratch-claude", "notes"), ("perm", "permanent")] {
         let (status, body) = call(
-            "PUT",
-            &format!("/contexts/{context}"),
-            Some(json!({"description": description})),
+            "POST",
+            "/contexts",
+            Some(json!({"name": context, "description": description})),
             "atok",
         );
         assert_eq!(status, 200, "{body}");
     }
     let (status, body) = call(
         "POST",
-        "/contexts/scratch-claude/associations",
+        &format!("/contexts/{}/associations", server.cx("scratch-claude")),
         Some(
             json!([{"subject": "DB", "label": "採用", "object": "PostgreSQL 16",
                      "weight": 1.0, "source": "session:claude:a"}]),
@@ -450,7 +475,7 @@ fn a_context_scoped_key_needs_the_destination_in_its_grant() {
     let request = json!({"into": "perm", "sources": ["session:claude:a"], "audit": false});
     let (status, refused) = call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(request.clone()),
         "htok",
     );
@@ -463,7 +488,7 @@ fn a_context_scoped_key_needs_the_destination_in_its_grant() {
 
     let (status, promoted) = call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(request),
         "ptok",
     );
@@ -492,7 +517,7 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
     // live-lane pre-check reads.
     server.ok(
         "POST",
-        "/contexts/perm/associations",
+        &format!("/contexts/{}/associations", server.cx("perm")),
         Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
                      "weight": 1.0, "source": "keep.md"}])),
     );
@@ -500,7 +525,10 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
     // A preview writes nothing, so the ceiling has nothing to gate.
     let preview = server.ok(
         "POST",
-        "/contexts/scratch-claude/promote?dry_run=true",
+        &format!(
+            "/contexts/{}/promote?dry_run=true",
+            server.cx("scratch-claude")
+        ),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"]
@@ -512,7 +540,7 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
     // nothing written, and the fields say so machine-readably.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"]
@@ -566,7 +594,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     seed(&probe);
     probe.ok(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", probe.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["session:claude:a/note"]})),
     );
     let ceiling = disk_total_bytes(&probe, "perm");
@@ -584,7 +612,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
 
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": "perm",
             "sources": ["session:claude:a/note", "session:claude:b"]
@@ -600,7 +628,11 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
 
     // The first batch landed for real before the second was refused —
     // specifically batch 0's source, not just any one source.
-    let sources = server.ok("GET", "/contexts/perm/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("perm")),
+        None,
+    );
     assert_eq!(sources["total"], json!(1), "{sources}");
     assert_eq!(
         sources["sources"],
@@ -618,7 +650,7 @@ fn a_warn_mode_destination_reports_schema_violations_in_the_envelope() {
     seed(&server);
     server.ok(
         "PUT",
-        "/contexts/perm/schema",
+        &format!("/contexts/{}/schema", server.cx("perm")),
         Some(json!({
             "type": "schema", "mode": "warn", "closed_labels": true,
             "types": {},
@@ -628,7 +660,7 @@ fn a_warn_mode_destination_reports_schema_violations_in_the_envelope() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/scratch-claude/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({"into": "perm", "sources": ["session:claude:a/note"], "audit": false})),
     );
     assert_eq!(status, 200, "warn lets the batch land: {body}");
@@ -659,7 +691,11 @@ fn an_export_stream_dry_runs_clean_when_aliases_trail_their_canonicals() {
     let server = Server::start("promote-preview-seeds");
     seed(&server);
 
-    let (status, exported) = server.call("GET", "/contexts/scratch-claude/export", None);
+    let (status, exported) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("scratch-claude")),
+        None,
+    );
     assert_eq!(status, 200, "{exported}");
     let stream = exported.as_str().expect("NDJSON body").replace(
         "\"context\":\"scratch-claude\"",
@@ -685,8 +721,10 @@ fn an_export_stream_dry_runs_clean_when_aliases_trail_their_canonicals() {
         Some(3),
         "{previewed}"
     );
-    let (status, _) = server.call("GET", "/contexts/fresh-restore", None);
-    assert_eq!(status, 404, "the preview must create nothing");
+    assert!(
+        server.try_cx("fresh-restore").is_none(),
+        "the preview must create nothing"
+    );
 }
 
 /// The per-context half of the same preview fix: a stream can
@@ -739,7 +777,7 @@ fn the_mcp_promote_tool_reaches_the_endpoint() {
         7,
         "promote",
         json!({
-            "context": "scratch-claude",
+            "context": server.cx("scratch-claude"),
             "into": "perm",
             "sources": ["session:claude:a/note"],
             "audit": false,
@@ -748,7 +786,11 @@ fn the_mcp_promote_tool_reaches_the_endpoint() {
     );
     let text = result["content"][0]["text"].as_str().expect("text");
     assert!(text.contains("\"batches\""), "{result}");
-    let sources = server.ok("GET", "/contexts/perm/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("perm")),
+        None,
+    );
     assert_eq!(
         sources["total"],
         json!(0),
@@ -811,7 +853,7 @@ fn seed_dense_vocabulary(server: &Server, context: &str) {
         .collect();
     server.ok(
         "POST",
-        &format!("/contexts/{context}/associations"),
+        &format!("/contexts/{}/associations", server.cx(context)),
         Some(serde_json::Value::Array(chain)),
     );
 }
@@ -825,9 +867,9 @@ fn seed_dense_vocabulary(server: &Server, context: &str) {
 /// slower machine.
 fn seed_many_sources(server: &Server, context: &str, count: usize) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": context, "description": "d"})),
     );
     // ~6.6KB/passage: at `count` == MAX_MATCH_LIMIT (1000) the whole
     // seeding POST stays comfortably under the 8MiB body cap.
@@ -837,7 +879,7 @@ fn seed_many_sources(server: &Server, context: &str, count: usize) {
         .collect();
     server.ok(
         "POST",
-        &format!("/contexts/{context}/sources"),
+        &format!("/contexts/{}/sources", server.cx(context)),
         Some(json!({"passages": passages})),
     );
 }
@@ -856,13 +898,17 @@ fn budget_refusal_cuts_a_multi_batch_promotion_short() {
     // as many batches as the request can carry, maximizing margin.
     const COUNT: usize = 1000;
     seed_many_sources(&server, "scratch", COUNT);
-    server.ok("PUT", "/contexts/perm2", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "perm2", "description": "d"})),
+    );
 
     let sources: Vec<String> = (0..COUNT).map(|i| format!("s{i:04}")).collect();
     let start = std::time::Instant::now();
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch")),
         Some(json!({"into": "perm2", "sources": sources, "audit": false})),
     );
     let elapsed = start.elapsed();
@@ -909,25 +955,29 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
         &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")],
     );
     server.ok(
-        "PUT",
-        "/contexts/scratch",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "scratch", "description": "d"})),
     );
     server.ok(
         "POST",
-        "/contexts/scratch/associations",
+        &format!("/contexts/{}/associations", server.cx("scratch")),
         Some(json!([
             {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a.md"}
         ])),
     );
-    server.ok("PUT", "/contexts/perm4", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "perm4", "description": "d"})),
+    );
     // ~1-2s of unchecked lexical-sweep work, comfortably past whatever
     // remains of a 1s request budget — see `seed_dense_vocabulary`.
     seed_dense_vocabulary(&server, "perm4");
 
     let promoted = server.ok(
         "POST",
-        "/contexts/scratch/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch")),
         Some(json!({"into": "perm4", "sources": ["a.md"]})),
     );
     // The batch itself landed — only the audit degraded.
@@ -980,11 +1030,15 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
         &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
     );
     server.ok(
-        "PUT",
-        "/contexts/scratch",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "scratch", "description": "d"})),
     );
-    server.ok("PUT", "/contexts/perm5", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "perm5", "description": "d"})),
+    );
     const COUNT: usize = 1_500_000;
     const CHUNK: usize = 10_000;
     let mut k = 0usize;
@@ -1000,7 +1054,7 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
             .collect();
         server.ok(
             "POST",
-            "/contexts/scratch/associations",
+            &format!("/contexts/{}/associations", server.cx("scratch")),
             Some(serde_json::Value::Array(batch)),
         );
         k = end;
@@ -1008,7 +1062,7 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
 
     let (status, refused) = server.call(
         "POST",
-        "/contexts/scratch/promote",
+        &format!("/contexts/{}/promote", server.cx("scratch")),
         Some(json!({"into": "perm5", "sources": ["a.md"], "audit": false})),
     );
     assert_eq!(status, 408, "{refused}");
@@ -1023,7 +1077,11 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
         "{message}"
     );
 
-    let sources = server.ok("GET", "/contexts/perm5/sources", None);
+    let sources = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("perm5")),
+        None,
+    );
     assert_eq!(
         sources["total"],
         json!(0),
@@ -1051,37 +1109,41 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
         &[("TAGURU_MAX_CONCURRENT_HEAVY_OPS", "1")],
     );
     server.ok(
-        "PUT",
-        "/contexts/scratch-a",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "scratch-a", "description": "d"})),
     );
     server.ok(
         "POST",
-        "/contexts/scratch-a/associations",
+        &format!("/contexts/{}/associations", server.cx("scratch-a")),
         Some(json!([
             {"subject": "s1", "label": "l", "object": "o1", "weight": 1.0, "source": "a.md"}
         ])),
     );
     server.ok(
-        "PUT",
-        "/contexts/scratch-b",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "scratch-b", "description": "d"})),
     );
     server.ok(
         "POST",
-        "/contexts/scratch-b/associations",
+        &format!("/contexts/{}/associations", server.cx("scratch-b")),
         Some(json!([
             {"subject": "s2", "label": "l", "object": "o2", "weight": 1.0, "source": "b.md"}
         ])),
     );
-    server.ok("PUT", "/contexts/perm6", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "perm6", "description": "d"})),
+    );
     seed_dense_vocabulary(&server, "perm6");
 
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| {
             server.ok(
                 "POST",
-                "/contexts/scratch-a/promote",
+                &format!("/contexts/{}/promote", server.cx("scratch-a")),
                 Some(json!({"into": "perm6", "sources": ["a.md"]})),
             )
         });
@@ -1092,7 +1154,7 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
         let second = scope.spawn(|| {
             server.ok(
                 "POST",
-                "/contexts/scratch-b/promote",
+                &format!("/contexts/{}/promote", server.cx("scratch-b")),
                 Some(json!({"into": "perm6", "sources": ["b.md"]})),
             )
         });

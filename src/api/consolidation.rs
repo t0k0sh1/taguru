@@ -1,4 +1,4 @@
-//! `POST /contexts/{name}/consolidation/audit` (ADR 0012): merge,
+//! `POST /contexts/{id}/consolidation/audit` (ADR 0012): merge,
 //! contradiction, and staleness candidates in one response, sections
 //! selected by the caller's `checks` — every candidate carrying a
 //! content fingerprint over its own evidence, because the fingerprint
@@ -26,8 +26,8 @@ use crate::registry::{AccessError, AppState};
 
 use super::vocabulary::vocabulary_audit;
 use super::{
-    AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp, deadline_exceeded, error,
-    not_found, ok, overlong,
+    AppJson, ContextIdPath, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp, deadline_exceeded,
+    error, not_found, ok, overlong,
 };
 
 /// The detector stamp (the `louvain-cc/1` precedent): fingerprints are
@@ -230,7 +230,7 @@ fn fingerprint_hex(digest: u64) -> String {
 
 pub async fn audit_consolidation(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ConsolidationAuditRequest>,
 ) -> Response {
@@ -273,17 +273,17 @@ pub async fn audit_consolidation(
     // the effective-time map (contradiction ordering, staleness) from
     // the passage store, whose locks must never nest inside the
     // entry's read path.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&id));
     let effective: HashMap<String, u64> = if wants("contradiction") || wants("staleness") {
-        match tokio::task::block_in_place(|| state.source_effective_times(&name)) {
-            None => return not_found(&name, started_at),
+        match tokio::task::block_in_place(|| state.source_effective_times(&id)) {
+            None => return not_found(&id, started_at),
             Some(Ok(map)) => map,
             Some(Err(io_error)) => {
-                tracing::warn!(context = %name, "source metadata read failed: {io_error}");
+                tracing::warn!(context = %id, "source metadata read failed: {io_error}");
                 state.metrics().record_error(ErrorKind::Load);
                 return error(
                     ErrorCode::Internal,
-                    format!("context '{name}' source metadata could not be read — see server logs"),
+                    format!("context '{id}' source metadata could not be read — see server logs"),
                     started_at,
                 );
             }
@@ -296,7 +296,7 @@ pub async fn audit_consolidation(
         match tokio::task::block_in_place(|| {
             merge_section(
                 &state,
-                &name,
+                &id,
                 request.dice_floor.unwrap_or(DEFAULT_DICE_FLOOR),
                 request.cosine_floor.unwrap_or(DEFAULT_COSINE_FLOOR),
                 evidence_cap,
@@ -306,7 +306,7 @@ pub async fn audit_consolidation(
             )
         }) {
             Ok(section) => Some(section),
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     } else {
         None
@@ -314,14 +314,14 @@ pub async fn audit_consolidation(
 
     let contradiction = if wants("contradiction") {
         match tokio::task::block_in_place(|| {
-            state.read_context(&name, |context| {
+            state.read_context(&id, |context| {
                 contradiction_section(context, &effective, limit, deadline)
             })
         })
         .and_then(std::convert::identity)
         {
             Ok(section) => Some(section),
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     } else {
         None
@@ -329,7 +329,7 @@ pub async fn audit_consolidation(
 
     let staleness = if wants("staleness") {
         match tokio::task::block_in_place(|| {
-            state.read_context(&name, |context| {
+            state.read_context(&id, |context| {
                 staleness_section(
                     context,
                     &effective,
@@ -342,7 +342,7 @@ pub async fn audit_consolidation(
         .and_then(std::convert::identity)
         {
             Ok(section) => Some(section),
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     } else {
         None

@@ -12,7 +12,7 @@ use crate::metrics::{ResolveTier, SearchOp};
 use crate::registry::AppState;
 
 use super::{
-    AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES, access_error, clamp,
+    AppJson, ContextIdPath, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES, access_error, clamp,
     deadline_exceeded, error, not_found, ok, oversized, search_log_enabled,
 };
 
@@ -409,22 +409,22 @@ pub(super) fn resolve_tier_of(served: &[TieredResolution]) -> ResolveTier {
 
 pub async fn resolve(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    resolve_with_fallback(&state, &name, &request, false, deadline, started_at)
+    resolve_with_fallback(&state, &id, &request, false, deadline, started_at)
 }
 
 pub async fn resolve_label(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    resolve_with_fallback(&state, &name, &request, true, deadline, started_at)
+    resolve_with_fallback(&state, &id, &request, true, deadline, started_at)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1025,28 +1025,28 @@ fn explain_resolve_verdict(
     ok(explanation, started_at)
 }
 
-/// `POST /contexts/{name}/resolve/explain` — "why didn't this concept
+/// `POST /contexts/{id}/resolve/explain` — "why didn't this concept
 /// come back for this cue" in one call: the same tiers, floors, and
 /// trims the resolve endpoint runs, with the expected name located in
 /// (or placed against) each of them. Read-only.
 pub async fn explain_resolve(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    explain_resolve_verdict(&state, &name, &request, false, deadline, started_at)
+    explain_resolve_verdict(&state, &id, &request, false, deadline, started_at)
 }
 
-/// `POST /contexts/{name}/resolve_label/explain` — explain_resolve,
+/// `POST /contexts/{id}/resolve_label/explain` — explain_resolve,
 /// for relation labels.
 pub async fn explain_resolve_label(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainResolveRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    explain_resolve_verdict(&state, &name, &request, true, deadline, started_at)
+    explain_resolve_verdict(&state, &id, &request, true, deadline, started_at)
 }

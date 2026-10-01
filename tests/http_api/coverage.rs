@@ -135,13 +135,13 @@ fn spawn_ok_embeddings() -> String {
 /// label), so the gloss half has something to embed.
 fn seed_one_concept(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "d"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
              "weight": 1.0, "source": "a.md"},
@@ -164,7 +164,11 @@ fn refresh_reports_embeddings_failed_when_the_gloss_provider_is_unreachable() {
     );
     seed_one_concept(&server, "sake");
 
-    let (status, body) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 502, "{body}");
     assert_eq!(body["code"], json!("embeddings_failed"), "{body}");
     assert!(
@@ -196,7 +200,11 @@ fn refresh_reports_timeout_when_the_gloss_provider_is_slow() {
     );
     seed_one_concept(&server, "sake");
 
-    let (status, body) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 408, "{body}");
     assert_eq!(body["code"], json!("timeout"), "{body}");
     assert!(
@@ -229,11 +237,15 @@ fn refresh_reports_embeddings_failed_on_the_passage_half_after_glosses_land() {
     seed_one_concept(&server, "sake");
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/a.md": "SENTINEL_PASSAGE_TEXT triggers the stub."}})),
     );
 
-    let (status, body) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 502, "{body}");
     assert_eq!(body["code"], json!("embeddings_failed"), "{body}");
     assert!(
@@ -247,7 +259,11 @@ fn refresh_reports_embeddings_failed_on_the_passage_half_after_glosses_land() {
     // The gloss half's own success is not undone by the passage
     // half's failure — the identity exposure shows the sidecar it
     // already built.
-    let status_body = server.ok("GET", "/contexts/sake/embeddings", None);
+    let status_body = server.ok(
+        "GET",
+        &format!("/contexts/{}/embeddings", server.cx("sake")),
+        None,
+    );
     // seed_one_concept's one association mints two concepts (subject
     // AND object) plus one label.
     assert_eq!(
@@ -278,11 +294,15 @@ fn refresh_reports_timeout_on_the_passage_half_after_glosses_land() {
     seed_one_concept(&server, "sake");
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/a.md": "SENTINEL_PASSAGE_TEXT triggers the stub."}})),
     );
 
-    let (status, body) = server.call("POST", "/contexts/sake/embeddings/refresh", None);
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 408, "{body}");
     assert_eq!(body["code"], json!("timeout"), "{body}");
     assert!(
@@ -296,7 +316,11 @@ fn refresh_reports_timeout_on_the_passage_half_after_glosses_land() {
     // The gloss half's own success is not undone by the passage
     // half's timeout either — same partial-progress guarantee as the
     // 502 test above.
-    let status_body = server.ok("GET", "/contexts/sake/embeddings", None);
+    let status_body = server.ok(
+        "GET",
+        &format!("/contexts/{}/embeddings", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         status_body["glosses"]["concepts"],
         json!(2),
@@ -322,17 +346,25 @@ fn refresh_reports_passages_skipped_over_the_row_limit() {
             ("TAGURU_PASSAGE_VECTOR_LIMIT", "1"),
         ],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/a.md": "最初の段落。",
             "docs/b.md": "二番目の段落。",
         }})),
     );
 
-    let refreshed = server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    let refreshed = server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
     // No concepts in this corpus, but `glosses` still runs (and rides
     // in the response) whenever the passage lane is enabled — `None`
     // is reserved for the "passage embedding disabled" shape only.
@@ -374,12 +406,20 @@ fn embeddings_status_reports_both_sidecars_once_both_are_built() {
     seed_one_concept(&server, "sake");
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/a.md": "段落一つ。"}})),
     );
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
-    let status = server.ok("GET", "/contexts/sake/embeddings", None);
+    let status = server.ok(
+        "GET",
+        &format!("/contexts/{}/embeddings", server.cx("sake")),
+        None,
+    );
     assert_eq!(status["provider_model"], json!("both-mock"), "{status}");
     assert_eq!(status["glosses"]["model"], json!("both-mock"), "{status}");
     assert_eq!(status["glosses"]["width"], json!(4), "{status}");

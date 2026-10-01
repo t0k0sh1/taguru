@@ -1,7 +1,7 @@
 //! The community verbs (issue #166). Two surfaces with one artifact
 //! between them:
 //!
-//! - `GET /contexts/{name}/communities` — detection on the live graph
+//! - `GET /contexts/{id}/communities` — detection on the live graph
 //!   ([`taguru::context::Context::communities`]), streamed as JSON
 //!   Lines like the export: a header line carrying the revision
 //!   snapshot the analysis was cut at, then one line per community.
@@ -9,7 +9,7 @@
 //!   compute-heavy, so it rides the heavy-ops gate beside compact and
 //!   the vocabulary audit, and uncached (an analysis dump would evict
 //!   the retrieval cache's working set for one offline caller).
-//! - `POST /contexts/{name}/communities/search` — the global-search
+//! - `POST /contexts/{id}/communities/search` — the global-search
 //!   surface over a previously derived artifact: ranked community
 //!   summaries with membership, and an honest staleness verdict. The
 //!   artifact is an ordinary `context` (default `{name}::communities`),
@@ -40,7 +40,7 @@ use crate::registry::{AppState, ContextRevision};
 
 use super::sources::{SearchContextPlan, SearchPlan, passages_unreadable};
 use super::{
-    AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, access_error, cache_and_serve, clamp,
+    AppJson, ContextIdPath, ErrorCode, MAX_MATCH_LIMIT, access_error, cache_and_serve, clamp,
     deadline_exceeded, error, not_found, ok, replay_cached_search, search_log_enabled,
 };
 
@@ -133,12 +133,12 @@ impl CommunitiesManifest {
     }
 }
 
-/// `GET /contexts/{name}/communities` — the analysis stream. The body
+/// `GET /contexts/{id}/communities` — the analysis stream. The body
 /// is JSON Lines, not the JSON envelope (the export's rule): a header
 /// object first, then one line per community, leaves first.
 pub async fn analyze_communities(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
@@ -146,18 +146,21 @@ pub async fn analyze_communities(
         return deadline_exceeded(started_at);
     }
     // Revision BEFORE analysis — the safe-staleness order (module doc).
-    let Some(revision) = state.context_revision(&name) else {
-        return not_found(&name, started_at);
+    let Some(revision) = state.context_revision(&id) else {
+        return not_found(&id, started_at);
     };
     // Off the async worker: detection sweeps every edge, and a cold
     // context loads first — the audit endpoints' rule.
     let outcome = tokio::task::block_in_place(|| {
-        state.read_context(&name, |context| context.communities(deadline))
+        state.read_context(&id, |context| context.communities(deadline))
     });
     match outcome {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(Err(_)) => deadline_exceeded(started_at),
-        Ok(Ok(analysis)) => match render_analysis(&name, revision, &analysis) {
+        // The header's `context` value stays the display name until
+        // #965 renames the column — the same posture every other wire
+        // body keeps.
+        Ok(Ok(analysis)) => match render_analysis(&state.name_of_stem(&id), revision, &analysis) {
             Some(body) => (
                 StatusCode::OK,
                 [(
@@ -401,13 +404,27 @@ pub(crate) fn community_hits(
              exist — run `taguru communities` to build it"
         ))
     };
+    // `derived` is a display NAME (the default is built from the
+    // source's own name, and the `derived` override stays a name until
+    // #965); the artifact reads below are id-keyed. An ambiguous name
+    // refuses like every name boundary; a missing one is the
+    // build-the-artifact verdict.
+    let derived_id = match state.resolve_wire_name(derived) {
+        Ok(derived_id) => derived_id,
+        Err(crate::registry::AccessError::NotFound) => return Ok(no_artifact_context()),
+        Err(failure) => return Err(access_error(state, failure, derived, started_at)),
+    };
+    let derived_id = derived_id.as_str();
 
     // The manifest is the artifact's identity: no artifact context, or
     // an artifact without its record, both answer "build one" rather
     // than an empty result — absence of analysis is not an empty
     // corpus.
     let manifest = tokio::task::block_in_place(|| {
-        state.lookup_passages(derived, std::slice::from_ref(&MANIFEST_SOURCE.to_string()))
+        state.lookup_passages(
+            derived_id,
+            std::slice::from_ref(&MANIFEST_SOURCE.to_string()),
+        )
     });
     let manifest = match manifest {
         None => return Ok(no_artifact_context()),
@@ -447,11 +464,15 @@ pub(crate) fn community_hits(
             },
         },
     };
-    if manifest.source_context != name {
+    // The manifest records the source's display NAME (the CLI writes
+    // it, and names stay the manifest's vocabulary until #965); the
+    // caller addressed the source by id.
+    let source_name = state.name_of_stem(name);
+    if manifest.source_context != source_name {
         return Err(error(
             ErrorCode::Conflict,
             format!(
-                "artifact '{derived}' was derived from '{}', not '{name}'",
+                "artifact '{derived}' was derived from '{}', not '{source_name}'",
                 manifest.source_context
             ),
             started_at,
@@ -470,7 +491,7 @@ pub(crate) fn community_hits(
     // synthetic `community:{id}` rows that carry no user metadata, so
     // a filter here could only ever exclude everything.
     let outcome = tokio::task::block_in_place(|| {
-        state.search_passages(derived, query, limit + 1, semantic_floor, None, deadline)
+        state.search_passages(derived_id, query, limit + 1, semantic_floor, None, deadline)
     });
     let found = match outcome {
         None => return Ok(no_artifact_context()),
@@ -513,7 +534,7 @@ pub(crate) fn community_hits(
     // Membership for the served hits, straight off the artifact's own
     // graph — `contains` edges, strongest members first.
     let members = tokio::task::block_in_place(|| {
-        state.read_context(derived, |context| {
+        state.read_context(derived_id, |context| {
             ranked
                 .iter()
                 .map(|summary| {
@@ -597,7 +618,7 @@ pub(crate) fn check_derived_scope(
 
 pub async fn search_communities(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchCommunitiesRequest>,
@@ -607,17 +628,18 @@ pub async fn search_communities(
         return deadline_exceeded(started_at);
     }
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    let source_name = state.name_of_stem(&id);
     let derived = request
         .derived
         .clone()
-        .unwrap_or_else(|| derived_context_name(&name));
-    if let Some(refusal) = check_derived_scope(&grant, &name, &derived, started_at) {
+        .unwrap_or_else(|| derived_context_name(&source_name));
+    if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
         return refusal;
     }
     // The source context anchors the staleness verdict; its absence is
     // this verb's 404 whatever the artifact holds.
-    let Some(current) = state.context_revision(&name) else {
-        return not_found(&name, started_at);
+    let Some(current) = state.context_revision(&id) else {
+        return not_found(&id, started_at);
     };
     // Minted before manifest read and search — see `retrieval_key`.
     // The artifact rides the key as a target (passages/config lanes);
@@ -625,7 +647,7 @@ pub async fn search_communities(
     // re-keys the staleness verdict the cached payload states.
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchCommunities,
-        &[derived.clone(), name.clone()],
+        &[derived.clone(), id.clone()],
         serde_json::to_string(&(
             "search_communities",
             &request.query,
@@ -642,7 +664,7 @@ pub async fn search_communities(
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
-                context = %name,
+                context = %id,
                 op = "search_communities",
                 cue = %request.query,
                 hits = found.log_hits,
@@ -656,7 +678,7 @@ pub async fn search_communities(
 
     let found = match community_hits(
         &state,
-        &name,
+        &id,
         &derived,
         &request.query,
         limit,
@@ -681,12 +703,14 @@ pub async fn search_communities(
     // item 7; the aggregate and per-context families are coupled in
     // one call, `gauges.rs`'s `note_search`, so counting both contexts
     // in it was the only way to update per-context for `derived` too).
-    state.note_search(SearchOp::SearchCommunities, &name, empty);
-    state.note_read(&derived, empty);
+    state.note_search(SearchOp::SearchCommunities, &id, empty);
+    if let Some(derived_id) = state.context_id_of(&derived) {
+        state.note_read(&derived_id, empty);
+    }
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
-            context = %name,
+            context = %id,
             op = "search_communities",
             cue = %request.query,
             hits = found.hits.len(),
@@ -706,10 +730,15 @@ pub async fn search_communities(
             recorded_graph: found.recorded_graph,
             current_graph: current.graph,
         },
-        // The plan entry names the SOURCE context — the caller asked
-        // about `{name}`; which artifact answered is `derived`'s job.
+        // The plan entry names the SOURCE context (by display name,
+        // like every other response body until #965) — the caller
+        // asked about it; which artifact answered is `derived`'s job.
         plan: SearchPlan {
-            contexts: vec![SearchContextPlan::of(&name, &found.lanes, None)],
+            contexts: vec![SearchContextPlan::of(
+                &state.name_of_stem(&id),
+                &found.lanes,
+                None,
+            )],
         },
         hits: found.hits,
     };

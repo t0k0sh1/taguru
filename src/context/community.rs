@@ -1,5 +1,5 @@
 //! Community detection over the concept graph — the analysis substrate
-//! behind `GET /contexts/{name}/communities` and, through it, the
+//! behind `GET /contexts/{id}/communities` and, through it, the
 //! `taguru communities` derivation flow (issue #166).
 //!
 //! The graph communities partition is the CONCEPT graph: concepts are

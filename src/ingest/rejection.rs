@@ -319,7 +319,7 @@ fn predicted_alias_rejection(
         None
     };
 
-    if state.directory_entry(&batch.context).is_none() {
+    let Some(context_id) = state.context_id_of(&batch.context) else {
         // An earlier previewed batch reaching this context stands in
         // for the create block the real stream's first batch carries.
         return if batch.create.is_some() || seeds.is_some_and(|seeds| seeds.reaches(&batch.context))
@@ -328,8 +328,8 @@ fn predicted_alias_rejection(
         } else {
             None
         };
-    }
-    state.read_context(&batch.context, check).ok().flatten()
+    };
+    state.read_context(&context_id, check).ok().flatten()
 }
 
 /// What earlier batches of the SAME previewed stream would intern —
@@ -484,7 +484,15 @@ fn predicted_schema_rejection(
     ops: &[AssocOp],
     purpose: CheckPurpose,
 ) -> Result<SchemaWarnings, ApplyRefusal> {
-    let schema = match state.schema_of(&batch.context) {
+    // The header still names the context (until #965); the id-keyed
+    // reads below want its id. A missing OR ambiguous name means no
+    // resolvable schema — the same "nothing to check" a fresh create
+    // has (an ambiguous target refuses later, at the create/apply
+    // boundary, where it can be reported properly).
+    let Some(context_id) = state.context_id_of(&batch.context) else {
+        return Ok(SchemaWarnings::none());
+    };
+    let schema = match state.schema_of(&context_id) {
         None | Some(Ok(None)) => return Ok(SchemaWarnings::none()),
         Some(Ok(Some(schema))) => schema,
         Some(Err(message)) => {
@@ -496,7 +504,7 @@ fn predicted_schema_rejection(
     };
 
     let check = state
-        .read_context(&batch.context, |context| {
+        .read_context(&context_id, |context| {
             let env = crate::schema::SchemaEnv::build(
                 context,
                 crate::schema::SchemaCheckInput {
@@ -522,7 +530,7 @@ fn predicted_schema_rejection(
 
     let mode = schema.document().mode;
     if purpose == CheckPurpose::Apply {
-        state.note_schema_check(&batch.context, check.outcome(mode), check.violations.len());
+        state.note_schema_check(&context_id, check.outcome(mode), check.violations.len());
     }
 
     // Complete lists, never truncated here (#863): the offline CLI
@@ -603,12 +611,24 @@ pub(crate) fn apply_batch(
         let Some(meta) = &batch.create else {
             return Err(ApplyRefusal::NoContext(batch.context.clone()));
         };
-        match state.create(&batch.context, meta.clone()) {
-            Ok(()) => created = true,
-            // Another writer got between the check and the create —
-            // possible on the live server, harmless everywhere: the
-            // context exists now, which is all the batch needed.
-            Err(CreateError::AlreadyExists) => {}
+        // At-most-one-per-name, however many batches of however many
+        // concurrent streams race this header: `create_if_absent`
+        // serializes on the name and hands `None` to every loser —
+        // the context exists (or is about to), which is all the batch
+        // needed.
+        match state.create_if_absent(&batch.context, meta.clone()) {
+            Ok(minted) => created = minted.is_some(),
+            // Several contexts already share this display name — the
+            // header cannot say which one it means (ids reach the
+            // import header at #965), and minting another would
+            // deepen the collision.
+            Err(CreateError::AmbiguousName(count)) => {
+                return Err(ApplyRefusal::Io(format!(
+                    "context name '{}' is ambiguous: {count} contexts share it; import by a \
+                     unique name (ids reach the import header in a later release)",
+                    batch.context
+                )));
+            }
             // Unreachable in practice — `parse_header` already refused an
             // empty context name — but the registry guards it too, so the
             // match must speak for it.
@@ -626,11 +646,19 @@ pub(crate) fn apply_batch(
             }
         }
     }
+    // Everything below runs on the id-keyed data paths; the header's
+    // name resolves exactly once. `None` here means a delete (or an
+    // ambiguity introduced by a racing same-name create) won the race
+    // since the block above — the same "context vanished mid-batch"
+    // any pre-id import could hit.
+    let Some(context_id) = state.context_id_of(&batch.context) else {
+        return Err(ApplyRefusal::NoContext(batch.context.clone()));
+    };
 
     // The marker precedes the first mutation or the batch does not
     // run: starting untracked would silently reopen the exact
     // undetectable-tear window it exists to close.
-    if let Err(error) = state.open_import_marker(&batch.context, &batch.source) {
+    if let Err(error) = state.open_import_marker(&context_id, &batch.source) {
         return Err(ApplyRefusal::Io(format!(
             "import marker not persisted: {error} — nothing was applied"
         )));
@@ -641,7 +669,7 @@ pub(crate) fn apply_batch(
     // clearing it here too would reopen the batch to the exact gap it
     // exists to close.
     let (retracted, passage_removed, passage_removal_errored) = state
-        .retract_source_unmarked(&batch.context, &batch.source)
+        .retract_source_unmarked(&context_id, &batch.source)
         .map_err(ApplyRefusal::Access)?;
     // `passage_removed` alone is unconditional — true whenever a prior
     // passage existed and was removed, with no notion of a forthcoming
@@ -673,7 +701,7 @@ pub(crate) fn apply_batch(
     if let Some(text) = &batch.passage {
         let outcome = state
             .store_passages(
-                &batch.context,
+                &context_id,
                 BTreeMap::from([(
                     batch.source.clone(),
                     crate::passages::PassageSubmission {
@@ -723,7 +751,7 @@ pub(crate) fn apply_batch(
     let mut associations = 0;
     for chunk in associations_to_apply.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
         match state
-            .add_associations(&batch.context, chunk.to_vec(), deadline)
+            .add_associations(&context_id, chunk.to_vec(), deadline)
             .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => associations += applied,
@@ -745,7 +773,7 @@ pub(crate) fn apply_batch(
     let mut aliases = 0;
     if !batch.concepts.is_empty() || !batch.labels.is_empty() {
         match state
-            .add_aliases(&batch.context, &batch.concepts, &batch.labels)
+            .add_aliases(&context_id, &batch.concepts, &batch.labels)
             .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => aliases += applied,
@@ -770,9 +798,9 @@ pub(crate) fn apply_batch(
     }
 
     // Only now is the source's stated truth fully on disk.
-    state.clear_import_marker(&batch.context, &batch.source);
+    state.clear_import_marker(&context_id, &batch.source);
 
-    state.note_write(&batch.context);
+    state.note_write(&context_id);
     Ok(Applied {
         created,
         retracted,
@@ -825,7 +853,8 @@ pub(crate) fn preview_batch(
     let schema_warnings =
         predicted_schema_rejection(state, batch, &predicted_ops, CheckPurpose::Preview)?;
 
-    let exists = state.directory_entry(&batch.context).is_some();
+    let context_id = state.context_id_of(&batch.context);
+    let exists = context_id.is_some();
     // An earlier batch of this previewed stream reaching the context
     // stands in for its create — the real stream's first batch will
     // have created it by the time this one applies.
@@ -837,9 +866,9 @@ pub(crate) fn preview_batch(
 
     // A context about to be created — by this batch or an earlier one
     // of the same previewed stream — has nothing to retract from yet.
-    let retracted = if exists {
+    let retracted = if let Some(context_id) = &context_id {
         state
-            .count_source_edges(&batch.context, &batch.source)
+            .count_source_edges(context_id, &batch.source)
             .map_err(ApplyRefusal::Access)?
     } else {
         0
@@ -847,11 +876,11 @@ pub(crate) fn preview_batch(
     // Mirrors apply_batch's tolerance for a passage-store read that
     // fails: retract_source warns and reports no removal rather than
     // failing the whole batch, so the preview falls back the same way.
-    let had_passage = exists
-        && state
-            .passage_sources(&batch.context)
-            .and_then(Result::ok)
-            .is_some_and(|sources| sources.contains(&batch.source));
+    let had_passage = context_id
+        .as_deref()
+        .and_then(|context_id| state.passage_sources(context_id))
+        .and_then(Result::ok)
+        .is_some_and(|sources| sources.contains(&batch.source));
     let passage_dropped = had_passage && batch.passage.is_none();
 
     let paragraph_count = batch

@@ -40,19 +40,22 @@ pub async fn track_http(
     // Extracted by hand: a route's params can't ride the signature as
     // an extractor the way MatchedPath (which supports optional
     // extraction) does. `path_param` decodes the same way a handler's
-    // `AppPath` would, so a percent-encoded name logs decoded here too.
+    // extractor would. Context routes carry `{id}` (#964) and group
+    // routes still carry `{name}`, so each column reads its own
+    // parameter — a log query over `context=` (ids now) never
+    // silently matches group names, the same split the audit lines
+    // and /metrics gauges keep.
     let (mut parts, body) = request.into_parts();
-    let name = crate::api::path_param(&mut parts, "name")
-        .await
-        .unwrap_or_else(|| "-".to_string());
-    // The name lands in the column matching its kind — on the group
-    // routes `{name}` is a GROUP — so a log query over `context=`
-    // never silently matches group names (the audit lines and the
-    // /metrics gauges keep the same split).
     let (context, group) = if route.starts_with("/groups") {
+        let name = crate::api::path_param(&mut parts, "name")
+            .await
+            .unwrap_or_else(|| "-".to_string());
         ("-".to_string(), name)
     } else {
-        (name, "-".to_string())
+        let id = crate::api::path_param(&mut parts, "id")
+            .await
+            .unwrap_or_else(|| "-".to_string());
+        (id, "-".to_string())
     };
     let request = Request::from_parts(parts, body);
     let started = Instant::now();

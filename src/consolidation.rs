@@ -195,9 +195,18 @@ fn drive(
     let api = Api::new(base.to_string());
     eprintln!("consolidation → {base}");
     api.warn_on_version_skew("consolidation");
-    let artifact = into
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{context}::consolidation"));
+    // `--context` takes the id (#964); the default artifact NAME is
+    // built from the source's display name, never from the id.
+    let artifact = match into.map(str::to_string) {
+        Some(artifact) => artifact,
+        None => {
+            let row = api.get(&["contexts", context])?;
+            let name = row["name"]
+                .as_str()
+                .ok_or_else(|| format!("context '{context}': the row carries no name"))?;
+            format!("{name}::consolidation")
+        }
+    };
 
     let checks: Vec<&str> = checks
         .split(',')
@@ -378,7 +387,12 @@ fn stored_judgments(
             .map(|candidate| judgment_source(&candidate.fingerprint)),
     );
     let body = json!({ "sources": wanted });
-    let found = match api.post_envelope(&["contexts", artifact, "sources", "lookup"], &body) {
+    // The artifact is created by NAME on the import wire but read by
+    // id (#964); a name nothing answers to is a first run.
+    let Some(artifact_id) = api.context_id_by_name(artifact)? else {
+        return Ok((None, BTreeSet::new()));
+    };
+    let found = match api.post_envelope(&["contexts", &artifact_id, "sources", "lookup"], &body) {
         Ok(result) => result,
         Err(ApiFailure::NotFound { .. }) => return Ok((None, BTreeSet::new())),
         Err(ApiFailure::Other(error)) => return Err(error),

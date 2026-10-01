@@ -375,7 +375,7 @@ fn runs_citation_lane(case: &EvalCase) -> bool {
     !case.expected_citations.is_empty()
 }
 
-/// One `POST /contexts/{name}/citations` call per `expected_citations[]`
+/// One `POST /contexts/{id}/citations` call per `expected_citations[]`
 /// entry, strictly sequential — the endpoint takes exactly one locator
 /// per request (`src/api/sources.rs:67-74`), never a batch, so N
 /// expectations cost N round trips. Deliberately NOT preflighted the
@@ -826,7 +826,7 @@ pub(crate) fn build_missed(
 /// specific diagnostics — `EvidenceOutcome` (`assembly` only) and
 /// `BudgetAccounting` (either mode, once a budget flag was given).
 /// `assembly` mode always sends `run_config.limits` to
-/// `POST /contexts/{name}/evidence` (that endpoint has no unbudgeted
+/// `POST /contexts/{id}/evidence` (that endpoint has no unbudgeted
 /// mode, ADR 0006 §8); `baseline` mode only truncates — and only then
 /// carries a `budget` block at all — when `run_config.budget_given`.
 fn run_passage_or_evidence_lane(

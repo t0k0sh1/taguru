@@ -13,8 +13,7 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
 /// "invalid".
 pub(super) fn search_target_schema(properties: Value, required: &[&str]) -> Value {
     let mut schema = object_schema(properties, required);
-    schema["properties"]["context"] =
-        json!({ "type": "string", "description": "Context name (from list_contexts)" });
+    schema["properties"]["context"] = json!({ "type": "string", "description": "Context id (the id column of list_contexts, a UUID)" });
     schema["properties"]["contexts"] = json!({
         "type": "array",
         "items": { "type": "string" },
@@ -54,7 +53,7 @@ fn require_any_of(mut schema: Value, alternatives: Value) -> Value {
 /// meaning, on two tools gets the same text; a real behavioral
 /// difference gets stated, not silently dropped.
 pub(super) fn tool_definitions() -> Vec<Value> {
-    let context = json!({ "type": "string", "description": "Context name (from list_contexts)" });
+    let context = json!({ "type": "string", "description": "Context id (the id column of list_contexts, a UUID)" });
     let match_after = json!({
         "type": "object",
         "description": "resume past the previous page's last match: copy {weight, subject, label, object} verbatim from it, plus context too when targeting several contexts. total stays constant across pages",
@@ -70,11 +69,12 @@ pub(super) fn tool_definitions() -> Vec<Value> {
     let tools = vec![
         (
             "list_contexts",
-            "Routing directory: every `context`'s name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
+            "Routing directory: every `context`'s id, name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself; the row's id is what every other tool's context argument takes.",
             object_schema(
                 json!({
-                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "only contexts whose name sorts strictly after this one" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by (name, id) (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only contexts sorting strictly after this name; pass the previous page's last row's name (with after_id) to resume exactly" },
+                    "after_id": { "type": "string", "description": "the previous page's last row's id, beside after — names are not unique, so the id breaks ties" },
                     "pinned": { "type": "boolean", "description": "only contexts with this pinned state" }
                 }),
                 &[],
@@ -82,10 +82,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "create_context",
-            "Create a `context`. One `context` = one 文脈: one spelling, one referent — different things sharing a spelling get separate `contexts`. The description drives routing; say concretely what the `context` covers.",
+            "Create a `context`; the response row carries the server-minted id every other tool takes. One `context` = one 文脈: one spelling, one referent — different things sharing a spelling get separate `contexts`. The description drives routing; say concretely what the `context` covers. Names are display strings, not unique — creating a name again mints a second, distinct context.",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
+                    "name": { "type": "string", "description": "display name (free-form, not unique)" },
                     "description": { "type": "string" },
                     "pinned": { "type": "boolean", "description": "keep resident (always-hot contexts like glossaries)" },
                     "dice_floor": { "type": "number", "description": "fuzzy-entry floor (default 0.3)" },
@@ -99,29 +99,32 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "Update description / pinned / dice_floor / semantic_floor.",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
+                    "context": { "type": "string", "description": "Context id (the id column of list_contexts, a UUID)" },
                     "description": { "type": "string" },
                     "pinned": { "type": "boolean", "description": "omit to leave unchanged" },
                     "dice_floor": { "type": "number", "description": "omit to leave unchanged" },
                     "semantic_floor": { "type": "number", "description": "omit to leave unchanged" }
                 }),
-                &["name"],
+                &["context"],
             ),
         ),
         (
             "delete_context",
             "Delete a `context` and its files (irreversible).",
-            object_schema(json!({ "name": { "type": "string" } }), &["name"]),
+            object_schema(
+                json!({ "context": { "type": "string", "description": "Context id (the id column of list_contexts, a UUID)" } }),
+                &["context"],
+            ),
         ),
         (
             "rename_context",
-            "Rename a `context` (admin role): the whole file family moves to the new name and every `group` naming it is rewritten to match. Fails if the destination name is already taken.",
+            "Rename a `context` (admin role): a display-name change and nothing else — the id, the files, and every path stay put; every `group` naming it is rewritten to match. Names are not unique, so the destination may already be in use.",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
-                    "to": { "type": "string", "description": "the new name" }
+                    "context": { "type": "string", "description": "Context id (the id column of list_contexts, a UUID)" },
+                    "to": { "type": "string", "description": "the new display name" }
                 }),
-                &["name", "to"],
+                &["context", "to"],
             ),
         ),
         (
@@ -913,7 +916,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "export_context",
-            "The whole `context` as a source stream (JSON Lines text) — one source file per source, create block first, aliases last; `taguru import` or POST /import restores it (per-source retract-then-apply, idempotent). The portable, version-independent backup of one `context`. The stream rides back as one text block: for very large `contexts` prefer GET /contexts/{name}/export over plain HTTP, or `taguru export` offline.",
+            "The whole `context` as a source stream (JSON Lines text) — one source file per source, create block first, aliases last; `taguru import` or POST /import restores it (per-source retract-then-apply, idempotent). The portable, version-independent backup of one `context`. The stream rides back as one text block: for very large `contexts` prefer GET /contexts/{id}/export over plain HTTP, or `taguru export` offline.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (

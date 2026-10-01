@@ -174,7 +174,7 @@ struct WireCase {
     case_id: String,
     query: String,
     /// #260 does not drive retrieval from cues (its only search entry
-    /// point is `POST /contexts/{name}/sources/search`, over `query`
+    /// point is `POST /contexts/{id}/sources/search`, over `query`
     /// — ADR 0003 §11); this rides along and is only echoed back in
     /// `retrieval.json`'s per-case block for a reader's own reference.
     #[serde(default)]
@@ -238,7 +238,7 @@ pub(crate) struct EvalCase {
     pub(crate) expected_labels: Vec<String>,
     pub(crate) expected_associations: Vec<ExpectedAssociation>,
     // `evaluate`'s citation lane (#275) reads this for its per-entry
-    // POST /contexts/{name}/citations checks.
+    // POST /contexts/{id}/citations checks.
     pub(crate) expected_citations: Vec<ExpectedCitation>,
     /// The case's 1-based line in its `eval.jsonl` (#865): a check made
     /// after loading (`evaluate`'s limit validation) can still name the

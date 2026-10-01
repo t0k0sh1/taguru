@@ -18,6 +18,10 @@ use serde_json::json;
 
 use crate::support::{Server, run_cli, run_import};
 
+/// A well-formed id no context carries — CONTEXT arguments are ids
+/// (#964), so "unknown context" means an unresolvable id.
+const GHOST: &str = "00000000-0000-4000-8000-00000000dead";
+
 /// One context ("sake") carrying a single dead edge: `a.md` states a
 /// fact, `b.md` restates the same source with a different fact,
 /// retracting the first and leaving dead weight for compact to
@@ -68,7 +72,7 @@ fn a_remote_per_context_compact_matches_the_local_run_byte_for_byte() {
 
     let server = Server::start_on("remote-compact-bytematch", remote_data);
     let (code, remote_stdout, remote_stderr) =
-        run_cli(&["compact", "--url", &server.base, "sake"], &[]);
+        run_cli(&["compact", "--url", &server.base, &server.cx("sake")], &[]);
     assert_eq!(code, 0, "stdout: {remote_stdout}\nstderr: {remote_stderr}");
     assert_eq!(
         remote_stderr.matches("compact → ").count(),
@@ -78,7 +82,10 @@ fn a_remote_per_context_compact_matches_the_local_run_byte_for_byte() {
     assert!(!remote_stderr.contains("warning:"), "{remote_stderr}");
 
     let (code, local_stdout, local_stderr) = run_cli(
-        &["compact", "sake"],
+        &[
+            "compact",
+            &crate::support::common::context_stem(&local_data, "sake"),
+        ],
         &[("TAGURU_DATA_DIR", local_data.to_str().unwrap())],
     );
     assert_eq!(code, 0, "stdout: {local_stdout}\nstderr: {local_stderr}");
@@ -159,7 +166,7 @@ fn dry_run_url_enumerates_get_contexts_and_never_compacts() {
         "a dry run must never call the sweep: {metrics_text}"
     );
     assert!(
-        !metrics_text.contains("route=\"/contexts/{name}/compact\""),
+        !metrics_text.contains("route=\"/contexts/{id}/compact\""),
         "a dry run must never call POST .../compact: {metrics_text}"
     );
 
@@ -215,7 +222,7 @@ fn dry_run_json_url_with_a_named_context_uses_the_single_context_path() {
             "--json",
             "--url",
             &server.base,
-            "sake",
+            &server.cx("sake"),
         ],
         &[],
     );
@@ -232,7 +239,7 @@ fn dry_run_json_url_with_a_named_context_uses_the_single_context_path() {
         .as_str()
         .expect("metrics body is text, not JSON");
     assert!(
-        metrics_text.contains("route=\"/contexts/{name}\""),
+        metrics_text.contains("route=\"/contexts/{id}\""),
         "a named CONTEXT argument must call GET /contexts/{{name}}, not enumerate: {metrics_text}"
     );
     assert!(
@@ -240,7 +247,7 @@ fn dry_run_json_url_with_a_named_context_uses_the_single_context_path() {
         "a named CONTEXT argument must not enumerate contexts: {metrics_text}"
     );
     assert!(
-        !metrics_text.contains("route=\"/contexts/{name}/compact\""),
+        !metrics_text.contains("route=\"/contexts/{id}/compact\""),
         "--dry-run must not compact the named context: {metrics_text}"
     );
 
@@ -268,13 +275,13 @@ fn dry_run_json_url_reports_an_unknown_context_as_a_failure() {
             "--json",
             "--url",
             &server.base,
-            "sake",
-            "nope",
+            &server.cx("sake"),
+            GHOST,
         ],
         &[],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stderr.contains("context 'nope'"), "{stderr}");
+    assert!(stderr.contains(&format!("context '{GHOST}'")), "{stderr}");
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("--dry-run --json must be one JSON document: {error}"));
     let rows = value.as_array().expect("--dry-run --json is an array");
@@ -299,9 +306,12 @@ fn an_unknown_context_counts_as_a_failure_and_the_rest_still_lands() {
     let scratch = data.parent().unwrap().to_path_buf();
     let server = Server::start_on("remote-compact-unknown", data);
 
-    let (code, stdout, stderr) = run_cli(&["compact", "--url", &server.base, "sake", "nope"], &[]);
+    let (code, stdout, stderr) = run_cli(
+        &["compact", "--url", &server.base, &server.cx("sake"), GHOST],
+        &[],
+    );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stderr.contains("context 'nope'"), "{stderr}");
+    assert!(stderr.contains(&format!("context '{GHOST}'")), "{stderr}");
     assert!(stderr.contains("404"), "{stderr}");
     assert!(stdout.contains("context 'sake':"), "{stdout}");
     assert!(stdout.contains("1 of 2 context(s) rewritten"), "{stdout}");
@@ -363,13 +373,14 @@ fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
         &[("TAGURU_API_TOKEN", "sekrit")],
     );
 
+    let sake = server.cx("sake");
     let (code, stdout, stderr) = run_cli(
-        &["compact", "--url", &server.base, "sake"],
+        &["compact", "--url", &server.base, &sake],
         &[("TAGURU_API_TOKEN", "sekrit")],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    let (code, _stdout, stderr) = run_cli(&["compact", "--url", &server.base, "sake"], &[]);
+    let (code, _stdout, stderr) = run_cli(&["compact", "--url", &server.base, &sake], &[]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("401"), "{stderr}");
 
@@ -440,9 +451,9 @@ fn remote_parallel_output_matches_the_sequential_remote_run() {
             "compact",
             "--url",
             &seq_server.base,
-            "charlie",
-            "alpha",
-            "bravo",
+            &seq_server.cx("charlie"),
+            &seq_server.cx("alpha"),
+            &seq_server.cx("bravo"),
         ],
         &[],
     );
@@ -467,9 +478,9 @@ fn remote_parallel_output_matches_the_sequential_remote_run() {
             &par_server.base,
             "--parallel",
             "8",
-            "charlie",
-            "alpha",
-            "bravo",
+            &par_server.cx("charlie"),
+            &par_server.cx("alpha"),
+            &par_server.cx("bravo"),
         ],
         &[],
     );
@@ -580,7 +591,11 @@ fn dry_run_url_counts_an_unrecognized_directory_response_as_a_failure() {
 #[test]
 fn an_empty_server_sweep_reports_zero_rewritten() {
     let server = Server::start("remote-compact-empty-sweep");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let (code, stdout, stderr) = run_cli(&["compact", "--url", &server.base], &[]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -588,4 +603,46 @@ fn an_empty_server_sweep_reports_zero_rewritten() {
         stdout.contains("server sweep rewrote 0 context(s)"),
         "{stdout}"
     );
+}
+
+/// Issue #964: the per-context remote compact resolves each ID to its
+/// display name before compacting. A row that carries no name — a
+/// shape no real build serves, so only a stub can force it — is a
+/// counted per-item failure: exit 1 and a summary that says nothing
+/// was rewritten, never a clean 0.
+#[test]
+fn a_row_without_a_name_is_a_counted_resolve_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            r#"{"status":"ok"}"#,
+            r#"{"result":{"id":"00000000-0000-4000-8000-000000000001"}}"#,
+        ];
+        for body in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "compact",
+            "--url",
+            &format!("http://{addr}"),
+            "00000000-0000-4000-8000-000000000001",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("the row carries no name"), "{stderr}");
+    assert!(stdout.contains("0 of 1 context(s) rewritten"), "{stdout}");
 }

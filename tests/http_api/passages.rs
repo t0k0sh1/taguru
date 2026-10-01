@@ -12,13 +12,13 @@ use crate::support::*;
 fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     let server = Server::start("passage-lanes");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
                 原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
@@ -27,7 +27,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 
     let page = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "精米歩合はどこまで磨く?", "limit": 3})),
     );
     let hit = &page["hits"][0];
@@ -60,7 +60,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
     // what it did (nothing, on both lanes).
     let none = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "精米", "limit": 0})),
     );
     assert_eq!(none["hits"].as_array().unwrap().len(), 0);
@@ -84,13 +84,13 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
     let server = Server::start("citation-hit");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/aomine.md": "青嶺酒造は雲居県霧沢町の蔵元である。\n\n\
                 原料米には山田錦を使い、精米歩合は50パーセントまで磨く。"
@@ -99,7 +99,7 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
 
     let citation = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "docs/aomine.md", "paragraph": 1})),
     );
     assert_eq!(
@@ -125,13 +125,13 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
 fn a_locator_stored_via_store_passages_resolves_on_citation() {
     let server = Server::start("locator-store");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"manual.pdf": "導入。\n\n本編。"},
             "locators": {"manual.pdf": [{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}]}
@@ -140,7 +140,7 @@ fn a_locator_stored_via_store_passages_resolves_on_citation() {
 
     let citation = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "manual.pdf", "paragraph": 1})),
     );
     assert_eq!(
@@ -154,7 +154,7 @@ fn a_locator_stored_via_store_passages_resolves_on_citation() {
     // value, and never the paragraph-1 locator extending backward.
     let citation0 = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "manual.pdf", "paragraph": 0})),
     );
     assert!(citation0["locator"].is_null(), "{citation0}");
@@ -167,19 +167,19 @@ fn a_locator_stored_via_store_passages_resolves_on_citation() {
 fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
     let server = Server::start("citation-miss");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/aomine.md": "一段落だけ。"}})),
     );
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "docs/ghost.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
@@ -191,7 +191,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "docs/aomine.md", "paragraph": 9})),
     );
     assert_eq!(status, 404, "{body}");
@@ -203,12 +203,21 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/ghost/citations",
+        &format!(
+            "/contexts/{}/citations",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"source": "docs/aomine.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
-    assert!(body["error"].as_str().unwrap().contains("ghost"), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("00000000-0000-4000-8000-00000000dead"),
+        "{body}"
+    );
 }
 
 /// A section stored via import resolves on the citation endpoint too:
@@ -233,7 +242,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
 
     let before = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
@@ -244,7 +253,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
 
     let after = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
@@ -259,13 +268,13 @@ fn citation_resolves_the_section_governing_its_paragraph() {
 fn store_passages_accepts_questions_and_reports_the_bookkeeping() {
     let server = Server::start("passage-questions");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     let result = server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc": "一つ目。\n\n二つ目。"},
             "questions": {"doc": [
@@ -280,7 +289,7 @@ fn store_passages_accepts_questions_and_reports_the_bookkeeping() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {},
             "questions": {"ghost": [{"paragraph": 0, "question": "誰の質問?"}]}
@@ -297,13 +306,13 @@ fn store_passages_accepts_questions_and_reports_the_bookkeeping() {
 fn store_passages_accepts_sections_and_reports_the_bookkeeping() {
     let server = Server::start("passage-sections");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     let result = server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc": "一つ目。\n\n二つ目。"},
             "sections": {"doc": [
@@ -318,7 +327,7 @@ fn store_passages_accepts_sections_and_reports_the_bookkeeping() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {},
             "sections": {"ghost": [{"paragraph": 0, "section": "幽霊"}]}
@@ -331,13 +340,13 @@ fn store_passages_accepts_sections_and_reports_the_bookkeeping() {
 fn store_passages_accepts_locators_and_reports_the_bookkeeping() {
     let server = Server::start("passage-locators");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     let result = server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc": "一つ目。\n\n二つ目。"},
             "locators": {"doc": [
@@ -352,7 +361,7 @@ fn store_passages_accepts_locators_and_reports_the_bookkeeping() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {},
             "locators": {"ghost": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
@@ -371,13 +380,13 @@ fn store_passages_accepts_locators_and_reports_the_bookkeeping() {
 fn a_section_stored_via_store_passages_resolves_on_citation() {
     let server = Server::start("store-passages-citation-section");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     let result = server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {"doc-sections": "蔵の杜氏は高瀬。\n\n創業は1907年。"},
             "sections": {"doc-sections": [{"paragraph": 1, "section": "沿革"}]}
@@ -387,7 +396,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
 
     let before = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
@@ -398,7 +407,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
 
     let after = server.ok(
         "POST",
-        "/contexts/sake/citations",
+        &format!("/contexts/{}/citations", server.cx("sake")),
         Some(json!({"source": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
@@ -504,16 +513,20 @@ fn search_semantic_floor_override_rides_every_search_surface() {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/fruit",
-        Some(json!({"description": "果樹園"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "fruit", "description": "果樹園"})),
     );
     server.ok(
         "POST",
-        "/contexts/fruit/sources",
+        &format!("/contexts/{}/sources", server.cx("fruit")),
         Some(json!({"passages": {"docs/apple.md": "りんごは真っ赤に実った。"}})),
     );
-    server.ok("POST", "/contexts/fruit/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("fruit")),
+        None,
+    );
 
     // Under the default floor the paraphrase stays hidden — and the
     // query shares no bigram with the text, so no lexical rescue. The
@@ -521,7 +534,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     // distinguishable from a lane that never ran.
     let hidden = server.ok(
         "POST",
-        "/contexts/fruit/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("fruit")),
         Some(json!({"query": "みかん"})),
     );
     assert_eq!(hidden["hits"].as_array().unwrap().len(), 0, "{hidden}");
@@ -535,7 +548,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     // The override admits it: a vector-only hit at cosine 0.28.
     let page = server.ok(
         "POST",
-        "/contexts/fruit/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("fruit")),
         Some(json!({"query": "みかん", "semantic_floor": 0.2})),
     );
     assert_eq!(page["hits"].as_array().unwrap().len(), 1, "{page}");
@@ -553,7 +566,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     // The explanation reports the floor of the call being explained.
     let explained = server.ok(
         "POST",
-        "/contexts/fruit/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("fruit")),
         Some(json!({"query": "みかん", "source": "docs/apple.md", "semantic_floor": 0.2})),
     );
     assert_eq!(explained["verdict"], json!("served"), "{explained}");
@@ -586,19 +599,23 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     // the server default only for itself, and the plan reports each —
     // the resolution chain was per-context all along, invisibly.
     server.ok(
-        "PUT",
-        "/contexts/veggie",
-        Some(json!({"description": "菜園"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "veggie", "description": "菜園"})),
     );
     server.ok(
         "POST",
-        "/contexts/veggie/sources",
+        &format!("/contexts/{}/sources", server.cx("veggie")),
         Some(json!({"passages": {"docs/tomato.md": "りんごの隣にトマトが実った。"}})),
     );
-    server.ok("POST", "/contexts/veggie/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("veggie")),
+        None,
+    );
     server.ok(
         "PATCH",
-        "/contexts/veggie",
+        &format!("/contexts/{}", server.cx("veggie")),
         Some(json!({"semantic_floor": 0.6})),
     );
     let split = server.ok(

@@ -10,6 +10,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/embeddings",
+  "route": "/contexts/{id}/embeddings",
   "status": 200
 }

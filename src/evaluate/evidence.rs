@@ -12,8 +12,8 @@
 //! entirely structural can read `passage_hit: true` under `--assembly`
 //! where `baseline` (a pure passage-lane call) would read it `false`.
 //!
-//! **Assembly mode** replaces `POST /contexts/{name}/sources/search`
-//! with `POST /contexts/{name}/evidence` ([`run_evidence_lane`]),
+//! **Assembly mode** replaces `POST /contexts/{id}/sources/search`
+//! with `POST /contexts/{id}/evidence` ([`run_evidence_lane`]),
 //! reusing the same request/response wire types #305/#307 already
 //! shipped (`crate::api::evidence::assemble::EvidencePackage`) rather
 //! than minting a parallel client-side mirror.

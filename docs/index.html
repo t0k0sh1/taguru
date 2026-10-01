@@ -224,16 +224,16 @@
 cargo install taguru
 taguru   <span class="c"># listens on 127.0.0.1:8248 (data in ./data)</span>
 
-<span class="c"># create a context</span>
-curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
-  -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
+<span class="c"># create a context — the server mints its id; keep it, every later call uses it</span>
+CTX=$(curl -sX POST localhost:8248/contexts -H 'Content-Type: application/json' \
+  -d '{"name":"sake","description":"青嶺酒造という架空の酒蔵の知識"}' | jq -r .result.id)
 
 <span class="c"># store one association</span>
-curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/associations -H 'Content-Type: application/json' \
   -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
 
 <span class="c"># pull the thread</span>
-curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'</code></pre>
     <p class="note">
       The full endpoint list and the complete ingest/retrieval discipline are distributed by the

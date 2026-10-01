@@ -42,6 +42,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/activate",
+  "route": "/contexts/{id}/activate",
   "status": 200
 }

@@ -12,10 +12,10 @@ fn graph_writes_survive_a_hard_kill() {
     // have persisted anything before the SIGKILL lands — whatever
     // comes back after the restart came through the WAL.
     let server = Server::start_with_env("hardkill", &[("TAGURU_FLUSH_SECS", "3600")]);
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
         ])),
@@ -25,7 +25,7 @@ fn graph_writes_survive_a_hard_kill() {
     let server = Server::start_on("hardkill2", data_dir);
     let recalled = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(recalled["matches"][0]["object"], json!("1907年"));
@@ -36,10 +36,10 @@ fn post_flush_persists_dirty_contexts_on_demand() {
     // The periodic flusher is effectively off: the endpoint is the
     // only thing that can move the image.
     let server = Server::start_with_env("forceflush", &[("TAGURU_FLUSH_SECS", "3600")]);
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
     );
 
@@ -57,15 +57,15 @@ fn the_wal_cap_env_refuses_writes_rather_than_growing_forever() {
         "walcap",
         &[("TAGURU_WAL_MAX_BYTES", "1"), ("TAGURU_FLUSH_SECS", "3600")],
     );
-    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "a", "label": "l", "object": "b", "weight": 1.0}])),
     );
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "c", "label": "l", "object": "d", "weight": 1.0}])),
     );
     assert_eq!(status, 500, "{body}");
@@ -102,13 +102,13 @@ fn a_bind_failure_exits_with_a_diagnosis_not_a_panic() {
 fn data_survives_a_graceful_restart() {
     let server = Server::start("restart");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "再起動テスト"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "再起動テスト"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
         ])),
@@ -119,14 +119,14 @@ fn data_survives_a_graceful_restart() {
     let data_dir = server.stop_gracefully();
     let server = Server::start_on("restart2", data_dir);
     let directory = server.ok("GET", "/contexts", None);
-    assert_eq!(directory["contexts"][0]["id"], json!("sake"));
+    assert_eq!(directory["contexts"][0]["name"], json!("sake"));
     assert_eq!(
         directory["contexts"][0]["description"],
         json!("再起動テスト")
     );
     let recalled = server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(recalled["matches"][0]["object"], json!("1907年"));

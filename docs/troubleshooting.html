@@ -164,7 +164,7 @@ npm ls langchain-taguru</code></pre>
     <p>
       Before 0.6.0, a minor version bump was allowed to change a response's shape without any
       machine-readable signal, and one already did:
-      <code>POST /contexts/{name}/sources/search</code> (and the cross-<code>context</code> form) went
+      <code>POST /contexts/{id}/sources/search</code> (and the cross-<code>context</code> form) went
       from a bare array of hits to a <code>PassagePage</code> object, <code>{plan, hits}</code>,
       in 0.4.0. A 0.3.x SDK against a 0.4.x server failed with
       <code>expected an object for PassagePage, got list</code>; a 0.4.x SDK against a 0.3.x
@@ -293,21 +293,24 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       <i>bytes</i>. For a deletion request (GDPR-style right to be forgotten) or a bad ingest
       you want gone entirely, you need both.
     </p>
-    <pre><code><span class="c"># 1. preview what the retraction would touch — writes nothing</span>
-curl -X POST 'localhost:8248/contexts/sake/sources/retract?dry_run=true' \
+    <pre><code><span class="c"># 0. look up the context id (the `id` column of GET /contexts)</span>
+CTX=$(curl -s localhost:8248/contexts | jq -r '.result.contexts[] | select(.name=="sake") | .id')
+
+<span class="c"># 1. preview what the retraction would touch — writes nothing</span>
+curl -X POST "localhost:8248/contexts/$CTX/sources/retract?dry_run=true" \
   -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
 
 <span class="c"># 2. retract: withdraw the source's associations and remove its passage</span>
-curl -X POST localhost:8248/contexts/sake/sources/retract \
+curl -X POST localhost:8248/contexts/$CTX/sources/retract \
   -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
 
 <span class="c"># 3. compact: physically drop the withdrawn records and the passage text's bytes</span>
-curl -X POST localhost:8248/contexts/sake/compact</code></pre>
+curl -X POST localhost:8248/contexts/$CTX/compact</code></pre>
     <p>
       Why the second step isn't enough by itself: storage is append-only on both sides.
       Retraction unlinks the source's attribution records from the graph but leaves them as
       dead space in the image, and removes its passage from serving while the text's bytes
-      stay in the passage log behind a tombstone. <code>POST /contexts/{name}/compact</code>
+      stay in the passage log behind a tombstone. <code>POST /contexts/{id}/compact</code>
       rebuilds the image without the dead records <b>and</b> rewrites the passage log without
       the retracted text (<code>passages_compacted: true</code> in its response confirms the
       log rewrite ran). Until a compaction runs — yours, or the automatic ratio/size-triggered
@@ -346,7 +349,7 @@ curl -X POST localhost:8248/contexts/sake/compact</code></pre>
       <code>latency_ms</code>. With <code>TAGURU_LOG_FORMAT=json</code> it's one JSON object per
       request — the least ambiguous way to read it:
     </p>
-    <pre><code>{"fields":{"message":"http","method":"POST","route":"/contexts/sake/sources/search","context":"sake","group":null,"status":200,"key":"-","latency_ms":6.2}}</code></pre>
+    <pre><code>{"fields":{"message":"http","method":"POST","route":"/contexts/{id}/sources/search","context":"0be6e28e-9f21-4a49-9dd6-3a9f24246b3e","group":null,"status":200,"key":"-","latency_ms":6.2}}</code></pre>
     <p>
       The default, human-readable stderr format carries the same fields on one line per request,
       timestamp and level first. <code>TAGURU_LOG_SEARCHES=1</code> adds a second,

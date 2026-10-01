@@ -57,20 +57,172 @@ fn dot_segment_refusal(path: &str, started_at: Instant) -> Response {
 
 pub(super) async fn proxy_context_root(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     request: Request,
 ) -> Response {
-    proxy_context(state, name, deadline, request).await
+    proxy_context(state, id, deadline, request).await
 }
 
 pub(super) async fn proxy_context_sub(
     State(state): State<RouterState>,
-    axum::extract::Path((name, _rest)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((id, _rest)): axum::extract::Path<(String, String)>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     request: Request,
 ) -> Response {
-    proxy_context(state, name, deadline, request).await
+    proxy_context(state, id, deadline, request).await
+}
+
+/// `POST /contexts` — the one `context` verb with no id in its path
+/// (the shard mints the id, ADR 0045). The destination is decided by
+/// the create body's display NAME against the route map, which still
+/// keys on names: the map keeps deciding where new `contexts` go,
+/// exactly as it decided the old name-addressed create.
+pub(super) async fn route_create_context(
+    State(state): State<RouterState>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let started_at = Instant::now();
+    let name = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("name")
+                .and_then(|name| name.as_str().map(str::to_string))
+        });
+    let Some(name) = name else {
+        return api::error(
+            ErrorCode::InvalidArgument,
+            "the create body must be JSON carrying the context's name — the router routes \
+             a create by it",
+            started_at,
+        );
+    };
+    let map = state.map();
+    let Some(shard) = map.shard_of(&name) else {
+        return api::error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "no shard owns context '{name}': add a route-map entry for it, or a \
+                 '*' fallback for unmapped contexts (TAGURU_ROUTE_MAP)"
+            ),
+            started_at,
+        );
+    };
+    match state
+        .call_shard(
+            &map,
+            shard,
+            Method::POST,
+            "/contexts",
+            &hop_headers(&headers),
+            Some(body),
+            deadline,
+        )
+        .await
+    {
+        Ok(answer) => passthrough(answer),
+        Err(error) => api::error(
+            ErrorCode::ShardUnreachable,
+            format!(
+                "shard {} (owning context '{name}') is unreachable: {error}",
+                map.url(shard)
+            ),
+            started_at,
+        ),
+    }
+}
+
+/// Which shard answers for a path id. The route map still keys on
+/// display names — a path that now carries the ID cannot consult it —
+/// so ownership is resolved by asking the shards themselves: one
+/// probe (`GET /contexts/{id}`, the caller's own credentials) per
+/// distinct shard, concurrently. A single-shard map skips the probes
+/// outright; so the common deployments (one shard, or one plus a
+/// `*` line naming it) pay nothing.
+enum Owner {
+    Shard(usize),
+    Answered(Response),
+}
+
+async fn resolve_owner(
+    state: &RouterState,
+    map: &RouteMap,
+    id: &str,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Owner {
+    let shards: Vec<usize> = map.all().collect();
+    if let [only] = shards.as_slice() {
+        return Owner::Shard(*only);
+    }
+    let path = format!("/contexts/{id}");
+    let outcomes = state
+        .fan_out(
+            map,
+            &shards,
+            Method::GET,
+            &path,
+            &hop_headers(headers),
+            |_| None,
+            deadline,
+        )
+        .await;
+    let mut owners: Vec<usize> = Vec::new();
+    let mut refused: Option<ShardAnswer> = None;
+    let mut unreached: Vec<String> = Vec::new();
+    for (shard, outcome) in outcomes {
+        match outcome {
+            Ok(answer) if answer.status.is_success() => owners.push(shard),
+            // 404 = "not here"; anything else (a scoped key's 403, a
+            // shard's 500) is remembered — with no owner found it IS
+            // the answer, in the shard's own shape.
+            Ok(answer) if answer.status == StatusCode::NOT_FOUND => {}
+            Ok(answer) => refused = refused.or(Some(answer)),
+            Err(error) => unreached.push(format!("{}: {error}", map.url(shard))),
+        }
+    }
+    match owners.as_slice() {
+        [owner] => Owner::Shard(*owner),
+        [] => {
+            if let Some(answer) = refused {
+                return Owner::Answered(passthrough(answer));
+            }
+            if !unreached.is_empty() {
+                return Owner::Answered(api::error(
+                    ErrorCode::ShardUnreachable,
+                    format!(
+                        "context '{id}' was not found on any reachable shard, and these \
+                         could not be asked: {}",
+                        unreached.join("; ")
+                    ),
+                    started_at,
+                ));
+            }
+            Owner::Answered(api::error(
+                ErrorCode::NoContext,
+                format!("context '{id}' not found"),
+                started_at,
+            ))
+        }
+        several => Owner::Answered(api::error(
+            ErrorCode::Conflict,
+            format!(
+                "context '{id}' is held by {} shards ({}) — mid-move stray? finish the move \
+                 (delete the source copy) before addressing it through the router",
+                several.len(),
+                several
+                    .iter()
+                    .map(|&shard| map.url(shard))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            started_at,
+        )),
+    }
 }
 
 /// The transparent hop: same method, same path and query, headers
@@ -79,7 +231,7 @@ pub(super) async fn proxy_context_sub(
 /// shapes included.
 async fn proxy_context(
     state: RouterState,
-    name: String,
+    id: String,
     deadline: Deadline,
     request: Request,
 ) -> Response {
@@ -91,29 +243,11 @@ async fn proxy_context(
         return dot_segment_refusal(request.uri().path(), started_at);
     }
     let map = state.map();
-    let Some(shard) = map.shard_of(&name) else {
-        // No entry and no fallback: for a read this context cannot
-        // exist anywhere the router routes — the single-instance
-        // not-found, byte for byte. A PUT is asking to CREATE it, and
-        // the honest answer is that the map decides where new contexts
-        // go, not that something wasn't found.
-        return if request.method() == Method::PUT {
-            api::error(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "no shard owns context '{name}': add a route-map entry for it, or a \
-                     '*' fallback for unmapped contexts (TAGURU_ROUTE_MAP)"
-                ),
-                started_at,
-            )
-        } else {
-            api::error(
-                ErrorCode::NoContext,
-                format!("context '{name}' not found"),
-                started_at,
-            )
+    let shard =
+        match resolve_owner(&state, &map, &id, request.headers(), deadline, started_at).await {
+            Owner::Shard(shard) => shard,
+            Owner::Answered(response) => return response,
         };
-    };
     let (parts, body) = request.into_parts();
     let path_and_query = parts
         .uri
@@ -200,7 +334,7 @@ async fn proxy_context(
             api::error(
                 ErrorCode::ShardUnreachable,
                 format!(
-                    "shard {} (owning context '{name}') is unreachable: {error}",
+                    "shard {} (owning context '{id}') is unreachable: {error}",
                     map.url(shard)
                 ),
                 started_at,

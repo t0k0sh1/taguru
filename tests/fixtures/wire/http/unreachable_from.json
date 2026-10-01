@@ -33,6 +33,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/unreachable_from",
+  "route": "/contexts/{id}/unreachable_from",
   "status": 200
 }

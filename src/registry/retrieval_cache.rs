@@ -78,7 +78,10 @@ pub(crate) fn budget_seats_nothing(budget: usize) -> bool {
 /// operation's response can depend on.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct TargetFingerprint {
-    pub name: String,
+    /// The `context`'s id — the addressable key, so a rename neither
+    /// splits nor poisons the cache and two same-named `contexts`
+    /// never share an entry.
+    pub id: String,
     /// [`super::EntryInner::cache_identity`] at key time.
     pub identity: u64,
     /// [`op_lanes`]' pair, in that fixed per-op order.
@@ -241,7 +244,7 @@ fn slot_cost(key: &RetrievalKey, value: &CachedRetrieval) -> usize {
     let key_bytes: usize = key
         .targets
         .iter()
-        .map(|target| target.name.len() + 24)
+        .map(|target| target.id.len() + 24)
         .sum::<usize>()
         + key.params.len();
     value.payload.get().len() + key_bytes + 64
@@ -292,11 +295,11 @@ impl AppState {
         let params = params?;
         let targets = targets
             .iter()
-            .map(|name| {
-                let entry = self.lookup(name)?;
+            .map(|id| {
+                let entry = self.lookup_id(id)?;
                 let inner = entry.read_unless_deleted()?;
                 Some(TargetFingerprint {
-                    name: name.clone(),
+                    id: id.clone(),
                     identity: inner.cache_identity,
                     lanes: op_lanes(op, entry.revision_snapshot(&inner)),
                 })
@@ -348,7 +351,7 @@ mod tests {
         RetrievalKey {
             op: RetrievalCacheOp::Recall,
             targets: Box::new([TargetFingerprint {
-                name: "c".to_string(),
+                id: "c".to_string(),
                 identity: 1,
                 lanes: [0, 0],
             }]),
@@ -389,27 +392,33 @@ mod tests {
         let mut passages = std::collections::BTreeMap::new();
         passages.insert("第1章".to_string(), "りんごの話".to_string());
         state
-            .store_passages("sake", crate::registry::test_support::plain(passages))
+            .store_passages(
+                &state.id_of("sake"),
+                crate::registry::test_support::plain(passages),
+            )
             .unwrap()
             .unwrap();
 
         let before = state
             .retrieval_key(
                 RetrievalCacheOp::SearchPassages,
-                &["sake".to_string()],
+                &[state.id_of("sake")],
                 Some("params".to_string()),
             )
             .expect("the retrieval cache is enabled by default");
 
         state
-            .refresh_passage_embeddings("sake", taguru::deadline::Deadline::unbounded())
+            .refresh_passage_embeddings(
+                &state.id_of("sake"),
+                taguru::deadline::Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
 
         let after = state
             .retrieval_key(
                 RetrievalCacheOp::SearchPassages,
-                &["sake".to_string()],
+                &[state.id_of("sake")],
                 Some("params".to_string()),
             )
             .unwrap();

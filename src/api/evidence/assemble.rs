@@ -1,4 +1,4 @@
-//! `POST /contexts/{name}/evidence` (#305, ADR 0006 §5.1, §5.4, §10,
+//! `POST /contexts/{id}/evidence` (#305, ADR 0006 §5.1, §5.4, §10,
 //! §11, §13.1-13.2): the opt-in HTTP surface over #303's candidate
 //! normalization and #304's budgeted selection. This is the first real
 //! caller of both — `super::EvidenceCandidate::from_*`, `super::fuse`,
@@ -38,8 +38,8 @@ use crate::api::sources::{
     Citation, LanePlan, NO_QUERY_TERMS_REASON, PassageHit, ZERO_LIMIT_REASON,
 };
 use crate::api::{
-    AppJson, AppPath, MAX_MATCH_LIMIT, access_error, activations_out, associations_out, clamp,
-    deadline_exceeded, not_found, ok, overlong, page,
+    AppJson, ContextIdPath, MAX_MATCH_LIMIT, access_error, activations_out, associations_out,
+    clamp, deadline_exceeded, not_found, ok, overlong, page,
 };
 
 use super::budget::{BudgetLimits, BudgetRequest, BudgetUsage};
@@ -153,7 +153,7 @@ pub struct EvidencePackage {
 
 pub async fn assemble_evidence(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<AssembleEvidenceRequest>,
@@ -195,8 +195,8 @@ pub async fn assemble_evidence(
     // degenerate-but-valid input (§8: budgets/inputs at their floor
     // are ordinary, not an error) and must not skip this check the
     // way an empty resolve loop otherwise would.
-    let Some(current) = state.context_revision(&name) else {
-        return not_found(&name, started_at);
+    let Some(current) = state.context_revision(&id) else {
+        return not_found(&id, started_at);
     };
 
     let limits = BudgetLimits::resolve(request.budget);
@@ -235,17 +235,11 @@ pub async fn assemble_evidence(
                 semantic_floor: request.semantic_floor,
                 limit: request.resolve_limit,
             };
-            let served = match resolve_served(
-                &state,
-                &name,
-                &resolve_request,
-                false,
-                deadline,
-                started_at,
-            ) {
-                Ok(served) => served,
-                Err(response) => return response,
-            };
+            let served =
+                match resolve_served(&state, &id, &resolve_request, false, deadline, started_at) {
+                    Ok(served) => served,
+                    Err(response) => return response,
+                };
             if let Some(top) = served.first()
                 && !anchors.contains(&top.name)
             {
@@ -287,16 +281,16 @@ pub async fn assemble_evidence(
         );
         let _guard = query_span.enter();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        match state.read_context(&name, |context| {
+        match state.read_context(&id, |context| {
             context.query_any(&anchor_refs, &label_refs, &[])
         }) {
             Ok(matches) => {
                 let (total, matches) = page(matches, None, None);
-                state.note_search(SearchOp::Query, &name, total == 0);
-                let matches = associations_out(&state, &name, matches);
+                state.note_search(SearchOp::Query, &id, total == 0);
+                let matches = associations_out(&state, &id, matches);
                 for (rank, association) in matches.into_iter().enumerate() {
                     association_pool.push(EvidenceCandidate::from_association(
-                        &name,
+                        &id,
                         association,
                         rank + 1,
                     ));
@@ -304,7 +298,7 @@ pub async fn assemble_evidence(
                 query_span.record("taguru.association.count", association_pool.len() as i64);
                 LanePlan::ran()
             }
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     };
 
@@ -325,14 +319,14 @@ pub async fn assemble_evidence(
             taguru.activation.count = tracing::field::Empty,
         );
         let _guard = activate_span.enter();
-        // ADR 0009 §6.3 exclusion 1, same as `POST /contexts/{name}/activate`
+        // ADR 0009 §6.3 exclusion 1, same as `POST /contexts/{id}/activate`
         // — resolved before `read_context`, per `AppState::hidden_label`'s
         // own doc. Its slow path is real disk I/O under a write lock,
         // so — like every other lane in this handler — it runs off the
         // async worker.
-        let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
+        let hidden = tokio::task::block_in_place(|| state.hidden_label(&id));
         let excluded: Vec<&str> = hidden.into_iter().collect();
-        match state.read_context(&name, |context| {
+        match state.read_context(&id, |context| {
             context.activate_excluding(
                 &anchor_refs,
                 request.activate_decay.unwrap_or(0.5),
@@ -341,19 +335,19 @@ pub async fn assemble_evidence(
             )
         }) {
             Ok((total, matches)) => {
-                state.note_search(SearchOp::Activate, &name, total == 0);
-                let matches = activations_out(&state, &name, matches);
+                state.note_search(SearchOp::Activate, &id, total == 0);
+                let matches = activations_out(&state, &id, matches);
                 activate_span.record("taguru.activation.count", matches.len() as i64);
                 for (rank, activation) in matches.into_iter().enumerate() {
                     association_pool.push(EvidenceCandidate::from_activation(
-                        &name,
+                        &id,
                         activation,
                         rank + 1,
                     ));
                 }
                 LanePlan::ran()
             }
-            Err(failure) => return access_error(&state, failure, &name, started_at),
+            Err(failure) => return access_error(&state, failure, &id, started_at),
         }
     };
     root.record("taguru.association.count", association_pool.len() as i64);
@@ -388,7 +382,7 @@ pub async fn assemble_evidence(
         // async worker, like every other passage-search entry.
         passages_plan = match tokio::task::block_in_place(|| {
             state.search_passages(
-                &name,
+                &id,
                 &canonical_query,
                 search_limit,
                 request.semantic_floor,
@@ -396,7 +390,7 @@ pub async fn assemble_evidence(
                 deadline,
             )
         }) {
-            None => return not_found(&name, started_at),
+            None => return not_found(&id, started_at),
             // Logged, not discarded (issue #620): same reasoning as
             // `search_passages`'s own budget/io-error race.
             Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
@@ -407,7 +401,7 @@ pub async fn assemble_evidence(
                 return crate::api::sources::passages_unreadable(&state, io_error, started_at);
             }
             Some(Ok(found)) => {
-                state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
+                state.note_search(SearchOp::SearchPassages, &id, found.hits.is_empty());
                 passages_span.record("taguru.passage.hit_count", found.hits.len() as i64);
                 for hit in &found.hits {
                     state
@@ -427,7 +421,7 @@ pub async fn assemble_evidence(
                 };
                 for (rank, hit) in found.hits.into_iter().enumerate() {
                     passage_candidates.push(EvidenceCandidate::from_passage(
-                        &name,
+                        &id,
                         PassageHit::from(hit),
                         rank + 1,
                     ));
@@ -448,8 +442,9 @@ pub async fn assemble_evidence(
         tracing::info!(taguru.reason = "communities_disabled", "taguru.skip");
         LanePlan::skipped("include_communities was false")
     } else {
-        let derived = derived_context_name(&name);
-        if let Some(refusal) = check_derived_scope(&grant, &name, &derived, started_at) {
+        let source_name = state.name_of_stem(&id);
+        let derived = derived_context_name(&source_name);
+        if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
             return refusal;
         }
         if deadline.expired() {
@@ -470,7 +465,7 @@ pub async fn assemble_evidence(
         let _guard = communities_span.enter();
         match community_hits(
             &state,
-            &name,
+            &id,
             &derived,
             &canonical_query,
             search_limit,
@@ -483,7 +478,7 @@ pub async fn assemble_evidence(
                 communities_span.record("taguru.passage.hit_count", found.hits.len() as i64);
                 for (rank, hit) in found.hits.into_iter().enumerate() {
                     community_candidates.push(EvidenceCandidate::from_community(
-                        &name,
+                        &id,
                         hit,
                         rank + 1,
                     ));
@@ -535,7 +530,7 @@ pub async fn assemble_evidence(
         #[allow(clippy::result_large_err)] // the Err IS the response served next
         {
             citation_lookup = match tokio::task::block_in_place(|| {
-                resolve_citations(&state, &name, wanted, started_at)
+                resolve_citations(&state, &id, wanted, started_at)
             }) {
                 Ok(citation_lookup) => citation_lookup,
                 Err(response) => return response,
@@ -729,8 +724,8 @@ mod tests {
         corrupt_passages_snapshot(&state, &dir, "sake");
 
         let response = assemble_evidence(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             None,
             axum::Extension(Deadline::unbounded()),
             AppJson(minimal_request()),
@@ -757,8 +752,8 @@ mod tests {
         crate::api::expire_deadline_race();
 
         let response = assemble_evidence(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             None,
             axum::Extension(Deadline::unbounded()),
             AppJson(minimal_request()),
@@ -794,7 +789,7 @@ mod tests {
 
         let response = assemble_evidence(
             State(state),
-            AppPath("ghost".to_string()),
+            ContextIdPath("00000000-0000-4000-8000-000000000000".to_string()),
             None,
             axum::Extension(deadline),
             AppJson(minimal_request()),

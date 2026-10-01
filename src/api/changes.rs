@@ -1,4 +1,4 @@
-//! `GET /contexts/{name}/changes` (#422): the polling change feed —
+//! `GET /contexts/{id}/changes` (#422): the polling change feed —
 //! one page of recent content-change events after an opaque cursor,
 //! served from the bounded in-memory ring `crate::registry::changes`
 //! keeps per `context`. A lost position (restart, recreate, ring
@@ -18,8 +18,8 @@ use taguru::deadline::Deadline;
 use crate::registry::{AppState, ChangeEvent, ChangesOutcome};
 
 use super::{
-    AppPath, AppQuery, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp_page,
-    deadline_exceeded, error, ok,
+    AppQuery, ContextIdPath, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, access_error,
+    clamp_page, deadline_exceeded, error, ok,
 };
 
 /// `?since=&limit=`. `since` is the opaque cursor a previous page's
@@ -49,7 +49,7 @@ pub struct ChangesPage {
 
 pub async fn changes(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Response {
@@ -58,12 +58,12 @@ pub async fn changes(
         return deadline_exceeded(started_at);
     }
     match state.context_changes(
-        &name,
+        &id,
         query.since.as_deref(),
         clamp_page(query.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
     ) {
         Ok(ChangesOutcome::Page { events, next, more }) => {
-            state.note_read(&name, events.is_empty());
+            state.note_read(&id, events.is_empty());
             ok(ChangesPage { events, next, more }, started_at)
         }
         // note_read here, unlike the Err arm below (issue #621's
@@ -80,7 +80,7 @@ pub async fn changes(
         // the separate `last_touch` field, which `context_changes`
         // already stamps on both the Page and Stale paths.
         Ok(ChangesOutcome::Stale) => {
-            state.note_read(&name, true);
+            state.note_read(&id, true);
             error(
                 ErrorCode::StaleCursor,
                 "the cursor's history is no longer held (a restart, a recreate, or more \
@@ -89,6 +89,6 @@ pub async fn changes(
                 started_at,
             )
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }

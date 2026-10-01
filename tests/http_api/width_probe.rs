@@ -113,31 +113,39 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
             ("TAGURU_EMBED_PASSAGES", "1"),
         ],
     );
-    server.ok("PUT", "/contexts/mine", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/mine/associations",
+        "/contexts",
+        Some(json!({"name": "mine", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("mine")),
         Some(json!([{"subject": "琥珀", "label": "分類", "object": "宝石", "weight": 1.0}])),
     );
     server.ok(
         "POST",
-        "/contexts/mine/sources",
+        &format!("/contexts/{}/sources", server.cx("mine")),
         Some(json!({"passages": {"docs/ore.md": "琥珀は樹脂の化石である。"}})),
     );
-    server.ok("POST", "/contexts/mine/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("mine")),
+        None,
+    );
 
     // Both tiers serve at the built width: a cue/query sharing no
     // spelling with anything stored reaches vectors alone (the stub's
     // identical unit vectors put cosine at 1.0).
     let resolved = server.ok(
         "POST",
-        "/contexts/mine/resolve",
+        &format!("/contexts/{}/resolve", server.cx("mine")),
         Some(json!({"cue": "べっこう"})),
     );
     assert_eq!(resolved[0]["tier"], json!("semantic"), "{resolved}");
     let page = server.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "こはくいろ"})),
     );
     assert_eq!(page["hits"][0]["source"], json!("docs/ore.md"), "{page}");
@@ -154,7 +162,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
                   never served, and the next refresh re-embeds";
     let page = server.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "とうめいなたから"})),
     );
     assert_eq!(page["hits"], json!([]), "{page}");
@@ -168,7 +176,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
     // "no current embedding yet" misdiagnosis.
     let explained = server.ok(
         "POST",
-        "/contexts/mine/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("mine")),
         Some(json!({"query": "とうめいなたから", "source": "docs/ore.md"})),
     );
     assert_eq!(explained["vector"]["ran"], json!(false), "{explained}");
@@ -178,7 +186,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
     // best-effort by contract)…
     let resolved = server.ok(
         "POST",
-        "/contexts/mine/resolve",
+        &format!("/contexts/{}/resolve", server.cx("mine")),
         Some(json!({"cue": "むかしのじゅし"})),
     );
     assert_eq!(resolved, json!([]), "{resolved}");
@@ -186,7 +194,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
     // sentinel as a measured cosine and prescribe an unreachable floor.
     let explained = server.ok(
         "POST",
-        "/contexts/mine/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("mine")),
         Some(json!({"cue": "むかしのじゅし", "expected": "琥珀"})),
     );
     assert_eq!(
@@ -208,7 +216,11 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
     // just warned about.
     assert_eq!(width_rebuilds(&server, "gloss"), 0);
     assert_eq!(width_rebuilds(&server, "passages"), 0);
-    let refreshed = server.ok("POST", "/contexts/mine/embeddings/refresh", None);
+    let refreshed = server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("mine")),
+        None,
+    );
     assert_eq!(refreshed["glosses"]["embedded"], json!(3), "{refreshed}");
     assert_eq!(refreshed["passages"]["embedded"], json!(1), "{refreshed}");
     assert_eq!(width_rebuilds(&server, "gloss"), 1);
@@ -216,13 +228,13 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
 
     let resolved = server.ok(
         "POST",
-        "/contexts/mine/resolve",
+        &format!("/contexts/{}/resolve", server.cx("mine")),
         Some(json!({"cue": "アンバー"})),
     );
     assert_eq!(resolved[0]["tier"], json!("semantic"), "{resolved}");
     let page = server.ok(
         "POST",
-        "/contexts/mine/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "アンバーのそう"})),
     );
     assert_eq!(page["hits"][0]["source"], json!("docs/ore.md"), "{page}");

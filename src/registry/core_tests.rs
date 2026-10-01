@@ -390,7 +390,7 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
         state
-            .store_passages("sake", test_support::plain(passages))
+            .store_passages(&state.id_of("sake"), test_support::plain(passages))
             .unwrap()
             .unwrap();
         // Force a resident BM25 index (the cold build itself marks
@@ -398,10 +398,17 @@ mod tests {
         // batches THIS test drives through `refresh_bm25` directly,
         // not the build.
         state
-            .search_passages("sake", "創業", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "創業",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         entry.bm25_dirty.store(false, Ordering::Relaxed);
         let store = state.entry_passages(&entry, &entry.id).unwrap();
 
@@ -474,10 +481,10 @@ mod tests {
             },
         )
         .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let before_revision = entry.inner.read().config_revision;
 
-        state.bump_config_revision("sake", &entry);
+        state.bump_config_revision(&entry);
 
         let after_revision = entry.inner.read().config_revision;
         assert_eq!(
@@ -506,11 +513,11 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let before_revision = entry.inner.read().config_revision;
 
         fail_persistence_ops_after(0);
-        state.bump_config_revision("sake", &entry);
+        state.bump_config_revision(&entry);
         assert!(
             !clear_persistence_fault(),
             "sanity: the injected failure must fire on this call's write_meta"
@@ -552,10 +559,15 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
         let installed = schema::install(valid_schema_document()).unwrap();
-        state.put_schema("sake", installed).unwrap().unwrap();
-        state.rename_context("sake", "shochu").unwrap();
+        state
+            .put_schema(&state.id_of("sake"), installed)
+            .unwrap()
+            .unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "shochu")
+            .unwrap();
         {
-            let entry = state.lookup("shochu").unwrap();
+            let entry = state.lookup_named("shochu").unwrap();
             let mut inner = entry.inner.write();
             inner.slot = Slot::Cold;
             inner.schema = None;
@@ -568,7 +580,9 @@ mod tests {
         .unwrap();
 
         let error = state
-            .read_context("shochu", |context| context.association_count())
+            .read_context(&state.id_of("shochu"), |context| {
+                context.association_count()
+            })
             .unwrap_err();
         match error {
             AccessError::Load(message) => {
@@ -604,7 +618,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "廃", "旧", 1.0, Some("x.md")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("x.md")),
@@ -613,10 +627,12 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_association("sake", "蔵", "廃", "旧").unwrap();
+        state
+            .retract_association(&state.id_of("sake"), "蔵", "廃", "旧")
+            .unwrap();
 
         let hot_ratio = state
-            .read_context("sake", |context| context.dead_ratio())
+            .read_context(&state.id_of("sake"), |context| context.dead_ratio())
             .map_err(|_| "read")
             .unwrap();
         assert!(
@@ -624,7 +640,7 @@ mod tests {
             "sanity: retracting one of two edges must leave real dead weight"
         );
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         let cold_ratio = entry.inner.read().stats.dead_ratio();
 

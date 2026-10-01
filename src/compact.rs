@@ -5,7 +5,7 @@
 //! traffic grows monotonically. Compaction rebuilds each image from
 //! its live content alone ([`taguru::context::Context::compacted`])
 //! and persists the result; a running server serves the same at
-//! `POST /contexts/{name}/compact`, and by default also runs the
+//! `POST /contexts/{id}/compact`, and by default also runs the
 //! policy itself, ratio-triggered from the flusher tick
 //! (`TAGURU_AUTO_COMPACT`, issue #135) — this offline command remains
 //! for opted-out deployments and for reclaiming without booting a
@@ -15,7 +15,7 @@
 //! `--url` (issue #246) makes this verb dual-mode, the same way
 //! `export --url` (#245) is: absent, the local path above runs
 //! unchanged; given a URL, CONTEXT arguments are compacted one at a
-//! time through `POST /contexts/{name}/compact`, and no arguments
+//! time through `POST /contexts/{id}/compact`, and no arguments
 //! trigger the server's own `POST /maintenance/compact` sweep instead
 //! of an enumerate-then-call loop — the sweep picks its own
 //! candidates, worst dead ratio first.
@@ -47,7 +47,7 @@ Rewrites context images in TAGURU_DATA_DIR without the dead weight the
 append-only format accumulates (retracted edges, unlinked attribution
 records, arena slack) — offline; the directory lock refuses to run
 beside a live server. No CONTEXT arguments means every context. Live
-systems use POST /contexts/{name}/compact instead (admin role; the
+systems use POST /contexts/{id}/compact instead (admin role; the
 context's own requests wait out the rebuild). Content is preserved:
 counts and paragraph locators exactly, per-source weights within
 float re-accumulation error; aliases whose canonical no longer
@@ -56,7 +56,7 @@ carries any live association are dropped and counted.
   --config F     read KEY=VALUE environment from F (same dialect as serve)
   --url URL      compact a running server instead of TAGURU_DATA_DIR
                  directly. CONTEXT arguments each call their own
-                 POST /contexts/{name}/compact; with none, calls the
+                 POST /contexts/{id}/compact; with none, calls the
                  server's POST /maintenance/compact sweep instead (its
                  own candidate list, not every context — --parallel
                  has no effect on this single request). Both need the
@@ -83,7 +83,7 @@ carries any live association are dropped and counted.
                  fields as above, plus dead_ratio and whether the
                  numbers are a live read or a saved snapshot); without
                  --dry-run, one object per rewritten context in the
-                 same shape POST /contexts/{name}/compact answers with.
+                 same shape POST /contexts/{id}/compact answers with.
 ";
 
 pub(crate) fn run(args: &[String]) -> i32 {
@@ -195,6 +195,15 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
 }
 
+/// Whether CONTEXT arguments run on the sequential path — `--parallel 1`
+/// (or the flag absent) must not pay the work-queue setup. Sequential
+/// and parallel runs print byte-identical output by contract, so this
+/// boundary is invisible to output tests; the unit pin below is what
+/// holds it in place.
+fn runs_sequentially(parallel: usize) -> bool {
+    parallel <= 1
+}
+
 fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
     crate::ingest::init_logging();
     let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None, None) {
@@ -205,11 +214,13 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
         }
     };
 
+    // Explicit arguments are context IDS (#964); the full sweep reads
+    // them off the directory rows.
     let names = if names.is_empty() {
         let all: Vec<String> = state
             .directory()
             .into_iter()
-            .map(|entry| entry.name)
+            .map(|entry| entry.id)
             .collect();
         if all.is_empty() {
             eprintln!("taguru: compact: the data directory holds no contexts");
@@ -220,12 +231,20 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
         names
     };
 
+    // Reports name contexts by display name (the raw argument stands
+    // in for an id nothing answers to); the id addresses the rebuild.
+    let display_of = |id: &String| {
+        state
+            .directory_entry_by_id(id)
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| id.clone())
+    };
     let mut failures = 0usize;
     let mut reports: Vec<MaintenanceCompactionEntry> = Vec::new();
-    if parallel <= 1 {
-        for name in &names {
-            let outcome = state.compact_context(name, Deadline::unbounded());
-            if !report_outcome(name, &outcome, as_json, &mut reports) {
+    if runs_sequentially(parallel) {
+        for id in &names {
+            let outcome = state.compact_context(id, Deadline::unbounded());
+            if !report_outcome(&display_of(id), &outcome, as_json, &mut reports) {
                 failures += 1;
             }
         }
@@ -234,15 +253,15 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
         // pinned contexts at boot: independent per-entry locks mean the
         // workers never contend with each other.
         let indexed: Vec<(usize, &String)> = names.iter().enumerate().collect();
-        let mut collected = crate::registry::parallel_map(indexed, parallel, |(index, name)| {
-            (index, state.compact_context(name, Deadline::unbounded()))
+        let mut collected = crate::registry::parallel_map(indexed, parallel, |(index, id)| {
+            (index, state.compact_context(id, Deadline::unbounded()))
         });
         // Reordered to the original argument order so `--parallel N`'s
         // stdout is byte-for-byte identical to the sequential run,
         // whatever N is or however the workers happened to race.
         collected.sort_by_key(|(index, _)| *index);
-        for (name, (_, outcome)) in names.iter().zip(collected) {
-            if !report_outcome(name, &outcome, as_json, &mut reports) {
+        for (id, (_, outcome)) in names.iter().zip(collected) {
+            if !report_outcome(&display_of(id), &outcome, as_json, &mut reports) {
                 failures += 1;
             }
         }
@@ -286,9 +305,15 @@ fn run_local_dry_run(names: Vec<String>, as_json: bool) -> i32 {
     } else {
         names
             .into_iter()
-            .map(|name| {
-                let entry = state.directory_entry(&name);
-                (name, entry)
+            .map(|id| {
+                let entry = state.directory_entry_by_id(&id);
+                // The row reads by display name; the raw argument
+                // stands in for an id nothing answers to.
+                let display = entry
+                    .as_ref()
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| id.clone());
+                (display, entry)
             })
             .collect()
     };
@@ -471,7 +496,7 @@ fn finish_dry_run(weights: Vec<DeadWeight>, total: usize, failures: usize, as_js
 }
 
 /// The remote twin of [`run_local`]: CONTEXT arguments each call
-/// their own `POST /contexts/{name}/compact`; no arguments call the
+/// their own `POST /contexts/{id}/compact`; no arguments call the
 /// server's `POST /maintenance/compact` sweep instead, which picks
 /// its own candidates rather than enumerating every `context` first
 /// (ADR 0002 §6).
@@ -501,7 +526,7 @@ fn run_remote(base: &str, names: Vec<String>, parallel: usize, as_json: bool) ->
     }
 }
 
-/// One `POST /contexts/{name}/compact`, decoded back into the same
+/// One `POST /contexts/{id}/compact`, decoded back into the same
 /// [`CompactOutcome`] the local path reports — the server's `result`
 /// and the library's in-process return value are the same shape.
 fn remote_compact_one(api: &Api, name: &str) -> Result<CompactOutcome, String> {
@@ -512,10 +537,31 @@ fn remote_compact_one(api: &Api, name: &str) -> Result<CompactOutcome, String> {
 
 fn run_remote_contexts(api: &Api, names: &[String], parallel: usize, as_json: bool) -> i32 {
     let mut failures = 0usize;
+    // Arguments are context IDS (#964); reports carry the display name
+    // (the id addresses the request), so each id resolves to its
+    // directory row first — the same resolve-then-report shape `export
+    // --url`'s subset path uses, and the same names `run_local` prints.
+    // An unresolvable id is a per-item failure the run continues past.
+    let mut resolved: Vec<(&String, String)> = Vec::with_capacity(names.len());
+    for id in names {
+        match api.get(&["contexts", id]) {
+            Ok(row) => match row["name"].as_str() {
+                Some(name) => resolved.push((id, name.to_string())),
+                None => {
+                    eprintln!("taguru: compact: context '{id}': the row carries no name");
+                    failures += 1;
+                }
+            },
+            Err(message) => {
+                eprintln!("taguru: compact: context '{id}': {message}");
+                failures += 1;
+            }
+        }
+    }
     let mut reports: Vec<MaintenanceCompactionEntry> = Vec::new();
-    if parallel <= 1 {
-        for name in names {
-            if !report_remote_outcome(name, &remote_compact_one(api, name), as_json, &mut reports) {
+    if runs_sequentially(parallel) {
+        for (id, name) in &resolved {
+            if !report_remote_outcome(name, &remote_compact_one(api, id), as_json, &mut reports) {
                 failures += 1;
             }
         }
@@ -524,12 +570,12 @@ fn run_remote_contexts(api: &Api, names: &[String], parallel: usize, as_json: bo
         // uses: independent HTTP calls, reordered back to the
         // original argument order so stdout doesn't depend on which
         // request happened to answer first.
-        let indexed: Vec<(usize, &String)> = names.iter().enumerate().collect();
-        let mut collected = crate::registry::parallel_map(indexed, parallel, |(index, name)| {
-            (index, remote_compact_one(api, name))
+        let indexed: Vec<(usize, &(&String, String))> = resolved.iter().enumerate().collect();
+        let mut collected = crate::registry::parallel_map(indexed, parallel, |(index, (id, _))| {
+            (index, remote_compact_one(api, id))
         });
         collected.sort_by_key(|(index, _)| *index);
-        for (name, (_, outcome)) in names.iter().zip(collected) {
+        for ((_, name), (_, outcome)) in resolved.iter().zip(collected) {
             if !report_remote_outcome(name, &outcome, as_json, &mut reports) {
                 failures += 1;
             }
@@ -638,7 +684,7 @@ fn run_remote_sweep(api: &Api, as_json: bool) -> i32 {
 /// the sweep picks its own worst-first candidates, but a preview must
 /// answer for every `context`, since the point is deciding whether a
 /// `context` is worth compacting in the first place. CONTEXT arguments
-/// each fetch their own `GET /contexts/{name}` instead.
+/// each fetch their own `GET /contexts/{id}` instead.
 fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(base) {
         return crate::config::subcommand_usage_error("compact", &message);
@@ -694,7 +740,17 @@ fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactOutcome, MaintenanceCompactionOutcome, success_line};
+    use super::{CompactOutcome, MaintenanceCompactionOutcome, runs_sequentially, success_line};
+
+    /// The sequential/parallel boundary, pinned literally: both paths
+    /// print identical output by contract, so no output test can hold
+    /// this predicate in place.
+    #[test]
+    fn parallel_one_and_absent_stay_sequential() {
+        assert!(runs_sequentially(0));
+        assert!(runs_sequentially(1));
+        assert!(!runs_sequentially(2));
+    }
 
     #[test]
     fn every_usage_variable_is_a_known_key() {

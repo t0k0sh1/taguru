@@ -35,13 +35,13 @@ fn search_cache(server: &Server, outcome: &str) -> u64 {
 /// (no tags, no date — its only timestamp is the server's stamp).
 fn seed(server: &Server, context: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "metadata fixture"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": context, "description": "metadata fixture"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/sources"),
+        &format!("/contexts/{}/sources", server.cx(context)),
         Some(json!({
             "passages": {
                 "a.md": "共通語の資料。\n\n酒の由来について。",
@@ -76,7 +76,11 @@ fn store_stamps_metadata_and_lists_it_back() {
         .unwrap()
         .as_secs();
 
-    let page = server.ok("GET", "/contexts/sake/sources", None);
+    let page = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(page["total"], 3);
     assert_eq!(page["sources"], json!(["a.md", "b.md", "c.md"]));
     let entries = entries_by_name(&page);
@@ -100,7 +104,11 @@ fn store_stamps_metadata_and_lists_it_back() {
     assert!(c["stored_at"].is_u64(), "every fresh store is stamped");
 
     // The page window applies to entries exactly as to sources.
-    let page = server.ok("GET", "/contexts/sake/sources?after=a.md&limit=1", None);
+    let page = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?after=a.md&limit=1", server.cx("sake")),
+        None,
+    );
     assert_eq!(page["sources"], json!(["b.md"]));
     assert_eq!(entries_by_name(&page).len(), 1);
     assert_eq!(entries_by_name(&page)[0].0, "b.md");
@@ -129,7 +137,11 @@ fn store_stamps_metadata_and_lists_it_back() {
             "ghost",
         ),
     ] {
-        let (status, answer) = server.call("POST", "/contexts/sake/sources", Some(body));
+        let (status, answer) = server.call(
+            "POST",
+            &format!("/contexts/{}/sources", server.cx("sake")),
+            Some(body),
+        );
         assert_eq!(status, 400, "{answer}");
         assert!(
             answer["error"]
@@ -150,10 +162,10 @@ fn store_stamps_metadata_and_lists_it_back() {
 #[test]
 fn a_null_tag_is_wrong_type_not_missing() {
     let server = Server::start("meta-null-tag");
-    server.ok("PUT", "/contexts/sake", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     let (status, answer) = server.call(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"x": "本文"}, "tags": {"x": [null]}})),
     );
     assert_eq!(status, 400, "{answer}");
@@ -167,20 +179,32 @@ fn a_null_tag_is_wrong_type_not_missing() {
 fn metadata_survives_a_restart_and_an_export_import_round_trip() {
     let server = Server::start("meta-durable");
     seed(&server, "sake");
-    let first = server.ok("GET", "/contexts/sake/sources", None);
+    let first = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
 
     // Hard kill: whatever survives comes off the disk alone (the WAL —
     // nothing here waited for a flush tick or a compaction).
     let data_dir = server.stop_hard();
     let server = Server::start_on("meta-durable", data_dir);
-    let replayed = server.ok("GET", "/contexts/sake/sources", None);
+    let replayed = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         replayed["entries"], first["entries"],
         "WAL replay must reproduce the metadata, stored_at stamp included"
     );
 
     // Export carries the metadata on the passage line…
-    let (status, body) = server.call("GET", "/contexts/sake/export", None);
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 200);
     let stream = body.as_str().expect("an export is a JSON Lines body");
     let passage_line = stream
@@ -199,7 +223,11 @@ fn metadata_survives_a_restart_and_an_export_import_round_trip() {
     let restored = Server::start("meta-restored");
     let (status, outcome) = post_import(&restored, stream, None);
     assert_eq!(status, 200, "{outcome}");
-    let after_import = restored.ok("GET", "/contexts/sake/sources", None);
+    let after_import = restored.ok(
+        "GET",
+        &format!("/contexts/{}/sources", restored.cx("sake")),
+        None,
+    );
     assert_eq!(
         after_import["entries"], first["entries"],
         "an export → import round trip is metadata-lossless"
@@ -223,7 +251,13 @@ fn metadata_survives_a_restart_and_an_export_import_round_trip() {
 fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
     let server = Server::start("meta-filter");
     seed(&server, "sake");
-    let search = |body: Value| server.ok("POST", "/contexts/sake/sources/search", Some(body));
+    let search = |body: Value| {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/sources/search", server.cx("sake")),
+            Some(body),
+        )
+    };
     let hit_sources = |page: &Value| -> Vec<String> {
         page["hits"]
             .as_array()
@@ -290,7 +324,7 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
     // An empty window is refused, not silently empty.
     let (status, answer) = server.call(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "共通語の資料", "since": 5, "until": 5})),
     );
     assert_eq!(status, 400, "{answer}");
@@ -298,13 +332,13 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
     // The cross variant applies the same filter to every target, each
     // with its own eligibility split.
     server.ok(
-        "PUT",
-        "/contexts/beer",
-        Some(json!({"description": "untagged neighbor"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "beer", "description": "untagged neighbor"})),
     );
     server.ok(
         "POST",
-        "/contexts/beer/sources",
+        &format!("/contexts/{}/sources", server.cx("beer")),
         Some(json!({"passages": {"z.md": "共通語の資料。\n\n麦芽の話。"}})),
     );
     let cross = server.ok(
@@ -333,7 +367,13 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
 fn filters_key_the_retrieval_cache_apart_and_normalized_spellings_share() {
     let server = Server::start("meta-cache");
     seed(&server, "sake");
-    let search = |body: Value| server.ok("POST", "/contexts/sake/sources/search", Some(body));
+    let search = |body: Value| {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/sources/search", server.cx("sake")),
+            Some(body),
+        )
+    };
 
     // Same query, same filter: the second call is a cache hit.
     let misses = search_cache(&server, "miss");
@@ -369,7 +409,7 @@ fn filters_key_the_retrieval_cache_apart_and_normalized_spellings_share() {
     // the same filtered request.
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"a.md": "共通語の資料。\n\n改訂版。"}, "tags": {"a.md": ["酒"]}})),
     );
     let misses = search_cache(&server, "miss");
@@ -398,12 +438,16 @@ fn the_semantic_tier_never_pairs_requests_across_different_filters() {
             &format!("taguru_semantic_cache_total{{outcome=\"{outcome}\"}}"),
         )
     };
-    server.ok("PUT", "/contexts/mill", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "mill", "description": "d"})),
+    );
     // Two sources matching the paired queries; only one is tagged, so
     // the filtered and unfiltered pages differ observably.
     server.ok(
         "POST",
-        "/contexts/mill/sources",
+        &format!("/contexts/{}/sources", server.cx("mill")),
         Some(json!({
             "passages": {
                 "a.md": "The mill produces fresh oysters.",
@@ -412,7 +456,13 @@ fn the_semantic_tier_never_pairs_requests_across_different_filters() {
             "tags": {"a.md": ["酒"]}
         })),
     );
-    let search = |body: Value| server.ok("POST", "/contexts/mill/sources/search", Some(body));
+    let search = |body: Value| {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/sources/search", server.cx("mill")),
+            Some(body),
+        )
+    };
     let sources = |page: &Value| -> Vec<String> {
         page["hits"]
             .as_array()
@@ -461,7 +511,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     // Unfiltered, the source explains normally (served here).
     let plain = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "共通語の資料", "source": "c.md"})),
     );
     assert_eq!(plain["verdict"], "served", "{plain}");
@@ -470,7 +520,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     // a misleading lane diagnosis about a search that never saw it.
     let filtered = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "共通語の資料", "source": "c.md", "tags": ["酒"]})),
     );
     assert_eq!(filtered["verdict"], "filtered_out", "{filtered}");
@@ -482,12 +532,30 @@ fn explain_names_filtered_out_before_the_lanes() {
         "{filtered}"
     );
 
+    // Empty-read accounting, counted ASYMMETRICALLY on purpose (one
+    // served, two filtered_out): the served explanation reached
+    // scoring (productive), the filtered_out ones never did — so the
+    // counter must read exactly 2. A flipped flag would read 1, the
+    // same total a symmetric fixture could not tell apart.
+    let second = server.ok(
+        "POST",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
+        Some(json!({"query": "共通語の資料", "source": "b.md", "tags": ["酒"]})),
+    );
+    assert_eq!(second["verdict"], "filtered_out", "{second}");
+    let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
+    assert_eq!(
+        row["usage"]["empty_reads"],
+        json!(2),
+        "two unproductive explains (filtered_out), one productive (served): {row}"
+    );
+
     // An eligible target under the same filter is ranked against the
     // ELIGIBLE field only: unfiltered, all three sources' matching
     // paragraphs rank; filtered to a.md's tag, only a.md's does.
     let eligible = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "共通語の資料", "source": "a.md", "tags": ["酒"]})),
     );
     assert_eq!(eligible["verdict"], "served", "{eligible}");
@@ -502,16 +570,16 @@ fn explain_names_filtered_out_before_the_lanes() {
 fn the_mcp_tools_route_metadata_and_filters() {
     let server = Server::start("meta-mcp");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "mcp metadata"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "mcp metadata"})),
     );
 
     let stored = server.call_tool(
         1,
         "store_passages",
         json!({
-            "context": "sake",
+            "context": server.cx("sake"),
             "passages": {"a.md": "共通語の資料。\n\n酒の話。", "b.md": "共通語の資料。\n\n蔵の話。"},
             "tags": {"a.md": ["酒"]},
             "dates": {"a.md": 1000}
@@ -522,7 +590,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let searched = server.call_tool(
         2,
         "search_passages",
-        json!({"context": "sake", "query": "共通語の資料", "tags": ["酒"]}),
+        json!({"context": server.cx("sake"), "query": "共通語の資料", "tags": ["酒"]}),
     );
     assert_ne!(searched["isError"], json!(true), "{searched}");
     // Tool content is the API envelope as JSON text; the payload sits
@@ -546,7 +614,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
         json!({"eligible_sources": 1, "total_sources": 2})
     );
 
-    let listed = server.call_tool(3, "list_sources", json!({"context": "sake"}));
+    let listed = server.call_tool(3, "list_sources", json!({"context": server.cx("sake")}));
     assert_ne!(listed["isError"], json!(true), "{listed}");
     let envelope: Value =
         serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -559,10 +627,54 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let explained = server.call_tool(
         4,
         "explain_search",
-        json!({"context": "sake", "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
+        json!({"context": server.cx("sake"), "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
     );
     assert_ne!(explained["isError"], json!(true), "{explained}");
     let envelope: Value =
         serde_json::from_str(explained["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(envelope["result"]["verdict"], "filtered_out", "{envelope}");
+}
+
+/// Cross-`context` matches resolve their section/locator markers
+/// through the (display name → id) bridge the resolved target list
+/// carries (#964) — page entries are tagged with names while the
+/// marker read is id-keyed, so a broken bridge would silently drop
+/// every marker from every cross match.
+#[test]
+fn cross_recall_matches_resolve_section_markers_through_the_name_id_bridge() {
+    let server = Server::start("cross-recall-markers");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "marked", "description": "d"})),
+    );
+    let id = server.cx("marked");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/sources"),
+        Some(json!({
+            "passages": {"docs/a.md": "第一段落。\n\n杜氏の話。"},
+            "sections": {"docs/a.md": [{"paragraph": 1, "section": "人物"}]},
+        })),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(
+            json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
+                     "source": "docs/a.md", "paragraph": 1}]),
+        ),
+    );
+
+    let page = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"contexts": ["marked"], "cue": "蔵"})),
+    );
+    let attribution = &page["matches"][0]["attributions"][0];
+    assert_eq!(
+        attribution["section"],
+        json!("人物"),
+        "the stored section must ride the cross match: {page}"
+    );
 }

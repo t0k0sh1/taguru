@@ -61,13 +61,13 @@ fn write_thresholds(dir: &Path, contents: &str) -> PathBuf {
 ///   test.
 fn seed_assembly_corpus(server: &Server, context: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "#308 equal-budget fixture"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": context, "description": "#308 equal-budget fixture"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/sources"),
+        &format!("/contexts/{}/sources", server.cx(context)),
         Some(json!({"passages": {
             "corpus/kura-a.md": "青嶺酒造は雲居県霧沢町の蔵元である。",
             "corpus/kura-b.md": "青嶺酒造の仕込み水は霧沢川の伏流水を使う。",
@@ -77,7 +77,7 @@ fn seed_assembly_corpus(server: &Server, context: &str) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{context}/associations"),
+        &format!("/contexts/{}/associations", server.cx(context)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "corpus/kura-c.md", "paragraph": 0},
@@ -104,7 +104,7 @@ fn write_shared_eval(dir: &Path) -> PathBuf {
 /// `--assembly` mode) and returns `(exit_code, stderr, parsed
 /// evaluation.json)`.
 fn run_evaluate(
-    base: &str,
+    server: &Server,
     eval_path: &Path,
     context: &str,
     out_path: &Path,
@@ -115,9 +115,9 @@ fn run_evaluate(
         "--eval".to_string(),
         eval_path.to_str().unwrap().to_string(),
         "--context".to_string(),
-        context.to_string(),
+        server.cx(context),
         "--url".to_string(),
-        base.to_string(),
+        server.base.clone(),
         "--out".to_string(),
         out_path.to_str().unwrap().to_string(),
     ];
@@ -152,7 +152,7 @@ fn equal_budget_baseline_and_assembly_record_the_same_limits() {
 
     let baseline_out = dir.join("baseline.json");
     let (code, stderr, baseline) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &baseline_out,
@@ -180,7 +180,7 @@ fn equal_budget_baseline_and_assembly_record_the_same_limits() {
 
     let assembly_out = dir.join("assembly.json");
     let (code, stderr, assembly) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &assembly_out,
@@ -219,8 +219,7 @@ fn without_a_budget_flag_neither_mode_truncates_or_reports_a_budget_block() {
     let eval_path = write_shared_eval(&dir);
 
     let baseline_out = dir.join("baseline.json");
-    let (code, stderr, baseline) =
-        run_evaluate(&server.base, &eval_path, "sake", &baseline_out, &[]);
+    let (code, stderr, baseline) = run_evaluate(&server, &eval_path, "sake", &baseline_out, &[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(baseline["inputs"].get("budget").is_none(), "{baseline}");
     assert!(
@@ -229,13 +228,8 @@ fn without_a_budget_flag_neither_mode_truncates_or_reports_a_budget_block() {
     );
 
     let assembly_out = dir.join("assembly.json");
-    let (code, stderr, assembly) = run_evaluate(
-        &server.base,
-        &eval_path,
-        "sake",
-        &assembly_out,
-        &["--assembly"],
-    );
+    let (code, stderr, assembly) =
+        run_evaluate(&server, &eval_path, "sake", &assembly_out, &["--assembly"]);
     assert_eq!(code, 0, "{stderr}");
     // Assembly always sends *some* budget to POST .../evidence (the
     // endpoint has no unbudgeted mode, ADR 0006 §8) — but that is the
@@ -268,8 +262,7 @@ fn assembly_reaches_a_source_diversity_baseline_structurally_cannot() {
     let eval_path = write_shared_eval(&dir);
 
     let baseline_out = dir.join("baseline.json");
-    let (code, stderr, baseline) =
-        run_evaluate(&server.base, &eval_path, "sake", &baseline_out, &[]);
+    let (code, stderr, baseline) = run_evaluate(&server, &eval_path, "sake", &baseline_out, &[]);
     assert_eq!(code, 0, "{stderr}");
     let baseline_diversity = case(&baseline, "diversity-001")["diversity_sources"]
         .as_u64()
@@ -277,13 +270,8 @@ fn assembly_reaches_a_source_diversity_baseline_structurally_cannot() {
     assert!(baseline_diversity <= 2, "{baseline}");
 
     let assembly_out = dir.join("assembly.json");
-    let (code, stderr, assembly) = run_evaluate(
-        &server.base,
-        &eval_path,
-        "sake",
-        &assembly_out,
-        &["--assembly"],
-    );
+    let (code, stderr, assembly) =
+        run_evaluate(&server, &eval_path, "sake", &assembly_out, &["--assembly"]);
     assert_eq!(code, 0, "{stderr}");
     let assembly_diversity = case(&assembly, "diversity-001")["diversity_sources"]
         .as_u64()
@@ -318,7 +306,7 @@ fn assembly_passes_a_checked_in_recall_and_diversity_threshold() {
 
     let out_path = dir.join("assembly.json");
     let (code, stderr, evaluation) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &out_path,
@@ -352,7 +340,7 @@ fn the_same_diversity_threshold_fails_the_gate_against_baseline() {
 
     let out_path = dir.join("baseline.json");
     let (code, stderr, evaluation) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &out_path,
@@ -373,7 +361,7 @@ fn assembly_is_reproducible_across_repeated_runs() {
 
     let first_out = dir.join("first.json");
     let (code, stderr, first) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &first_out,
@@ -383,7 +371,7 @@ fn assembly_is_reproducible_across_repeated_runs() {
 
     let second_out = dir.join("second.json");
     let (code, stderr, second) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &second_out,
@@ -451,7 +439,7 @@ fn a_tiny_budget_reports_every_omission_in_both_modes() {
 
     let baseline_out = dir.join("baseline.json");
     let (code, stderr, baseline) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &baseline_out,
@@ -467,7 +455,7 @@ fn a_tiny_budget_reports_every_omission_in_both_modes() {
 
     let assembly_out = dir.join("assembly.json");
     let (code, stderr, assembly) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &assembly_out,
@@ -515,7 +503,7 @@ fn a_failing_reranker_degrades_and_the_degrade_rate_is_reported() {
 
     let out_path = dir.join("assembly.json");
     let (code, stderr, evaluation) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &out_path,
@@ -547,7 +535,7 @@ fn an_offline_run_records_no_embedding_provider_and_no_reranker() {
 
     let out_path = dir.join("assembly.json");
     let (code, stderr, evaluation) =
-        run_evaluate(&server.base, &eval_path, "sake", &out_path, &["--assembly"]);
+        run_evaluate(&server, &eval_path, "sake", &out_path, &["--assembly"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
         evaluation["corpus"]["embeddings"]["provider_model"].is_null(),
@@ -576,12 +564,12 @@ fn compare_warns_when_the_two_runs_used_different_budgets() {
     let eval_path = write_shared_eval(&dir);
 
     let base_out = dir.join("base.json");
-    let (code, stderr, _) = run_evaluate(&server.base, &eval_path, "sake", &base_out, &[]);
+    let (code, stderr, _) = run_evaluate(&server, &eval_path, "sake", &base_out, &[]);
     assert_eq!(code, 0, "{stderr}");
 
     let head_out = dir.join("head.json");
     let (code, stderr, _) = run_evaluate(
-        &server.base,
+        &server,
         &eval_path,
         "sake",
         &head_out,
@@ -603,4 +591,8 @@ fn compare_warns_when_the_two_runs_used_different_budgets() {
     );
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("budget differs"), "{stderr}");
+    // The warning spells out both sides' limits — a warning that names
+    // no numbers would leave the operator diffing evaluation.json by
+    // hand to learn WHAT differed.
+    assert!(stderr.contains("max_items="), "{stderr}");
 }

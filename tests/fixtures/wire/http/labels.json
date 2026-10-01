@@ -13,6 +13,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/labels",
+  "route": "/contexts/{id}/labels",
   "status": 200
 }

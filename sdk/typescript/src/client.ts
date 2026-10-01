@@ -452,9 +452,12 @@ export class Taguru {
     }
   }
 
-  /** A handle bound to one `context` (no network call). */
-  context(name: string): Context {
-    return new Context(this, name);
+  /**
+   * A handle bound to one `context` by its id — the `id` column of
+   * `contexts.list()` / `contexts.create()` (no network call).
+   */
+  context(contextId: string): Context {
+    return new Context(this, contextId);
   }
 
   // -- cross-`context` search ------------------------------------------------
@@ -576,16 +579,23 @@ export class Contexts {
   constructor(private readonly client: Taguru) {}
 
   /**
-   * One directory page (keyset cursor: `after` = last name shown).
+   * One directory page, sorted by `(name, id)`.
    *
-   * `pinned` narrows to that pinned state; unlike `after`, it counts
+   * The keyset cursor is the last row shown: `after` its `name` and
+   * `after_id` its `id` (names are not unique, so the id breaks ties).
+   * `pinned` narrows to that pinned state; unlike the cursor, it counts
    * toward `total`.
    */
   async list(
-    options: { limit?: number; after?: string; pinned?: boolean } = {},
+    options: { limit?: number; after?: string; after_id?: string; pinned?: boolean } = {},
   ): Promise<ContextPage> {
     const result = await this.client.requestJson("GET", "/contexts", {
-      params: { limit: options.limit, after: options.after, pinned: options.pinned },
+      params: {
+        limit: options.limit,
+        after: options.after,
+        after_id: options.after_id,
+        pinned: options.pinned,
+      },
     });
     return result as ContextPage;
   }
@@ -595,26 +605,34 @@ export class Contexts {
     options: { limit?: number; pinned?: boolean } = {},
   ): AsyncGenerator<DirectoryEntry, void, undefined> {
     let after: string | undefined;
+    let afterId: string | undefined;
     for (;;) {
-      const page = await this.list({ limit: options.limit, after, pinned: options.pinned });
+      const page = await this.list({
+        limit: options.limit,
+        after,
+        after_id: afterId,
+        pinned: options.pinned,
+      });
       if (page.contexts.length === 0) {
         return;
       }
       yield* page.contexts;
       // A short page is not the last one: a concurrent delete can shorten
       // it while later rows remain, so page until an empty page.
-      after = page.contexts[page.contexts.length - 1]!.id;
+      const last = page.contexts[page.contexts.length - 1]!;
+      after = last.name;
+      afterId = last.id;
     }
   }
 
-  async get(name: string): Promise<DirectoryEntry> {
-    const result = await this.client.requestJson("GET", `/contexts/${encodeName(name)}`);
+  async get(contextId: string): Promise<DirectoryEntry> {
+    const result = await this.client.requestJson("GET", `/contexts/${encodeName(contextId)}`);
     return result as DirectoryEntry;
   }
 
-  async exists(name: string): Promise<boolean> {
+  async exists(contextId: string): Promise<boolean> {
     try {
-      await this.get(name);
+      await this.get(contextId);
     } catch (error) {
       if (error instanceof NotFoundError) {
         return false;
@@ -624,7 +642,13 @@ export class Contexts {
     return true;
   }
 
-  /** Create a `context` (409 ConflictError if it already exists). */
+  /**
+   * Create a `context` and return its directory row — `id` included, the
+   * value every other call addresses it by.
+   *
+   * `name` is a display string and NOT unique: creating a name again mints
+   * a second, distinct `context`.
+   */
   async create(
     name: string,
     options: {
@@ -633,9 +657,10 @@ export class Contexts {
       dice_floor?: number;
       semantic_floor?: number;
     } = {},
-  ): Promise<boolean> {
-    const result = await this.client.requestJson("PUT", `/contexts/${encodeName(name)}`, {
+  ): Promise<DirectoryEntry> {
+    const result = await this.client.requestJson("POST", "/contexts", {
       jsonBody: dropUndefined({
+        name,
         description: options.description ?? "",
         pinned: options.pinned ?? false,
         dice_floor: options.dice_floor,
@@ -643,12 +668,12 @@ export class Contexts {
       }),
       retry: "unsafe_on_ambiguous",
     });
-    return Boolean(result);
+    return result as DirectoryEntry;
   }
 
   /** Update metadata; an omitted field is left unchanged. */
   async update(
-    name: string,
+    contextId: string,
     options: {
       description?: string;
       pinned?: boolean;
@@ -656,7 +681,7 @@ export class Contexts {
       semantic_floor?: number;
     } = {},
   ): Promise<ContextMeta> {
-    const result = await this.client.requestJson("PATCH", `/contexts/${encodeName(name)}`, {
+    const result = await this.client.requestJson("PATCH", `/contexts/${encodeName(contextId)}`, {
       jsonBody: dropUndefined({
         description: options.description,
         pinned: options.pinned,
@@ -668,8 +693,8 @@ export class Contexts {
   }
 
   /** Delete a `context`, files included (admin role). */
-  async delete(name: string): Promise<boolean> {
-    const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`, {
+  async delete(contextId: string): Promise<boolean> {
+    const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(contextId)}`, {
       // A repeat delete 404s, so a phantom retry after an ambiguous
       // transport failure would surface as NotFoundError even though
       // the first delete already applied.
@@ -679,14 +704,19 @@ export class Contexts {
   }
 
   /**
-   * Rename a `context` (admin role): the whole file family moves to `to`,
-   * and every `group` naming it is rewritten to match.
+   * Rename a `context` (admin role): a display-name change and nothing
+   * else — the id, the files, and every path stay put. Names are not
+   * unique, so `to` may already be in use.
    */
-  async rename(name: string, to: string): Promise<boolean> {
-    const result = await this.client.requestJson("POST", `/contexts/${encodeName(name)}/rename`, {
-      jsonBody: { to },
-      retry: "unsafe_on_ambiguous",
-    });
+  async rename(contextId: string, to: string): Promise<boolean> {
+    const result = await this.client.requestJson(
+      "POST",
+      `/contexts/${encodeName(contextId)}/rename`,
+      {
+        jsonBody: { to },
+        retry: "unsafe_on_ambiguous",
+      },
+    );
     return Boolean(result);
   }
 }
@@ -825,15 +855,15 @@ export class Groups {
  * one surface transfers to the others.
  */
 export class Context {
-  readonly name: string;
+  readonly contextId: string;
   private readonly path: string;
 
   constructor(
     private readonly client: Taguru,
-    name: string,
+    contextId: string,
   ) {
-    this.name = name;
-    this.path = `/contexts/${encodeName(name)}`;
+    this.contextId = contextId;
+    this.path = `/contexts/${encodeName(contextId)}`;
   }
 
   private async post(suffix: string, jsonBody?: unknown, retry?: RetryClass): Promise<unknown> {

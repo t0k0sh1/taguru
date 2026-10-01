@@ -184,7 +184,6 @@ impl AppState {
             if let Err(error) = ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                &name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -334,7 +333,7 @@ mod tests {
             state
                 .retrieval_key(
                     crate::metrics::RetrievalCacheOp::Recall,
-                    std::slice::from_ref(&"sake".to_string()),
+                    std::slice::from_ref(&state.id_of("sake")),
                     Some("params".to_string()),
                 )
                 .expect("a live context keys")
@@ -368,7 +367,7 @@ mod tests {
         fs::write(wal_path(&dir, &stem), b"{\"tailed\":1}\n").unwrap();
         fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":2}\n").unwrap();
         state.replica_refresh(&stem);
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         {
             let inner = entry.inner.read();
             assert_eq!(
@@ -424,10 +423,10 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state.flush_dirty();
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let generation = entry.inner.read().image_generation;
         state.replica_refresh(&entry.id);
         {
@@ -603,7 +602,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            state.lookup("sake").is_none(),
+            state.lookup_named("sake").is_none(),
             "nothing registered before the tailer touches it"
         );
 
@@ -626,9 +625,9 @@ mod tests {
         // REPLACE the entry — `lookup` alone would pass even if it did
         // (a fresh entry with the same name still looks up fine), so
         // this pins the actual identity via `Arc::ptr_eq`.
-        let first = state.lookup("sake").expect("just registered");
+        let first = state.lookup_named("sake").expect("just registered");
         state.replica_register(stem);
-        let second = state.lookup("sake").expect("still registered");
+        let second = state.lookup_named("sake").expect("still registered");
         assert!(
             std::sync::Arc::ptr_eq(&first, &second),
             "a repeat registration of an already-registered stem must not replace the entry"
@@ -694,11 +693,11 @@ mod tests {
         )
         .unwrap();
         state.replica_register(stem);
-        assert!(state.lookup("sake").is_some());
+        assert!(state.lookup_named("sake").is_some());
 
         state.replica_deregister(stem);
         assert!(
-            state.lookup("sake").is_none(),
+            state.lookup_named("sake").is_none(),
             "the lineage no longer carrying this context must drop it in memory"
         );
 
@@ -732,7 +731,7 @@ mod tests {
         )
         .unwrap();
         state.replica_register(stem);
-        assert!(state.lookup("sake").is_some());
+        assert!(state.lookup_named("sake").is_some());
 
         // The writer renamed it; the tailer lands the new meta bytes
         // and refreshes.
@@ -744,10 +743,12 @@ mod tests {
         state.replica_refresh(stem);
 
         assert!(
-            state.lookup("sake").is_none(),
+            state.lookup_named("sake").is_none(),
             "the old name must stop answering"
         );
-        let entry = state.lookup("shochu").expect("the new name must answer");
+        let entry = state
+            .lookup_named("shochu")
+            .expect("the new name must answer");
         assert_eq!(entry.id, stem, "same entry, same id — nothing moved");
 
         let _ = fs::remove_dir_all(dir);

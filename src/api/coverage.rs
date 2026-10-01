@@ -11,8 +11,9 @@ use crate::registry::{AccessError, AppState};
 
 use super::aliases::{KeysetQuery, keyset_bounds};
 use super::{
-    AppJson, AppPath, AppQuery, ErrorCode, MAX_MATCH_LIMIT, MatchCursor, MatchPage, access_error,
-    associations_out, clamp_page, deadline_exceeded, error, not_found, ok, overlong, page,
+    AppJson, AppQuery, ContextIdPath, ErrorCode, MAX_MATCH_LIMIT, MatchCursor, MatchPage,
+    access_error, associations_out, clamp_page, deadline_exceeded, error, not_found, ok, overlong,
+    page,
 };
 
 /// What one embedding refresh accomplished. `embedded`/`total` stay
@@ -37,27 +38,27 @@ pub struct RefreshBreakdown {
     pub skipped_over_limit: Option<usize>,
 }
 
-/// `GET /contexts/{name}/embeddings` — the embedding identity in one
+/// `GET /contexts/{id}/embeddings` — the embedding identity in one
 /// read: the provider's configured model beside the (model, width)
 /// each vector sidecar was built with, and the row counts. What
 /// `taguru calibrate` stamps its report with (#131), and the state an
 /// operator checks after a model switch without provoking a search.
 pub async fn embeddings_status(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
 ) -> Response {
     let started_at = Instant::now();
     // A cold context loads here (the same admission resolve makes),
     // and the sidecar reads are file I/O — keep the async workers free.
-    match tokio::task::block_in_place(|| state.embeddings_status(&name)) {
+    match tokio::task::block_in_place(|| state.embeddings_status(&id)) {
         Some(status) => ok(status, started_at),
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
     }
 }
 
 pub async fn refresh_embeddings(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
@@ -73,8 +74,8 @@ pub async fn refresh_embeddings(
     }
     // Refresh batches can talk to the provider for seconds; keep the
     // runtime's workers unstarved while this one blocks.
-    let glosses = match tokio::task::block_in_place(|| state.refresh_embeddings(&name, deadline)) {
-        None => return not_found(&name, started_at),
+    let glosses = match tokio::task::block_in_place(|| state.refresh_embeddings(&id, deadline)) {
+        None => return not_found(&id, started_at),
         Some(Ok(counts)) => counts,
         Some(Err(message)) if deadline.expired() => {
             return error(
@@ -110,8 +111,8 @@ pub async fn refresh_embeddings(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&name, deadline)) {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.refresh_passage_embeddings(&id, deadline)) {
+        None => not_found(&id, started_at),
         Some(Ok(passages)) => ok(
             RefreshOutcome {
                 embedded: glosses.0 + passages.embedded,
@@ -156,7 +157,7 @@ pub struct LabelPage {
 
 pub async fn labels(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
@@ -173,7 +174,7 @@ pub async fn labels(
     // door around the same exclusion, so it applies on both branches
     // below, not only the cursor one. See `AppState::excluded_hidden_label`
     // for why this must resolve before `read_context`, not inside it.
-    let excluded = state.excluded_hidden_label(&name);
+    let excluded = state.excluded_hidden_label(&id);
     // A `prefix` filter defines the population rather than a cursor, so
     // — like `pinned` on `list_contexts` — it forces the whole-vocabulary
     // path instead of the BTreeMap-seeking `label_page` fast path, which
@@ -186,7 +187,7 @@ pub async fn labels(
     // `limit`.
     let outcome = match query.prefix.as_deref() {
         Some(prefix) => tokio::task::block_in_place(|| {
-            state.read_context(&name, |context| {
+            state.read_context(&id, |context| {
                 let mut labels: Vec<String> =
                     context.labels().into_iter().map(String::from).collect();
                 labels.sort();
@@ -207,7 +208,7 @@ pub async fn labels(
                 LabelPage { total, labels }
             })
         }),
-        None => state.read_context(&name, |context| {
+        None => state.read_context(&id, |context| {
             let (total, labels) =
                 context.label_page_excluding(query.after.as_deref(), limit, &excluded);
             LabelPage { total, labels }
@@ -215,7 +216,7 @@ pub async fn labels(
     };
     match outcome {
         Ok(result) => ok(result, started_at),
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }
 
@@ -231,7 +232,7 @@ pub struct UnreachableFromRequest {
 
 pub async fn unreachable_from(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<UnreachableFromRequest>,
 ) -> Response {
@@ -249,10 +250,10 @@ pub async fn unreachable_from(
     // ADR 0009 §6.3's traversal exclusion, same as `explore`/`activate`:
     // a `schema:type` edge to a shared type name is exactly the hub that
     // would bridge otherwise-disconnected facts and under-report orphans.
-    let excluded = state.excluded_hidden_label(&name);
+    let excluded = state.excluded_hidden_label(&id);
     let loaded = tokio::task::block_in_place(|| {
         state
-            .read_context(&name, |context| {
+            .read_context(&id, |context| {
                 let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
                 context
                     .unreachable_from_excluding(&origins, deadline, &excluded)
@@ -267,8 +268,8 @@ pub async fn unreachable_from(
             // usage counters must agree with that grouping. Zero
             // orphans is the audit SUCCEEDING, though, not a miss, so
             // it never counts as an empty read.
-            state.note_read(&name, false);
-            let matches = associations_out(&state, &name, matches);
+            state.note_read(&id, false);
+            let matches = associations_out(&state, &id, matches);
             // No plan: an orphan audit is not a search — the field
             // stays off the wire here.
             ok(
@@ -280,6 +281,6 @@ pub async fn unreachable_from(
                 started_at,
             )
         }
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }

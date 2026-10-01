@@ -270,7 +270,10 @@ def main() -> int:
         print(f"  answer: {chain.invoke(QUESTION)}")
 
         # Trace one claim in the answer back to its original PDF paragraph.
-        citation = client.context("section/tanaka2024/3").cite_passage("tanaka2024/3", 0)
+        section_id = next(
+            row.id for row in client.contexts.iter() if row.name == "section/tanaka2024/3"
+        )
+        citation = client.context(section_id).cite_passage("tanaka2024/3", 0)
         print(f"\n  cited passage (tanaka2024 §3, ¶0): {citation.text[:120]}...")
         return 0
     finally:

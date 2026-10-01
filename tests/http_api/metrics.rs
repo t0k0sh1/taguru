@@ -39,8 +39,22 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
     // which is all the label needs).
     server.call("GET", "/health", None);
     server.call("GET", "/health", None);
-    server.call("POST", "/contexts/nope1/recall", Some(json!({"cue": "x"})));
-    server.call("POST", "/contexts/nope2/recall", Some(json!({"cue": "x"})));
+    server.call(
+        "POST",
+        &format!(
+            "/contexts/{}/recall",
+            "00000000-0000-4000-8000-00000000dea1"
+        ),
+        Some(json!({"cue": "x"})),
+    );
+    server.call(
+        "POST",
+        &format!(
+            "/contexts/{}/recall",
+            "00000000-0000-4000-8000-00000000dea2"
+        ),
+        Some(json!({"cue": "x"})),
+    );
     // And one path that matches no route at all.
     server.call("GET", "/definitely/not/a/route", None);
 
@@ -57,13 +71,18 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
     );
     assert!(
         text.contains(
-            "taguru_http_requests_total{method=\"POST\",route=\"/contexts/{name}/recall\",status=\"404\"} 2"
+            "taguru_http_requests_total{method=\"POST\",route=\"/contexts/{id}/recall\",status=\"404\"} 2"
         ),
         "two context names must fold into ONE templated series: {text}"
     );
     // The raw paths never become label values; unmatched requests all
     // share one bucket.
-    assert!(!text.contains("nope1"), "raw path leaked into labels");
+    for raw in [
+        "00000000-0000-4000-8000-00000000dea1",
+        "00000000-0000-4000-8000-00000000dea2",
+    ] {
+        assert!(!text.contains(raw), "raw path {raw} leaked into labels");
+    }
     assert!(!text.contains("/definitely/not/a/route"));
     assert!(text.contains("route=\"<unmatched>\""));
 
@@ -94,13 +113,13 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
         ],
     );
     server.ok(
-        "PUT",
-        "/contexts/pc",
-        Some(json!({"description": "計測対象", "pinned": true})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "pc", "description": "計測対象", "pinned": true})),
     );
     server.ok(
         "POST",
-        "/contexts/pc/associations",
+        &format!("/contexts/{}/associations", server.cx("pc")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
              "weight": 1.0, "source": "p1"},
@@ -190,10 +209,14 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
 #[test]
 fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
     let server = Server::start("searchmetrics");
-    server.ok("PUT", "/contexts/sm", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sm/associations",
+        "/contexts",
+        Some(json!({"name": "sm", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sm")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
             "weight": 1.0, "source": "p1"
@@ -204,16 +227,24 @@ fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
     // (no embedding provider in the harness, so nothing rescues it).
     server.ok(
         "POST",
-        "/contexts/sm/recall",
+        &format!("/contexts/{}/recall", server.cx("sm")),
         Some(json!({"cue": "青嶺酒造"})),
     );
-    server.ok("POST", "/contexts/sm/recall", Some(json!({"cue": "qqqq"})));
     server.ok(
         "POST",
-        "/contexts/sm/resolve",
+        &format!("/contexts/{}/recall", server.cx("sm")),
+        Some(json!({"cue": "qqqq"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/resolve", server.cx("sm")),
         Some(json!({"cue": "青嶺酒造"})),
     );
-    server.ok("POST", "/contexts/sm/resolve", Some(json!({"cue": "qqqq"})));
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/resolve", server.cx("sm")),
+        Some(json!({"cue": "qqqq"})),
+    );
 
     let (status, body) = server.call("GET", "/metrics", None);
     assert_eq!(status, 200);
@@ -244,11 +275,19 @@ fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
 #[test]
 fn usage_counters_track_reads_writes_and_empties_per_context() {
     let server = Server::start("usage");
-    server.ok("PUT", "/contexts/used", Some(json!({"description": "d"})));
-    server.ok("PUT", "/contexts/idle", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/used/associations",
+        "/contexts",
+        Some(json!({"name": "used", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "idle", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("used")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
             "weight": 1.0, "source": "p1"
@@ -256,17 +295,17 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
     );
     server.ok(
         "POST",
-        "/contexts/used/recall",
+        &format!("/contexts/{}/recall", server.cx("used")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     server.ok(
         "POST",
-        "/contexts/used/recall",
+        &format!("/contexts/{}/recall", server.cx("used")),
         Some(json!({"cue": "qqqq"})),
     );
     server.ok(
         "POST",
-        "/contexts/used/query",
+        &format!("/contexts/{}/query", server.cx("used")),
         Some(json!({"subject": "青嶺酒造"})),
     );
     // The registry groups unreachable_from with the association reads
@@ -274,11 +313,11 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
     // succeeding, so it counts as a read but never as an empty one.
     server.ok(
         "POST",
-        "/contexts/used/unreachable_from",
+        &format!("/contexts/{}/unreachable_from", server.cx("used")),
         Some(json!({"origins": ["青嶺酒造"]})),
     );
 
-    let used = server.ok("GET", "/contexts/used", None);
+    let used = server.ok("GET", &format!("/contexts/{}", server.cx("used")), None);
     assert_eq!(used["usage"]["writes"], json!(1), "{used}");
     assert_eq!(used["usage"]["reads"], json!(4), "{used}");
     assert_eq!(used["usage"]["empty_reads"], json!(1), "{used}");
@@ -287,7 +326,7 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
 
     // The untouched context shows exactly that — the "never chosen"
     // signal the directory exists to expose.
-    let idle = server.ok("GET", "/contexts/idle", None);
+    let idle = server.ok("GET", &format!("/contexts/{}", server.cx("idle")), None);
     assert_eq!(idle["usage"]["reads"], json!(0), "{idle}");
     assert_eq!(idle["usage"]["writes"], json!(0), "{idle}");
     assert_eq!(idle["usage"]["last_read_epoch"], json!(0), "{idle}");
@@ -299,19 +338,27 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
 #[test]
 fn empty_association_and_alias_batches_do_not_bump_the_write_counter() {
     let server = Server::start("empty-batch-writes");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
-    let applied = server.ok("POST", "/contexts/sake/associations", Some(json!([])));
+    let applied = server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(json!([])),
+    );
     assert_eq!(applied, json!(0));
 
     let applied = server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {}, "labels": {}})),
     );
     assert_eq!(applied, json!(0));
 
-    let entry = server.ok("GET", "/contexts/sake", None);
+    let entry = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(
         entry["usage"]["writes"],
         json!(0),
@@ -322,23 +369,27 @@ fn empty_association_and_alias_batches_do_not_bump_the_write_counter() {
     // stuck at zero regardless of what reaches it.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
             "weight": 1.0, "source": "p1"
         }])),
     );
-    let entry = server.ok("GET", "/contexts/sake", None);
+    let entry = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(entry["usage"]["writes"], json!(1), "{entry}");
 }
 
 #[test]
 fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
     let server = Server::start("usagerestart");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
             "weight": 1.0, "source": "p1"
@@ -346,7 +397,7 @@ fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     let data_dir = server.stop_gracefully();
@@ -357,13 +408,13 @@ fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
     let server = Server::start_on("usagerestart", data_dir);
     server.ok(
         "POST",
-        "/contexts/sake/recall",
+        &format!("/contexts/{}/recall", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造"})),
     );
     let data_dir = server.stop_gracefully();
 
     let server = Server::start_on("usagerestart", data_dir);
-    let entry = server.ok("GET", "/contexts/sake", None);
+    let entry = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(entry["usage"]["reads"], json!(2), "{entry}");
     assert_eq!(entry["usage"]["writes"], json!(1), "{entry}");
 }
@@ -377,10 +428,14 @@ fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
 #[test]
 fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
     let server = Server::start_with_env("schema-metrics", &[("TAGURU_METRICS_PER_CONTEXT", "1")]);
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(schema_document("strict")),
     );
     let strict_batch = domain_violation_batch("sake", "a.md");
@@ -422,10 +477,14 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
     // A `warn` context's applied violation rides a DIFFERENT outcome
     // label and a DIFFERENT context row, so this also proves the two
     // contexts' per-context rows never bleed into each other.
-    server.ok("PUT", "/contexts/nomi", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "nomi", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/nomi/schema",
+        &format!("/contexts/{}/schema", server.cx("nomi")),
         Some(schema_document("warn")),
     );
     let (status, body) = post_import(&server, &domain_violation_batch("nomi", "a.md"), None);
@@ -454,15 +513,19 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
     // a schema gates (S5/#383, `src/api/associations.rs`, distinct
     // from `predicted_schema_rejection` above) — it must feed the same
     // aggregate family.
-    server.ok("PUT", "/contexts/musubi", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "musubi", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/musubi/schema",
+        &format!("/contexts/{}/schema", server.cx("musubi")),
         Some(schema_document("strict")),
     );
     server.ok(
         "POST",
-        "/contexts/musubi/associations",
+        &format!("/contexts/{}/associations", server.cx("musubi")),
         Some(json!([{
             "subject": "田中", "label": "schema:type", "object": "Person",
             "weight": 1.0, "source": "a.md"
@@ -470,7 +533,7 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
     );
     let (status, body) = server.call(
         "POST",
-        "/contexts/musubi/associations",
+        &format!("/contexts/{}/associations", server.cx("musubi")),
         Some(json!([{
             "subject": "田中", "label": "杜氏", "object": "青嶺酒造",
             "weight": 1.0, "source": "a.md"

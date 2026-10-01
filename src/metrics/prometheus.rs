@@ -277,7 +277,7 @@ impl Metrics {
             "counter",
             "Schema pre-write checks by outcome, counted only at the \
              entrances that actually gate a write (POST \
-             /contexts/{name}/associations, POST /import/taguru import) \
+             /contexts/{id}/associations, POST /import/taguru import) \
              for a context with an installed schema document — a \
              schema-free context, ?dry_run=true/preview, and POST \
              /schema/validate|/schema/audit never land here. warned = \

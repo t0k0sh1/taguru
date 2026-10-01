@@ -249,7 +249,7 @@ struct Header {
 }
 
 /// The header's optional create block — the same fields as
-/// PUT /contexts/{name}, applied only when the `context` does not exist.
+/// PUT /contexts/{id}, applied only when the `context` does not exist.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct CreateBlock {

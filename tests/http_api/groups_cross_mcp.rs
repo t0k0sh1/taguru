@@ -13,7 +13,7 @@ use crate::support::*;
 #[test]
 fn groups_ride_the_mcp_transport() {
     let server = Server::start("groups-mcp");
-    server.ok("PUT", "/contexts/sake", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
 
     let tool = |id: u64, name: &str, arguments: Value| server.call_tool(id, name, arguments);
 
@@ -71,20 +71,20 @@ fn groups_ride_the_mcp_transport() {
 fn cross_context_search_answers_questions_that_straddle_the_split() {
     let server = Server::start("cross-golden");
     server.ok(
-        "PUT",
-        "/contexts/brewery",
-        Some(json!({"description": "青嶺酒造という蔵元の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "brewery", "description": "青嶺酒造という蔵元の知識"})),
     );
     server.ok(
-        "PUT",
-        "/contexts/region",
-        Some(json!({"description": "霧沢町という土地の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "region", "description": "霧沢町という土地の知識"})),
     );
     // 蔵元の事実は brewery に、土地の事実は region に — どちらの
     // コンテキストも単独では下の質問に答え切れない。
     server.ok(
         "POST",
-        "/contexts/brewery/associations",
+        &format!("/contexts/{}/associations", server.cx("brewery")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source": "第1段落"},
             {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
@@ -94,7 +94,7 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
     );
     server.ok(
         "POST",
-        "/contexts/region/associations",
+        &format!("/contexts/{}/associations", server.cx("region")),
         Some(json!([
             {"subject": "霧沢町", "label": "所在する県", "object": "雲居県", "weight": 1.0, "source": "地誌1"},
             {"subject": "霧沢町", "label": "力を入れる", "object": "酒蔵観光", "weight": 1.0, "source": "地誌2"},
@@ -162,13 +162,13 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
 fn doc2query_questions_land_lexically_without_embeddings() {
     let server = Server::start("doc2query-lexical");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     let stored = server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {
                 "doc": "精米歩合は50パーセントまで磨く。\n\n仕込み水は雲居山の伏流水を使う。"
@@ -184,7 +184,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
     // appears in either paragraph.
     let hits = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "米をどれくらい削る?"})),
     );
     let hits = hits["hits"].as_array().unwrap();
@@ -200,7 +200,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
     // question's terms with it (the index's wholesale-replacement unit).
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({
             "passages": {
                 "doc": "精米歩合は50パーセントまで磨く。\n\n仕込み水は雲居山の伏流水を使う。"
@@ -209,7 +209,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
     );
     let hits = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "米をどれくらい削る?"})),
     );
     assert_eq!(
@@ -238,15 +238,15 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     );
     let write = Some("wtok");
     let (status, _) = server.call_with_token(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
         write,
     );
     assert_eq!(status, 200);
     server.call_with_token(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc1"},
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc2"},
@@ -256,7 +256,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     );
     server.call_with_token(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"Aomine Brewery": "青嶺酒造"}, "labels": {}})),
         write,
     );
@@ -264,7 +264,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     // Reads cannot retract.
     let (status, refused) = server.call_with_token(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺"})),
         Some("rtok"),
     );
@@ -273,7 +273,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     // The write key retracts through an alias; both sources' shares go.
     let (status, outcome) = server.call_with_token(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": "Aomine Brewery", "label": "代表銘柄", "object": "青嶺"})),
         write,
     );
@@ -288,7 +288,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     // Found-nothing honesty: the second retraction changed nothing.
     let (status, outcome) = server.call_with_token(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺"})),
         write,
     );
@@ -305,7 +305,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     // carries the dead edge.
     let (_, queried) = server.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造"})),
         write,
     );
@@ -321,7 +321,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     assert_eq!(by_label("杜氏")["weight"], json!(1.0), "{queried}");
     let (_, activated) = server.call_with_token(
         "POST",
-        "/contexts/sake/activate",
+        &format!("/contexts/{}/activate", server.cx("sake")),
         Some(json!({"origins": ["青嶺酒造"]})),
         write,
     );
@@ -342,7 +342,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": "retract_association",
-                               "arguments": {"context": "sake", "subject": "青嶺酒造",
+                               "arguments": {"context": server.cx("sake"), "subject": "青嶺酒造",
                                               "label": "杜氏", "object": "高瀬"}}})),
         write,
     );
@@ -356,7 +356,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
     let server = Server::start_on("assoc-retract-reboot", data_dir);
     let (_, queried) = server.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "青嶺酒造"})),
         write,
     );
@@ -377,10 +377,14 @@ fn flush_and_export_ride_the_mcp_transport() {
     // A one-hour flush interval keeps the periodic flusher out of the
     // race: the dirty context below stays dirty until the tool runs.
     let server = Server::start_with_env("mcp-ops", &[("TAGURU_FLUSH_SECS", "3600")]);
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc"},
         ])),
@@ -398,7 +402,7 @@ fn flush_and_export_ride_the_mcp_transport() {
     let text = flushed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("sake"), "{text}");
 
-    let exported = tool(2, "export_context", json!({"context": "sake"}));
+    let exported = tool(2, "export_context", json!({"context": server.cx("sake")}));
     assert!(exported.get("isError").is_none(), "{exported}");
     let text = exported["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"type\":\"source\""), "{text}");
@@ -420,7 +424,11 @@ fn flush_and_export_ride_the_mcp_transport() {
 fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
     let server =
         Server::start_with_env("mcp-result-cap", &[("TAGURU_MCP_MAX_RESULT_BYTES", "1024")]);
-    server.ok("PUT", "/contexts/big", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "big", "description": "d"})),
+    );
     let batch: Vec<Value> = (0..200)
         .map(|i| {
             json!({"subject": format!("s{i}"), "label": "rel", "object": format!("o{i}"),
@@ -429,19 +437,23 @@ fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/big/associations",
+        &format!("/contexts/{}/associations", server.cx("big")),
         Some(Value::Array(batch)),
     );
 
-    let reply = server.call_tool(1, "export_context", json!({"context": "big"}));
+    let reply = server.call_tool(1, "export_context", json!({"context": server.cx("big")}));
     assert_eq!(reply["isError"], true, "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+    assert!(text.contains("GET /contexts/{id}/export"), "{text}");
     assert!(text.contains("taguru export"), "{text}");
 
     // The raw HTTP export route this message points at is uncapped —
     // the same 200-association context exports whole over it.
-    let (status, exported) = server.call("GET", "/contexts/big/export", None);
+    let (status, exported) = server.call(
+        "GET",
+        &format!("/contexts/{}/export", server.cx("big")),
+        None,
+    );
     assert_eq!(status, 200, "{exported}");
     let stream = exported.as_str().expect("export body is JSONL");
     assert!(stream.contains("\"s199\""), "{stream}");
@@ -495,9 +507,9 @@ fn the_mcp_compact_tool_stays_admin_gated() {
         ],
     );
     server.call_with_token(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
         Some("atok"),
     );
     let call = |token: &str| {
@@ -505,7 +517,7 @@ fn the_mcp_compact_tool_stays_admin_gated() {
             "POST",
             "/mcp",
             Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                        "params": {"name": "compact", "arguments": {"context": "sake"}}})),
+                        "params": {"name": "compact", "arguments": {"context": server.cx("sake")}}})),
             Some(token),
         );
         assert_eq!(status, 200, "{answer}");
@@ -528,9 +540,9 @@ fn the_mcp_compact_tool_stays_admin_gated() {
 fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
     let server = Server::start("mcp-get-passthrough");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の記憶"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
     );
     server.ok(
         "PUT",
@@ -555,8 +567,9 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
         serde_json::from_str::<Value>(&text).unwrap()["result"].clone()
     };
 
-    let context = call("get_context", json!({"context": "sake"}));
-    assert_eq!(context["id"], json!("sake"));
+    let context = call("get_context", json!({"context": server.cx("sake")}));
+    assert_eq!(context["id"], json!(server.cx("sake")));
+    assert_eq!(context["name"], json!("sake"));
     assert_eq!(context["description"], json!("酒蔵の記憶"));
 
     let group = call("get_group", json!({"name": "breweries"}));
@@ -596,7 +609,7 @@ fn the_mcp_import_tool_applies_a_multi_line_stream() {
     assert_eq!(outcome["associations"], json!(1));
     assert_eq!(outcome["passage_stored"], json!(true));
 
-    let row = server.ok("GET", "/contexts/sake", None);
+    let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(row["description"], json!("d"));
 
     // dry_run previews without writing: the context this batch would
@@ -620,8 +633,10 @@ fn the_mcp_import_tool_applies_a_multi_line_stream() {
         preview_envelope["result"]["batches"][0]["created"],
         json!(true)
     );
-    let (status, _) = server.call("GET", "/contexts/bunko", None);
-    assert_eq!(status, 404, "dry_run through the MCP tool must not write");
+    assert!(
+        server.try_cx("bunko").is_none(),
+        "dry_run through the MCP tool must not write"
+    );
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
@@ -635,9 +650,9 @@ fn the_mcp_import_tool_applies_a_multi_line_stream() {
 fn search_explain_names_the_first_verdict_that_applies() {
     let server = Server::start("search-explain");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     // docs/many.md: seven short twin paragraphs plus one long, diluted
     // straggler — everything shares the 霧沢 bigram, so the straggler
@@ -651,7 +666,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let many = format!("{}\n\n{straggler}", twins.join("\n\n"));
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/kura.md": "青嶺酒造は雲居県の蔵元である。\n\n\
                 原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
@@ -665,13 +680,13 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // there.
     let hits = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "精米歩合はどこまで磨く?"})),
     );
     assert_eq!(hits["hits"][0]["source"], json!("docs/kura.md"));
     let served = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "精米歩合はどこまで磨く?", "source": "docs/kura.md"})),
     );
     assert_eq!(served["verdict"], json!("served"), "{served}");
@@ -704,7 +719,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // it actually surfaces the paragraph.
     let cutoff = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "霧沢", "source": "docs/many.md", "paragraph": 7})),
     );
     assert_eq!(cutoff["verdict"], json!("below_cutoff"), "{cutoff}");
@@ -719,7 +734,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     assert!(reach >= rank, "{cutoff}");
     let wider = server.ok(
         "POST",
-        "/contexts/sake/sources/search",
+        &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "霧沢", "limit": reach})),
     );
     assert!(
@@ -744,7 +759,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // 酒造, this source spells 酒蔵; both spellings sit in the answer.
     let overlap = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
     );
     assert_eq!(overlap["verdict"], json!("no_term_overlap"), "{overlap}");
@@ -768,7 +783,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // because the store keeps no tombstone history to tell them apart.
     let ghost = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "霧沢", "source": "docs/ghost.md"})),
     );
     assert_eq!(ghost["verdict"], json!("not_stored"), "{ghost}");
@@ -778,12 +793,12 @@ fn search_explain_names_the_first_verdict_that_applies() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "docs/kuramoto.md"})),
     );
     let retracted = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
     );
     assert_eq!(retracted["verdict"], json!("not_stored"), "{retracted}");
@@ -791,7 +806,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // Verdict: paragraph_out_of_range, with the range that would fit.
     let out = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "霧沢", "source": "docs/kura.md", "paragraph": 9})),
     );
     assert_eq!(out["verdict"], json!("paragraph_out_of_range"), "{out}");
@@ -800,7 +815,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // Verdict: no_query_terms — punctuation tokenizes to nothing.
     let empty = server.ok(
         "POST",
-        "/contexts/sake/sources/search/explain",
+        &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
         Some(json!({"query": "、。", "source": "docs/kura.md"})),
     );
     assert_eq!(empty["verdict"], json!("no_query_terms"), "{empty}");
@@ -808,7 +823,10 @@ fn search_explain_names_the_first_verdict_that_applies() {
     // Unknown context stays the outer 404, never a verdict.
     let (status, _) = server.call(
         "POST",
-        "/contexts/nazo/sources/search/explain",
+        &format!(
+            "/contexts/{}/sources/search/explain",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"query": "霧沢", "source": "docs/kura.md"})),
     );
     assert_eq!(status, 404);
@@ -823,13 +841,13 @@ fn search_explain_names_the_first_verdict_that_applies() {
 fn resolve_explain_names_the_first_verdict_that_applies() {
     let server = Server::start("resolve-explain");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "蔵の知識"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
@@ -839,14 +857,14 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"Aomine": "青嶺酒造"}})),
     );
 
     // Verdict: served — and an alias expectation reports its canonical.
     let served = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "青嶺酒造", "expected": "青嶺酒造"})),
     );
     assert_eq!(served["verdict"], json!("served"), "{served}");
@@ -856,7 +874,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     assert_eq!(served["semantic"]["entered"], json!(false));
     let alias = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "青嶺酒", "expected": "Aomine"})),
     );
     assert_eq!(alias["verdict"], json!("served"), "{alias}");
@@ -866,7 +884,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // Verdict: cue_resolved_exactly — the exact tier answers alone.
     let eclipsed = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "高瀬", "expected": "青嶺酒造"})),
     );
     assert_eq!(
@@ -885,7 +903,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // containing it: a fuzzy 0.5, gated by a request floor of 0.6.
     let floored = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "青嶺の酒造り", "expected": "青嶺酒造", "dice_floor": 0.6})),
     );
     assert_eq!(floored["verdict"], json!("below_floor"), "{floored}");
@@ -899,7 +917,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // fictitious floor refusal.
     let contained = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "青嶺酒", "expected": "青嶺酒造", "dice_floor": 0.9})),
     );
     assert_eq!(contained["verdict"], json!("served"), "{contained}");
@@ -908,7 +926,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // Verdict: below_cutoff — lost on limit, with a verified way back.
     let cut = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "山田", "expected": "山田錦", "limit": 1})),
     );
     assert_eq!(cut["verdict"], json!("below_cutoff"), "{cut}");
@@ -923,7 +941,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     );
     let wider = server.ok(
         "POST",
-        "/contexts/sake/resolve",
+        &format!("/contexts/{}/resolve", server.cx("sake")),
         Some(json!({"cue": "山田", "limit": reach})),
     );
     assert!(
@@ -939,7 +957,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // tier that could have found it names why it never ran.
     let semantic = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "みかん", "expected": "青嶺酒造"})),
     );
     assert_eq!(semantic["verdict"], json!("semantic_not_run"), "{semantic}");
@@ -956,7 +974,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // so the repair (register an alias) is one step away.
     let missing = server.ok(
         "POST",
-        "/contexts/sake/resolve/explain",
+        &format!("/contexts/{}/resolve/explain", server.cx("sake")),
         Some(json!({"cue": "青嶺", "expected": "幻の蔵"})),
     );
     assert_eq!(missing["verdict"], json!("not_in_vocabulary"), "{missing}");
@@ -966,7 +984,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // The label twin answers through its own route.
     let label = server.ok(
         "POST",
-        "/contexts/sake/resolve_label/explain",
+        &format!("/contexts/{}/resolve_label/explain", server.cx("sake")),
         Some(json!({"cue": "杜氏の職", "expected": "杜氏"})),
     );
     assert_eq!(label["verdict"], json!("served"), "{label}");
@@ -975,7 +993,10 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // Unknown context stays the outer 404, never a verdict.
     let (status, _) = server.call(
         "POST",
-        "/contexts/nazo/resolve/explain",
+        &format!(
+            "/contexts/{}/resolve/explain",
+            "00000000-0000-4000-8000-00000000dead"
+        ),
         Some(json!({"cue": "青嶺", "expected": "青嶺酒造"})),
     );
     assert_eq!(status, 404);
@@ -986,7 +1007,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                     "params": {"name": "explain_resolve",
-                               "arguments": {"context": "sake", "cue": "青嶺", "expected": "幻の蔵"}}})),
+                               "arguments": {"context": server.cx("sake"), "cue": "青嶺", "expected": "幻の蔵"}}})),
     );
     assert!(reply["result"].get("isError").is_none(), "{reply}");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
@@ -996,7 +1017,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     // And the search mirror rides the same registry.
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"docs/kura.md": "その酒蔵は谷あいにある。"}})),
     );
     let (_, reply) = server.call(
@@ -1004,7 +1025,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                     "params": {"name": "explain_search",
-                               "arguments": {"context": "sake", "query": "酒造",
+                               "arguments": {"context": server.cx("sake"), "query": "酒造",
                                              "source": "docs/kura.md"}}})),
     );
     assert!(reply["result"].get("isError").is_none(), "{reply}");
@@ -1025,20 +1046,20 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
 fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
     let server = Server::start("mcp-retrieve");
     server.ok(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "酒蔵の記憶"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {
             "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
         }})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
              "source": "docs/kura.md", "paragraph": 0},
@@ -1048,7 +1069,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
     let result = server.call_tool(
         1,
         "retrieve",
-        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
     let text = result["content"][0]["text"].as_str().unwrap();
@@ -1090,7 +1111,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
         2,
         "retrieve",
         json!({
-            "context": "sake", "origins": ["青嶺酒造"],
+            "context": server.cx("sake"), "origins": ["青嶺酒造"],
             "text_fallback_query": "杜氏は高瀬である",
             "text_fallback_only_if_empty": false
         }),

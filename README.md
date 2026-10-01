@@ -51,16 +51,16 @@ docker run -d --name taguru \
 ```sh
 taguru   # listens on 127.0.0.1:8248, data in ./data
 
-# create a context
-curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
-  -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
+# create a context (the response's `id` addresses every /contexts/{id}/… path)
+CTX=$(curl -sX POST localhost:8248/contexts -H 'Content-Type: application/json' \
+  -d '{"name":"sake","description":"青嶺酒造という架空の酒蔵の知識"}' | jq -r .result.id)
 
 # store one association
-curl -X POST localhost:8248/contexts/sake/associations -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/associations -H 'Content-Type: application/json' \
   -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
 
 # pull the thread
-curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application/json' \
+curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'
 ```
 
@@ -86,7 +86,7 @@ before the feature existed.
 
 For clients that mirror or index a `context` — a local cache, an
 external search index, a recomputation trigger — `GET
-/contexts/{name}/changes` is a polling **change feed**: content-change
+/contexts/{id}/changes` is a polling **change feed**: content-change
 events after an opaque cursor (one event per write call, a bulk import
 is one event), with an honest `410 stale_cursor` when the position is
 gone (restart, or further behind than the bounded feed retains) —
@@ -94,7 +94,7 @@ resync fully, then tail again.
 
 Sources carry **metadata**: a server-stamped `stored_at`, an optional
 user-supplied segment `date`, and `tags` — accepted at store and
-import time, listed back by `GET /contexts/{name}/sources`, and
+import time, listed back by `GET /contexts/{id}/sources`, and
 filterable at search time: passage search takes `tags` (any-of) and a
 half-open `since`/`until` window (epoch seconds, over `date ??
 stored_at`), applied *before* the retrieval lanes run, so "only
@@ -119,13 +119,13 @@ is a third lane: `taguru communities` detects communities on the
 association graph server-side and derives an artifact of LLM summaries
 — an ordinary `context`, incremental by content fingerprint, so an
 unchanged graph re-runs without a single LLM call — and
-`POST /contexts/{name}/communities/search` (MCP: `search_communities`)
+`POST /contexts/{id}/communities/search` (MCP: `search_communities`)
 ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
 
 Long-lived `contexts` accumulate spelling-twin concepts, conflicting
 facts, and assertions the corpus has moved past;
-`POST /contexts/{name}/consolidation/audit` (MCP:
+`POST /contexts/{id}/consolidation/audit` (MCP:
 `audit_consolidation`, ADR 0012) surfaces them as **candidates, never
 verdicts** — merge pairs corroborated by shared live structure,
 multi-object facts ranked by how one-object their label usually is
@@ -140,7 +140,7 @@ alias, a retraction, a negative-weight assertion, or a re-import —
 never an automatic change.
 
 Handing retrieved evidence to an external answer model with a bounded
-context window? [`POST /contexts/{name}/evidence`](https://t0k0sh1.github.io/taguru/evidence.html)
+context window? [`POST /contexts/{id}/evidence`](https://t0k0sh1.github.io/taguru/evidence.html)
 (MCP: `assemble_evidence`) is opt-in evidence assembly: it runs the same
 graph/passage/community fan-out as the composed retrieval loop, then
 ranks (reciprocal-rank fusion, never comparing raw graph/BM25/vector
@@ -351,7 +351,7 @@ load-bearing ones:
 | `TAGURU_RATE_LIMIT_PER_MIN` | 0 (off) | Per-key request budget — turn on whenever the server leaves localhost |
 | `TAGURU_REQUEST_TIMEOUT_SECS` | 30 | Per-request budget; raise it when an embedding provider is configured |
 | `TAGURU_EMBED_TIMEOUT_SECS` | 60 | Per-attempt ceiling for one embedding provider round trip; a request's remaining budget bounds an attempt further, and transient failures (transport, 429, 5xx) retry twice with backoff |
-| `TAGURU_RERANK_URL` / `_MODEL` / `_API_KEY` | — | Optional reranker for `POST /contexts/{name}/evidence` (Cohere/Jina-compatible `/rerank`, #307); unset keeps evidence selection fully deterministic, at no network or credential cost |
+| `TAGURU_RERANK_URL` / `_MODEL` / `_API_KEY` | — | Optional reranker for `POST /contexts/{id}/evidence` (Cohere/Jina-compatible `/rerank`, #307); unset keeps evidence selection fully deterministic, at no network or credential cost |
 | `TAGURU_RERANK_TIMEOUT_SECS` | 5 | Per-attempt ceiling for one reranker round trip; a request's remaining budget bounds an attempt further, and one transient failure retries with backoff — any failure degrades to the deterministic order rather than erroring |
 | `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and `context` compactions; excess calls get 503 + `Retry-After` (`0` disables) |
 | `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst `context` whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
@@ -516,13 +516,13 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   ratio passes `TAGURU_AUTO_COMPACT_RATIO`, the flusher rebuilds it on
   an upcoming tick — worst ratio first, one `context` per tick, as the
   heavy-ops ceiling allows (audit line +
-  `taguru_auto_compactions_total` on `/metrics`). `taguru compact` and `POST /contexts/{name}/compact`
+  `taguru_auto_compactions_total` on `/metrics`). `taguru compact` and `POST /contexts/{id}/compact`
   remain for opted-out deployments (`TAGURU_AUTO_COMPACT=0`) and
   scheduled quiet-window sweeps; size targets with `taguru estimate`.
 - **Recovering from a bad alias.** Alias registration takes effect
   immediately and resolves that spelling on every subsequent write — a
   wrong alias silently pulls all matching ingestion onto the wrong
-  canonical from that moment on. `DELETE /contexts/{name}/aliases`
+  canonical from that moment on. `DELETE /contexts/{id}/aliases`
   only stops new contamination; it does not revisit associations
   already interned under the bad spelling, and there is no alias-node
   concept to enumerate them after the fact. To recover: delete the
@@ -536,7 +536,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   ingestion record (or the `source retracted`/`import source applied`
   audit lines, if the affected sources were re-imported rather than
   freshly asserted) to find which sources landed under the bad
-  spelling, then retract each (`POST /contexts/{name}/sources/
+  spelling, then retract each (`POST /contexts/{id}/sources/
   retract`) and re-import it under the correct one. There is no merge
   for two canonicals that already diverged before the alias was
   caught — unify them the way `compact` itself rebuilds a `context`:

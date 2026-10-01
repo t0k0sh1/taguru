@@ -132,7 +132,9 @@ describe("TaguruRetriever cross-context", () => {
     // The graph lane ran per context; the text lane rode the server's own
     // cross-context search — one top-level call naming both targets.
     const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
-    expect(resolves).toEqual(["/contexts/sake/resolve", "/contexts/tea/resolve"]);
+    // Cross targets are display names; the graph lane resolves each to
+    // its id and addresses the per-context routes with it (#964).
+    expect(resolves).toEqual(["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]);
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
@@ -169,7 +171,8 @@ describe("TaguruRetriever cross-context", () => {
 
   it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {
     const server = new FakeServer();
-    server.failContexts.add("tea");
+    // The graph lane addresses tea by its id (#964).
+    server.failContexts.add("id-tea");
     const retriever = new TaguruRetriever({
       contexts: ["sake", "tea"],
       client: server.client(),

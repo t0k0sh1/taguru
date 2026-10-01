@@ -33,7 +33,7 @@ fn get_ndjson(server: &Server, path: &str) -> (u16, String) {
 /// with nothing to merge above them — exactly one level, so every
 /// LLM-call count below is deterministic.
 fn seed_two_cliques(server: &Server, name: &str) {
-    server.ok("PUT", &format!("/contexts/{name}"), None);
+    server.ok("POST", "/contexts", Some(json!({"name": name})));
     let mut ops = Vec::new();
     for group in ["a", "b"] {
         let members: Vec<String> = (1..=4).map(|index| format!("{group}{index}")).collect();
@@ -50,7 +50,7 @@ fn seed_two_cliques(server: &Server, name: &str) {
     }
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(Value::Array(ops)),
     );
 }
@@ -59,11 +59,15 @@ fn seed_two_cliques(server: &Server, name: &str) {
 fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
     let server = Server::start("communities-analysis");
     seed_two_cliques(&server, "corpus");
-    let revision = server.ok("GET", "/contexts/corpus", None)["revision"]["graph"]
-        .as_u64()
-        .expect("a revision");
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("corpus")), None)["revision"]["graph"]
+            .as_u64()
+            .expect("a revision");
 
-    let (status, body) = get_ndjson(&server, "/contexts/corpus/communities");
+    let (status, body) = get_ndjson(
+        &server,
+        &format!("/contexts/{}/communities", server.cx("corpus")),
+    );
     assert_eq!(status, 200, "{body}");
     let lines: Vec<Value> = body
         .lines()
@@ -94,7 +98,11 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
         );
     }
 
-    let (status, _) = server.call("GET", "/contexts/nowhere/communities", None);
+    let (status, _) = server.call(
+        "GET",
+        "/contexts/00000000-0000-4000-8000-00000000dead/communities",
+        None,
+    );
     assert_eq!(status, 404);
 }
 
@@ -107,7 +115,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     // analysis must never read as an empty corpus.
     let (status, refusal) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "何がテーマか"})),
     );
     assert_eq!(status, 404, "{refusal}");
@@ -120,8 +128,13 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     );
 
     // Build the artifact by hand through the same API the CLI uses.
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
-    server.ok("PUT", "/contexts/sci::communities", None);
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sci::communities"})),
+    );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -134,7 +147,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     });
     server.ok(
         "POST",
-        "/contexts/sci::communities/sources",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -142,7 +155,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     );
     server.ok(
         "POST",
-        "/contexts/sci::communities/associations",
+        &format!("/contexts/{}/associations", server.cx("sci::communities")),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
             {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
@@ -151,7 +164,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
 
     let page = server.ok(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(page["derived"], "sci::communities");
@@ -171,14 +184,14 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     // is part of the cache key's params.
     server.ok(
         "POST",
-        "/contexts/sci/associations",
+        &format!("/contexts/{}/associations", server.cx("sci")),
         Some(json!([
             {"subject": "a1", "label": "新事実", "object": "z9", "weight": 1.0},
         ])),
     );
     let page = server.ok(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(page["stale"], true, "{page}");
@@ -189,7 +202,7 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     // A `derived` override pointing nowhere is the same honest refusal.
     let (status, refusal) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石", "derived": "elsewhere"})),
     );
     assert_eq!(status, 404, "{refusal}");
@@ -205,8 +218,13 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
     let server = Server::start("communities-search-counts");
     seed_two_cliques(&server, "sci");
 
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
-    server.ok("PUT", "/contexts/sci::communities", None);
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sci::communities"})),
+    );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -219,7 +237,7 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
     });
     server.ok(
         "POST",
-        "/contexts/sci::communities/sources",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -227,7 +245,7 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
     );
     server.ok(
         "POST",
-        "/contexts/sci::communities/associations",
+        &format!("/contexts/{}/associations", server.cx("sci::communities")),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
             {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
@@ -236,7 +254,7 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
 
     server.ok(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
 
@@ -248,9 +266,13 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
         "one search over two contexts must bump the aggregate exactly once: {text}"
     );
 
-    let source = server.ok("GET", "/contexts/sci", None);
+    let source = server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None);
     assert_eq!(source["usage"]["reads"], json!(1), "{source}");
-    let derived = server.ok("GET", "/contexts/sci::communities", None);
+    let derived = server.ok(
+        "GET",
+        &format!("/contexts/{}", server.cx("sci::communities")),
+        None,
+    );
     assert_eq!(derived["usage"]["reads"], json!(1), "{derived}");
 }
 
@@ -261,7 +283,7 @@ fn the_search_communities_tool_routes_through_mcp() {
     let result = server.call_tool(
         1,
         "search_communities",
-        json!({"context": "mcp-src", "query": "テーマ"}),
+        json!({"context": server.cx("mcp-src"), "query": "テーマ"}),
     );
     // No artifact yet: the tool surfaces the server's refusal — with
     // the build command — as a tool error, not an empty result.
@@ -347,8 +369,10 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     ];
 
     // First run: two leaf communities, two summaries, one artifact.
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
@@ -375,7 +399,7 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
 
     let page = server.ok(
         "POST",
-        "/contexts/corp/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("corp")),
         Some(json!({"query": "共同体のテーマ"})),
     );
     assert_eq!(page["stale"], false, "{page}");
@@ -389,14 +413,17 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     let community = hit["community"].as_str().unwrap();
     let members = server.ok(
         "POST",
-        "/contexts/corp::communities/query",
+        &format!("/contexts/{}/query", server.cx("corp::communities")),
         Some(json!({"subject": format!("community:{community}"), "label": "contains"})),
     );
     assert_eq!(members["total"], 4, "{members}");
 
     // Unchanged graph: the re-run reuses every summary — zero LLM
     // calls is the whole point of the fingerprints.
-    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, _) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("0 generated, 2 reused"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
@@ -404,7 +431,7 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     // One clique's content moves: exactly that community re-summarizes.
     server.ok(
         "POST",
-        "/contexts/corp/associations",
+        &format!("/contexts/{}/associations", server.cx("corp")),
         Some(json!([
             {"subject": "a1", "label": "近い", "object": "a2", "weight": 1.0},
         ])),
@@ -412,21 +439,37 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
 
     // --dry-run sees the pending work but writes nothing and calls
     // nobody — it must succeed with no extract env at all.
-    let derived_before = server.ok("GET", "/contexts/corp::communities", None)["revision"].clone();
-    let (code, stdout, _) = run_communities(&["--context", "corp", "--dry-run", &server.base], &[]);
+    let derived_before = server.ok(
+        "GET",
+        &format!("/contexts/{}", server.cx("corp::communities")),
+        None,
+    )["revision"]
+        .clone();
+    let (code, stdout, _) = run_communities(
+        &["--context", &server.cx("corp"), "--dry-run", &server.base],
+        &[],
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 would generate"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
-    let derived_after = server.ok("GET", "/contexts/corp::communities", None)["revision"].clone();
+    let derived_after = server.ok(
+        "GET",
+        &format!("/contexts/{}", server.cx("corp::communities")),
+        None,
+    )["revision"]
+        .clone();
     assert_eq!(derived_before, derived_after, "a dry run must not write");
 
-    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, _) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 generated, 1 reused"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 3);
     let page = server.ok(
         "POST",
-        "/contexts/corp/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("corp")),
         Some(json!({"query": "共同体のテーマ"})),
     );
     assert_eq!(
@@ -441,16 +484,22 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     let community = page["hits"][0]["community"].as_str().unwrap().to_string();
     server.ok(
         "POST",
-        "/contexts/corp::communities/sources/retract",
+        &format!(
+            "/contexts/{}/sources/retract",
+            server.cx("corp::communities")
+        ),
         Some(json!({"source": format!("community:{community}")})),
     );
-    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, _) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 generated, 1 reused"), "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 4);
     let page = server.ok(
         "POST",
-        "/contexts/corp/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("corp")),
         Some(json!({"query": "共同体のテーマ"})),
     );
     assert!(
@@ -466,10 +515,10 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
 /// the branches below can each mutate one field of an otherwise valid
 /// artifact.
 fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
-    server.ok("PUT", &format!("/contexts/{derived}"), None);
+    server.ok("POST", "/contexts", Some(json!({"name": derived})));
     server.ok(
         "POST",
-        &format!("/contexts/{derived}/sources"),
+        &format!("/contexts/{}/sources", server.cx(derived)),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -477,7 +526,7 @@ fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{derived}/associations"),
+        &format!("/contexts/{}/associations", server.cx(derived)),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
             {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
@@ -492,10 +541,14 @@ fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
 fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
     let server = Server::start("communities-manifest-corrupt");
     seed_two_cliques(&server, "sci");
-    server.ok("PUT", "/contexts/sci::communities", None);
     server.ok(
         "POST",
-        "/contexts/sci::communities/sources",
+        "/contexts",
+        Some(json!({"name": "sci::communities"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
         Some(json!({"passages": {
             "communities:manifest": "{not valid json",
         }})),
@@ -503,7 +556,7 @@ fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
 
     let (status, refused) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(status, 409, "{refused}");
@@ -526,7 +579,8 @@ fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
 fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
     let server = Server::start("communities-manifest-format");
     seed_two_cliques(&server, "sci");
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
     let body = |stamp: Value| {
         let mut manifest = json!({
             "algorithm": "louvain-cc/1",
@@ -566,7 +620,7 @@ fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
         );
         let (status, refused) = server.call(
             "POST",
-            "/contexts/sci/communities/search",
+            &format!("/contexts/{}/communities/search", server.cx("sci")),
             Some(json!({"query": "夏目漱石"})),
         );
         assert_eq!(status, 409, "{stamp}: {refused}");
@@ -588,7 +642,7 @@ fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
     );
     let (status, refused) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(status, 409, "{refused}");
@@ -608,7 +662,7 @@ fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
     );
     let (status, served) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(status, 200, "{served}");
@@ -621,7 +675,8 @@ fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
 fn search_reports_conflict_when_the_manifest_names_a_different_source_context() {
     let server = Server::start("communities-manifest-mismatch");
     seed_two_cliques(&server, "sci");
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -636,7 +691,7 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
 
     let (status, refused) = server.call(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     assert_eq!(status, 409, "{refused}");
@@ -667,7 +722,7 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     let admin = |method: &str, path: &str, body: Option<Value>| {
         server.call_with_token(method, path, body, Some("atok"))
     };
-    admin("PUT", "/contexts/sci", None);
+    admin("POST", "/contexts", Some(json!({"name": "sci"})));
     // The same 4-clique graph `seed_two_cliques` seeds, over an
     // authenticated admin token so the derived-scope grant below can
     // be scoped to a real, non-empty source graph.
@@ -680,10 +735,11 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     }
     admin(
         "POST",
-        "/contexts/sci/associations",
+        &format!("/contexts/{}/associations", server.cx("sci")),
         Some(Value::Array(ops)),
     );
-    let revision = admin("GET", "/contexts/sci", None).1["revision"].clone();
+    let revision =
+        admin("GET", &format!("/contexts/{}", server.cx("sci")), None).1["revision"].clone();
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -694,10 +750,14 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
         ],
     });
-    admin("PUT", "/contexts/sci::communities", None);
     admin(
         "POST",
-        "/contexts/sci::communities/sources",
+        "/contexts",
+        Some(json!({"name": "sci::communities"})),
+    );
+    admin(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -713,7 +773,7 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
 
     let (status, refused) = server.call_with_token(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
         Some("rtok"),
     );
@@ -732,7 +792,8 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
 fn search_truncates_membership_past_members_per_hit_and_flags_it() {
     let server = Server::start("communities-members-cap");
     seed_two_cliques(&server, "sci");
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
@@ -743,10 +804,14 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 13},
         ],
     });
-    server.ok("PUT", "/contexts/sci::communities", None);
     server.ok(
         "POST",
-        "/contexts/sci::communities/sources",
+        "/contexts",
+        Some(json!({"name": "sci::communities"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -763,13 +828,13 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/sci::communities/associations",
+        &format!("/contexts/{}/associations", server.cx("sci::communities")),
         Some(Value::Array(members)),
     );
 
     let page = server.ok(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     let hit = &page["hits"][0];
@@ -797,7 +862,8 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
 fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
     let server = Server::start("communities-manifest-torn");
     seed_two_cliques(&server, "sci");
-    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
     // The manifest's own `communities` array is empty — L0-0 is
     // searchable (passage + contains edges below) but unlisted.
     let manifest = json!({
@@ -812,7 +878,7 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
 
     let page = server.ok(
         "POST",
-        "/contexts/sci/communities/search",
+        &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
     let hit = &page["hits"][0];
@@ -851,7 +917,7 @@ fn overwrite_manifest(server: &Server, derived: &str, manifest_text: &str) {
 #[test]
 fn a_vanished_community_is_retracted_and_the_survivor_kept() {
     let server = Server::start("communities-vanish");
-    server.ok("PUT", "/contexts/corp", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "corp"})));
     let mut ops = Vec::new();
     for (group, source) in [("a", "a.md"), ("b", "b.md")] {
         let members: Vec<String> = (1..=4).map(|index| format!("{group}{index}")).collect();
@@ -866,7 +932,7 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
     }
     server.ok(
         "POST",
-        "/contexts/corp/associations",
+        &format!("/contexts/{}/associations", server.cx("corp")),
         Some(Value::Array(ops)),
     );
 
@@ -876,8 +942,10 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
     assert!(
@@ -887,7 +955,8 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
 
     // An unchanged graph re-runs WITHOUT the extract env — the chat
     // client only comes up when something actually needs summarizing.
-    let (code, stdout, stderr) = run_communities(&["--context", "corp", &server.base], &[]);
+    let (code, stdout, stderr) =
+        run_communities(&["--context", &server.cx("corp"), &server.base], &[]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("0 generated, 2 reused"), "{stdout}");
 
@@ -895,11 +964,13 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
     // community, and the run must retract exactly the vanished one.
     server.ok(
         "POST",
-        "/contexts/corp/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("corp")),
         Some(json!({"source": "b.md"})),
     );
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains("1 vanished community retracted"),
@@ -919,13 +990,16 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
     // source is gone from the artifact.
     let survivors = server.ok(
         "POST",
-        "/contexts/corp::communities/query",
+        &format!("/contexts/{}/query", server.cx("corp::communities")),
         Some(json!({"subject": "community:L0-0", "label": "contains"})),
     );
     assert_eq!(survivors["total"], 4, "{survivors}");
     let looked = server.ok(
         "POST",
-        "/contexts/corp::communities/sources/lookup",
+        &format!(
+            "/contexts/{}/sources/lookup",
+            server.cx("corp::communities")
+        ),
         Some(json!({"sources": ["community:L0-1"]})),
     );
     assert!(
@@ -948,7 +1022,10 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, _) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
 
@@ -957,7 +1034,10 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
     // rule forces the rebuild.
     let stored = server.ok(
         "POST",
-        "/contexts/corp::communities/sources/lookup",
+        &format!(
+            "/contexts/{}/sources/lookup",
+            server.cx("corp::communities")
+        ),
         Some(json!({"sources": ["communities:manifest"]})),
     );
     let mut manifest: Value =
@@ -965,8 +1045,10 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
             .expect("the stored manifest parses");
     manifest["algorithm"] = json!("other/1");
     overwrite_manifest(&server, "corp::communities", &manifest.to_string());
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains("algorithm changed: previous fingerprints incomparable"),
@@ -978,8 +1060,10 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
     // Mangled bytes where the manifest should be: a human's problem,
     // said out loud.
     overwrite_manifest(&server, "corp::communities", "not a manifest at all");
-    let (code, _stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, _stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("does not parse"), "{stderr}");
     assert!(
@@ -998,8 +1082,10 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
         })
         .to_string(),
     );
-    let (code, _stdout, stderr) =
-        run_communities(&["--context", "corp", &server.base], &extract_env);
+    let (code, _stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 1, "{stderr}");
     assert!(
         stderr.contains("is not a manifest this build reads")
@@ -1019,7 +1105,7 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
 #[test]
 fn a_two_level_graph_summarizes_parents_from_their_children() {
     let server = Server::start("communities-levels");
-    server.ok("PUT", "/contexts/deep", None);
+    server.ok("POST", "/contexts", Some(json!({"name": "deep"})));
     let mut ops = Vec::new();
     let sides = [["a", "b", "c"], ["d", "e", "f"]];
     for cliques in &sides {
@@ -1043,13 +1129,16 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
     }
     server.ok(
         "POST",
-        "/contexts/deep/associations",
+        &format!("/contexts/{}/associations", server.cx("deep")),
         Some(Value::Array(ops)),
     );
 
     // The graph really is two levels — the test's premise, pinned so a
     // future algorithm change fails HERE and not in a prompt assert.
-    let (status, body) = get_ndjson(&server, "/contexts/deep/communities");
+    let (status, body) = get_ndjson(
+        &server,
+        &format!("/contexts/{}/communities", server.cx("deep")),
+    );
     assert_eq!(status, 200, "{body}");
     let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
     assert_eq!(header["levels"], 2, "{header}");
@@ -1068,8 +1157,10 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "deep", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("deep"), &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stdout.contains(&format!("{total} generated, 0 reused")),
@@ -1095,7 +1186,7 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
     let children = parents[0]["children"].as_array().unwrap();
     let includes = server.ok(
         "POST",
-        "/contexts/deep::communities/query",
+        &format!("/contexts/{}/query", server.cx("deep::communities")),
         Some(json!({"subject": format!("community:{parent_id}"), "label": "includes"})),
     );
     assert_eq!(includes["total"], json!(children.len()), "{includes}");
@@ -1153,18 +1244,24 @@ fn group_traversal_derives_each_member_and_into_renames() {
     assert!(stdout.contains("context 'm1'"), "{stdout}");
     assert!(stdout.contains("context 'm2'"), "{stdout}");
     for derived in ["m1::communities", "m2::communities"] {
-        let (status, _) = server.call("GET", &format!("/contexts/{derived}"), None);
+        let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx(derived)), None);
         assert_eq!(status, 200, "the member artifact '{derived}' must exist");
     }
 
     // --into aims one context's artifact at a chosen name.
     let (code, stdout, stderr) = run_communities(
-        &["--context", "m1", "--into", "renamed", &server.base],
+        &[
+            "--context",
+            &server.cx("m1"),
+            "--into",
+            "renamed",
+            &server.base,
+        ],
         &extract_env,
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("artifact 'renamed'"), "{stdout}");
-    let (status, _) = server.call("GET", "/contexts/renamed", None);
+    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("renamed")), None);
     assert_eq!(status, 200);
 }
 
@@ -1181,8 +1278,10 @@ fn json_mode_emits_the_report_structs() {
         ("TAGURU_EXTRACT_URL", chat_url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_communities(&["--context", "corp", "--json", &server.base], &extract_env);
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), "--json", &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let reports: Value = serde_json::from_str(&stdout).expect("stdout must be the JSON reports");
     let report = &reports[0];
@@ -1191,4 +1290,83 @@ fn json_mode_emits_the_report_structs() {
     assert_eq!(report["summaries_generated"], json!(2), "{report}");
     assert_eq!(report["summaries_reused"], json!(0), "{report}");
     assert_eq!(report["dry_run"], json!(false), "{report}");
+}
+
+/// `search_communities` ranks with ONE extra slot beyond the caller's
+/// limit, so the manifest passage (always a candidate — its JSON text
+/// shares terms with any query about the corpus' own vocabulary) can
+/// be filtered out below without costing a community hit. The source
+/// context's name rides inside the manifest JSON, making a query for
+/// it the worst case: the manifest ranks, and without the extra slot
+/// one real community would be crowded off a full page.
+#[test]
+fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
+    let server = Server::start("communities-manifest-slot");
+    // The source context's NAME carries the query term, so the
+    // manifest (which embeds `source_context`) matches the query.
+    server.ok("POST", "/contexts", Some(json!({"name": "酒造りの記録"})));
+    let source_id = server.cx("酒造りの記録");
+    server.ok(
+        "POST",
+        &format!("/contexts/{source_id}/associations"),
+        Some(json!([{"subject": "a1", "label": "l", "object": "a2", "weight": 1.0}])),
+    );
+    let revision = server.ok("GET", &format!("/contexts/{source_id}"), None)["revision"].clone();
+
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "酒造りの記録::communities"})),
+    );
+    let derived_id = server.cx("酒造りの記録::communities");
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context": "酒造りの記録",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+        ],
+    });
+    // The manifest text carries the query's full bigram run (inside
+    // `source_context`); the community summary shares only its first
+    // two bigrams and dilutes them in filler — so for this query the
+    // manifest OUTRANKS the community, and only the extra slot keeps
+    // the community reachable at all.
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived_id}/sources"),
+        Some(json!({"passages": {
+            "community:L0-0": "酒造りについて。蔵人は冬の朝に井戸の水を汲み、\
+                               米を蒸し、麹室で麹を育て、槽で搾るまでの永い\
+                               仕事を淡々と続けた。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived_id}/associations"),
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 2.0},
+        ])),
+    );
+
+    let page = server.ok(
+        "POST",
+        &format!("/contexts/{source_id}/communities/search"),
+        Some(json!({"query": "酒造りの記録", "limit": 1})),
+    );
+    let communities: Vec<&str> = page["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["community"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        communities,
+        vec!["L0-0"],
+        "the community must fill the page — the manifest's higher rank is \
+         absorbed by the extra slot, never at the community's expense: {page}"
+    );
 }

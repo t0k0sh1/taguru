@@ -11,6 +11,12 @@ use crate::support::*;
 /// sessions below run outside the `Server` harness so they can own
 /// stderr. Returns the status; bodies are irrelevant to log tests.
 fn raw_call(base: &str, method: &str, path: &str, body: Option<Value>) -> u16 {
+    raw_call_read(base, method, path, body).0
+}
+
+/// [`raw_call`] returning the parsed body too — for the create whose
+/// minted id the id-addressed paths need (#964).
+fn raw_call_read(base: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
     let request = ureq::http::Request::builder()
         .method(method)
         .uri(format!("{base}{path}"));
@@ -22,9 +28,29 @@ fn raw_call(base: &str, method: &str, path: &str, body: Option<Value>) -> u16 {
         None => request.body(()).map(|request| test_agent().run(request)),
     };
     match response.expect("request must assemble") {
-        Ok(response) => response.status().as_u16(),
+        Ok(mut response) => {
+            let status = response.status().as_u16();
+            let text = response.body_mut().read_to_string().unwrap_or_default();
+            let parsed = serde_json::from_str(&text).unwrap_or(Value::Null);
+            (status, parsed)
+        }
         Err(error) => panic!("{method} {path} failed: {error}"),
     }
+}
+
+/// `POST /contexts` for `name`, returning the minted id.
+fn raw_create(base: &str, name: &str) -> String {
+    let (status, body) = raw_call_read(
+        base,
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "d"})),
+    );
+    assert_eq!(status, 200, "{body}");
+    body["result"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("create must answer the row: {body}"))
+        .to_string()
 }
 
 /// Spawns the binary with JSON logs on a piped stderr, runs `drive`,
@@ -96,20 +122,12 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
         "searchlog-on",
         &[("TAGURU_LOG_SEARCHES", "1"), ("RUST_LOG", "info")],
         |base| {
-            assert_eq!(
-                raw_call(
-                    base,
-                    "PUT",
-                    "/contexts/s",
-                    Some(json!({"description": "d"}))
-                ),
-                200
-            );
+            let s = raw_create(base, "s");
             assert_eq!(
                 raw_call(
                     base,
                     "POST",
-                    "/contexts/s/associations",
+                    &format!("/contexts/{s}/associations"),
                     Some(json!([{
                         "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
                         "weight": 1.0, "source": "p1"
@@ -121,7 +139,7 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
                 raw_call(
                     base,
                     "POST",
-                    "/contexts/s/recall",
+                    &format!("/contexts/{s}/recall"),
                     Some(json!({"cue": "青嶺酒造"}))
                 ),
                 200
@@ -130,7 +148,7 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
                 raw_call(
                     base,
                     "POST",
-                    "/contexts/s/resolve",
+                    &format!("/contexts/{s}/resolve"),
                     Some(json!({"cue": "qqqq"}))
                 ),
                 200
@@ -146,7 +164,8 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
         .iter()
         .find(|line| line["fields"]["op"] == "recall")
         .expect("a recall event must be logged");
-    assert_eq!(recall["fields"]["context"], json!("s"), "{recall}");
+    let context = recall["fields"]["context"].as_str().unwrap();
+    assert_eq!(context.len(), 36, "the search event names the id: {recall}");
     assert_eq!(recall["fields"]["cue"], json!("青嶺酒造"), "{recall}");
     assert_eq!(recall["fields"]["hits"], json!(1), "{recall}");
     let resolve = searches
@@ -164,17 +183,8 @@ fn search_events_stay_absent_without_the_opt_in() {
         assert_eq!(
             raw_call(
                 base,
-                "PUT",
-                "/contexts/s",
-                Some(json!({"description": "d"}))
-            ),
-            200
-        );
-        assert_eq!(
-            raw_call(
-                base,
                 "POST",
-                "/contexts/s/recall",
+                &format!("/contexts/{}/recall", raw_create(base, "s")),
                 Some(json!({"cue": "秘匿の合い言葉"}))
             ),
             200
@@ -213,9 +223,9 @@ fn access_log_survives_an_inherited_rust_log_warn() {
             assert_eq!(
                 raw_call(
                     base,
-                    "PUT",
-                    "/contexts/s",
-                    Some(json!({"description": "d"}))
+                    "POST",
+                    "/contexts",
+                    Some(json!({"name": "s", "description": "d"}))
                 ),
                 200
             );

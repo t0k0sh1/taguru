@@ -176,7 +176,7 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
 }
 
 fn associations_count(server: &Server, context: &str) -> u64 {
-    server.ok("GET", &format!("/contexts/{context}"), None)["stats"]["associations"]
+    server.ok("GET", &format!("/contexts/{}", server.cx(context)), None)["stats"]["associations"]
         .as_u64()
         .unwrap()
 }
@@ -213,7 +213,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| c["id"].as_str().unwrap())
+        .map(|c| c["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"sake::m1"), "{names:?}");
     assert!(names.contains(&"sake::m2"), "{names:?}");
@@ -440,13 +440,13 @@ fn benchmark_search_skip_import_searches_existing_corpora_and_flags_a_missing_on
     // prefix::model_id naming --skip-import expects to find; m2's is
     // left absent on purpose.
     server.ok(
-        "PUT",
-        "/contexts/sake::m1",
-        Some(json!({"description": "pre-existing"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake::m1", "description": "pre-existing"})),
     );
     server.ok(
         "POST",
-        "/contexts/sake::m1/sources",
+        &format!("/contexts/{}/sources", server.cx("sake::m1")),
         Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
     );
 

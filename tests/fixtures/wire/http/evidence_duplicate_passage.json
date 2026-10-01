@@ -9,22 +9,22 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 323,
+        "bytes_used": 349,
         "items_used": 1,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 81
+        "tokens_used": 88
       },
       "citations": [],
       "items": [
         {
-          "bytes": 319,
-          "candidate_id": "passage\u0000dup-corpus\u0000a.md\u00000",
+          "bytes": 345,
+          "candidate_id": "passage\u000000000000-0000-4000-8000-000000000001\u0000a.md\u00000",
           "citation_refs": [],
-          "estimated_tokens": 80,
+          "estimated_tokens": 87,
           "fused_rank": 1,
           "kind": "passage",
           "lane_ranks": [
@@ -49,8 +49,8 @@
       ],
       "omitted": [
         {
-          "candidate_id": "passage\u0000dup-corpus\u0000b.md\u00000",
-          "duplicate_of": "passage\u0000dup-corpus\u0000a.md\u00000",
+          "candidate_id": "passage\u000000000000-0000-4000-8000-000000000001\u0000b.md\u00000",
+          "duplicate_of": "passage\u000000000000-0000-4000-8000-000000000001\u0000a.md\u00000",
           "kind": "passage",
           "reason": "duplicate_passage"
         }
@@ -98,6 +98,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/evidence",
+  "route": "/contexts/{id}/evidence",
   "status": 200
 }

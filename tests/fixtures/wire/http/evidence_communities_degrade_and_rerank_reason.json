@@ -61,7 +61,7 @@
           },
           "communities": {
             "ran": false,
-            "reason": "no communities artifact for 'comm-corpus': context 'comm-corpus::communities' does not exist — run `taguru communities` to build it"
+            "reason": "no communities artifact for '00000000-0000-4000-8000-000000000001': context 'comm-corpus::communities' does not exist — run `taguru communities` to build it"
           },
           "passages": {
             "ran": true
@@ -89,6 +89,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/evidence",
+  "route": "/contexts/{id}/evidence",
   "status": 200
 }

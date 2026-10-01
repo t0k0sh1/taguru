@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Budgeted evidence assembly (evidence) — Taguru</title>
-  <meta name="description" content="The complete reference for POST /contexts/{name}/evidence, MCP assemble_evidence, and the Python/TypeScript SDK assemble_evidence()/assembleEvidence() calls: the three independent budget ceilings, deduplication and diversity and corroboration/contradiction handling, the optional reranker's deterministic-fallback boundary, how to read plan.selection/plan.reranker/omitted, and taguru evaluate --assembly's equal-budget comparison against fixed-limit retrieval.">
+  <meta name="description" content="The complete reference for POST /contexts/{id}/evidence, MCP assemble_evidence, and the Python/TypeScript SDK assemble_evidence()/assembleEvidence() calls: the three independent budget ceilings, deduplication and diversity and corroboration/contradiction handling, the optional reranker's deterministic-fallback boundary, how to read plan.selection/plan.reranker/omitted, and taguru evaluate --assembly's equal-budget comparison against fixed-limit retrieval.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -73,7 +73,7 @@
 
   <header class="hero">
     <div class="eyebrow">reference · evidence assembly</div>
-    <h1>Budgeted evidence assembly — <code>POST /contexts/{name}/evidence</code></h1>
+    <h1>Budgeted evidence assembly — <code>POST /contexts/{id}/evidence</code></h1>
     <p class="lede">
       An <b>opt-in</b> step after retrieval and before an external answer model: ranks graph
       associations, graph activations, passages, and (opt-in) community summaries into one
@@ -97,14 +97,14 @@
       <table>
         <thead><tr><th>Surface</th><th>Call</th></tr></thead>
         <tbody>
-          <tr><td>HTTP</td><td><code>POST /contexts/{name}/evidence</code></td></tr>
+          <tr><td>HTTP</td><td><code>POST /contexts/{id}/evidence</code></td></tr>
           <tr><td>MCP</td><td><code>assemble_evidence</code> — one ordinary routed tool, not the <code>retrieve</code>-style client-composed loop</td></tr>
           <tr><td>Python SDK</td><td><code>Context.assemble_evidence(origins, **options)</code> (sync and async)</td></tr>
           <tr><td>TypeScript SDK</td><td><code>context.assembleEvidence(origins, options)</code>, returning a named <code>EvidencePackage</code></td></tr>
         </tbody>
       </table>
     </div>
-    <pre><code>POST /contexts/sake/evidence
+    <pre><code>POST /contexts/$CTX/evidence
 {
   "origins": ["青嶺酒造"],
   "labels": ["杜氏"],
@@ -304,7 +304,7 @@
       <a href="evaluate.html">retrieval quality gate</a> page for the harness itself) grows three
       flags for exactly this (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0006-budgeted-evidence-assembly.md">ADR 0006 §14</a>):
     </p>
-    <pre><code>--assembly              swap the passage lane for POST /contexts/{name}/evidence;
+    <pre><code>--assembly              swap the passage lane for POST /contexts/{id}/evidence;
                        the structural lane (resolve -&gt; query) never changes, so
                        coverage/lane-cross stay comparable across a run pair
 --max-items N

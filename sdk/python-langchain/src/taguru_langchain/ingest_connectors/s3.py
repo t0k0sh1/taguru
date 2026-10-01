@@ -563,7 +563,13 @@ def _handle_deletions(
                 "(an async-only TaguruIngester has no synchronous Context to retract "
                 "through)"
             )
-        context = ingester.client.context(ingester.context)
+        context_id = ingester._context_id()
+        if context_id is None:
+            raise ValueError(
+                f"context {ingester.context!r} does not resolve to a context — nothing to "
+                "retract from"
+            )
+        context = ingester.client.context(context_id)
         for source in deleted:
             retract(source)
             retracted += 1

@@ -32,7 +32,7 @@ mod tests {
         );
         passages.insert("doc-b".to_string(), "三番目の段落。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -42,7 +42,7 @@ mod tests {
         );
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -64,7 +64,7 @@ mod tests {
         // changed vector width behind an unchanged model name), the same
         // one-embedding-per-no-op cost the gloss refresh pays.
         let again = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((again.embedded, again.total), (0, 3));
@@ -91,19 +91,19 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "最初の段落。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let outcome = state
-            .auto_refresh_passage_embeddings("sake", Deadline::unbounded())
+            .auto_refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(outcome.embedded, 1);
         let after_real = calls.load(Ordering::Relaxed);
 
         let again = state
-            .auto_refresh_passage_embeddings("sake", Deadline::unbounded())
+            .auto_refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(again.embedded, 0);
@@ -133,11 +133,11 @@ mod tests {
             "変わらない段落。\n\n古い版の段落。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -147,11 +147,11 @@ mod tests {
             "変わらない段落。\n\n新しい版の段落。".to_string(),
         );
         state
-            .store_passages("sake", plain(updated))
+            .store_passages(&state.id_of("sake"), plain(updated))
             .unwrap()
             .unwrap();
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -177,17 +177,17 @@ mod tests {
         passages.insert("doc-a".to_string(), "残る段落。".to_string());
         passages.insert("doc-b".to_string(), "消える段落。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
-        state.retract_source("sake", "doc-b").unwrap();
+        state.retract_source(&state.id_of("sake"), "doc-b").unwrap();
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -253,11 +253,11 @@ mod tests {
         passages.insert("doc-a".to_string(), "最初の段落。".to_string());
         passages.insert("doc-b".to_string(), "二番目の段落。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         let first = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((first.embedded, first.total), (2, 2));
@@ -274,7 +274,7 @@ mod tests {
         // stale 2-dim rows against a provider now speaking 3.
         width.store(3, Ordering::Relaxed);
         let widened = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -298,12 +298,12 @@ mod tests {
         edited.insert("doc-a".to_string(), "改訂された段落。".to_string());
         edited.insert("doc-b".to_string(), "二番目の段落。".to_string());
         state
-            .store_passages("sake", plain(edited))
+            .store_passages(&state.id_of("sake"), plain(edited))
             .unwrap()
             .unwrap();
         let before_mixed = texts_requested.load(Ordering::Relaxed);
         let mixed = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -382,12 +382,12 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-big".to_string(), text);
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -417,12 +417,12 @@ mod tests {
             "一つ目。\n\n二つ目。\n\n三つ目。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -481,12 +481,12 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-big".to_string(), text);
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let error = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
@@ -505,7 +505,7 @@ mod tests {
 
         // The next refresh buys only the missing paragraph.
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((outcome.embedded, outcome.total), (1, 129));
@@ -529,7 +529,7 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "りんごの段落。".to_string());
         state
-            .store_passages("fruit", plain(passages))
+            .store_passages(&state.id_of("fruit"), plain(passages))
             .unwrap()
             .unwrap();
 
@@ -538,7 +538,7 @@ mod tests {
         // write fails.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
         let error = state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("not persisted"), "{error}");
@@ -556,7 +556,7 @@ mod tests {
         // yet it must still retry the write so the row does not stay
         // unpersisted forever.
         let outcome = state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -606,20 +606,20 @@ mod tests {
             passages
         };
         state
-            .store_passages("fruit", submission("アップルはどんな色?"))
+            .store_passages(&state.id_of("fruit"), submission("アップルはどんな色?"))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         state
-            .store_passages("fruit", submission("アップルは何色ですか?"))
+            .store_passages(&state.id_of("fruit"), submission("アップルは何色ですか?"))
             .unwrap()
             .unwrap();
         let outcome = state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -654,9 +654,12 @@ mod tests {
                 meta: crate::passages::SourceMeta::default(),
             },
         );
-        state.store_passages("fruit", passages).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("fruit"), passages)
+            .unwrap()
+            .unwrap();
         let outcome = state
-            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -679,7 +682,7 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         let error = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("TAGURU_EMBED_PASSAGES"), "{error}");
@@ -721,12 +724,12 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-big".to_string(), text);
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -814,12 +817,12 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-big".to_string(), text);
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let error = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("boom"), "{error}");
@@ -891,9 +894,12 @@ mod tests {
                 .unwrap();
             let mut seed = BTreeMap::new();
             seed.insert("doc-seed".to_string(), "最初の段落。".to_string());
-            state.store_passages("sake", plain(seed)).unwrap().unwrap();
             state
-                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .store_passages(&state.id_of("sake"), plain(seed))
+                .unwrap()
+                .unwrap();
+            state
+                .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
         }
@@ -918,12 +924,12 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-big".to_string(), text);
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -961,19 +967,19 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-a".to_string(), "最初の段落。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         let path = pvectors_path(&dir, &state.stem_of("sake").unwrap());
         let inode = fs::metadata(&path).unwrap().ino();
-        let config = state.context_revision("sake").unwrap().config;
+        let config = state.context_revision(&state.id_of("sake")).unwrap().config;
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(outcome.embedded, 0);
@@ -983,7 +989,7 @@ mod tests {
             "a no-op refresh rewrote the sidecar (write_atomic mints a new inode)"
         );
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             config,
             "nothing served changed; the revision must hold"
         );
@@ -1013,20 +1019,20 @@ mod tests {
                 "最初の段落。\n\n二番目の段落。\n\n三番目の段落。".to_string(),
             );
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state
-                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
         }
 
         let state = boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 2);
-        let config = state.context_revision("sake").unwrap().config;
+        let config = state.context_revision(&state.id_of("sake")).unwrap().config;
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1038,7 +1044,7 @@ mod tests {
             PassageVectorStore::load(&pvectors_path(&dir, &state.stem_of("sake").unwrap()));
         assert_eq!(sidecar.len(), 2, "the shrink must reach the disk");
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             config + 1,
             "served rows changed; the revision must move"
         );
@@ -1060,10 +1066,10 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        let config = state.context_revision("sake").unwrap().config;
+        let config = state.context_revision(&state.id_of("sake")).unwrap().config;
 
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((outcome.embedded, outcome.total), (0, 0));
@@ -1071,7 +1077,10 @@ mod tests {
             !pvectors_path(&dir, &state.stem_of("sake").unwrap()).exists(),
             "a passage-less refresh must not mint a sidecar"
         );
-        assert_eq!(state.context_revision("sake").unwrap().config, config);
+        assert_eq!(
+            state.context_revision(&state.id_of("sake")).unwrap().config,
+            config
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1098,11 +1107,11 @@ mod tests {
                 "変わらない段落。\n\n古い版の段落。".to_string(),
             );
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state
-                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             // The edit lands, the refresh does NOT run — the reboot
@@ -1113,7 +1122,7 @@ mod tests {
                 "変わらない段落。\n\n新しい版の段落。".to_string(),
             );
             state
-                .store_passages("sake", plain(updated))
+                .store_passages(&state.id_of("sake"), plain(updated))
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1123,9 +1132,9 @@ mod tests {
         let before = fs::read(&path).unwrap();
         let state =
             boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
-        let config = state.context_revision("sake").unwrap().config;
+        let config = state.context_revision(&state.id_of("sake")).unwrap().config;
         let outcome = state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1139,7 +1148,7 @@ mod tests {
             "the edited row's rewrite must reach the disk"
         );
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             config + 1,
             "a re-embedded row is served content; the revision must move"
         );
@@ -1167,11 +1176,11 @@ mod tests {
             let mut passages = BTreeMap::new();
             passages.insert("doc-a".to_string(), "りんごの段落。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
             state
-                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1194,7 +1203,7 @@ mod tests {
             ))),
             20_000,
         );
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
 
         let degraded = state.entry_passage_vectors(&entry, &state.stem_of("sake").unwrap());
         assert_eq!(degraded.len(), 0);

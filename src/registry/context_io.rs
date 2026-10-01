@@ -4,8 +4,8 @@ impl AppState {
     /// One `context`'s current revision counters, or `None` for an
     /// unknown or deleted `context` — what the `group` fingerprint hashes
     /// per member, without loading anything.
-    pub fn context_revision(&self, name: &str) -> Option<ContextRevision> {
-        let entry = self.lookup(name)?;
+    pub fn context_revision(&self, id: &str) -> Option<ContextRevision> {
+        let entry = self.lookup_id(id)?;
         let inner = entry.read_unless_deleted()?;
         Some(entry.revision_snapshot(&inner))
     }
@@ -60,22 +60,22 @@ impl AppState {
     pub fn directory_page(
         &self,
         after: Option<&str>,
+        after_id: Option<&str>,
         limit: usize,
     ) -> (usize, Vec<DirectoryEntry>) {
-        use std::ops::Bound;
-
         let mut after = after.map(str::to_string);
+        let mut after_id = after_id.map(str::to_string);
         loop {
             let (total, slice) = {
                 let registry = self.0.registry.read();
-                let start = match &after {
-                    Some(after) => Bound::Excluded(after.as_str()),
-                    None => Bound::Unbounded,
-                };
-                let slice: Vec<(String, Arc<Entry>)> = registry.range_named(start, limit);
+                let slice: Vec<(String, Arc<Entry>)> =
+                    registry.range_named(after.as_deref(), after_id.as_deref(), limit);
                 (registry.len(), slice)
             };
-            let Some(last_seeked) = slice.last().map(|(name, _)| name.clone()) else {
+            let Some((last_name, last_id)) = slice
+                .last()
+                .map(|(name, entry)| (name.clone(), entry.id.clone()))
+            else {
                 return (total, Vec::new());
             };
             let page: Vec<DirectoryEntry> = slice
@@ -85,13 +85,34 @@ impl AppState {
             if !page.is_empty() {
                 return (total, page);
             }
-            after = Some(last_seeked);
+            after = Some(last_name);
+            after_id = Some(last_id);
         }
     }
 
-    /// One directory row by name, or `None` for an unknown `context`.
+    /// [`Self::context_revision`] for the one caller that still keys
+    /// on display names — the `group` fingerprint, whose records hold
+    /// member names until #965. `None` for a missing OR ambiguous
+    /// name, which the fingerprint treats like any vanished member.
+    pub fn context_revision_named(&self, name: &str) -> Option<ContextRevision> {
+        let entry = self.lookup_named(name)?;
+        let inner = entry.read_unless_deleted()?;
+        Some(entry.revision_snapshot(&inner))
+    }
+
+    /// One directory row by id, or `None` for an unknown `context` —
+    /// `GET /contexts/{id}`'s read.
+    pub fn directory_entry_by_id(&self, id: &str) -> Option<DirectoryEntry> {
+        let entry = self.lookup_id(id)?;
+        let name = entry.read_unless_deleted()?.name.clone();
+        describe_entry(name, &entry)
+    }
+
+    /// One directory row by display name, or `None` for an unknown OR
+    /// ambiguous name — the name-boundary read (grant allow-lists,
+    /// the import header) until #965 retires those surfaces.
     pub fn directory_entry(&self, name: &str) -> Option<DirectoryEntry> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_named(name)?;
         describe_entry(name.to_string(), &entry)
     }
 
@@ -101,7 +122,7 @@ impl AppState {
     /// searched; a `context` deleted between this check and its read is
     /// still caught by the read itself.
     pub fn context_exists(&self, name: &str) -> bool {
-        self.lookup(name).is_some()
+        self.lookup_named(name).is_some()
     }
 }
 
@@ -124,10 +145,10 @@ impl AppState {
     /// export is future work, not a v1 promise.
     pub fn export_context(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.resolved_id(id)?;
         let stem = entry.id.clone();
         // Fast path: already resident, shared lock (mirrors read_context).
         {
@@ -168,7 +189,6 @@ impl AppState {
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -242,16 +262,15 @@ impl AppState {
     /// and replays the same log — compaction lost, nothing corrupted.
     pub fn compact_context(
         &self,
-        name: &str,
+        id: &str,
         deadline: Deadline,
     ) -> Result<CompactOutcome, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.resolved_id(id)?;
         let (bytes_before, bytes_after, stats) = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                name,
                 &mut inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
@@ -301,9 +320,9 @@ impl AppState {
         // newer) — either way `entry.dirty` stays set, so the honest
         // answer is the same: not durably reflected by THIS call, the
         // next flush tick will pick it up.
-        let image_persisted = self.flush_entry(name, &entry);
+        let image_persisted = self.flush_entry(id, &entry);
         if let Some(message) = unpersisted_compact_warning(image_persisted) {
-            tracing::warn!(context = %name, "{message}");
+            tracing::warn!(context = %id, "{message}");
         }
         // The passage log's own dead weight (#437): a retracted
         // source's text lives on in the log as bytes behind a
@@ -321,7 +340,7 @@ impl AppState {
         let passages_compacted = entry
             .read_unless_deleted()
             .map(|_fence| {
-                self.compact_entry_passages(&entry, name, |store| store.compact().map(|()| true))
+                self.compact_entry_passages(&entry, id, |store| store.compact().map(|()| true))
             })
             .unwrap_or(false);
         let outcome = CompactOutcome {
@@ -356,7 +375,7 @@ impl AppState {
         if self.is_replica() {
             return false;
         }
-        let Some(entry) = self.lookup(name) else {
+        let Some(entry) = self.lookup_named(name) else {
             return false;
         };
         let Some(_fence) = entry.read_unless_deleted() else {
@@ -425,7 +444,6 @@ impl AppState {
             .into_iter()
             .filter_map(|entry| {
                 let inner = entry.inner.read();
-                let name = inner.name.clone();
                 let ratio = match &inner.slot {
                     Slot::Hot(context) => context.dead_ratio(),
                     Slot::Cold => inner.stats.dead_ratio(),
@@ -433,8 +451,10 @@ impl AppState {
                 };
                 // NaN (a malformed `min_dead_ratio`) makes every
                 // comparison false, so the sweep simply selects nothing
-                // rather than mis-selecting.
-                (ratio > min_dead_ratio).then_some((name, ratio))
+                // rather than mis-selecting. Candidates carry the ID —
+                // what `compact_context` takes and what the flusher's
+                // skip set keys on (rename-stable, duplicate-safe).
+                (ratio > min_dead_ratio).then_some((entry.id.clone(), ratio))
             })
             .collect();
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -481,12 +501,15 @@ impl AppState {
         let mut contexts = Vec::with_capacity(candidates.len());
         let mut skipped = Vec::new();
         let mut deadline_exceeded = false;
-        for (name, _) in candidates {
+        for (id, _) in candidates {
             if deadline.expired() {
                 deadline_exceeded = true;
                 break;
             }
-            match self.compact_context(&name, deadline) {
+            // The response rows keep naming contexts by display name
+            // (the wire's `name` value); the id addresses the rebuild.
+            let name = self.name_of_stem(&id);
+            match self.compact_context(&id, deadline) {
                 Ok(outcome) => contexts.push(MaintenanceCompactionEntry { name, outcome }),
                 Err(AccessError::DeadlineExceeded) => {
                     deadline_exceeded = true;
@@ -558,14 +581,14 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap(),
+            state.context_revision(&state.id_of("sake")).unwrap(),
             ContextRevision::default(),
             "a fresh context starts at zeros"
         );
 
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md")),
                     assoc_op("蔵", "創業", "1832", 1.0, Some("a.md")),
@@ -574,7 +597,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let after_graph = state.context_revision("sake").unwrap();
+        let after_graph = state.context_revision(&state.id_of("sake")).unwrap();
         assert_eq!(after_graph.graph, 2, "one bump per applied op");
         assert_eq!((after_graph.passages, after_graph.config), (0, 0));
 
@@ -583,8 +606,11 @@ mod tests {
             "a.md".to_string(),
             crate::passages::PassageSubmission::plain("蔵は1832年創業。"),
         );
-        state.store_passages("sake", passages).unwrap().unwrap();
-        let after_passage = state.context_revision("sake").unwrap();
+        state
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
+        let after_passage = state.context_revision(&state.id_of("sake")).unwrap();
         assert_eq!(after_passage.passages, 1, "the passage log watermark");
         assert_eq!(
             after_passage.graph, 2,
@@ -592,29 +618,29 @@ mod tests {
         );
 
         state
-            .update_meta("sake", None, None, None, Some(0.5))
+            .update_meta(&state.id_of("sake"), None, None, None, Some(0.5))
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             1,
             "a metadata change bumps config"
         );
         state
-            .update_meta("sake", None, None, None, Some(0.5))
+            .update_meta(&state.id_of("sake"), None, None, None, Some(0.5))
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap().config,
+            state.context_revision(&state.id_of("sake")).unwrap().config,
             1,
             "the same floor again changed nothing, so it bumps nothing"
         );
 
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap(),
+            state.context_revision(&state.id_of("sake")).unwrap(),
             ContextRevision {
                 graph: 2,
                 passages: 1,
@@ -625,9 +651,9 @@ mod tests {
 
         // One retraction is a graph op AND a passage-log record: both
         // data lanes move, config stays.
-        state.retract_source("sake", "a.md").unwrap();
+        state.retract_source(&state.id_of("sake"), "a.md").unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap(),
+            state.context_revision(&state.id_of("sake")).unwrap(),
             ContextRevision {
                 graph: 3,
                 passages: 2,
@@ -649,7 +675,7 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
                     Deadline::unbounded(),
                 )
@@ -660,15 +686,18 @@ mod tests {
                 "a.md".to_string(),
                 crate::passages::PassageSubmission::plain("高瀬が杜氏。"),
             );
-            state.store_passages("sake", passages).unwrap().unwrap();
             state
-                .update_meta("sake", None, None, None, Some(0.4))
+                .store_passages(&state.id_of("sake"), passages)
+                .unwrap()
+                .unwrap();
+            state
+                .update_meta(&state.id_of("sake"), None, None, None, Some(0.4))
                 .unwrap()
                 .unwrap();
             // The graceful-shutdown pair: the final flush, then the sweep.
             state.flush_dirty();
             state.persist_usage();
-            state.context_revision("sake").unwrap()
+            state.context_revision(&state.id_of("sake")).unwrap()
         };
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -679,7 +708,7 @@ mod tests {
         // More writes on both data lanes, then a crash: no flush, no sweep.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "創業", "1832", 1.0, Some("b.md"))],
                 Deadline::unbounded(),
             )
@@ -690,30 +719,39 @@ mod tests {
             "b.md".to_string(),
             crate::passages::PassageSubmission::plain("創業は1832年。"),
         );
-        state.store_passages("sake", passages).unwrap().unwrap();
-        let live = state.context_revision("sake").unwrap();
+        state
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
+        let live = state.context_revision(&state.id_of("sake")).unwrap();
         assert_eq!(live.graph, clean.graph + 1);
         assert_eq!(live.passages, clean.passages + 1);
         drop(state);
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap(),
+            state.context_revision(&state.id_of("sake")).unwrap(),
             clean,
             "cold after a crash: the sidecar's lagging values"
         );
         // A graph load replays the WAL and floors the counter with its top.
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .unwrap();
-        assert_eq!(state.context_revision("sake").unwrap().graph, live.graph);
+        assert_eq!(
+            state.context_revision(&state.id_of("sake")).unwrap().graph,
+            live.graph
+        );
         // A passage-store load replays its own log the same way.
         state
-            .lookup_passages("sake", &["a.md".to_string()])
+            .lookup_passages(&state.id_of("sake"), &["a.md".to_string()])
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap().passages,
+            state
+                .context_revision(&state.id_of("sake"))
+                .unwrap()
+                .passages,
             live.passages,
             "every search path loads before computing, so a cache fill never keys on the stale seed"
         );
@@ -736,26 +774,29 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                     Deadline::unbounded(),
                 )
                 .unwrap()
                 .unwrap();
-            assert_eq!(state.context_revision("sake").unwrap().graph, 1);
+            assert_eq!(
+                state.context_revision(&state.id_of("sake")).unwrap().graph,
+                1
+            );
             state.flush_dirty();
         }
         let state = AppState::boot_with(dir.clone(), usize::MAX, None, wal_off()).unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap().graph,
+            state.context_revision(&state.id_of("sake")).unwrap().graph,
             1,
             "flushed WAL-off writes keep their count across a restart"
         );
         state
-            .read_context("sake", |context| context.association_count())
+            .read_context(&state.id_of("sake"), |context| context.association_count())
             .unwrap();
         assert_eq!(
-            state.context_revision("sake").unwrap().graph,
+            state.context_revision(&state.id_of("sake")).unwrap().graph,
             1,
             "the stale replay top (there is no log) must not regress the counter"
         );
@@ -772,23 +813,25 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        let before = state.context_revision("sake").unwrap();
-        state.rename_context("sake", "brewery").unwrap();
+        let before = state.context_revision(&state.id_of("sake")).unwrap();
+        state
+            .rename_context(&state.id_of("sake"), "brewery")
+            .unwrap();
         assert_eq!(
-            state.context_revision("brewery").unwrap(),
+            state.context_revision(&state.id_of("brewery")).unwrap(),
             before,
             "a rename is the same content under a new name"
         );
-        state.delete("brewery").unwrap().unwrap();
+        state.delete(&state.id_of("brewery")).unwrap().unwrap();
         state.create("brewery", ContextMeta::default()).unwrap();
         assert_eq!(
-            state.context_revision("brewery").unwrap(),
+            state.context_revision(&state.id_of("brewery")).unwrap(),
             ContextRevision::default(),
             "a recreate is a new lineage"
         );
@@ -816,14 +859,14 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             matches!(entry.inner.read().slot, Slot::Hot(_)),
             "must exercise the hot path, not the cold-load one"
@@ -832,7 +875,7 @@ mod tests {
         let before_budget_ops = state.0.budget_ops.load(Ordering::Relaxed);
 
         let already_expired = Deadline::after(std::time::Duration::ZERO);
-        match state.export_context("sake", already_expired) {
+        match state.export_context(&state.id_of("sake"), already_expired) {
             Err(AccessError::DeadlineExceeded) => {}
             other => panic!("expected DeadlineExceeded, got {}", other.is_ok()),
         }
@@ -863,7 +906,7 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .store_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     plain(BTreeMap::from([(
                         "a.md".to_string(),
                         "蔵は1832年創業。".to_string(),
@@ -923,7 +966,7 @@ mod tests {
         // `None` one) but its slot already flipped to the tombstone —
         // same shape as `run_maintenance_compaction_skips_a_deleted_entry_without_panicking`
         // above.
-        let entry = state.lookup("sake").expect("just created");
+        let entry = state.lookup_named("sake").expect("just created");
         entry.inner.write().slot = Slot::Deleted;
         assert!(!state.compact_passages_if_worthwhile("sake", 0));
         let _ = fs::remove_dir_all(dir);
@@ -960,7 +1003,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .store_passages(
-                "sake",
+                &state.id_of("sake"),
                 plain(BTreeMap::from([(
                     "a.md".to_string(),
                     "蔵は1832年創業。".to_string(),
@@ -990,7 +1033,7 @@ mod tests {
         drop(state);
         let reopened = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (passages, missing) = reopened
-            .lookup_passages("sake", &["a.md".to_string()])
+            .lookup_passages(&reopened.id_of("sake"), &["a.md".to_string()])
             .unwrap()
             .unwrap();
         assert!(missing.is_empty(), "{missing:?}");
@@ -1011,7 +1054,7 @@ mod tests {
         let dir = scratch_dir("compact");
         let live_facts = |state: &AppState| -> Vec<(String, String, String, u64)> {
             let mut facts = state
-                .read_context("sake", |context| {
+                .read_context(&state.id_of("sake"), |context| {
                     context
                         .query_any(&[], &[], &[])
                         .into_iter()
@@ -1040,7 +1083,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![
                         assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                         assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1050,11 +1093,13 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap();
-            state.retract_source("sake", "gone.md").unwrap();
+            state
+                .retract_source(&state.id_of("sake"), "gone.md")
+                .unwrap();
             before = live_facts(&state);
 
             let outcome = state
-                .compact_context("sake", Deadline::unbounded())
+                .compact_context(&state.id_of("sake"), Deadline::unbounded())
                 .unwrap();
             assert!(
                 outcome.bytes_after < outcome.bytes_before,
@@ -1072,7 +1117,7 @@ mod tests {
             // sequence keeps counting from where it was.
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "創業年", "1907年", 1.0, Some("keep.md"))],
                     Deadline::unbounded(),
                 )
@@ -1110,7 +1155,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1119,14 +1164,16 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("sake", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("sake"), "gone.md")
+            .unwrap();
 
         // The rebuild itself does no persistence I/O — only the
         // trailing `flush_entry` does, staging the image as its very
         // first op. Failing op #0 lands squarely on that stage.
         fail_persistence_ops_after(0);
         let outcome = state
-            .compact_context("sake", Deadline::unbounded())
+            .compact_context(&state.id_of("sake"), Deadline::unbounded())
             .expect("the rebuild succeeds even though its publish will fail");
         let past_end = clear_persistence_fault();
         assert!(!past_end, "the flush's own stage must be what failed");
@@ -1140,7 +1187,7 @@ mod tests {
             "the rebuilt image never reached disk: {outcome:?}"
         );
 
-        let entry = state.lookup("sake").expect("still registered");
+        let entry = state.lookup_named("sake").expect("still registered");
         assert!(
             entry.dirty.load(Ordering::Relaxed),
             "a failed publish must leave the entry dirty for the next flush tick to retry"
@@ -1176,7 +1223,7 @@ mod tests {
             })
             .collect();
         state
-            .add_associations("generated", ops, Deadline::unbounded())
+            .add_associations(&state.id_of("generated"), ops, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -1191,13 +1238,17 @@ mod tests {
                     BTreeMap::from([(alias.to_string(), canonical.to_string())]),
                 ),
             };
-            let _ = state.add_aliases("generated", &concepts, &labels).unwrap();
+            let _ = state
+                .add_aliases(&state.id_of("generated"), &concepts, &labels)
+                .unwrap();
         }
 
         for retraction in retractions {
             match retraction {
                 RetractionInput::Source(source) => {
-                    state.retract_source("generated", source).unwrap();
+                    state
+                        .retract_source(&state.id_of("generated"), source)
+                        .unwrap();
                 }
                 RetractionInput::Association {
                     subject,
@@ -1205,7 +1256,7 @@ mod tests {
                     object,
                 } => {
                     state
-                        .retract_association("generated", subject, label, object)
+                        .retract_association(&state.id_of("generated"), subject, label, object)
                         .unwrap();
                 }
             }
@@ -1240,7 +1291,7 @@ mod tests {
             prop_assert_eq!(state.flush_dirty(), vec!["generated"]);
 
             let (expected_image, expected_seq, expected_floor, expected_stats) = state
-                .read_context("generated", |context| {
+                .read_context(&state.id_of("generated"), |context| {
                     let (mut canonical, stats) =
                         context.compacted(Deadline::unbounded()).unwrap();
                     canonical.set_applied_seq(context.applied_seq());
@@ -1255,12 +1306,12 @@ mod tests {
                 .unwrap();
 
             let outcome = state
-                .compact_context("generated", Deadline::unbounded())
+                .compact_context(&state.id_of("generated"), Deadline::unbounded())
                 .unwrap();
             prop_assert_eq!(outcome.dead_edges, expected_stats.dead_edges);
             prop_assert_eq!(outcome.aliases_dropped, expected_stats.aliases_dropped);
             state
-                .read_context("generated", |context| {
+                .read_context(&state.id_of("generated"), |context| {
                     assert_eq!(context.to_bytes(), expected_image);
                     assert_eq!(context.applied_seq(), expected_seq);
                     assert_eq!(context.dice_floor(), expected_floor);
@@ -1270,7 +1321,7 @@ mod tests {
             prop_assert_eq!(&disk_image, &expected_image);
 
             let second = state
-                .compact_context("generated", Deadline::unbounded())
+                .compact_context(&state.id_of("generated"), Deadline::unbounded())
                 .unwrap();
             prop_assert_eq!(second.dead_edges, 0);
             prop_assert_eq!(second.aliases_dropped, 0);
@@ -1278,7 +1329,7 @@ mod tests {
 
             let reloaded = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             reloaded
-                .read_context("generated", |context| {
+                .read_context(&reloaded.id_of("generated"), |context| {
                     assert_eq!(context.to_bytes(), expected_image);
                     assert_eq!(context.applied_seq(), expected_seq);
                     assert_eq!(context.dice_floor(), expected_floor);
@@ -1304,7 +1355,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "clean",
+                &state.id_of("clean"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1321,7 +1372,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "mild",
+                &state.id_of("mild"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1332,7 +1383,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("mild", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("mild"), "gone.md")
+            .unwrap();
 
         state
             .create("rotten", ContextMeta::default())
@@ -1340,7 +1393,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "rotten",
+                &state.id_of("rotten"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1349,7 +1402,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("rotten", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("rotten"), "gone.md")
+            .unwrap();
 
         let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
         assert!(!outcome.deadline_exceeded);
@@ -1379,7 +1434,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "rotten",
+                &state.id_of("rotten"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1388,7 +1443,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("rotten", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("rotten"), "gone.md")
+            .unwrap();
 
         state
             .create("other", ContextMeta::default())
@@ -1396,7 +1453,7 @@ mod tests {
             .unwrap();
         // Touching "other" evicts "rotten" to cold under the one-byte budget.
         state
-            .read_context("other", |context| context.association_count())
+            .read_context(&state.id_of("other"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert!(
@@ -1432,7 +1489,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "mild",
+                &state.id_of("mild"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1443,7 +1500,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("mild", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("mild"), "gone.md")
+            .unwrap();
 
         state
             .create("semi", ContextMeta::default())
@@ -1451,7 +1510,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "semi",
+                &state.id_of("semi"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
@@ -1463,7 +1522,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("semi", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("semi"), "gone.md")
+            .unwrap();
 
         state
             .create("rotten", ContextMeta::default())
@@ -1471,7 +1532,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "rotten",
+                &state.id_of("rotten"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1481,36 +1542,39 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("rotten", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("rotten"), "gone.md")
+            .unwrap();
 
         // mild sits at 1/4 — under the 0.5 default; semi at 3/5,
         // rotten at 2/3: both qualify, worst first.
-        let (name, ratio) = state
+        let (candidate, ratio) = state
             .auto_compact_candidate(&HashSet::new())
             .expect("rotten is past the trigger");
-        assert_eq!(name, "rotten");
+        assert_eq!(candidate, state.id_of("rotten"), "candidates carry ids");
         assert!((ratio - 2.0 / 3.0).abs() < 1e-9, "{ratio}");
 
         // An oversized rebuild remembered by the flusher steps the
         // selection to the next-worst qualifier — the loop keeps
-        // working around a context it cannot finish.
-        let mut skip: HashSet<String> = ["rotten".to_string()].into();
-        let (name, ratio) = state
+        // working around a context it cannot finish. The skip set
+        // keys on ids too (rename-stable).
+        let mut skip: HashSet<String> = [state.id_of("rotten")].into();
+        let (candidate, ratio) = state
             .auto_compact_candidate(&skip)
             .expect("semi is the next-worst qualifier");
-        assert_eq!(name, "semi");
+        assert_eq!(candidate, state.id_of("semi"));
         assert!((ratio - 3.0 / 5.0).abs() < 1e-9, "{ratio}");
 
         // Skipping every qualifier must not promote mild from under
         // the trigger.
-        skip.insert("semi".to_string());
+        skip.insert(state.id_of("semi"));
         assert_eq!(state.auto_compact_candidate(&skip), None);
 
         state
-            .compact_context("rotten", Deadline::unbounded())
+            .compact_context(&state.id_of("rotten"), Deadline::unbounded())
             .unwrap();
         state
-            .compact_context("semi", Deadline::unbounded())
+            .compact_context(&state.id_of("semi"), Deadline::unbounded())
             .unwrap();
         assert_eq!(
             state.auto_compact_candidate(&HashSet::new()),
@@ -1544,7 +1608,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "rotten",
+                &state.id_of("rotten"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1553,7 +1617,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("rotten", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("rotten"), "gone.md")
+            .unwrap();
 
         assert_eq!(state.auto_compact_candidate(&HashSet::new()), None);
 
@@ -1573,19 +1639,21 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "ghost",
+                &state.id_of("ghost"),
                 vec![assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        state.retract_source("ghost", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("ghost"), "gone.md")
+            .unwrap();
 
         // Simulates the race `delete()` can open: still a member of the
         // registry map (so the sweep's snapshot picks it up) but its
         // slot already flipped to the tombstone, as if a concurrent
         // `delete()` had reached that half of its two-step teardown.
-        let entry = state.lookup("ghost").expect("just created");
+        let entry = state.lookup_named("ghost").expect("just created");
         entry.inner.write().slot = Slot::Deleted;
 
         let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
@@ -1612,7 +1680,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1621,7 +1689,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        state.retract_source("sake", "gone.md").unwrap();
+        state
+            .retract_source(&state.id_of("sake"), "gone.md")
+            .unwrap();
 
         // Flush so the cached `inner.stats` snapshot `evict_entry`
         // caches on the way down actually reflects the retraction
@@ -1632,7 +1702,7 @@ mod tests {
         // will actually try to load it from disk rather than short-
         // circuiting on an already-hot slot.
         state.flush_dirty();
-        let entry = state.lookup("sake").expect("just created");
+        let entry = state.lookup_named("sake").expect("just created");
         assert!(
             state.evict_entry("sake", &entry),
             "sanity: an unpinned context must evict cleanly"
@@ -1690,7 +1760,7 @@ mod tests {
         assert_eq!(sake.stats.associations, 1);
 
         let recalled = state
-            .read_context("sake", |context| context.recall("青嶺").len())
+            .read_context(&state.id_of("sake"), |context| context.recall("青嶺").len())
             .map_err(|_| "reload")
             .unwrap();
         assert_eq!(recalled, 1);
@@ -1706,19 +1776,20 @@ mod tests {
             state.create(name, ContextMeta::default()).unwrap();
         }
 
-        let (total, first) = state.directory_page(None, 2);
+        let (total, first) = state.directory_page(None, None, 2);
         assert_eq!(total, 3);
         let names: Vec<&str> = first.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["apple", "banana"]);
 
-        let (total, second) = state.directory_page(Some("banana"), 2);
+        let (total, second) = state.directory_page(Some("banana"), None, 2);
         assert_eq!(total, 3, "total stays constant across pages");
         let names: Vec<&str> = second.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["cherry"]);
 
         // Deleting a context drops it from the very next page.
-        state.delete("apple").unwrap().unwrap();
-        let (total, page) = state.directory_page(None, 10);
+        let apple = state.stem_of("apple").unwrap();
+        state.delete(&apple).unwrap().unwrap();
+        let (total, page) = state.directory_page(None, None, 10);
         assert_eq!(total, 2);
         let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["banana", "cherry"]);
@@ -1750,7 +1821,7 @@ mod tests {
         // limit 1 makes the whole seek window ("apple" alone) lose the
         // race — a false end of directory would stop right here and
         // never see "banana".
-        let (total, page) = state.directory_page(None, 1);
+        let (total, page) = state.directory_page(None, None, 1);
         assert_eq!(total, 2);
         let names: Vec<&str> = page.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["banana"]);

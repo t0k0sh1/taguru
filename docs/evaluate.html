@@ -103,7 +103,7 @@
                     exits 3. Without it every completed run exits 0 and is
                     report-only — a stderr line says so, so a CI job that
                     forgot the flag does not pass silently.
---assembly           swap the passage lane for POST /contexts/{name}/evidence
+--assembly           swap the passage lane for POST /contexts/{id}/evidence
                     (see <a href="evidence.html">evidence assembly</a>) — the
                     structural lane itself never changes, so a baseline/
                     assembly run pair stays comparable on coverage and on
@@ -121,7 +121,7 @@
                     helps at equal budget</a>. None given leaves baseline
                     untruncated, matching every run before this flag
                     existed — but --assembly always sends a budget to
-                    POST /contexts/{name}/evidence (that endpoint has no
+                    POST /contexts/{id}/evidence (that endpoint has no
                     unbudgeted mode), so an --assembly run with no flag
                     still runs under the server's own defaults
                     (max_items 40, max_bytes 65536, max_tokens 4000).
@@ -246,7 +246,7 @@
 
     <h3 id="explain"><code>explain_resolve</code> / <code>explain_search</code>: one query, always 200</h3>
     <p>
-      <code>POST /contexts/{name}/resolve/explain</code>,
+      <code>POST /contexts/{id}/resolve/explain</code>,
       <code>/resolve_label/explain</code>, and <code>/sources/search/explain</code> — exposed to
       an LLM client as the <code>explain_resolve</code>, <code>explain_resolve_label</code>, and
       <code>explain_search</code> MCP tools — diagnose exactly one cue against one expected name,
@@ -332,7 +332,7 @@
           <tr>
             <td>Passage</td>
             <td>Always</td>
-            <td><code>POST /contexts/{name}/sources/search</code> with <code>{query, limit, semantic_floor, tags, since, until}</code></td>
+            <td><code>POST /contexts/{id}/sources/search</code> with <code>{query, limit, semantic_floor, tags, since, until}</code></td>
           </tr>
           <tr>
             <td>Structural</td>
@@ -342,7 +342,7 @@
           <tr>
             <td>Citation</td>
             <td>The case declares <code>expected_citations</code></td>
-            <td>One <code>POST /contexts/{name}/citations</code> call per entry, strictly sequential</td>
+            <td>One <code>POST /contexts/{id}/citations</code> call per entry, strictly sequential</td>
           </tr>
         </tbody>
       </table>
@@ -433,7 +433,7 @@
           <tr><td><code>expected_citations[]</code></td><td><code>{source, paragraph, section?, quote?}</code> — drives the citation lane. See below for <code>section</code>'s three-valued semantics.</td></tr>
           <tr><td><code>options.limit</code></td><td>Per-case search limit, <code>1..=1000</code>; omitted means 10. Also the <i>k</i> in this case's own <code>recall_at_k</code> — there is no fixed recall@1/@5/@10 family, one value per case at that case's own limit.</td></tr>
           <tr><td><code>options.floor</code></td><td>Passage-lane <code>semantic_floor</code> override.</td></tr>
-          <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim. Under <code>--assembly</code> (#308), <code>POST /contexts/{name}/evidence</code> has no matching request field — a case declaring any of these still runs, but the filter is silently not applied unless said out loud, so <code>evaluate</code> emits one warning per such case.</td></tr>
+          <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim. Under <code>--assembly</code> (#308), <code>POST /contexts/{id}/evidence</code> has no matching request field — a case declaring any of these still runs, but the filter is silently not applied unless said out loud, so <code>evaluate</code> emits one warning per such case.</td></tr>
         </tbody>
       </table>
     </div>
@@ -473,7 +473,7 @@
           <tr><td><code>coverage.concepts</code>, <code>.labels</code></td><td>distribution</td><td>Fraction of <code>expected_concepts</code>/<code>expected_labels</code> present in the top-tier <code>resolved_names[]</code>, matched with normalized entry folding.</td></tr>
           <tr><td><code>coverage.associations</code></td><td>distribution</td><td>Fraction of <code>expected_associations</code> whose <code>/query</code> call both ran (all three positions pinned) and returned <code>total &gt;= 1</code>. No client-side string comparison — positions are pinned server-side.</td></tr>
           <tr><td><code>citations.recall</code></td><td>distribution</td><td>Fraction of <code>expected_citations</code> whose <code>(source, paragraph)</code> was <i>served</i> — appears among passage hits or the structural lane's own attribution locators. Whether retrieval surfaced the evidence.</td></tr>
-          <tr><td><code>citations.locator_validity</code></td><td>distribution</td><td>Fraction of <code>expected_citations</code> whose <code>POST /contexts/{name}/citations</code> call resolved, with a matching <code>section</code> (when declared) and <code>quote</code> (when declared). Whether the locator itself is correct — runs even on a case whose passage lane missed outright.</td></tr>
+          <tr><td><code>citations.locator_validity</code></td><td>distribution</td><td>Fraction of <code>expected_citations</code> whose <code>POST /contexts/{id}/citations</code> call resolved, with a matching <code>section</code> (when declared) and <code>quote</code> (when declared). Whether the locator itself is correct — runs even on a case whose passage lane missed outright.</td></tr>
           <tr><td><code>citations.resolved</code>, <code>.no_source</code>, <code>.no_paragraph</code></td><td>ratio (run)</td><td>Outcome share across every citation call made, regardless of case.</td></tr>
           <tr><td><code>citations.section_match</code>, <code>.quote_match</code></td><td>ratio (run)</td><td>Narrower denominators: only checks that declared <code>section</code> (explicit <code>null</code> included) or <code>quote</code>.</td></tr>
           <tr><td><code>lanes.structural_hit</code>, <code>.passage_hit</code>, <code>.both</code>, <code>.neither</code></td><td>ratio (run)</td><td>The lane cross-tab, denominator restricted to cases declaring both a structural and a source expectation whose passage lane completed.</td></tr>

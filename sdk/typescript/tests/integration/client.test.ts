@@ -57,9 +57,10 @@ afterAll(() => {
   server.stop();
 });
 
-async function seed(name: string): Promise<void> {
-  await client.contexts.create(name, { description: "青嶺酒造という架空の酒蔵の知識" });
-  const ctx = client.context(name);
+async function seed(name: string): Promise<string> {
+  // Creates and seeds a context named `name`, returning its id.
+  const row = await client.contexts.create(name, { description: "青嶺酒造という架空の酒蔵の知識" });
+  const ctx = client.context(row.id);
   await ctx.addAssociations([
     { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
     { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
@@ -68,39 +69,45 @@ async function seed(name: string): Promise<void> {
     { subject: "青嶺酒造", label: "行う", object: "大量生産", weight: -1.0, source: "docs/aomine.md", paragraph: 2 },
   ]);
   await ctx.storePassages({ "docs/aomine.md": AOMINE_DOC });
+  return row.id;
 }
 
 describe("context lifecycle", () => {
   it("creates, lists, updates, deletes", async () => {
     const name = fresh();
-    expect(await client.contexts.exists(name)).toBe(false);
-    expect(await client.contexts.create(name, { description: "d" })).toBe(true);
-    await expect(client.contexts.create(name)).rejects.toMatchObject({ code: "already_exists" });
+    const row = await client.contexts.create(name, { description: "d" });
+    expect(await client.contexts.exists(row.id)).toBe(true);
+    expect(row.name).toBe(name);
+    // Names are not unique (#964, issue #961 decision 1): a duplicate
+    // create mints a second, distinct context rather than conflicting.
+    const twin = await client.contexts.create(name);
+    expect(twin.id).not.toBe(row.id);
+    expect(twin.name).toBe(name);
+    expect(await client.contexts.delete(twin.id)).toBe(true);
 
-    const entry = await client.contexts.get(name);
+    const entry = await client.contexts.get(row.id);
     expect(entry.description).toBe("d");
 
-    const meta = await client.contexts.update(name, { description: "d2", dice_floor: 0.25 });
+    const meta = await client.contexts.update(row.id, { description: "d2", dice_floor: 0.25 });
     expect(meta.description).toBe("d2");
     expect(meta.dice_floor).toBe(0.25);
 
-    const names: string[] = [];
-    for await (const row of client.contexts.iter({ limit: 2 })) {
-      names.push(row.id);
+    const ids: string[] = [];
+    for await (const listed of client.contexts.iter({ limit: 2 })) {
+      ids.push(listed.id);
     }
-    expect(names).toContain(name);
+    expect(ids).toContain(row.id);
 
     const renamed = `${name}-renamed`;
-    expect(await client.contexts.rename(name, renamed)).toBe(true);
-    const renamedAway = await client.contexts.get(name).catch((caught: unknown) => caught);
-    expect(renamedAway).toBeInstanceOf(NotFoundError);
-    expect((renamedAway as NotFoundError).code).toBe("no_context");
-    const movedEntry = await client.contexts.get(renamed);
+    expect(await client.contexts.rename(row.id, renamed)).toBe(true);
+    // The id — and so the path — never moves; only the name column does.
+    const movedEntry = await client.contexts.get(row.id);
+    expect(movedEntry.name).toBe(renamed);
     expect(movedEntry.description).toBe("d2");
     expect(movedEntry.dice_floor).toBe(0.25);
 
-    expect(await client.contexts.delete(renamed)).toBe(true);
-    const missing = await client.contexts.get(renamed).catch((caught: unknown) => caught);
+    expect(await client.contexts.delete(row.id)).toBe(true);
+    const missing = await client.contexts.get(row.id).catch((caught: unknown) => caught);
     expect(missing).toBeInstanceOf(NotFoundError);
     expect((missing as NotFoundError).code).toBe("no_context");
   });
@@ -109,8 +116,8 @@ describe("context lifecycle", () => {
 describe("graph writes and reads", () => {
   it("accumulates weight and validates", async () => {
     const name = fresh();
-    await client.contexts.create(name);
-    const ctx = client.context(name);
+    const contextId = (await client.contexts.create(name)).id;
+    const ctx = client.context(contextId);
     const op = { subject: "s", label: "l", object: "o", weight: 1.0, source: "a" };
     expect((await ctx.addAssociations([op])).applied).toBe(1);
     expect((await ctx.addAssociations([{ ...op, source: "b" }])).applied).toBe(1);
@@ -127,13 +134,13 @@ describe("graph writes and reads", () => {
     await expect(ctx.addAssociations([{ ...op, subject: "" }])).rejects.toBeInstanceOf(
       ValidationError,
     );
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("serves the read surface", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     expect((await ctx.recall("青嶺酒造")).total).toBeGreaterThanOrEqual(4);
 
@@ -181,13 +188,13 @@ describe("graph writes and reads", () => {
       iterated.push(label);
     }
     expect(iterated).toEqual(labels.labels);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("resumes recall pagination from a match object without a 400 (MatchCursor structural trap)", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     const first = await ctx.recall("青嶺酒造", { limit: 1 });
     expect(first.matches).toHaveLength(1);
@@ -202,13 +209,13 @@ describe("graph writes and reads", () => {
     expect(second.matches).toHaveLength(1);
     expect(second.matches[0]!.object).not.toEqual(first.matches[0]!.object);
 
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("resolves cues across kinds and floors", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     const exact = await ctx.resolve("青嶺酒造");
     expect(exact[0]).toMatchObject({ name: "青嶺酒造", kind: "exact", tier: "lexical", score: 1.0 });
@@ -221,15 +228,15 @@ describe("graph writes and reads", () => {
     expect(wide.length).toBeGreaterThanOrEqual(narrow.length);
 
     expect((await ctx.resolveLabel("杜氏"))[0]!.name).toBe("杜氏");
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
 describe("aliases", () => {
   it("registers, iterates, re-registers as a no-op, removes", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     expect(
       await ctx.addAliases({ concepts: { "Aomine Brewery": "青嶺酒造" }, labels: { brewer: "杜氏" } }),
@@ -257,15 +264,15 @@ describe("aliases", () => {
 
     expect(await ctx.removeAliases({ concepts: ["Aomine Brewery"], labels: ["brewer"] })).toBe(2);
     expect((await ctx.getAliases()).concepts).toEqual({});
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
 describe("sources and citations", () => {
   it("stores, lists, looks up, searches, cites, retracts", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     const stored = await ctx.storePassages(
       { "docs/extra.md": "第一段落。\n\n第二段落。" },
@@ -307,13 +314,13 @@ describe("sources and citations", () => {
 
     const retracted = await ctx.retractSource("docs/extra.md");
     expect(retracted.passage_removed).toBe(true);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("source metadata lists back under entries and pre-filters search (#167)", async () => {
     const name = fresh();
-    await client.contexts.create(name, { description: "metadata" });
-    const ctx = client.context(name);
+    const contextId = (await client.contexts.create(name, { description: "metadata" })).id;
+    const ctx = client.context(contextId);
     await ctx.storePassages(
       {
         "a.md": "共通語の資料。\n\n酒の由来について。",
@@ -355,7 +362,7 @@ describe("sources and citations", () => {
     });
     expect(new Set(cross.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
     expect(cross.plan.contexts[0]!.filter?.eligible_sources).toBe(1);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("searchCommunities refuses without an artifact and verdicts staleness with one", async () => {
@@ -363,14 +370,14 @@ describe("sources and citations", () => {
     // the same shapes by hand through the API is exactly what makes it
     // an ordinary context.
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     await expect(ctx.searchCommunities("何がテーマか")).rejects.toBeInstanceOf(NotFoundError);
 
     const derived = `${name}::communities`;
-    await client.contexts.create(derived);
-    const revision = (await client.contexts.get(name)).revision;
+    const derivedId = (await client.contexts.create(derived)).id;
+    const revision = (await client.contexts.get(contextId)).revision;
     const manifest = {
       type: "communities_manifest",
       algorithm: "louvain-cc/1",
@@ -381,7 +388,7 @@ describe("sources and citations", () => {
         { id: "L0-0", level: 0, fingerprint: "00aa00aa00aa00aa", concept_count: 3 },
       ],
     };
-    const dctx = client.context(derived);
+    const dctx = client.context(derivedId);
     await dctx.storePassages({
       "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
       "communities:manifest": JSON.stringify(manifest),
@@ -406,52 +413,52 @@ describe("sources and citations", () => {
     expect(page.stale).toBe(true);
     expect(page.revision.current_graph).toBeGreaterThan(page.revision.recorded_graph);
 
-    await client.contexts.delete(derived);
-    await client.contexts.delete(name);
+    await client.contexts.delete(derivedId);
+    await client.contexts.delete(contextId);
   });
 
   it("answers 501 for embeddings refresh without a provider", async () => {
     const name = fresh();
-    await client.contexts.create(name);
+    const contextId = (await client.contexts.create(name)).id;
     const error = await client
-      .context(name)
+      .context(contextId)
       .refreshEmbeddings()
       .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(EmbeddingUnavailableError);
     expect((error as EmbeddingUnavailableError).reason).toBe("not_configured");
     expect((error as EmbeddingUnavailableError).code).toBe("embeddings_unconfigured");
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("reports no embedding provider configured", async () => {
     const name = fresh();
-    await client.contexts.create(name);
-    const status = await client.context(name).embeddingsStatus();
+    const contextId = (await client.contexts.create(name)).id;
+    const status = await client.context(contextId).embeddingsStatus();
     expect(status.provider_model).toBeNull();
     expect(status.glosses).toBeUndefined();
     expect(status.passages).toBeUndefined();
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("analyzeCommunities returns NDJSON with a header line", async () => {
     const name = fresh();
-    await seed(name);
-    const body = await client.context(name).analyzeCommunities();
+    const contextId = await seed(name);
+    const body = await client.context(contextId).analyzeCommunities();
     const lines = body.split("\n").filter((line) => line.length > 0);
     expect(lines.length).toBeGreaterThan(0);
     const header = JSON.parse(lines[0]!);
     expect(header.type).toBe("communities");
     expect(header.version).toBe("2026-09-17");
     expect(header.context).toBe(name);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
 describe("transfer and maintenance", () => {
   it("round-trips export → import idempotently", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
     await ctx.addAliases({ concepts: { Aomine: "青嶺酒造" } });
     const stream = await ctx.export();
 
@@ -460,7 +467,13 @@ describe("transfer and maintenance", () => {
     const outcomes = await client.importBatches(renamed);
     expect(outcomes.batches.every((o) => o.context === restoredName)).toBe(true);
 
-    const restored = client.context(restoredName);
+    let restoredId: string | undefined;
+    for await (const listed of client.contexts.iter()) {
+      if (listed.name === restoredName) {
+        restoredId = listed.id;
+      }
+    }
+    const restored = client.context(restoredId!);
     const before = (await restored.query({ subject: "青嶺酒造", label: "杜氏" })).matches[0]!;
     await client.importBatches(renamed);
     const after = (await restored.query({ subject: "青嶺酒造", label: "杜氏" })).matches[0]!;
@@ -474,51 +487,51 @@ describe("transfer and maintenance", () => {
     }
     expect(Buffer.concat(chunks).toString("utf-8")).toBe(stream);
 
-    await client.contexts.delete(name);
-    await client.contexts.delete(restoredName);
+    await client.contexts.delete(contextId);
+    await client.contexts.delete(restoredId!);
   });
 
   it("compacts and flushes", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
     // Freshly seeded → dirty → flush names it. (Compact persists as part of
     // its rebuild, so the order matters: flush first.)
     expect(await client.flush()).toContain(name);
     await ctx.retractSource("docs/aomine.md");
     const outcome = await ctx.compact();
     expect(outcome.bytes_after).toBeLessThanOrEqual(outcome.bytes_before);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("promotes a source and previews with dry_run", async () => {
     const name = fresh();
     const destination = `${name}-dest`;
-    await seed(name);
-    await client.contexts.create(destination);
-    const scratch = client.context(name);
+    const contextId = await seed(name);
+    const destinationId = (await client.contexts.create(destination)).id;
+    const scratch = client.context(contextId);
 
     const preview = await scratch.promote(destination, ["docs/aomine.md"], { dry_run: true });
     expect(preview.batches).toHaveLength(1);
     expect(preview.audit).toBeUndefined();
     // A dry run writes nothing.
-    expect((await client.context(destination).listSources()).total).toBe(0);
+    expect((await client.context(destinationId).listSources()).total).toBe(0);
 
     const outcome = await scratch.promote(destination, ["docs/aomine.md"]);
     expect(outcome.batches[0]!.source).toBe("docs/aomine.md");
     expect(outcome.batches[0]!.context).toBe(destination);
     expect(outcome.audit).toBeDefined();
     expect(outcome.audit!.detector).toBe("consolidation/1");
-    expect((await client.context(destination).listSources()).total).toBe(1);
+    expect((await client.context(destinationId).listSources()).total).toBe(1);
 
-    await client.contexts.delete(destination);
-    await client.contexts.delete(name);
+    await client.contexts.delete(destinationId);
+    await client.contexts.delete(contextId);
   });
 
   it("audits vocabulary twins", async () => {
     const name = fresh();
-    await client.contexts.create(name);
-    const ctx = client.context(name);
+    const contextId = (await client.contexts.create(name)).id;
+    const ctx = client.context(contextId);
     await ctx.addAssociations([
       { subject: "株式会社青嶺", label: "kind", object: "会社", weight: 1.0 },
       { subject: "青嶺株式会社", label: "kind", object: "会社", weight: 1.0 },
@@ -529,13 +542,13 @@ describe("transfer and maintenance", () => {
         (pair) => new Set([pair.a, pair.b]).size === 2 && [pair.a, pair.b].includes("株式会社青嶺"),
       ),
     ).toBe(true);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("audits drift: unsourced weight and dead-canonical aliases", async () => {
     const name = fresh();
-    await client.contexts.create(name);
-    const ctx = client.context(name);
+    const contextId = (await client.contexts.create(name)).id;
+    const ctx = client.context(contextId);
     // No `source`: this weight lands unexplained by any named source.
     await ctx.addAssociations([
       { subject: "青嶺酒造", label: "kind", object: "会社", weight: 1.0 },
@@ -559,13 +572,13 @@ describe("transfer and maintenance", () => {
 
     const withTwins = await ctx.auditDrift({ include_twins: true, dice_floor: 0.4 });
     expect(withTwins.twins).not.toBeNull();
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("resumes drift-audit pagination from an unsourced entry's association (MatchCursor structural trap)", async () => {
     const name = fresh();
-    await client.contexts.create(name);
-    const ctx = client.context(name);
+    const contextId = (await client.contexts.create(name)).id;
+    const ctx = client.context(contextId);
     // Two unsourced edges so a limit:1 page has somewhere to resume from.
     await ctx.addAssociations([{ subject: "青嶺酒造", label: "kind", object: "会社", weight: 1.0 }]);
     await ctx.addAssociations([{ subject: "高瀬", label: "kind", object: "杜氏", weight: 1.0 }]);
@@ -583,7 +596,7 @@ describe("transfer and maintenance", () => {
       first.unsourced[0]!.association.subject,
     );
 
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
@@ -601,15 +614,15 @@ describe("auth and limits", () => {
 
   it("denies writes to a key granted only Read", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = reader.context(name);
+    const contextId = await seed(name);
+    const ctx = reader.context(contextId);
     expect((await ctx.recall("青嶺酒造")).total).toBeGreaterThan(0);
     await expect(
       ctx.addAssociations([{ subject: "s", label: "l", object: "o", weight: 1.0 }]),
     ).rejects.toBeInstanceOf(PermissionDeniedError);
-    await expect(reader.contexts.delete(name)).rejects.toBeInstanceOf(PermissionDeniedError);
+    await expect(reader.contexts.delete(contextId)).rejects.toBeInstanceOf(PermissionDeniedError);
     await expect(reader.flush()).rejects.toBeInstanceOf(PermissionDeniedError);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 
   it("rate limits with retry-after and caps bodies with 413", async () => {
@@ -621,7 +634,7 @@ describe("auth and limits", () => {
     try {
       const c = new Taguru({ base_url: limited.baseUrl, api_key: "rl-token", retries: 0 });
       await c.waitUntilReady({ timeout: 30 });
-      await c.contexts.create("cap");
+      const capId = (await c.contexts.create("cap")).id;
 
       const big = Array.from({ length: 200 }, (_, i) => ({
         subject: `s${i}`,
@@ -630,7 +643,7 @@ describe("auth and limits", () => {
         weight: 1.0,
       }));
       const capped = await c
-        .context("cap")
+        .context(capId)
         .addAssociations(big)
         .catch((caught: unknown) => caught);
       expect(capped).toBeInstanceOf(PayloadTooLargeError);
@@ -655,9 +668,9 @@ describe("auth and limits", () => {
 describe("retrieve end to end", () => {
   it("answers the qa_recall-style question with citations", async () => {
     const name = fresh();
-    await seed(name);
+    const contextId = await seed(name);
     const result = await client
-      .context(name)
+      .context(contextId)
       .retrieve("青嶺酒造", { text_fallback_query: "杜氏は高瀬である" });
 
     expect(result.resolved["青嶺酒造"]![0]!.kind).toBe("exact");
@@ -670,15 +683,15 @@ describe("retrieve end to end", () => {
       expect(result.citations.get(key)!.text).toContain("高瀬");
     }
     expect(result.passage_hits).toEqual([]);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
 describe("assembleEvidence end to end", () => {
   it("assembles a budgeted evidence package from a live corpus", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     const pkg = await ctx.assembleEvidence("青嶺酒造", { text_fallback_query: "杜氏は高瀬である" });
     expect(pkg.items.length).toBeGreaterThan(0);
@@ -699,31 +712,34 @@ describe("assembleEvidence end to end", () => {
       expect(total).toBe(tight.omitted_total);
     }
 
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });
 
 describe("groups and cross-context search", () => {
   /** Two contexts holding one distinct fact (graph + passage) each. */
-  async function seededPair(base: string): Promise<[string, string]> {
+  /** Returns `[sakeName, teaName, sakeId, teaId]` — group members and
+   * cross-search bodies take the names (until #965); `/contexts/{id}/…`
+   * calls take the ids (#964). */
+  async function seededPair(base: string): Promise<[string, string, string, string]> {
     const sake = `${base}-sake`;
     const tea = `${base}-tea`;
-    await client.contexts.create(sake, { description: "酒蔵の知識" });
-    await client.contexts.create(tea, { description: "茶園の知識" });
-    await client.context(sake).addAssociations([
+    const sakeId = (await client.contexts.create(sake, { description: "酒蔵の知識" })).id;
+    const teaId = (await client.contexts.create(tea, { description: "茶園の知識" })).id;
+    await client.context(sakeId).addAssociations([
       { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "sake.md", paragraph: 0 },
     ]);
-    await client.context(tea).addAssociations([
+    await client.context(teaId).addAssociations([
       { subject: "青嶺茶園", label: "代表銘柄", object: "露霜", weight: 1.0, source: "tea.md", paragraph: 0 },
     ]);
-    await client.context(sake).storePassages({ "sake.md": "青嶺酒造の代表銘柄は「青嶺」である。" });
-    await client.context(tea).storePassages({ "tea.md": "青嶺茶園の代表銘柄は「露霜」である。" });
-    return [sake, tea];
+    await client.context(sakeId).storePassages({ "sake.md": "青嶺酒造の代表銘柄は「青嶺」である。" });
+    await client.context(teaId).storePassages({ "tea.md": "青嶺茶園の代表銘柄は「露霜」である。" });
+    return [sake, tea, sakeId, teaId];
   }
 
   it("creates, nests, updates by deltas, deletes the bundling only", async () => {
     const base = fresh();
-    const [sake, tea] = await seededPair(base);
+    const [sake, tea, sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
     const child = `${base}-child`;
 
@@ -770,20 +786,20 @@ describe("groups and cross-context search", () => {
     expect(await client.groups.delete(renamedGroup)).toBe(true);
     await expect(client.groups.get(renamedGroup)).rejects.toMatchObject({ code: "no_group" });
     expect(await client.groups.exists(child)).toBe(true);
-    expect(await client.contexts.exists(sake)).toBe(true);
+    expect(await client.contexts.exists(sakeId)).toBe(true);
 
     await expect(reader.groups.create(`${base}-denied`)).rejects.toBeInstanceOf(
       PermissionDeniedError,
     );
 
     await client.groups.delete(child);
-    await client.contexts.delete(sake);
-    await client.contexts.delete(tea);
+    await client.contexts.delete(sakeId);
+    await client.contexts.delete(teaId);
   });
 
   it("tags every cross-context match and resolves groups", async () => {
     const base = fresh();
-    const [sake, tea] = await seededPair(base);
+    const [sake, tea, sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
     await client.groups.create(group, { contexts: [sake, tea] });
 
@@ -818,13 +834,13 @@ describe("groups and cross-context search", () => {
     });
 
     await client.groups.delete(group);
-    await client.contexts.delete(sake);
-    await client.contexts.delete(tea);
+    await client.contexts.delete(sakeId);
+    await client.contexts.delete(teaId);
   });
 
   it("round-trips a group through export → import", async () => {
     const base = fresh();
-    const [sake, tea] = await seededPair(base);
+    const [sake, tea, sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
     await client.groups.create(group, { description: "蔵元一式", contexts: [sake, tea] });
 
@@ -848,16 +864,16 @@ describe("groups and cross-context search", () => {
     expect((await client.groups.get(group)).contexts).toEqual([sake, tea].sort());
 
     await client.groups.delete(group);
-    await client.contexts.delete(sake);
-    await client.contexts.delete(tea);
+    await client.contexts.delete(sakeId);
+    await client.contexts.delete(teaId);
   });
 });
 
 describe("retract association", () => {
   it("withdraws one edge outright and answers found-nothing honestly", async () => {
     const name = fresh();
-    await seed(name);
-    const ctx = client.context(name);
+    const contextId = await seed(name);
+    const ctx = client.context(contextId);
 
     const outcome = await ctx.retractAssociation("青嶺酒造", "代表銘柄", "青嶺");
     expect(outcome.retracted).toBe(true);
@@ -872,6 +888,6 @@ describe("retract association", () => {
     const dead = await ctx.query({ subject: "青嶺酒造", label: "代表銘柄" });
     expect(dead.matches[0]!.weight).toBe(0.0);
     expect(dead.matches[0]!.count).toBe(0);
-    await client.contexts.delete(name);
+    await client.contexts.delete(contextId);
   });
 });

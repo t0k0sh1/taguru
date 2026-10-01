@@ -15,8 +15,8 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Wall-clock round trip of the passage lane's own \
-             POST /contexts/{name}/sources/search call.",
-            "POST /contexts/{name}/sources/search",
+             POST /contexts/{id}/sources/search call.",
+            "POST /contexts/{id}/sources/search",
             None,
         ),
     );
@@ -29,7 +29,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Wall-clock round trip of every /resolve and /resolve_label call \
              the structural lane made — coverage cues and association \
              positions alike.",
-            "POST /contexts/{name}/resolve, POST /contexts/{name}/resolve_label",
+            "POST /contexts/{id}/resolve, POST /contexts/{id}/resolve_label",
             None,
         ),
     );
@@ -40,8 +40,8 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Wall-clock round trip of each expected_associations[] entry's \
-             POST /contexts/{name}/query call.",
-            "POST /contexts/{name}/query",
+             POST /contexts/{id}/query call.",
+            "POST /contexts/{id}/query",
             Some(
                 "empty when no case declares expected_associations, or none \
                  of them resolved every position to exactly one name",
@@ -56,7 +56,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["run"],
             "Share of cases whose passage lane call did not complete \
              (transport error or an unparseable response).",
-            "POST /contexts/{name}/sources/search",
+            "POST /contexts/{id}/sources/search",
             None,
         ),
     );
@@ -81,7 +81,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["case"],
             "Fraction of a case's expected_sources (relevance >= 1) found \
              among the passage lane's hits, up to the case's own limit.",
-            "eval.jsonl expected_sources, POST /contexts/{name}/sources/search",
+            "eval.jsonl expected_sources, POST /contexts/{id}/sources/search",
             Some(
                 "empty when no case declares a relevance >= 1 expected_sources \
                  entry, or the passage lane failed outright",
@@ -96,7 +96,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["case"],
             "1 / rank of the first passage hit that satisfies any of a \
              case's expected_sources entries, 0 if none does.",
-            "eval.jsonl expected_sources, POST /contexts/{name}/sources/search",
+            "eval.jsonl expected_sources, POST /contexts/{id}/sources/search",
             Some(
                 "empty when no case declares a relevance >= 1 expected_sources \
                  entry, or the passage lane failed outright",
@@ -113,7 +113,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              contributes its own relevance (0..=3) once, at the rank of the \
              first hit that satisfies it; IDCG orders the case's own \
              expected relevances descending.",
-            "eval.jsonl expected_sources.relevance, POST /contexts/{name}/sources/search",
+            "eval.jsonl expected_sources.relevance, POST /contexts/{id}/sources/search",
             Some(
                 "empty when no case declares a relevance >= 1 expected_sources \
                  entry, or the passage lane failed outright",
@@ -129,7 +129,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Fraction of a case's expected_concepts found, after \
              normalize_entry folding, among the structural lane's \
              concept-cue resolved_names[].",
-            "eval.jsonl expected_concepts, POST /contexts/{name}/resolve",
+            "eval.jsonl expected_concepts, POST /contexts/{id}/resolve",
             Some("empty when no case declares expected_concepts"),
         ),
     );
@@ -142,7 +142,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Fraction of a case's expected_labels found, after \
              normalize_entry folding, among the structural lane's \
              label-cue resolved_names[].",
-            "eval.jsonl expected_labels, POST /contexts/{name}/resolve_label",
+            "eval.jsonl expected_labels, POST /contexts/{id}/resolve_label",
             Some("empty when no case declares expected_labels"),
         ),
     );
@@ -154,7 +154,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["case"],
             "Fraction of a case's expected_associations whose /query call \
              ran (all three positions pinned) and returned total >= 1.",
-            "eval.jsonl expected_associations, POST /contexts/{name}/query",
+            "eval.jsonl expected_associations, POST /contexts/{id}/query",
             Some(
                 "empty when no case declares expected_associations; a \
                  not_found/ambiguous position never runs query and so \
@@ -173,8 +173,8 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              passage hits up to limit, plus the structural lane's \
              AttributionOut locators when it ran (ADR 0004 §8). Never \
              merged with citations.locator_validity.",
-            "eval.jsonl expected_citations, POST /contexts/{name}/sources/search, \
-             POST /contexts/{name}/query",
+            "eval.jsonl expected_citations, POST /contexts/{id}/sources/search, \
+             POST /contexts/{id}/query",
             Some("empty when no case declares expected_citations"),
         ),
     );
@@ -185,11 +185,11 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Fraction of a case's expected_citations whose \
-             POST /contexts/{name}/citations call resolved with a \
+             POST /contexts/{id}/citations call resolved with a \
              matching section (when declared) and quote (when declared) \
              — computed even for a case whose passage lane missed \
              outright (ADR 0004 §8). Never merged with citations.recall.",
-            "POST /contexts/{name}/citations",
+            "POST /contexts/{id}/citations",
             Some("empty when no case declares expected_citations"),
         ),
     );
@@ -199,10 +199,10 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "ratio",
             "ratio",
             &["run"],
-            "Share of every POST /contexts/{name}/citations call made \
+            "Share of every POST /contexts/{id}/citations call made \
              across all cases that resolved (neither no_source nor \
              no_paragraph).",
-            "POST /contexts/{name}/citations",
+            "POST /contexts/{id}/citations",
             None,
         ),
     );
@@ -215,7 +215,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Share of every citation call that failed with ErrorCode \
              no_source — the expected_citations entry names a source \
              this context does not carry.",
-            "POST /contexts/{name}/citations",
+            "POST /contexts/{id}/citations",
             None,
         ),
     );
@@ -228,7 +228,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Share of every citation call that failed with ErrorCode \
              no_paragraph — the expected_citations entry names a \
              paragraph index out of range for its source.",
-            "POST /contexts/{name}/citations",
+            "POST /contexts/{id}/citations",
             None,
         ),
     );
@@ -243,7 +243,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              failure, an unparsable response, or any other ErrorCode. \
              resolved + no_source + no_paragraph + other always sums \
              to 1.0.",
-            "POST /contexts/{name}/citations",
+            "POST /contexts/{id}/citations",
             None,
         ),
     );
@@ -257,7 +257,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              entry declared a section key (an explicit null included), \
              the share whose declared value matched the server's own \
              Citation.section.",
-            "eval.jsonl expected_citations.section, POST /contexts/{name}/citations",
+            "eval.jsonl expected_citations.section, POST /contexts/{id}/citations",
             Some("n is 0 when no expected_citations entry declares section"),
         ),
     );
@@ -272,7 +272,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              a normalize_entry-folded substring of the returned text. A \
              quote spanning a paragraph boundary can never match here, \
              since Citation.text is exactly one paragraph.",
-            "eval.jsonl expected_citations.quote, POST /contexts/{name}/citations",
+            "eval.jsonl expected_citations.quote, POST /contexts/{id}/citations",
             Some("n is 0 when no expected_citations entry declares quote"),
         ),
     );
@@ -283,8 +283,8 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Wall-clock round trip of each expected_citations[] entry's \
-             own POST /contexts/{name}/citations call.",
-            "POST /contexts/{name}/citations",
+             own POST /contexts/{id}/citations call.",
+            "POST /contexts/{id}/citations",
             Some("empty when no case declares expected_citations"),
         ),
     );
@@ -365,7 +365,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              union their citation_refs (an association's corroborating \
              attributions; a passage/community item's own locator, \
              since its citation_refs is always empty by design).",
-            "POST /contexts/{name}/sources/search, POST /contexts/{name}/evidence",
+            "POST /contexts/{id}/sources/search, POST /contexts/{id}/evidence",
             Some("empty when the passage/evidence lane failed outright"),
         ),
     );
@@ -376,8 +376,8 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Wall-clock round trip of an --assembly run's own \
-             POST /contexts/{name}/evidence call.",
-            "POST /contexts/{name}/evidence",
+             POST /contexts/{id}/evidence call.",
+            "POST /contexts/{id}/evidence",
             Some("empty in baseline mode"),
         ),
     );
@@ -433,7 +433,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              (admitted plus omitted, either mode) that a budget ceiling \
              dropped — the equal-budget \"how much got left out\" \
              counterpart to items_used/bytes_used/tokens_used.",
-            "crate::api::evidence::budget, POST /contexts/{name}/evidence",
+            "crate::api::evidence::budget, POST /contexts/{id}/evidence",
             Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
         ),
     );
@@ -447,7 +447,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              reordered the pool (plan.reranker.ran); the complement is \
              the degrade rate — no provider configured, a model \
              mismatch, or any other ADR 0006 §12 fallback reason.",
-            "POST /contexts/{name}/evidence plan.reranker",
+            "POST /contexts/{id}/evidence plan.reranker",
             Some("empty when --rerank was not given"),
         ),
     );

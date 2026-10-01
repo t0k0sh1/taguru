@@ -19,16 +19,16 @@ impl AppState {
 
     /// Counts one successful retrieval twice over: the aggregate
     /// searches family (by operation) and the `context`'s own usage row.
-    pub fn note_search(&self, op: crate::metrics::SearchOp, name: &str, empty: bool) {
+    pub fn note_search(&self, op: crate::metrics::SearchOp, id: &str, empty: bool) {
         self.0.metrics.record_search(op, empty);
-        self.note_read(name, empty);
+        self.note_read(id, empty);
     }
 
     /// Bumps a `context`'s read counters — relaxed atomics only, so a
     /// read is counted without ever waiting on the entry lock. Unknown
-    /// names (a delete racing the response) are silently skipped.
-    pub fn note_read(&self, name: &str, empty: bool) {
-        let Some(entry) = self.lookup(name) else {
+    /// ids (a delete racing the response) are silently skipped.
+    pub fn note_read(&self, id: &str, empty: bool) {
+        let Some(entry) = self.lookup_id(id) else {
             return;
         };
         entry.usage.reads.fetch_add(1, Ordering::Relaxed);
@@ -49,7 +49,7 @@ impl AppState {
     /// `check.violations.len()`, never `check.reserved`'s count: a
     /// reserved-label conflict is a namespace collision, not a schema
     /// violation. Call sites are exactly the two write entrances a
-    /// schema gates — `POST /contexts/{name}/associations` and
+    /// schema gates — `POST /contexts/{id}/associations` and
     /// `predicted_schema_rejection`'s `Apply` purpose — never a
     /// dry-run or the audit/validate diagnostics, so `outcome` here
     /// can never disagree with what actually happened to the write.
@@ -63,12 +63,12 @@ impl AppState {
     /// `landed > 0` re-append guard.
     pub(crate) fn note_schema_check(
         &self,
-        name: &str,
+        id: &str,
         outcome: crate::metrics::SchemaOutcome,
         violations: usize,
     ) {
         self.0.metrics.record_schema_check(outcome);
-        if let Some(entry) = self.lookup(name) {
+        if let Some(entry) = self.lookup_id(id) {
             entry
                 .schema_violations
                 .fetch_add(violations as u64, Ordering::Relaxed);
@@ -77,8 +77,8 @@ impl AppState {
 
     /// Bumps a `context`'s write counter, same contract as
     /// [`AppState::note_read`].
-    pub fn note_write(&self, name: &str) {
-        let Some(entry) = self.lookup(name) else {
+    pub fn note_write(&self, id: &str) {
+        let Some(entry) = self.lookup_id(id) else {
             return;
         };
         entry.usage.writes.fetch_add(1, Ordering::Relaxed);
@@ -386,9 +386,9 @@ mod tests {
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
                 .unwrap();
-            state.note_read("sake", false);
-            state.note_read("sake", true);
-            state.note_write("sake");
+            state.note_read(&state.id_of("sake"), false);
+            state.note_read(&state.id_of("sake"), true);
+            state.note_write(&state.id_of("sake"));
             let usage = state.directory_entry("sake").unwrap().usage;
             assert_eq!((usage.reads, usage.empty_reads, usage.writes), (2, 1, 1));
             assert!(usage.last_read_epoch > 0);
@@ -442,9 +442,13 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
 
-        state.note_schema_check("sake", crate::metrics::SchemaOutcome::Warned, 0);
+        state.note_schema_check(
+            &state.id_of("sake"),
+            crate::metrics::SchemaOutcome::Warned,
+            0,
+        );
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert_eq!(
             entry.schema_violations.load(Ordering::Relaxed),
             0,
@@ -465,10 +469,14 @@ mod tests {
         let dir = scratch_dir("schema-check-unknown-context");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
-        state.note_schema_check("ghost", crate::metrics::SchemaOutcome::Refused, 3);
+        state.note_schema_check(
+            &state.id_of("ghost"),
+            crate::metrics::SchemaOutcome::Refused,
+            3,
+        );
 
         assert!(
-            state.lookup("ghost").is_none(),
+            state.lookup_named("ghost").is_none(),
             "sanity: the context must not exist"
         );
         let text = rendered(&state);
@@ -490,7 +498,7 @@ mod tests {
                 .create("sake", ContextMeta::default())
                 .map_err(|_| "create")
                 .unwrap();
-            state.note_write("sake");
+            state.note_write(&state.id_of("sake"));
             state.persist_usage();
         }
         let before = fs::read(meta_path(&dir, &stem_on_disk(&dir, "sake"))).unwrap();
@@ -507,8 +515,8 @@ mod tests {
         .unwrap();
         assert!(state.is_replica(), "sanity: the reopened boot is a replica");
 
-        state.note_write("sake");
-        let entry = state.lookup("sake").unwrap();
+        state.note_write(&state.id_of("sake"));
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.usage_dirty.load(Ordering::Relaxed),
             "note_write still marks dirty on a replica — only the sweep refuses"
@@ -542,8 +550,8 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
-        state.note_write("sake");
-        let entry = state.lookup("sake").unwrap();
+        state.note_write(&state.id_of("sake"));
+        let entry = state.lookup_named("sake").unwrap();
         assert!(entry.usage_dirty.load(Ordering::Relaxed));
 
         fail_persistence_ops_after(0);
@@ -592,7 +600,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -600,7 +608,7 @@ mod tests {
             .unwrap();
         state.flush_dirty();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert_eq!(
             entry.disk.lock().sidecar_bytes,
             0,
@@ -649,13 +657,13 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert_eq!(
             entry.disk.lock().sidecar_bytes,
             0,
@@ -698,7 +706,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -743,20 +751,22 @@ mod tests {
         // edge, one unlinked attribution.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "廃", "旧", 1.0, Some("x.md"))],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.retract_association("sake", "蔵", "廃", "旧").unwrap(),
+            state
+                .retract_association(&state.id_of("sake"), "蔵", "廃", "旧")
+                .unwrap(),
             Some(1)
         );
         // One sourceless association: pure unsourced weight, nothing else.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "銘柄", "青嶺", 2.5, None)],
                 Deadline::unbounded(),
             )
@@ -766,14 +776,14 @@ mod tests {
         // become arena slack.
         state
             .add_aliases(
-                "sake",
+                &state.id_of("sake"),
                 &BTreeMap::from([("Aomine".to_string(), "蔵".to_string())]),
                 &BTreeMap::new(),
             )
             .unwrap()
             .unwrap();
         state
-            .remove_aliases("sake", &["Aomine".to_string()], &[])
+            .remove_aliases(&state.id_of("sake"), &["Aomine".to_string()], &[])
             .unwrap()
             .unwrap();
 
@@ -792,7 +802,7 @@ mod tests {
 
         // Eviction to cold must not lose the totals — the gauge falls
         // back to the persisted `ContextStats` snapshot.
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         let cold = state.gauge_snapshot();
         assert_eq!(cold.dead_edges_total, hot.dead_edges_total);
@@ -847,12 +857,12 @@ mod tests {
                 })
                 .collect();
             state
-                .add_associations("big", seed, Deadline::unbounded())
+                .add_associations(&state.id_of("big"), seed, Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state
                 .add_associations(
-                    "small",
+                    &state.id_of("small"),
                     vec![assoc_op("a", "l", "b", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -939,7 +949,7 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("大きな段落".to_string(), "あ".repeat(300_000));
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         let after = state.gauge_snapshot().resident_bytes;
@@ -967,7 +977,7 @@ mod tests {
             "仕込み水は雲居山の伏流水。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         assert!(
@@ -975,7 +985,7 @@ mod tests {
             "a freshly written passage log must show up as pending"
         );
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         // `evict_entry` compacts the store on the way down and caches
         // the resulting (now-zero) pending-log size on `EntryInner`;
@@ -1020,7 +1030,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -1029,26 +1039,33 @@ mod tests {
         let mut passages = std::collections::BTreeMap::new();
         passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
-        state.note_read("sake", true);
+        state.note_read(&state.id_of("sake"), true);
         state.persist_usage();
         // The eviction persists every dirty sidecar (index, usage,
         // meta) on the way down.
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         // The legacy sources file is cleanup-only in current code, and
         // no schema was ever installed on this context — both planted
@@ -1144,7 +1161,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -1155,11 +1172,14 @@ mod tests {
             // WAL lane to muddy the before/after comparison.
             state.flush_dirty();
             state
-                .put_schema("sake", schema::install(schema_document()).unwrap())
+                .put_schema(
+                    &state.id_of("sake"),
+                    schema::install(schema_document()).unwrap(),
+                )
                 .unwrap()
                 .unwrap();
             state.refresh_disk_usage();
-            let entry = state.lookup("sake").unwrap();
+            let entry = state.lookup_named("sake").unwrap();
             let disk = *entry.disk.lock();
             let total = disk.image_bytes + disk.passages_bytes + disk.sidecar_bytes;
             let schema_len = fs::metadata(schema_path(&probe_dir, &state.stem_of("sake").unwrap()))
@@ -1200,7 +1220,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -1208,18 +1228,21 @@ mod tests {
             .unwrap();
         state.flush_dirty();
         assert_eq!(
-            state.storage_quota_refusal("sake"),
+            state.storage_quota_refusal(&state.id_of("sake")),
             None,
             "the same content without a schema must stay under the ceiling"
         );
 
         state
-            .put_schema("sake", schema::install(schema_document()).unwrap())
+            .put_schema(
+                &state.id_of("sake"),
+                schema::install(schema_document()).unwrap(),
+            )
             .unwrap()
             .unwrap();
         state.refresh_disk_usage();
         assert!(
-            state.storage_quota_refusal("sake").is_some(),
+            state.storage_quota_refusal(&state.id_of("sake")).is_some(),
             "the schema file's bytes must be enough to cross a ceiling \
              set just above the pre-schema total"
         );
@@ -1254,14 +1277,14 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
         state.flush_dirty();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let before = *entry.disk.lock();
         assert!(
             before.sidecar_bytes > 0,
@@ -1332,7 +1355,7 @@ mod tests {
                 .unwrap();
             state
                 .add_associations(
-                    name,
+                    &state.id_of(name),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
                     Deadline::unbounded(),
                 )
@@ -1341,8 +1364,9 @@ mod tests {
         }
 
         let holder = state.clone();
-        let handle =
-            std::thread::spawn(move || holder.refresh_embeddings("a", Deadline::unbounded()));
+        let handle = std::thread::spawn(move || {
+            holder.refresh_embeddings(&holder.id_of("a"), Deadline::unbounded())
+        });
         // Long enough that "a" has certainly acquired the only permit
         // (a near-instant fast-path grant) before "b" ever tries.
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -1354,7 +1378,10 @@ mod tests {
         // well before "a" releases at ~150ms.
         let waiter = state.clone();
         let b_handle = std::thread::spawn(move || {
-            waiter.refresh_embeddings("b", Deadline::after(std::time::Duration::from_millis(100)))
+            waiter.refresh_embeddings(
+                &waiter.id_of("b"),
+                Deadline::after(std::time::Duration::from_millis(100)),
+            )
         });
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(
@@ -1423,7 +1450,7 @@ mod tests {
         // A sourceless association carries unsourced weight.
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 2.5, None)],
                 Deadline::unbounded(),
             )
@@ -1432,23 +1459,30 @@ mod tests {
         let mut passages = std::collections::BTreeMap::new();
         passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
         state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .refresh_passage_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .search_passages(
+                &state.id_of("sake"),
+                "杜氏",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let graph = {
             let inner = entry.inner.read();
             let Slot::Hot(context) = &inner.slot else {

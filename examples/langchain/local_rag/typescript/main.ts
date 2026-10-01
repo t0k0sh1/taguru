@@ -253,6 +253,9 @@ async function main(): Promise<void> {
     const extractLlm = await makeLlm(allSections.map((s) => JSON.stringify(FAKE_EXTRACTIONS[`${s.paper}/${s.n}`])));
 
     const paperContexts: Record<PaperId, string[]> = { tanaka2024: [], sato2023: [] };
+    // Paths address a context by id (#964); the ingester creates each section
+    // by name, so keep the id it landed on for the core-SDK read at the end.
+    const sectionIds = new Map<string, string>();
     for (const section of allSections) {
       const context = `section/${section.paper}/${section.n}`;
       const ingester = new TaguruIngester({
@@ -272,6 +275,10 @@ async function main(): Promise<void> {
       }
       console.log(`ingested ${context}: ${outcome.associations} facts, ${outcome.aliases} aliases`);
       paperContexts[section.paper].push(context);
+      const sectionId = await ingester.contextId();
+      if (sectionId !== null) {
+        sectionIds.set(context, sectionId);
+      }
     }
 
     for (const paperId of paperIds) {
@@ -306,7 +313,11 @@ async function main(): Promise<void> {
     console.log(`  answer: ${await chain.invoke(QUESTION)}`);
 
     // Trace one claim in the answer back to its original PDF paragraph.
-    const citation = await client.context("section/tanaka2024/3").citePassage("tanaka2024/3", 0);
+    const citedSectionId = sectionIds.get("section/tanaka2024/3");
+    if (citedSectionId === undefined) {
+      throw new Error("section/tanaka2024/3 was not created");
+    }
+    const citation = await client.context(citedSectionId).citePassage("tanaka2024/3", 0);
     console.log(`\n  cited passage (tanaka2024 §3, ¶0): ${citation.text.slice(0, 120)}...`);
   } finally {
     spawned?.stop();

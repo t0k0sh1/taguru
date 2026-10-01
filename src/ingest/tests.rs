@@ -1167,7 +1167,9 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
     let stem = state.stem_of("sake").unwrap();
 
     // The open is the gated half: an explicit call lands no file.
-    state.open_import_marker("sake", "doc-1").unwrap();
+    state
+        .open_import_marker(&state.id_of("sake"), "doc-1")
+        .unwrap();
     assert!(
         crate::registry::import_marker_paths(&dir, &stem).is_empty(),
         "a disabled marker must not touch the disk"
@@ -1452,21 +1454,23 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
 
         assert_eq!(
             state
-                .read_context("sake", |context| context.association_count())
+                .read_context(&state.id_of("sake"), |context| context.association_count())
                 .unwrap(),
             1,
             "retry at step {failure} was not idempotent"
         );
         assert_eq!(
             state
-                .read_context("sake", |context| context.resolve("青嶺")[0].name.clone())
+                .read_context(&state.id_of("sake"), |context| context.resolve("青嶺")[0]
+                    .name
+                    .clone())
                 .unwrap(),
             "青嶺酒造",
             "alias step {failure} did not land"
         );
         assert_eq!(
             state
-                .lookup_passages("sake", &["doc-1".to_string()])
+                .lookup_passages(&state.id_of("sake"), &["doc-1".to_string()])
                 .unwrap()
                 .unwrap()
                 .0["doc-1"],

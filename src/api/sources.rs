@@ -17,7 +17,7 @@ use crate::registry::{
 use super::aliases::{KeysetQuery, keyset_bounds};
 use super::recall::cross_targets;
 use super::{
-    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_LOCATOR_KIND_BYTES,
+    AppJson, AppQuery, ContextIdPath, CrossMatch, ErrorCode, Issue, MAX_LOCATOR_KIND_BYTES,
     MAX_LOCATOR_VALUE_BYTES, MAX_MATCH_LIMIT, MAX_NAME_BYTES, MAX_PASSAGES_PER_REQUEST,
     MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES, MAX_TAG_BYTES,
     MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve,
@@ -54,7 +54,7 @@ pub struct PassageLookup {
 
 pub async fn lookup_passages(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<LookupPassagesRequest>,
 ) -> Response {
@@ -75,10 +75,10 @@ pub async fn lookup_passages(
     // A residency's first passage access loads the store from disk
     // (sources.json/passages.bin/WAL replay); keep that off the async
     // worker like every other passage-search entry.
-    match tokio::task::block_in_place(|| state.lookup_passages(&name, &request.sources)) {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.lookup_passages(&id, &request.sources)) {
+        None => not_found(&id, started_at),
         Some(Ok((passages, missing))) => {
-            state.note_read(&name, passages.is_empty());
+            state.note_read(&id, passages.is_empty());
             ok(PassageLookup { passages, missing }, started_at)
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
@@ -114,7 +114,7 @@ pub struct Citation {
 
 pub async fn citation(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
@@ -127,24 +127,23 @@ pub async fn citation(
     }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
-    match tokio::task::block_in_place(|| state.citation(&name, &request.source, request.paragraph))
-    {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.citation(&id, &request.source, request.paragraph)) {
+        None => not_found(&id, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(CitationLookup::UnknownSource)) => {
-            state.note_read(&name, true);
+            state.note_read(&id, true);
             error(
                 ErrorCode::NoSource,
-                format!("source '{}' not found in context '{name}'", request.source),
+                format!("source '{}' not found in context '{id}'", request.source),
                 started_at,
             )
         }
         Some(Ok(CitationLookup::IndexOutOfRange)) => {
-            state.note_read(&name, true);
+            state.note_read(&id, true);
             error(
                 ErrorCode::NoParagraph,
                 format!(
-                    "paragraph {} out of range for source '{}' in context '{name}'",
+                    "paragraph {} out of range for source '{}' in context '{id}'",
                     request.paragraph, request.source
                 ),
                 started_at,
@@ -155,7 +154,7 @@ pub async fn citation(
             section,
             locator,
         })) => {
-            state.note_read(&name, false);
+            state.note_read(&id, false);
             ok(
                 Citation {
                     text,
@@ -196,7 +195,7 @@ pub struct SourceEntry {
 
 pub async fn list_sources(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
@@ -210,8 +209,8 @@ pub async fn list_sources(
     }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
-    match tokio::task::block_in_place(|| state.passage_source_entries(&name)) {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.passage_source_entries(&id)) {
+        None => not_found(&id, started_at),
         // `passage_source_entries` already yields BTreeMap-key order —
         // no sort. One read feeds both `sources` and `entries`, so the
         // two views of the page can never disagree.
@@ -298,7 +297,7 @@ pub struct RetractOutcome {
 
 pub async fn retract_source(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppQuery(query): AppQuery<RetractSourceQuery>,
@@ -319,9 +318,9 @@ pub async fn retract_source(
         // Reads only — off the async worker like every store-loading
         // read, but with none of the write path's marker/WAL/audit.
         return match tokio::task::block_in_place(|| {
-            state.retract_source_preview(&name, &request.source)
+            state.retract_source_preview(&id, &request.source)
         }) {
-            Err(failure) => access_error(&state, failure, &name, started_at),
+            Err(failure) => access_error(&state, failure, &id, started_at),
             Ok((associations_touched, passage_removed)) => ok(
                 RetractOutcome {
                     associations_touched,
@@ -333,15 +332,15 @@ pub async fn retract_source(
     }
     // Retraction stages a WAL op and fsyncs before returning; keep that
     // synchronous write off the async worker like every other write path.
-    match tokio::task::block_in_place(|| state.retract_source(&name, &request.source)) {
-        Err(failure) => access_error(&state, failure, &name, started_at),
+    match tokio::task::block_in_place(|| state.retract_source(&id, &request.source)) {
+        Err(failure) => access_error(&state, failure, &id, started_at),
         Ok((associations_touched, passage_removed)) => {
             // The retracted SOURCE lives in the body, so the access log
             // alone cannot say what was withdrawn — the audit line can.
             tracing::info!(
                 target: "taguru::audit",
                 key = %crate::api::key_name(&key),
-                context = %name,
+                context = %id,
                 source = %request.source,
                 associations_touched,
                 passage_removed,
@@ -350,7 +349,7 @@ pub async fn retract_source(
             // A retraction that found nothing changed nothing; only an
             // effective one counts as a write.
             if associations_touched > 0 || passage_removed {
-                state.note_write(&name);
+                state.note_write(&id);
             }
             // Retracting the source is the second documented repair for
             // a torn import (beside re-importing the batch): its truth
@@ -939,7 +938,7 @@ fn record_lane_hits(
 
 pub async fn search_passages(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SearchPassagesRequest>,
 ) -> Response {
@@ -991,7 +990,7 @@ pub async fn search_passages(
     // cost, never a correctness one.
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchPassages,
-        std::slice::from_ref(&name),
+        std::slice::from_ref(&id),
         key_params.exact(),
     );
     let semantic_fill = match passage_search_cache_probe(
@@ -1004,7 +1003,7 @@ pub async fn search_passages(
         |found| {
             tracing::info!(
                 target: "taguru::search",
-                context = %name,
+                context = %id,
                 op = "search_passages",
                 cue = %request.query,
                 hits = found.log_hits,
@@ -1016,7 +1015,7 @@ pub async fn search_passages(
         |served| {
             tracing::info!(
                 target: "taguru::search",
-                context = %name,
+                context = %id,
                 op = "search_passages",
                 cue = %request.query,
                 hits = served.value.log_hits,
@@ -1056,7 +1055,7 @@ pub async fn search_passages(
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
         state.search_passages(
-            &name,
+            &id,
             &request.query,
             limit,
             request.semantic_floor,
@@ -1065,7 +1064,7 @@ pub async fn search_passages(
         )
     });
     match outcome {
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
         // A rebuild the lexical lane needed refused to start once the
         // budget was already gone — the same "before it could start"
         // shape as the entry check above, just discovered later, past
@@ -1079,7 +1078,7 @@ pub async fn search_passages(
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(found)) => {
-            state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
+            state.note_search(SearchOp::SearchPassages, &id, found.hits.is_empty());
             let target_empty = vec![found.hits.is_empty()];
             let lane_hits = record_lane_hits(
                 state.metrics(),
@@ -1091,7 +1090,7 @@ pub async fn search_passages(
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
-                    context = %name,
+                    context = %id,
                     op = "search_passages",
                     cue = %request.query,
                     hits = found.hits.len(),
@@ -1128,7 +1127,7 @@ pub async fn search_passages(
             let payload = PassagePage {
                 plan: SearchPlan {
                     contexts: vec![SearchContextPlan::of(
-                        &name,
+                        &state.name_of_stem(&id),
                         &found.lanes,
                         FilterPlan::of(found.filter),
                     )],
@@ -1530,7 +1529,7 @@ impl SearchExplanation {
     }
 }
 
-/// `POST /contexts/{name}/sources/search/explain` — one call instead
+/// `POST /contexts/{id}/sources/search/explain` — one call instead
 /// of "orchestrate four endpoints and cross-reference by hand": name
 /// the query and the source (optionally the paragraph) you expected to
 /// see, get the first verdict that applies with its evidence. Runs the
@@ -1548,7 +1547,7 @@ impl SearchExplanation {
 /// [`crate::api::resolve::ResolveExplanation`] for why.
 pub async fn explain_search_passages(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<ExplainSearchRequest>,
 ) -> Response {
@@ -1564,7 +1563,7 @@ pub async fn explain_search_passages(
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
         state.explain_passage_search(
-            &name,
+            &id,
             &request.query,
             &request.source,
             request.paragraph,
@@ -1575,7 +1574,7 @@ pub async fn explain_search_passages(
         )
     });
     match outcome {
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
         // Mirrors search_passages: a rebuild the lexical lane needed
         // refused to start once the budget was already gone — logged,
         // not discarded (issue #620), the same reasoning as there.
@@ -1587,9 +1586,9 @@ pub async fn explain_search_passages(
         Some(Ok(lookup)) => {
             // A lookup that never reached scoring is the unproductive
             // read; a diagnosed miss is exactly what was asked for.
-            state.note_read(&name, !matches!(lookup, PassageExplainLookup::Explained(_)));
+            state.note_read(&id, !matches!(lookup, PassageExplainLookup::Explained(_)));
             ok(
-                SearchExplanation::from_lookup(&name, &request, lookup),
+                SearchExplanation::from_lookup(&id, &request, lookup),
                 started_at,
             )
         }
@@ -1716,7 +1715,7 @@ pub async fn cross_search_passages(
         // The attributes shared with `search_passages`' span keep its
         // raw types — retyping only this copy would fork one attribute
         // into two wire types.
-        taguru.context.count = targets.len() as i64,
+        taguru.context.count = targets.names.len() as i64,
         taguru.cache.result = tracing::field::Empty,
         taguru.cache.semantic = tracing::field::Empty,
         taguru.passage.hit_count = tracing::field::Empty,
@@ -1730,7 +1729,7 @@ pub async fn cross_search_passages(
     // lanes.
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchPassages,
-        &targets,
+        &targets.ids,
         key_params.exact(),
     );
     // The semantic tier is keyed on the resolved target list like the
@@ -1748,7 +1747,7 @@ pub async fn cross_search_passages(
         |found| {
             tracing::info!(
                 target: "taguru::search",
-                contexts = %targets.join(","),
+                contexts = %targets.names.join(","),
                 op = "search_passages",
                 cue = %request.query,
                 hits = found.log_hits,
@@ -1760,7 +1759,7 @@ pub async fn cross_search_passages(
         |served| {
             tracing::info!(
                 target: "taguru::search",
-                contexts = %targets.join(","),
+                contexts = %targets.names.join(","),
                 op = "search_passages",
                 cue = %request.query,
                 hits = served.value.log_hits,
@@ -1802,8 +1801,8 @@ pub async fn cross_search_passages(
     // `deadline` is `Copy`, so every job carries its own value and can
     // bail out mid-tokenize the same way the single-context handler
     // does.
-    let permits = cross_search_concurrency().min(targets.len().max(1));
-    let owned_targets = Arc::clone(&targets);
+    let permits = cross_search_concurrency().min(targets.names.len().max(1));
+    let owned_ids = Arc::clone(&targets.ids);
     let query = request.query.clone();
     let semantic_floor = request.semantic_floor;
     let job_filter = filter.clone();
@@ -1822,7 +1821,7 @@ pub async fn cross_search_passages(
     // position in the request's resolved target list, never the
     // context name (ADR 0008 §8).
     let parent = span.clone();
-    let fetched = match bounded_parallel_map(targets.len(), permits, move |index| {
+    let fetched = match bounded_parallel_map(owned_ids.len(), permits, move |index| {
         parent.in_scope(|| {
             let target_span = crate::trace::span!(
                 "taguru.passage_search.target",
@@ -1837,7 +1836,7 @@ pub async fn cross_search_passages(
             );
             let _entered = target_span.enter();
             let outcome = job_state.search_passages(
-                &owned_targets[index],
+                &owned_ids[index],
                 &query,
                 limit,
                 semantic_floor,
@@ -1875,7 +1874,7 @@ pub async fn cross_search_passages(
     {
         Ok(fetched) => fetched,
         Err(panicked) => {
-            return cross_job_panic(&state, &targets[panicked.index], started_at);
+            return cross_job_panic(&state, &targets.names[panicked.index], started_at);
         }
     };
     // Synchronous from here to the response — the guard can hold
@@ -1891,11 +1890,11 @@ pub async fn cross_search_passages(
     // budget is gone is reported as a timeout, not as whatever shape
     // the abandoned work happened to fail with.
     let mut pool = Vec::new();
-    let mut target_empty = Vec::with_capacity(targets.len());
-    let mut plans = Vec::with_capacity(targets.len());
+    let mut target_empty = Vec::with_capacity(targets.names.len());
+    let mut plans = Vec::with_capacity(targets.names.len());
     let mut embedding_failed = false;
     for (index, outcome) in fetched.into_iter().enumerate() {
-        let name = &targets[index];
+        let name = &targets.names[index];
         match outcome {
             None => return not_found(name, started_at),
             // Logged, not discarded (issue #620): the client still
@@ -1907,7 +1906,11 @@ pub async fn cross_search_passages(
             }
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
             Some(Ok(found)) => {
-                state.note_search(SearchOp::SearchPassages, name, found.hits.is_empty());
+                state.note_search(
+                    SearchOp::SearchPassages,
+                    &targets.ids[index],
+                    found.hits.is_empty(),
+                );
                 target_empty.push(found.hits.is_empty());
                 plans.push(SearchContextPlan::of(
                     name,
@@ -1922,7 +1925,7 @@ pub async fn cross_search_passages(
                         .enumerate()
                         .map(|(rank, hit)| (index, rank, hit)),
                 );
-                if pool.len() >= limit * 2 {
+                if super::recall::cross_pool_needs_trim(pool.len(), limit) {
                     cut(&mut pool);
                 }
             }
@@ -1942,7 +1945,7 @@ pub async fn cross_search_passages(
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
-            contexts = %targets.join(","),
+            contexts = %targets.names.join(","),
             op = "search_passages",
             cue = %request.query,
             hits = pool.len(),
@@ -1966,7 +1969,7 @@ pub async fn cross_search_passages(
         hits: pool
             .into_iter()
             .map(|(index, _, hit)| CrossMatch {
-                context: targets[index].clone(),
+                context: targets.names[index].clone(),
                 inner: PassageHit::from(hit),
             })
             .collect(),
@@ -2487,7 +2490,7 @@ pub struct StoredPassages {
 
 pub async fn store_passages(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(body): AppJson<Value>,
 ) -> Response {
@@ -2580,11 +2583,11 @@ pub async fn store_passages(
     }
     // Off the async worker: the store fsyncs its log, and folding the
     // new paragraphs into a resident index tokenizes them.
-    let outcome = tokio::task::block_in_place(|| state.store_passages(&name, passages));
+    let outcome = tokio::task::block_in_place(|| state.store_passages(&id, passages));
     match outcome {
-        None => not_found(&name, started_at),
+        None => not_found(&id, started_at),
         Some(Ok(outcome)) => {
-            state.note_write(&name);
+            state.note_write(&id);
             ok(
                 StoredPassages {
                     stored: outcome.stored,
@@ -2668,8 +2671,8 @@ mod tests {
             until: None,
         };
         let response = search_passages(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             axum::Extension(Deadline::unbounded()),
             AppJson(request),
         )
@@ -2703,8 +2706,8 @@ mod tests {
             until: None,
         };
         let response = search_passages(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             axum::Extension(Deadline::unbounded()),
             AppJson(request),
         )
@@ -2741,8 +2744,8 @@ mod tests {
             until: None,
         };
         let response = explain_search_passages(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             axum::Extension(Deadline::unbounded()),
             AppJson(request),
         )
@@ -2774,8 +2777,8 @@ mod tests {
             until: None,
         };
         let response = explain_search_passages(
-            State(state),
-            AppPath("sake".to_string()),
+            State(state.clone()),
+            ContextIdPath(state.stem_of("sake").unwrap()),
             axum::Extension(Deadline::unbounded()),
             AppJson(request),
         )

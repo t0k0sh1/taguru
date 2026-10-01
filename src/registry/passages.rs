@@ -67,10 +67,10 @@ impl AppState {
     /// optional per source; nothing requires one to exist.
     pub fn store_passages(
         &self,
-        name: &str,
+        id: &str,
         passages: BTreeMap<String, crate::passages::PassageSubmission>,
     ) -> Option<Result<crate::passages::StoreOutcome, PassagesWriteError>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let fence = entry.read_unless_deleted()?;
         // The storage-quota gate, before the store is even loaded: this
         // entrance only ever grows the context (retraction goes through
@@ -82,10 +82,10 @@ impl AppState {
         // pass, and only then serialize at the store's writer mutex —
         // already past the gate (see `Entry::passages_admission`).
         let admission = entry.passages_admission.lock();
-        if let Some((used, ceiling)) = self.storage_quota_excess(name, &fence, &entry) {
+        if let Some((used, ceiling)) = self.storage_quota_excess(&fence, &entry) {
             self.0.metrics.record_storage_quota_refusal();
             return Some(Err(PassagesWriteError::QuotaExceeded(
-                super::storage_quota_message(name, used, ceiling),
+                super::storage_quota_message(&fence.name, used, ceiling),
             )));
         }
         hit_quota_write_checkpoint();
@@ -145,10 +145,10 @@ impl AppState {
     /// documented rule for undatable sources, not an oversight.
     pub fn window_source_names(
         &self,
-        name: &str,
+        id: &str,
         filter: &crate::passages::SourceFilter,
     ) -> Option<io::Result<std::collections::BTreeSet<String>>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
             self.entry_passages(&entry, &entry.id)
@@ -165,9 +165,9 @@ impl AppState {
     /// exist. Runs before `read_context`, like `window_source_names`.
     pub fn source_effective_times(
         &self,
-        name: &str,
+        id: &str,
     ) -> Option<io::Result<std::collections::HashMap<String, u64>>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         Some(self.entry_passages(&entry, &entry.id).map(|store| {
             store
@@ -185,10 +185,10 @@ impl AppState {
     #[allow(clippy::type_complexity)]
     pub fn lookup_passages(
         &self,
-        name: &str,
+        id: &str,
         sources: &[String],
     ) -> Option<io::Result<(BTreeMap<String, String>, Vec<String>)>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
@@ -217,11 +217,11 @@ impl AppState {
     /// when the index falls outside what the source's import stored.
     pub fn citation(
         &self,
-        name: &str,
+        id: &str,
         source: &str,
         index: u32,
     ) -> Option<io::Result<CitationLookup>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         let store = match self.entry_passages(&entry, &entry.id) {
             Ok(store) => store,
@@ -265,14 +265,14 @@ impl AppState {
     /// word.
     pub fn resolve_markers(
         &self,
-        name: &str,
+        id: &str,
         keys: impl Iterator<Item = (String, u32)>,
     ) -> HashMap<(String, u32), Markers> {
         let mut keys = keys.peekable();
         if keys.peek().is_none() {
             return HashMap::new();
         }
-        let Some(entry) = self.lookup(name) else {
+        let Some(entry) = self.lookup_id(id) else {
             return HashMap::new();
         };
         let Some(_fence) = entry.read_unless_deleted() else {
@@ -282,7 +282,7 @@ impl AppState {
             Ok(store) => store,
             Err(error) => {
                 tracing::warn!(
-                    context = %name,
+                    context = %id,
                     %error,
                     "marker resolution: passage store load failed; continuing without \
                      section/locator labels"
@@ -303,8 +303,8 @@ impl AppState {
     }
 
     /// The source ids that currently have a registered passage.
-    pub fn passage_sources(&self, name: &str) -> Option<io::Result<Vec<String>>> {
-        let entry = self.lookup(name)?;
+    pub fn passage_sources(&self, id: &str) -> Option<io::Result<Vec<String>>> {
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
             self.entry_passages(&entry, &entry.id)
@@ -317,9 +317,9 @@ impl AppState {
     #[allow(clippy::type_complexity)]
     pub fn passage_source_entries(
         &self,
-        name: &str,
+        id: &str,
     ) -> Option<io::Result<Vec<(String, crate::passages::SourceMeta)>>> {
-        let entry = self.lookup(name)?;
+        let entry = self.lookup_id(id)?;
         let _fence = entry.read_unless_deleted()?;
         Some(
             self.entry_passages(&entry, &entry.id)
@@ -356,7 +356,7 @@ mod tests {
             );
             assert_eq!(
                 state
-                    .store_passages("sake", plain(passages))
+                    .store_passages(&state.id_of("sake"), plain(passages))
                     .unwrap()
                     .unwrap()
                     .stored,
@@ -368,23 +368,29 @@ mod tests {
         // come back as missing rather than erroring.
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (passages, missing) = state
-            .lookup_passages("sake", &["第1段落".to_string(), "第9段落".to_string()])
+            .lookup_passages(
+                &state.id_of("sake"),
+                &["第1段落".to_string(), "第9段落".to_string()],
+            )
             .unwrap()
             .unwrap();
         assert!(passages["第1段落"].starts_with("青嶺酒造は"));
         assert_eq!(missing, vec!["第9段落".to_string()]);
         assert_eq!(
-            state.passage_sources("sake").unwrap().unwrap(),
+            state
+                .passage_sources(&state.id_of("sake"))
+                .unwrap()
+                .unwrap(),
             vec!["第1段落"]
         );
-        assert!(state.lookup_passages("nope", &[]).is_none());
+        assert!(state.lookup_passages(&state.id_of("nope"), &[]).is_none());
 
         // Deleting the context removes the whole passage file family:
         // the log the store just wrote, any snapshot, and a legacy
         // sources file left over from before the migration.
         let stem = state.stem_of("sake").unwrap();
         fs::write(sources_path(&dir, &stem), br#"{"legacy":"remnant"}"#).unwrap();
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
         assert!(!sources_path(&dir, &stem).exists());
         assert!(!passages_path(&dir, &stem).exists());
         assert!(!passages_wal_path(&dir, &stem).exists());
@@ -403,21 +409,23 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("第1段落".to_string(), "本文。".to_string());
         state
-            .store_passages("sake", plain(passages.clone()))
+            .store_passages(&state.id_of("sake"), plain(passages.clone()))
             .unwrap()
             .unwrap();
 
         // The racing writer's handle predates the delete — exactly the
         // window the read fence exists for.
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         let stem = entry.id.clone();
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
         assert!(
             entry.read_unless_deleted().is_none(),
             "a handle from before the delete must see the tombstone"
         );
         assert!(
-            state.store_passages("sake", plain(passages)).is_none(),
+            state
+                .store_passages(&state.id_of("sake"), plain(passages))
+                .is_none(),
             "the name is gone; nothing may recreate it"
         );
         assert!(
@@ -442,7 +450,7 @@ mod tests {
                 .unwrap();
             state
                 .store_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     BTreeMap::from([(
                         "a.md".to_string(),
                         crate::passages::PassageSubmission::plain("本文。"),
@@ -461,21 +469,21 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let sources = ["a.md".to_string()];
         let first = state
-            .lookup_passages("sake", &sources)
+            .lookup_passages(&state.id_of("sake"), &sources)
             .expect("registered")
             .unwrap_err();
         assert!(!first.to_string().contains("quarantined"), "{first}");
 
         fs::write(&log, &healthy).unwrap();
         let second = state
-            .lookup_passages("sake", &sources)
+            .lookup_passages(&state.id_of("sake"), &sources)
             .expect("registered")
             .unwrap_err();
         assert!(second.to_string().contains("quarantined"), "{second}");
 
         state.age_load_failures("sake", LOAD_FAILURE_RETRY);
         let (passages, missing) = state
-            .lookup_passages("sake", &sources)
+            .lookup_passages(&state.id_of("sake"), &sources)
             .expect("registered")
             .unwrap();
         assert!(missing.is_empty());
@@ -497,11 +505,11 @@ mod tests {
             "仕込み水は雲居山の伏流水。".to_string(),
         );
         state
-            .store_passages("sake", plain(passages))
+            .store_passages(&state.id_of("sake"), plain(passages))
             .unwrap()
             .unwrap();
 
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
         assert!(
             entry.passages.lock().is_none(),
@@ -510,7 +518,7 @@ mod tests {
         // Durability never depended on residency: the next access
         // reloads from the log (or the snapshot the eviction wrote).
         let (found, missing) = state
-            .lookup_passages("sake", &["第1段落".to_string()])
+            .lookup_passages(&state.id_of("sake"), &["第1段落".to_string()])
             .unwrap()
             .unwrap();
         assert!(found["第1段落"].starts_with("仕込み水"));
@@ -547,7 +555,10 @@ mod tests {
         let mut passages = BTreeMap::new();
         passages.insert("doc-old".to_string(), dated("旧杜氏は高瀬。", 100));
         passages.insert("doc-new".to_string(), dated("新杜氏は青山。", 200));
-        state.store_passages("sake", passages).unwrap().unwrap();
+        state
+            .store_passages(&state.id_of("sake"), passages)
+            .unwrap()
+            .unwrap();
 
         let assert_op = |object: &str, source: &str| crate::registry::AssocOp {
             subject: "蔵".to_string(),
@@ -559,7 +570,7 @@ mod tests {
         };
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assert_op("高瀬", "doc-old"),
                     assert_op("青山", "doc-new"),
@@ -578,7 +589,7 @@ mod tests {
             until: None,
         };
         let eligible = state
-            .window_source_names("sake", &window_after)
+            .window_source_names(&state.id_of("sake"), &window_after)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -588,7 +599,7 @@ mod tests {
         );
 
         let hits = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 let window = context.source_window(eligible.iter().map(String::as_str));
                 context.query_any_within(&["蔵"], &[], &[], &window)
             })
@@ -598,12 +609,16 @@ mod tests {
 
         // The unwindowed read still sees all three, undated included.
         let all = state
-            .read_context("sake", |context| context.query_any(&["蔵"], &[], &[]))
+            .read_context(&state.id_of("sake"), |context| {
+                context.query_any(&["蔵"], &[], &[])
+            })
             .unwrap();
         assert_eq!(all.len(), 3);
 
         assert!(
-            state.window_source_names("nope", &window_after).is_none(),
+            state
+                .window_source_names(&state.id_of("nope"), &window_after)
+                .is_none(),
             "an unknown context is None, matching lookup_passages"
         );
 
@@ -617,7 +632,7 @@ mod tests {
             until: Some(200),
         };
         let eligible = state
-            .window_source_names("sake", &window_before)
+            .window_source_names(&state.id_of("sake"), &window_before)
             .unwrap()
             .unwrap();
         assert_eq!(eligible.iter().collect::<Vec<_>>(), vec!["doc-old"]);
@@ -626,11 +641,14 @@ mod tests {
         // dated sources map to their date, the undated
         // associations-only source is absent, an unknown context is
         // None.
-        let times = state.source_effective_times("sake").unwrap().unwrap();
+        let times = state
+            .source_effective_times(&state.id_of("sake"))
+            .unwrap()
+            .unwrap();
         assert_eq!(times.get("doc-old"), Some(&100));
         assert_eq!(times.get("doc-new"), Some(&200));
         assert!(!times.contains_key("doc-undated"));
-        assert!(state.source_effective_times("nope").is_none());
+        assert!(state.source_effective_times(&state.id_of("nope")).is_none());
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -693,7 +711,7 @@ mod tests {
                     barrier.wait();
                     arm_quota_write_checkpoint_sleep(Duration::from_millis(200));
                     state.store_passages(
-                        "sake",
+                        &state.id_of("sake"),
                         BTreeMap::from([(
                             format!("race-{i}.md"),
                             crate::passages::PassageSubmission::plain("本文。"),
@@ -742,7 +760,7 @@ mod tests {
         // both semantics distinctly.
         state
             .store_passages(
-                "sake",
+                &state.id_of("sake"),
                 BTreeMap::from([(
                     "doc".to_string(),
                     crate::passages::PassageSubmission {
@@ -767,7 +785,7 @@ mod tests {
             text,
             section,
             locator,
-        })) = state.citation("sake", "doc", 0)
+        })) = state.citation(&state.id_of("sake"), "doc", 0)
         else {
             panic!("index 0 must resolve");
         };
@@ -785,7 +803,7 @@ mod tests {
             text,
             section,
             locator,
-        })) = state.citation("sake", "doc", 1)
+        })) = state.citation(&state.id_of("sake"), "doc", 1)
         else {
             panic!("index 1 must resolve");
         };
@@ -797,15 +815,15 @@ mod tests {
         );
 
         assert!(matches!(
-            state.citation("sake", "nope", 0),
+            state.citation(&state.id_of("sake"), "nope", 0),
             Some(Ok(CitationLookup::UnknownSource))
         ));
         assert!(matches!(
-            state.citation("sake", "doc", 99),
+            state.citation(&state.id_of("sake"), "doc", 99),
             Some(Ok(CitationLookup::IndexOutOfRange))
         ));
         assert!(
-            state.citation("nazo", "doc", 0).is_none(),
+            state.citation(&state.id_of("nazo"), "doc", 0).is_none(),
             "an unknown context is the outer None"
         );
 
@@ -825,7 +843,7 @@ mod tests {
                 .unwrap();
             state
                 .store_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     plain(BTreeMap::from([("doc".to_string(), "本文。".to_string())])),
                 )
                 .unwrap()
@@ -838,7 +856,10 @@ mod tests {
         fs::write(&log, &corrupt).unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(matches!(state.citation("sake", "doc", 0), Some(Err(_))));
+        assert!(matches!(
+            state.citation(&state.id_of("sake"), "doc", 0),
+            Some(Err(_))
+        ));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -862,13 +883,15 @@ mod tests {
         // "skipped the load" apart from "loaded an empty/failed store
         // and got nothing back" — the store's own residency is the
         // only witness that the short-circuit itself fired.
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         assert!(
             entry.passages.lock().is_none(),
             "nothing has touched the store yet"
         );
         assert!(
-            state.resolve_markers("sake", std::iter::empty()).is_empty(),
+            state
+                .resolve_markers(&state.id_of("sake"), std::iter::empty())
+                .is_empty(),
             "an empty key iterator must skip the store load entirely"
         );
         assert!(
@@ -878,7 +901,7 @@ mod tests {
         assert!(
             state
                 .resolve_markers(
-                    "no-such-context",
+                    &state.id_of("no-such-context"),
                     std::iter::once(("doc".to_string(), 0u32))
                 )
                 .is_empty(),
@@ -895,7 +918,7 @@ mod tests {
         // asserted it `None`.
         state
             .store_passages(
-                "sake",
+                &state.id_of("sake"),
                 BTreeMap::from([(
                     "doc".to_string(),
                     crate::passages::PassageSubmission {
@@ -921,7 +944,7 @@ mod tests {
             ("doc".to_string(), 0u32),  // no marker at all
             ("nope".to_string(), 0u32), // unknown source
         ];
-        let resolved = state.resolve_markers("sake", keys.into_iter());
+        let resolved = state.resolve_markers(&state.id_of("sake"), keys.into_iter());
         assert_eq!(
             resolved.len(),
             1,
@@ -954,7 +977,7 @@ mod tests {
                 .unwrap();
             state
                 .store_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     plain(BTreeMap::from([("doc".to_string(), "本文。".to_string())])),
                 )
                 .unwrap()
@@ -969,7 +992,10 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert!(
             state
-                .resolve_markers("sake", std::iter::once(("doc".to_string(), 0u32)))
+                .resolve_markers(
+                    &state.id_of("sake"),
+                    std::iter::once(("doc".to_string(), 0u32))
+                )
                 .is_empty()
         );
 
@@ -991,7 +1017,7 @@ mod tests {
         // catch a zipped-in-the-wrong-order id/metadata mismatch.
         state
             .store_passages(
-                "sake",
+                &state.id_of("sake"),
                 BTreeMap::from([
                     (
                         "doc-a".to_string(),
@@ -1026,8 +1052,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let sources = state.passage_sources("sake").unwrap().unwrap();
-        let entries = state.passage_source_entries("sake").unwrap().unwrap();
+        let sources = state
+            .passage_sources(&state.id_of("sake"))
+            .unwrap()
+            .unwrap();
+        let entries = state
+            .passage_source_entries(&state.id_of("sake"))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             entries.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
             sources,
@@ -1041,7 +1073,7 @@ mod tests {
         assert_eq!(meta_b.tags, vec!["tag-b".to_string(), "tag-c".to_string()]);
 
         assert!(
-            state.passage_source_entries("nazo").is_none(),
+            state.passage_source_entries(&state.id_of("nazo")).is_none(),
             "an unknown context is the outer None"
         );
 

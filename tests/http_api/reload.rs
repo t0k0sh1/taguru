@@ -342,9 +342,9 @@ fn sighup_rotates_keys_and_grants_and_audits_names_only() {
     // The reloaded grant binds immediately: read works above, write
     // is now beyond ci's grant.
     let (refused, body) = server.call_with_token(
-        "PUT",
-        "/contexts/rotated",
-        Some(serde_json::json!({})),
+        "POST",
+        "/contexts",
+        Some(serde_json::json!({"name": "rotated"})),
         Some("sekrit-new"),
     );
     assert_eq!(refused, 403, "{body}");

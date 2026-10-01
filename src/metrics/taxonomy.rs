@@ -292,7 +292,7 @@ impl ResolveTier {
 /// How one schema pre-write check ended (#388, S10 of #218's ADR 0009
 /// split §15) — the label vocabulary of `taguru_schema_checks_total`.
 /// Counted only at the entrances that actually gate a write
-/// (`POST /contexts/{name}/associations`, `POST /import`/`taguru
+/// (`POST /contexts/{id}/associations`, `POST /import`/`taguru
 /// import`) for a `context` that has an installed schema document
 /// (ADR 0009 §6.3's single condition, not `mode`); a schema-free
 /// `context` never touches this family. `?dry_run=true`/`preview_batch`

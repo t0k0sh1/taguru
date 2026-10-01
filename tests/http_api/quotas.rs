@@ -23,16 +23,16 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
 
     // Creation is never gated — the declaration waits for the name.
     server.ok(
-        "PUT",
-        "/contexts/capped",
-        Some(json!({"description": "quota'd tenant"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "capped", "description": "quota'd tenant"})),
     );
     // The first write lands (nothing on disk yet); its WAL append
     // alone carries the family past the one-byte ceiling, so the
     // second growth write refuses with the documented contract.
     server.ok(
         "POST",
-        "/contexts/capped/associations",
+        &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
             "weight": 1.0, "source": "keep.md"
@@ -40,7 +40,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     );
     let (status, refused) = server.call(
         "POST",
-        "/contexts/capped/associations",
+        &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "銘柄", "object": "青嶺",
             "weight": 1.0, "source": "keep.md"
@@ -55,7 +55,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     // Passages are the other growth entrance — same contract.
     let (status, refused) = server.call(
         "POST",
-        "/contexts/capped/sources",
+        &format!("/contexts/{}/sources", server.cx("capped")),
         Some(json!({"passages": {"keep.md": "原文の段落。"}})),
     );
     assert_eq!(status, 507, "{refused}");
@@ -64,20 +64,24 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     // The ways down the refusal names stay open at the ceiling.
     server.ok(
         "POST",
-        "/contexts/capped/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("capped")),
         Some(json!({"source": "keep.md"})),
-    );
-    server.ok("POST", "/contexts/capped/compact", None);
-
-    // An uncapped sibling writes freely through all of it.
-    server.ok(
-        "PUT",
-        "/contexts/free",
-        Some(json!({"description": "no quota"})),
     );
     server.ok(
         "POST",
-        "/contexts/free/associations",
+        &format!("/contexts/{}/compact", server.cx("capped")),
+        None,
+    );
+
+    // An uncapped sibling writes freely through all of it.
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "free", "description": "no quota"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("free")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
             "weight": 1.0, "source": "keep.md"
@@ -130,13 +134,13 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
 
     // Put the capped context at its ceiling before the import.
     server.ok(
-        "PUT",
-        "/contexts/capped",
-        Some(json!({"description": "quota'd tenant"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "capped", "description": "quota'd tenant"})),
     );
     server.ok(
         "POST",
-        "/contexts/capped/associations",
+        &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
             "weight": 1.0, "source": "keep.md"
@@ -182,7 +186,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|context| context["id"] == "free")
+        .find(|context| context["name"] == "free")
         .expect("free was created by the landed batch")
         .clone();
     assert_eq!(free["stats"]["associations"], json!(1), "{free}");

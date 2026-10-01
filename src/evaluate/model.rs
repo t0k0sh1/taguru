@@ -89,7 +89,7 @@ pub(crate) struct InputsBlock {
     /// this codebase's convention for wire-visible mode tags.
     pub(crate) mode: String,
     /// The equal-budget ceilings this run enforced. Always present in
-    /// `assembly` mode — `POST /contexts/{name}/evidence` has no
+    /// `assembly` mode — `POST /contexts/{id}/evidence` has no
     /// unbudgeted mode, so this records the server's own defaults
     /// (`max_items: 40, max_bytes: 65536, max_tokens: 4000`) even when
     /// no `--max-*` flag was given. `None` only in `baseline` mode,
@@ -249,7 +249,7 @@ pub(crate) struct CitationsBlock {
     /// it ran) — see [`served_locators`]. Independent of `validity`.
     pub(crate) recall: CitationRecallBlock,
     /// Locator validity: the fraction of `checks` whose
-    /// `POST /contexts/{name}/citations` call resolved with a matching
+    /// `POST /contexts/{id}/citations` call resolved with a matching
     /// `section` (when declared) and `quote` (when declared) — see
     /// [`citation_is_valid`]. Computed even for a case whose passage
     /// lane missed outright.
@@ -276,7 +276,7 @@ pub(crate) struct CitationValidityBlock {
 
 /// One `expected_citations[]` entry's outcome from both measurements:
 /// `served` is citation recall's own per-entry bit, `outcome` is
-/// locator validity's `POST /contexts/{name}/citations` result.
+/// locator validity's `POST /contexts/{id}/citations` result.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CitationCheck {
     pub(crate) source: String,

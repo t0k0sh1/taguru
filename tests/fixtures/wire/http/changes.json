@@ -18,6 +18,6 @@
     "status": "ok",
     "time": 0.0
   },
-  "route": "/contexts/{name}/changes",
+  "route": "/contexts/{id}/changes",
   "status": 200
 }

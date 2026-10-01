@@ -306,7 +306,7 @@ impl Api {
     /// [`Api::get`] with query pairs appended to the request.
     ///
     /// `pub(crate)`: `evaluate` (#273) keyset-walks
-    /// `GET /contexts/{name}/sources` itself — its `limit`/`after` shape
+    /// `GET /contexts/{id}/sources` itself — its `limit`/`after` shape
     /// does not fit [`Api::list_names`], which assumes each page item is
     /// an object carrying a `name` field; `sources` pages a bare string
     /// array instead. No new HTTP client code, per ADR 0004 §11.
@@ -415,12 +415,13 @@ impl Api {
         page: usize,
     ) -> Result<Vec<crate::registry::DirectoryEntry>, String> {
         let mut rows = Vec::new();
-        let mut after: Option<String> = None;
+        let mut after: Option<(String, String)> = None;
         loop {
             let limit = page.to_string();
             let mut query: Vec<(&str, &str)> = vec![("limit", limit.as_str())];
-            if let Some(cursor) = after.as_deref() {
-                query.push(("after", cursor));
+            if let Some((cursor_name, cursor_id)) = after.as_ref() {
+                query.push(("after", cursor_name.as_str()));
+                query.push(("after_id", cursor_id.as_str()));
             }
             let body = self.get_with_query(&["contexts"], &query)?;
             let items = body["contexts"]
@@ -435,17 +436,23 @@ impl Api {
                 page_rows.push(entry);
             }
             let page_len = page_rows.len();
-            // Same first-name-vs-cursor advancement check
-            // `list_names_paged` runs — see its comment for why the
-            // first name, not the last, is the one compared.
-            if let (Some(cursor), Some(first)) = (after.as_deref(), page_rows.first())
-                && first.name.as_str() <= cursor
+            // Same first-vs-cursor advancement check `list_names_paged`
+            // runs — see its comment for why the first row, not the
+            // last, is the one compared. The directory sorts by
+            // `(name, id)` (names are not unique, #964), so the
+            // cursor and the comparison both carry the pair.
+            if let (Some((cursor_name, cursor_id)), Some(first)) =
+                (after.as_ref(), page_rows.first())
+                && (first.name.as_str(), first.id.as_str())
+                    <= (cursor_name.as_str(), cursor_id.as_str())
             {
                 return Err(format!(
-                    "the server's contexts page did not advance past '{cursor}'"
+                    "the server's contexts page did not advance past '{cursor_name}'"
                 ));
             }
-            after = page_rows.last().map(|entry| entry.name.clone());
+            after = page_rows
+                .last()
+                .map(|entry| (entry.name.clone(), entry.id.clone()));
             rows.extend(page_rows);
             // Only an EMPTY page marks the end — see
             // `list_names_paged`'s comment for why a short-but-nonempty
@@ -455,6 +462,31 @@ impl Api {
             }
         }
         Ok(rows)
+    }
+
+    /// The id behind one display name, read off the full directory
+    /// walk — the name-boundary helper for CLI verbs whose inputs are
+    /// still names (group members, derived-artifact names) while the
+    /// paths they build take ids (#964). `Ok(None)` when nothing
+    /// carries the name; an error when several `contexts` do — the
+    /// caller cannot pick one, and the message hands over the ids so
+    /// the operator can.
+    pub(crate) fn context_id_by_name(&self, name: &str) -> Result<Option<String>, String> {
+        let matches: Vec<String> = self
+            .list_context_entries()?
+            .into_iter()
+            .filter(|entry| entry.name == name)
+            .map(|entry| entry.id)
+            .collect();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some(id.clone())),
+            several => Err(format!(
+                "context name '{name}' is ambiguous: {} contexts share it ({}) — pass the id",
+                several.len(),
+                several.join(", ")
+            )),
+        }
     }
 
     /// One `POST /import` request carrying a pack of whole batches —
@@ -1395,8 +1427,9 @@ mod tests {
     fn context_entry_listing_walks_pages_and_refuses_a_non_advancing_one() {
         fn row(name: &str) -> serde_json::Value {
             json!({
-                "id": name, "description": "", "pinned": false, "loaded": false,
-                "dice_floor": null, "semantic_floor": null, "stats": {}, "usage": {}
+                "id": format!("id-{name}"), "name": name, "description": "", "pinned": false,
+                "loaded": false, "dice_floor": null, "semantic_floor": null,
+                "stats": {}, "usage": {}
             })
         }
         let (base, requests) = respond_in_order_capturing(vec![
@@ -1425,7 +1458,10 @@ mod tests {
         // THIRD request went out, cursored past the short page's name.
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3, "{requests:?}");
-        assert!(requests[2].contains("after=c"), "{requests:?}");
+        assert!(
+            requests[2].contains("after=c") && requests[2].contains("after_id=id-c"),
+            "{requests:?}"
+        );
 
         let (base, _) = respond_in_order_capturing(vec![
             (

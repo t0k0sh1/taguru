@@ -54,7 +54,13 @@ pub(crate) fn apply_schema_record(
     context: &str,
     installed: schema::InstalledSchema,
 ) -> Result<schema::SchemaDocument, SchemaApplyError> {
-    match state.put_schema(context, installed) {
+    // The record still names its context (until #965); `put_schema`
+    // is id-keyed. A missing OR ambiguous name is the same refusal:
+    // the record's target does not resolve to exactly one context.
+    let Some(context_id) = state.context_id_of(context) else {
+        return Err(SchemaApplyError::NoContext);
+    };
+    match state.put_schema(&context_id, installed) {
         None => Err(SchemaApplyError::NoContext),
         Some(Ok(document)) => Ok(document),
         Some(Err(crate::registry::PutSchemaError::ReservedAlias(alias))) => {

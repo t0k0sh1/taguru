@@ -156,7 +156,7 @@ volumes:
     <p class="section-sub">On this model, availability is restore time. Two rungs: a byte-exact snapshot, and a portable export stream.</p>
     <ol>
       <li><code>POST /flush</code> — write out everything dirty.</li>
-      <li>Snapshot the volume (every writer is fsync+rename, so a filesystem snapshot is safe at any instant) — or take the portable stream with <code>taguru export</code> / <code>GET /contexts/{name}/export</code>, which restores anywhere through <code>taguru import</code> / <code>POST /import</code>, across versions and machines.</li>
+      <li>Snapshot the volume (every writer is fsync+rename, so a filesystem snapshot is safe at any instant) — or take the portable stream with <code>taguru export</code> / <code>GET /contexts/{id}/export</code>, which restores anywhere through <code>taguru import</code> / <code>POST /import</code>, across versions and machines.</li>
       <li>Verify with <code>taguru inspect</code> — the same fully-validating load + WAL replay the server does; non-zero exit means acknowledged data is corrupt.</li>
     </ol>
     <pre><code><span class="c"># verification needs no local toolchain — run the image against the volume</span>

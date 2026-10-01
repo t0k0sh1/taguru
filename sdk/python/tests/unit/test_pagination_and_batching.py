@@ -16,7 +16,8 @@ from .conftest import ok_response, sync_client
 def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
     rows = [
         {
-            "id": name,
+            "id": f"id-{name}",
+            "name": name,
             "description": "",
             "pinned": False,
             "loaded": False,
@@ -44,11 +45,12 @@ def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
         }
         for name in ["a", "b", "c"]
     ]
-    cursors: list[str | None] = []
+    cursors: list[tuple[str | None, str | None]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         after = req.url.params.get("after")
-        cursors.append(after)
+        after_id = req.url.params.get("after_id")
+        cursors.append((after, after_id))
         if after is None:
             return ok_response({"total": 3, "contexts": rows[:2]})
         if after == "b":
@@ -58,12 +60,13 @@ def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
         raise AssertionError(after)
 
     client = sync_client(handler)
-    names = [entry.id for entry in client.contexts.iter(limit=2)]
+    names = [entry.name for entry in client.contexts.iter(limit=2)]
     assert names == ["a", "b", "c"]
     # A short page is not the last one — a concurrent delete could shorten it
     # while later rows remain — so iteration pages on past the short final page
-    # and stops only on the empty page after it.
-    assert cursors == [None, "b", "c"]
+    # and stops only on the empty page after it. The cursor carries the
+    # (name, id) pair — names are not unique (#964).
+    assert cursors == [(None, None), ("b", "id-b"), ("c", "id-c")]
 
 
 def test_iter_labels_pages_until_an_empty_page() -> None:

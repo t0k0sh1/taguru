@@ -722,7 +722,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">resolve</span>
-            <span class="step-route">POST /contexts/sake/resolve</span>
+            <span class="step-route">POST /contexts/{id}/resolve</span>
           </div>
           <div class="step-body">
             <p class="step-why">Resolve the cue 「青嶺酒造」, extracted from the question, to its canonical concept name on the graph.</p>
@@ -759,7 +759,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">describe</span>
-            <span class="step-route">POST /contexts/sake/describe</span>
+            <span class="step-route">POST /contexts/{id}/describe</span>
           </div>
           <div class="step-body">
             <p class="step-why">Survey which labels the concept 青嶺酒造 carries and how many facts each holds — a scouting pass before pulling the whole profile on a hunch.</p>
@@ -796,7 +796,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">activate</span>
-            <span class="step-route">POST /contexts/sake/activate</span>
+            <span class="step-route">POST /contexts/{id}/activate</span>
           </div>
           <div class="step-body">
             <p class="step-why">Spread out from 青嶺酒造, collecting the direct facts and the knowledge chained beyond them, ordered by strength. The workhorse for gathering related knowledge.</p>
@@ -841,7 +841,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">cite_passage</span>
-            <span class="step-route">POST /contexts/sake/citations</span>
+            <span class="step-route">POST /contexts/{id}/citations</span>
           </div>
           <div class="step-body">
             <p class="step-why">Verify the grounds for "the master brewer is 高瀬" against the original text itself — not a summary, not an association.</p>
@@ -901,7 +901,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">describe</span>
-            <span class="step-route">POST /contexts/sake/describe</span>
+            <span class="step-route">POST /contexts/{id}/describe</span>
           </div>
           <div class="step-body">
             <p class="step-why">After resolving 浸漬 (steeping) with <code>resolve</code>, first check what facts the graph side holds.</p>
@@ -938,7 +938,7 @@
         <div class="step-card">
           <div class="step-head">
             <span class="step-tool">search_passages</span>
-            <span class="step-route">POST /contexts/sake/sources/search</span>
+            <span class="step-route">POST /contexts/{id}/sources/search</span>
           </div>
           <div class="step-body">
             <p class="step-why">Don't send the question as-is; rephrase it into a plausible <b>answering sentence</b> — not 「浸漬は何分？」 ("how many minutes?") but 「浸漬は夏場40分、冬場90分ほど行う」 ("steeping runs about 40 minutes in summer, 90 in winter"). It doesn't have to be right, only the same <i>shape</i> as the sentence being sought.</p>

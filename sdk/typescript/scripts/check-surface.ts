@@ -111,7 +111,7 @@ function main(): number {
       errors.push(`missing exported function: ${tsName}`);
       continue;
     }
-    const wantArgs = declared.args ?? [];
+    const wantArgs = (declared.args ?? []).map(camel);
     if (JSON.stringify(found.args) !== JSON.stringify(wantArgs)) {
       errors.push(`${tsName}: args [${found.args}] != spec [${wantArgs}]`);
     }
@@ -140,7 +140,7 @@ function main(): number {
       if (found === undefined) {
         continue;
       }
-      const wantArgs = entry?.args ?? [];
+      const wantArgs = (entry?.args ?? []).map(camel);
       const wantOptions = entry?.options ?? [];
       if (JSON.stringify(found.args) !== JSON.stringify(wantArgs)) {
         errors.push(`${className}.${tsName}: args [${found.args}] != spec [${wantArgs}]`);

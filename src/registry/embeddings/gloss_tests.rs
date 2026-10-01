@@ -27,28 +27,40 @@ mod tests {
         state.create("fruit", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "fruit",
+                &state.id_of("fruit"),
                 vec![assoc_op("りんご", "分類", "果物", 1.0, None)],
                 Deadline::unbounded(),
             )
             .unwrap()
             .unwrap();
-        assert_eq!(state.context_revision("fruit").unwrap().config, 0);
+        assert_eq!(
+            state
+                .context_revision(&state.id_of("fruit"))
+                .unwrap()
+                .config,
+            0
+        );
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.context_revision("fruit").unwrap().config,
+            state
+                .context_revision(&state.id_of("fruit"))
+                .unwrap()
+                .config,
             1,
             "vectors the semantic lane now serves are a config change"
         );
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.context_revision("fruit").unwrap().config,
+            state
+                .context_revision(&state.id_of("fruit"))
+                .unwrap()
+                .config,
             1,
             "a refresh that embedded nothing new bumps nothing"
         );
@@ -67,26 +79,32 @@ mod tests {
         let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
-        let entry = state.lookup("sake").unwrap();
+        let entry = state.lookup_named("sake").unwrap();
         {
             let mut inner = entry.inner.write();
             state.tombstone_locked(&mut inner, &entry);
         }
-        assert!(state.embeddings_status("sake").is_none());
+        assert!(state.embeddings_status(&state.id_of("sake")).is_none());
         assert!(
             state
-                .semantic_twins("sake", 0.5, Deadline::unbounded())
+                .semantic_twins(&state.id_of("sake"), 0.5, Deadline::unbounded())
                 .is_none()
         );
         assert!(
             state
-                .semantic_resolve("sake", "りんご", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("sake"),
+                    "りんご",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .is_none()
         );
         assert!(
             state
                 .explain_semantic_resolve(
-                    "sake",
+                    &state.id_of("sake"),
                     "りんご",
                     "果物",
                     false,
@@ -134,7 +152,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             // One batch per namespace: two successful provider calls.
@@ -150,7 +168,13 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .is_err()
         );
@@ -212,14 +236,20 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         let baseline = calls.load(Ordering::Relaxed);
 
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .is_err(),
             "an empty provider vector must resolve as a failure, not an empty-but-ok answer"
@@ -233,7 +263,13 @@ mod tests {
 
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .is_err()
         );
@@ -283,7 +319,7 @@ mod tests {
             assert!(matches!(
                 state
                     .explain_semantic_resolve(
-                        "fruit",
+                        &state.id_of("fruit"),
                         "アップル",
                         "りんご",
                         false,
@@ -295,7 +331,7 @@ mod tests {
             ));
 
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
 
@@ -308,7 +344,7 @@ mod tests {
                 passing,
                 cap,
             }) = state.explain_semantic_resolve(
-                "fruit",
+                &state.id_of("fruit"),
                 "アップル",
                 "りんご",
                 false,
@@ -332,7 +368,7 @@ mod tests {
                 rank: None,
                 ..
             }) = state.explain_semantic_resolve(
-                "fruit",
+                &state.id_of("fruit"),
                 "アップル",
                 "果物",
                 false,
@@ -348,7 +384,7 @@ mod tests {
                 passing,
                 ..
             }) = state.explain_semantic_resolve(
-                "fruit",
+                &state.id_of("fruit"),
                 "アップル",
                 "果物",
                 false,
@@ -360,7 +396,13 @@ mod tests {
             };
             assert_eq!((rank, passing), (2, 2));
             let served = state
-                .semantic_resolve("fruit", "アップル", false, Some(0.0), Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    Some(0.0),
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -380,7 +422,7 @@ mod tests {
             assert!(matches!(
                 state
                     .explain_semantic_resolve(
-                        "fruit",
+                        &state.id_of("fruit"),
                         "アップル",
                         "バナナ",
                         false,
@@ -417,7 +459,7 @@ mod tests {
         assert!(matches!(
             state
                 .explain_semantic_resolve(
-                    "fruit",
+                    &state.id_of("fruit"),
                     "アップル",
                     "りんご",
                     false,
@@ -432,7 +474,7 @@ mod tests {
         assert!(
             state
                 .explain_semantic_resolve(
-                    "nazo",
+                    &state.id_of("nazo"),
                     "アップル",
                     "りんご",
                     false,
@@ -451,7 +493,7 @@ mod tests {
         assert!(matches!(
             state
                 .explain_semantic_resolve(
-                    "fruit",
+                    &state.id_of("fruit"),
                     "アップル",
                     "りんご",
                     false,
@@ -503,11 +545,11 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("p", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("p"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         state
-            .semantic_resolve("p", "cue", false, None, Deadline::unbounded())
+            .semantic_resolve(&state.id_of("p"), "cue", false, None, Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -564,7 +606,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             let (embedded, total) = state
-                .refresh_embeddings("w", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
@@ -577,7 +619,7 @@ mod tests {
         let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         let (embedded, total) = state
-            .refresh_embeddings("w", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (3, 3));
@@ -594,7 +636,7 @@ mod tests {
         // A no-op refresh against the same-width provider stays a no-op
         // (the probe embeds one gloss but re-embeds nothing).
         let (embedded, total) = state
-            .refresh_embeddings("w", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (0, 3));
@@ -656,7 +698,7 @@ mod tests {
             .unwrap();
 
         let (embedded, _) = state
-            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(
@@ -666,7 +708,7 @@ mod tests {
         let after_real = calls.load(Ordering::Relaxed);
 
         let (embedded_again, _) = state
-            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(embedded_again, 0);
@@ -731,7 +773,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         let (embedded, _) = state
-            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(embedded > 0);
@@ -742,7 +784,7 @@ mod tests {
         width.store(3, Ordering::Relaxed);
         let calls_before_stale_no_op = calls.load(Ordering::Relaxed);
         let (embedded, total) = state
-            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (0, 3), "still within the trust window");
@@ -756,7 +798,7 @@ mod tests {
         // probes again and this time catches the swap.
         state.age_width_observation(crate::registry::WIDTH_OBSERVATION_TRUST);
         let (embedded, total) = state
-            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -826,7 +868,7 @@ mod tests {
                     .map_err(|_| "write")
                     .unwrap();
                 state
-                    .refresh_embeddings(name, Deadline::unbounded())
+                    .refresh_embeddings(&state.id_of(name), Deadline::unbounded())
                     .unwrap()
                     .unwrap();
             }
@@ -844,7 +886,7 @@ mod tests {
         // "a"'s own no-op ticker refresh has no observation to lean on
         // yet, so it pays for its own probe.
         let (embedded_a, _) = state
-            .auto_refresh_embeddings("a", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("a"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(embedded_a, 0);
@@ -854,7 +896,7 @@ mod tests {
         // provider's, not "a"'s, so "a"'s probe already answers for
         // "b" too: no second provider call.
         let (embedded_b, _) = state
-            .auto_refresh_embeddings("b", Deadline::unbounded())
+            .auto_refresh_embeddings(&state.id_of("b"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(embedded_b, 0);
@@ -922,7 +964,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             let (embedded, total) = state
-                .refresh_embeddings("w", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
@@ -942,7 +984,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         let (embedded, total) = state
-            .refresh_embeddings("w", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1009,7 +1051,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("w", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1035,7 +1077,7 @@ mod tests {
         let embedder = Some(Arc::new(FixedWidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         let (embedded, total) = state
-            .refresh_embeddings("w", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1081,7 +1123,7 @@ mod tests {
         // write fails.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
         let error = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("not persisted"), "{error}");
@@ -1099,7 +1141,7 @@ mod tests {
         // yet it must still retry the write so those rows do not stay
         // unpersisted forever.
         let (embedded, total) = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1181,7 +1223,7 @@ mod tests {
             .unwrap();
 
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -1231,7 +1273,7 @@ mod tests {
         let state =
             AppState::boot_with(dir.clone(), usize::MAX, embedder, BootOptions::default()).unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         let store = VectorStore::load(&vectors_path(&dir, &state.stem_of("fruit").unwrap()));
@@ -1261,7 +1303,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
                     assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
@@ -1272,7 +1314,7 @@ mod tests {
             .unwrap();
 
         let (_, total) = state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1282,13 +1324,15 @@ mod tests {
 
         // Retract the only source behind 旧銘/廃止銘柄, then compact so
         // those names actually leave the graph.
-        state.retract_source("sake", "gone.md").unwrap();
         state
-            .compact_context("sake", Deadline::unbounded())
+            .retract_source(&state.id_of("sake"), "gone.md")
+            .unwrap();
+        state
+            .compact_context(&state.id_of("sake"), Deadline::unbounded())
             .unwrap();
 
         let (_, total) = state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1347,7 +1391,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
                 Deadline::unbounded(),
             )
@@ -1355,7 +1399,7 @@ mod tests {
             .unwrap();
 
         let error = state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap_err();
         assert!(error.contains("hiccup"), "{error}");
@@ -1372,7 +1416,7 @@ mod tests {
 
         // The next refresh buys only the labels the first pass missed.
         let (embedded, total) = state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!((embedded, total), (1, 3));
@@ -1432,7 +1476,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("w", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -1458,7 +1502,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         let (embedded, total) = state
-            .refresh_embeddings("w", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1517,7 +1561,7 @@ mod tests {
             let state = state.clone();
             refreshers.push(thread::spawn(move || {
                 state
-                    .refresh_embeddings("fruit", Deadline::unbounded())
+                    .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                     .unwrap()
                     .unwrap();
             }));
@@ -1576,7 +1620,7 @@ mod tests {
             .unwrap();
 
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
@@ -1639,7 +1683,7 @@ mod tests {
             for name in ["fruit", "veg"] {
                 scope.spawn(|| {
                     state
-                        .refresh_embeddings(name, Deadline::unbounded())
+                        .refresh_embeddings(&state.id_of(name), Deadline::unbounded())
                         .unwrap()
                         .unwrap();
                 });
@@ -1700,7 +1744,7 @@ mod tests {
         // binary itself rather than fail an assertion — the point of
         // this test is that it completes at all.
         let embedded = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert!(embedded.0 > 0, "the one stale concept must actually embed");
@@ -1728,13 +1772,19 @@ mod tests {
         // アップル shares no normalized characters with りんご: every
         // lexical tier misses, and before a refresh so does semantics.
         let lexical = state
-            .read_context("fruit", |context| context.resolve("アップル"))
+            .read_context(&state.id_of("fruit"), |context| context.resolve("アップル"))
             .map_err(|_| "read")
             .unwrap();
         assert!(lexical.is_empty());
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -1743,14 +1793,14 @@ mod tests {
         // Refresh embeds every canonical name's gloss once; a second run
         // is a no-op.
         let (embedded, total) = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(embedded, 3); // りんご, 果物 + label 分類
         assert_eq!(total, 3);
         assert_eq!(
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .0,
@@ -1760,7 +1810,13 @@ mod tests {
         // Now the paraphrase lands on the stored spelling by cosine, and
         // unrelated names stay under the floor.
         let hits = state
-            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+            .semantic_resolve(
+                &state.id_of("fruit"),
+                "アップル",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -1778,7 +1834,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         let (embedded, total) = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(embedded, 3);
@@ -1786,7 +1842,13 @@ mod tests {
 
         assert!(
             state
-                .semantic_resolve("nope", "x", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("nope"),
+                    "x",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .is_none()
         );
 
@@ -1810,7 +1872,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         // One batch per namespace: concepts, then labels.
@@ -1818,13 +1880,25 @@ mod tests {
 
         // First query embeds the cue; repeating the wording does not.
         let first = state
-            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+            .semantic_resolve(
+                &state.id_of("fruit"),
+                "アップル",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(first[0].0, "りんご");
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         state
-            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+            .semantic_resolve(
+                &state.id_of("fruit"),
+                "アップル",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3, "cue must come from cache");
@@ -1833,7 +1907,13 @@ mod tests {
         // file gone, the same query keeps answering.
         fs::remove_file(vectors_path(&dir, &state.stem_of("fruit").unwrap())).unwrap();
         let held = state
-            .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+            .semantic_resolve(
+                &state.id_of("fruit"),
+                "アップル",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(held[0].0, "りんご");
@@ -1847,12 +1927,18 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
         state
-            .read_context("other", |context| context.association_count())
+            .read_context(&state.id_of("other"), |context| context.association_count())
             .map_err(|_| "read")
             .unwrap();
         assert!(
             state
-                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "アップル",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -1894,17 +1980,17 @@ mod tests {
 
         // Before any vectors exist the semantic half is skipped, loudly.
         let (concepts, labels, note) = state
-            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .semantic_twins(&state.id_of("sake"), 0.6, Deadline::unbounded())
             .unwrap();
         assert!(concepts.is_empty() && labels.is_empty());
         assert!(note.is_some());
 
         state
-            .refresh_embeddings("sake", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("sake"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         let (concepts, labels, note) = state
-            .semantic_twins("sake", 0.6, Deadline::unbounded())
+            .semantic_twins(&state.id_of("sake"), 0.6, Deadline::unbounded())
             .unwrap();
         assert!(note.is_none());
         // Directly connected concepts (青嶺酒造 —創業年→ 1907年) are
@@ -1932,7 +2018,7 @@ mod tests {
 
         assert!(
             state
-                .semantic_twins("nope", 0.6, Deadline::unbounded())
+                .semantic_twins(&state.id_of("nope"), 0.6, Deadline::unbounded())
                 .is_none()
         );
         let _ = fs::remove_dir_all(dir);
@@ -1955,14 +2041,20 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         // みかん×りんご sits at cosine 0.28 — under the 0.35 default.
         let miss = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "みかん",
+                    false,
+                    floor,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap()
         };
@@ -1973,7 +2065,7 @@ mod tests {
         // ... and the context setting changes the default, persisting
         // in the sidecar across a reboot.
         state
-            .update_meta("fruit", None, None, None, Some(0.2))
+            .update_meta(&state.id_of("fruit"), None, None, None, Some(0.2))
             .unwrap()
             .unwrap();
         assert_eq!(miss(None)[0].0, "りんご");
@@ -2012,13 +2104,19 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
 
         let hits = |floor: Option<f32>| {
             state
-                .semantic_resolve("fruit", "みかん", false, floor, Deadline::unbounded())
+                .semantic_resolve(
+                    &state.id_of("fruit"),
+                    "みかん",
+                    false,
+                    floor,
+                    Deadline::unbounded(),
+                )
                 .unwrap()
                 .unwrap()
         };
@@ -2027,7 +2125,7 @@ mod tests {
         assert_eq!(hits(None)[0].0, "りんご");
         // The context setting still beats the server default ...
         state
-            .update_meta("fruit", None, None, None, Some(0.9))
+            .update_meta(&state.id_of("fruit"), None, None, None, Some(0.9))
             .unwrap()
             .unwrap();
         assert!(hits(None).is_empty());
@@ -2069,7 +2167,7 @@ mod tests {
             .unwrap();
 
         let (concepts, labels, note) = state
-            .semantic_twins("fruit", 0.9, Deadline::unbounded())
+            .semantic_twins(&state.id_of("fruit"), 0.9, Deadline::unbounded())
             .unwrap();
         assert!(note.is_none(), "{note:?}");
         assert!(labels.is_empty());
@@ -2114,7 +2212,7 @@ mod tests {
         store.save(&path).unwrap();
 
         let (_, _, note) = state
-            .semantic_twins("fruit", 1.0, Deadline::unbounded())
+            .semantic_twins(&state.id_of("fruit"), 1.0, Deadline::unbounded())
             .unwrap();
         assert!(note.is_none(), "2000 names must still sweep: {note:?}");
 
@@ -2129,7 +2227,7 @@ mod tests {
         drop(state);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let (pairs, _, note) = state
-            .semantic_twins("fruit", 1.0, Deadline::unbounded())
+            .semantic_twins(&state.id_of("fruit"), 1.0, Deadline::unbounded())
             .unwrap();
         assert!(
             note.as_deref().is_some_and(|note| note.contains("2000")),
@@ -2190,7 +2288,7 @@ mod tests {
         let explain = |expected: &str| {
             state
                 .explain_semantic_resolve(
-                    "fruit",
+                    &state.id_of("fruit"),
                     "cue",
                     expected,
                     false,
@@ -2288,7 +2386,7 @@ mod tests {
                 .unwrap();
             assert!(
                 state
-                    .refresh_embeddings("fruit", Deadline::unbounded())
+                    .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                     .unwrap()
                     .is_err(),
                 "the concept call's failure must be reported"
@@ -2313,7 +2411,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         assert!(
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .is_err(),
             "the redo's label failure must be reported"
@@ -2362,7 +2460,7 @@ mod tests {
             .map_err(|_| "write")
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         let path = vectors_path(&dir, &state.stem_of("fruit").unwrap());
@@ -2370,7 +2468,7 @@ mod tests {
 
         assert_eq!(
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap()
                 .0,
@@ -2405,7 +2503,7 @@ mod tests {
         // embeds nothing and prunes c/d/l2 — the prune-only pass.
         state
             .add_associations(
-                "fruit",
+                &state.id_of("fruit"),
                 vec![
                     assoc_op("a", "l1", "b", 1.0, Some("s1")),
                     assoc_op("c", "l2", "d", 1.0, Some("s2")),
@@ -2415,17 +2513,20 @@ mod tests {
             .unwrap()
             .unwrap();
         state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
-        state.retract_source("fruit", "s2").unwrap();
+        state.retract_source(&state.id_of("fruit"), "s2").unwrap();
         state
-            .compact_context("fruit", Deadline::unbounded())
+            .compact_context(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap();
-        let config = state.context_revision("fruit").unwrap().config;
+        let config = state
+            .context_revision(&state.id_of("fruit"))
+            .unwrap()
+            .config;
 
         let (newly, total) = state
-            .refresh_embeddings("fruit", Deadline::unbounded())
+            .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2446,7 +2547,10 @@ mod tests {
         );
         assert_eq!(store.concepts.len(), 2);
         assert_eq!(
-            state.context_revision("fruit").unwrap().config,
+            state
+                .context_revision(&state.id_of("fruit"))
+                .unwrap()
+                .config,
             config + 1,
             "served vectors changed; the revision must move"
         );
@@ -2523,7 +2627,7 @@ mod tests {
             .unwrap();
 
         let (concepts, labels, note) = state
-            .semantic_twins("fruit", 0.5, Deadline::unbounded())
+            .semantic_twins(&state.id_of("fruit"), 0.5, Deadline::unbounded())
             .unwrap();
         assert!(note.is_none(), "{note:?}");
         assert!(labels.is_empty());
@@ -2600,7 +2704,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("w", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("w"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -2610,8 +2714,15 @@ mod tests {
         // width 2, the cue now comes back at width 3.
         let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
-        let Some(GlossLaneReport::WidthChanged { stored, current }) =
-            state.explain_semantic_resolve("w", "cue", "a", false, None, Deadline::unbounded())
+        let Some(GlossLaneReport::WidthChanged { stored, current }) = state
+            .explain_semantic_resolve(
+                &state.id_of("w"),
+                "cue",
+                "a",
+                false,
+                None,
+                Deadline::unbounded(),
+            )
         else {
             panic!("a same-named model's wider query vectors must report WidthChanged");
         };
@@ -2660,7 +2771,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -2669,7 +2780,7 @@ mod tests {
         let embedder = Some(Arc::new(FailingEmbeddings) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
         let Some(GlossLaneReport::QueryEmbeddingFailed(message)) = state.explain_semantic_resolve(
-            "fruit",
+            &state.id_of("fruit"),
             "アップル",
             "りんご",
             false,
@@ -2709,7 +2820,7 @@ mod tests {
                 .map_err(|_| "write")
                 .unwrap();
             state
-                .refresh_embeddings("fruit", Deadline::unbounded())
+                .refresh_embeddings(&state.id_of("fruit"), Deadline::unbounded())
                 .unwrap()
                 .unwrap();
             state.flush_dirty();
@@ -2727,7 +2838,7 @@ mod tests {
         fs::create_dir(&path).unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let entry = state.lookup("fruit").unwrap();
+        let entry = state.lookup_named("fruit").unwrap();
 
         // Unreadable: an empty store, degraded rather than a panic or
         // a propagated error — but NOT cached, unlike a genuinely

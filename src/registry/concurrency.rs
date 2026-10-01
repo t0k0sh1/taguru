@@ -659,7 +659,7 @@ mod tests {
             .unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
                 Deadline::unbounded(),
             )
@@ -675,7 +675,7 @@ mod tests {
             let peak = Arc::clone(&peak);
             readers.push(thread::spawn(move || {
                 state
-                    .read_context("sake", |context| {
+                    .read_context(&state.id_of("sake"), |context| {
                         let now = in_read.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
                         // Wait for the other reader to show up (or give

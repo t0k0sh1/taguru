@@ -23,7 +23,7 @@ impl AppState {
     /// pretending a write happened).
     pub fn retract_association(
         &self,
-        name: &str,
+        id: &str,
         subject: &str,
         label: &str,
         object: &str,
@@ -33,7 +33,7 @@ impl AppState {
             label: label.to_string(),
             object: object.to_string(),
         };
-        self.retract_single_op(name, op, |context| {
+        self.retract_single_op(id, op, |context| {
             context.retract_association(subject, label, object)
         })
     }
@@ -41,8 +41,8 @@ impl AppState {
     /// The read-only twin of [`Self::retract_source`]'s edge count —
     /// `POST /import?dry_run=true`'s preview of what a retraction would
     /// report, without unlinking anything.
-    pub fn count_source_edges(&self, name: &str, source: &str) -> Result<usize, AccessError> {
-        self.read_context(name, |context| context.count_source_edges(source))
+    pub fn count_source_edges(&self, id: &str, source: &str) -> Result<usize, AccessError> {
+        self.read_context(id, |context| context.count_source_edges(source))
     }
 
     /// Withdraws one source from a `context` — its graph contributions and
@@ -64,14 +64,14 @@ impl AppState {
     /// store/associate/alias steps that follow it, and clearing the
     /// marker here too would reopen the batch to the exact gap it
     /// exists to close.
-    pub fn retract_source(&self, name: &str, source: &str) -> Result<(usize, bool), AccessError> {
-        self.open_import_marker(name, source).map_err(|error| {
+    pub fn retract_source(&self, id: &str, source: &str) -> Result<(usize, bool), AccessError> {
+        self.open_import_marker(id, source).map_err(|error| {
             AccessError::Unpersisted(format!(
                 "import marker not persisted: {error} — nothing was retracted"
             ))
         })?;
         let (touched, passage_removed, passage_removal_errored) =
-            self.retract_source_unmarked(name, source)?;
+            self.retract_source_unmarked(id, source)?;
         // A genuine passage-store failure must leave the marker in
         // place: clearing it here would erase the only surviving
         // witness (surfaced by boot and `taguru inspect`) that this
@@ -80,7 +80,7 @@ impl AppState {
         // there to remove" (raced with a delete, or never had a
         // passage) is not this case and still clears normally.
         if !passage_removal_errored {
-            self.clear_import_marker(name, source);
+            self.clear_import_marker(id, source);
         }
         Ok((touched, passage_removed))
     }
@@ -96,11 +96,11 @@ impl AppState {
     /// the numbers.
     pub fn retract_source_preview(
         &self,
-        name: &str,
+        id: &str,
         source: &str,
     ) -> Result<(usize, bool), AccessError> {
-        let touched = self.read_context(name, |context| context.count_source_edges(source))?;
-        let Some(entry) = self.lookup(name) else {
+        let touched = self.read_context(id, |context| context.count_source_edges(source))?;
+        let Some(entry) = self.lookup_id(id) else {
             return Ok((touched, false));
         };
         let Some(_fence) = entry.read_unless_deleted() else {
@@ -131,7 +131,7 @@ impl AppState {
     /// is safe.
     pub(crate) fn retract_source_unmarked(
         &self,
-        name: &str,
+        id: &str,
         source: &str,
     ) -> Result<(usize, bool, bool), AccessError> {
         let op = WalOp::RetractSource {
@@ -146,10 +146,10 @@ impl AppState {
         // could still fail (#676 review). The passage side instead
         // reports its own real outcome directly to the feed, below.
         let touched = self
-            .retract_single_op(name, op, |context| context.retract_source(source))?
+            .retract_single_op(id, op, |context| context.retract_source(source))?
             .unwrap_or(0);
 
-        let Some(entry) = self.lookup(name) else {
+        let Some(entry) = self.lookup_id(id) else {
             // Raced with a delete; there is nothing left to clean up.
             return Ok((touched, false, false));
         };
@@ -204,7 +204,7 @@ impl AppState {
                     }
                 },
                 Err(error) => {
-                    tracing::warn!("passages for '{name}' unavailable during retract: {error}");
+                    tracing::warn!("passages for '{id}' unavailable during retract: {error}");
                     (false, true)
                 }
             };
@@ -220,7 +220,7 @@ impl AppState {
     /// (and a disk that cannot land a hundred-byte marker is not going
     /// to land the writes either). `write_atomic` makes it durable,
     /// directory entry included, before any tracked write can need it.
-    pub fn open_import_marker(&self, context: &str, source: &str) -> io::Result<()> {
+    pub fn open_import_marker(&self, id: &str, source: &str) -> io::Result<()> {
         // The opt-out for an idempotent offline importer (issue #443
         // item 2): with re-run-the-sync as the documented recovery,
         // tear detection buys nothing, and this `write_atomic` is 2 of
@@ -233,14 +233,14 @@ impl AppState {
         // The marker sits in the context's file family, so it is
         // addressed by the context's id; a name that no longer
         // resolves means the delete won — nothing to mark.
-        let Some(entry) = self.lookup(context) else {
+        let Some(entry) = self.lookup_id(id) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("context '{context}' not found"),
+                format!("context '{id}' not found"),
             ));
         };
         let marker = ImportMarker {
-            context: context.to_string(),
+            context: id.to_string(),
             source: source.to_string(),
         };
         let body = serde_json::to_vec(&marker).map_err(io::Error::from)?;
@@ -256,10 +256,10 @@ impl AppState {
     /// effort, loudly: a marker that cannot be removed only means boot
     /// keeps reporting a tear that is no longer one, until a re-import
     /// or a hand unlink clears it.
-    pub fn clear_import_marker(&self, context: &str, source: &str) {
+    pub fn clear_import_marker(&self, id: &str, source: &str) {
         // A name that no longer resolves means the context (and its
         // markers) are already gone with the family.
-        let Some(entry) = self.lookup(context) else {
+        let Some(entry) = self.lookup_id(id) else {
             return;
         };
         let path = import_marker_path(&self.0.data_dir, &entry.id, source);
@@ -267,7 +267,7 @@ impl AppState {
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
-                context,
+                id,
                 source,
                 %error,
                 "import marker not removed; boot will keep reporting this import as torn",
@@ -281,17 +281,17 @@ impl AppState {
     /// one are applied, each all-or-nothing in the library.
     pub fn add_associations(
         &self,
-        name: &str,
+        id: &str,
         ops: Vec<AssocOp>,
         deadline: Deadline,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
         if deadline.expired() {
             return Err(AccessError::DeadlineExceeded);
         }
-        let ops = self.clamp_out_of_range_paragraphs(name, ops);
+        let ops = self.clamp_out_of_range_paragraphs(id, ops);
         let wal_ops: Vec<WalOp> = ops.into_iter().map(WalOp::Associate).collect();
         self.logged_write(
-            name,
+            id,
             &wal_ops,
             |context| apply_in_order(context, &wal_ops),
             applied_count,
@@ -314,11 +314,11 @@ impl AppState {
     /// fail the write — an unresolved locator is still meaningful
     /// (just without a section label), so this only removes locators
     /// it can positively prove are out of range.
-    fn clamp_out_of_range_paragraphs(&self, name: &str, mut ops: Vec<AssocOp>) -> Vec<AssocOp> {
+    fn clamp_out_of_range_paragraphs(&self, id: &str, mut ops: Vec<AssocOp>) -> Vec<AssocOp> {
         if !ops.iter().any(|op| op.paragraph.is_some()) {
             return ops;
         }
-        let Some(entry) = self.lookup(name) else {
+        let Some(entry) = self.lookup_id(id) else {
             return ops;
         };
         let Some(_fence) = entry.read_unless_deleted() else {
@@ -350,7 +350,7 @@ impl AppState {
     /// in [`PartialWrite::full`].
     pub fn add_aliases(
         &self,
-        name: &str,
+        id: &str,
         concepts: &BTreeMap<String, String>,
         labels: &BTreeMap<String, String>,
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
@@ -368,7 +368,7 @@ impl AppState {
             });
         }
         self.logged_write(
-            name,
+            id,
             &wal_ops,
             |context| apply_in_order(context, &wal_ops),
             applied_count,
@@ -382,7 +382,7 @@ impl AppState {
     /// spellings are refused as conflicts, never applied silently.
     pub fn remove_aliases(
         &self,
-        name: &str,
+        id: &str,
         concepts: &[String],
         labels: &[String],
     ) -> Result<Result<usize, PartialWrite>, AccessError> {
@@ -398,7 +398,7 @@ impl AppState {
             });
         }
         self.logged_write(
-            name,
+            id,
             &wal_ops,
             |context| apply_in_order(context, &wal_ops),
             applied_count,
@@ -420,11 +420,11 @@ impl AppState {
     /// never happened.
     fn retract_single_op(
         &self,
-        name: &str,
+        id: &str,
         op: WalOp,
         operate: impl FnOnce(&mut Context) -> Option<usize>,
     ) -> Result<Option<usize>, AccessError> {
-        self.logged_write(name, std::slice::from_ref(&op), operate, |result| {
+        self.logged_write(id, std::slice::from_ref(&op), operate, |result| {
             result.is_some() as usize
         })
     }
@@ -458,7 +458,7 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .add_associations(
-                    "sake",
+                    &state.id_of("sake"),
                     vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                     Deadline::unbounded(),
                 )
@@ -467,12 +467,12 @@ mod tests {
             let mut passages = BTreeMap::new();
             passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
 
             fail_persistence_ops_after(failure);
-            let first = state.retract_source("sake", "doc");
+            let first = state.retract_source(&state.id_of("sake"), "doc");
             let past_end = clear_persistence_fault();
             let marker = import_marker_path(&dir, &state.stem_of("sake").unwrap(), "doc");
 
@@ -518,7 +518,7 @@ mod tests {
                 // retract_source is idempotent per-source, so it is
                 // exact even when the injected failure was swallowed
                 // internally or only prevented marker cleanup.
-                state.retract_source("sake", "doc").unwrap();
+                state.retract_source(&state.id_of("sake"), "doc").unwrap();
                 assert!(
                     !marker.exists(),
                     "repair did not clear failure step {failure}"
@@ -529,7 +529,7 @@ mod tests {
             // nets to zero attributions — the same end-state
             // `retract_source_withdraws_its_contributions` checks.
             let attributions_gone = state
-                .read_context("sake", |context| {
+                .read_context(&state.id_of("sake"), |context| {
                     context.query(Some("蔵"), None, Some("高瀬"))[0]
                         .attributions
                         .is_empty()
@@ -540,7 +540,7 @@ mod tests {
                 "retry at step {failure} did not retract the association"
             );
             let (found, missing) = state
-                .lookup_passages("sake", &["doc".to_string()])
+                .lookup_passages(&state.id_of("sake"), &["doc".to_string()])
                 .unwrap()
                 .unwrap();
             assert!(
@@ -572,27 +572,32 @@ mod tests {
             .unwrap();
 
         let stem = state.stem_of("sake").unwrap();
-        state.open_import_marker("sake", "doc-1").unwrap();
+        state
+            .open_import_marker(&state.id_of("sake"), "doc-1")
+            .unwrap();
         let marker = import_marker_path(&dir, &stem, "doc-1");
         assert!(marker.exists(), "open writes the marker");
         // Distinct sources get distinct files — concurrent imports of
         // one context never race on a shared marker.
-        state.open_import_marker("sake", "doc-2").unwrap();
+        state
+            .open_import_marker(&state.id_of("sake"), "doc-2")
+            .unwrap();
         assert_eq!(import_marker_paths(&dir, &stem).len(), 2);
         // The content names the pair, so reports never decode filenames.
         let parsed: ImportMarker = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
         assert_eq!(
             (parsed.context.as_str(), parsed.source.as_str()),
-            ("sake", "doc-1")
+            (stem.as_str(), "doc-1"),
+            "the marker names the id — the same stem its file name carries"
         );
 
-        state.clear_import_marker("sake", "doc-1");
+        state.clear_import_marker(&state.id_of("sake"), "doc-1");
         assert!(!marker.exists(), "clear removes exactly its own marker");
         assert_eq!(import_marker_paths(&dir, &stem).len(), 1);
 
         // Deletion takes the survivors with the family: a marker must
         // not have boot report a tear in a context that is gone.
-        state.delete("sake").unwrap().unwrap();
+        state.delete(&state.id_of("sake")).unwrap().unwrap();
         assert!(
             import_marker_paths(&dir, &stem).is_empty(),
             "delete sweeps markers"
@@ -634,18 +639,21 @@ mod tests {
             let mut passages = BTreeMap::new();
             passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
             state
-                .store_passages("sake", plain(passages))
+                .store_passages(&state.id_of("sake"), plain(passages))
                 .unwrap()
                 .unwrap();
 
             let before = state.directory_entry("sake").unwrap().revision.graph;
-            let cursor = match state.context_changes("sake", None, 100).unwrap() {
+            let cursor = match state
+                .context_changes(&state.id_of("sake"), None, 100)
+                .unwrap()
+            {
                 ChangesOutcome::Page { next, .. } => next,
                 ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
             };
 
             fail_persistence_ops_after(failure);
-            let outcome = state.retract_source_unmarked("sake", "doc");
+            let outcome = state.retract_source_unmarked(&state.id_of("sake"), "doc");
             let past_end = clear_persistence_fault();
 
             if past_end {
@@ -672,7 +680,10 @@ mod tests {
                     "failure {failure}: a failed passage removal after an \
                      already-gone graph edge must not advance graph_revision"
                 );
-                match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+                match state
+                    .context_changes(&state.id_of("sake"), Some(&cursor), 100)
+                    .unwrap()
+                {
                     ChangesOutcome::Page { events, .. } => assert!(
                         events.is_empty(),
                         "failure {failure}: must not emit a change-feed event"
@@ -705,7 +716,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                 Deadline::unbounded(),
             )
@@ -713,7 +724,10 @@ mod tests {
             .unwrap();
 
         let before = state.directory_entry("sake").unwrap().revision.graph;
-        let cursor = match state.context_changes("sake", None, 100).unwrap() {
+        let cursor = match state
+            .context_changes(&state.id_of("sake"), None, 100)
+            .unwrap()
+        {
             ChangesOutcome::Page { next, .. } => next,
             ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
         };
@@ -721,7 +735,7 @@ mod tests {
         // Names no live edge: "蔵" and "杜氏" are real, but this
         // triple was never asserted.
         let outcome = state
-            .retract_association("sake", "蔵", "杜氏", "存在しない")
+            .retract_association(&state.id_of("sake"), "蔵", "杜氏", "存在しない")
             .unwrap();
         assert_eq!(outcome, None, "a no-op retract must report None honestly");
 
@@ -730,7 +744,10 @@ mod tests {
             before, after,
             "a no-op retract_association must not advance graph_revision"
         );
-        match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+        match state
+            .context_changes(&state.id_of("sake"), Some(&cursor), 100)
+            .unwrap()
+        {
             ChangesOutcome::Page { events, more, .. } => {
                 assert!(
                     events.is_empty(),
@@ -754,7 +771,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                 Deadline::unbounded(),
             )
@@ -762,13 +779,18 @@ mod tests {
             .unwrap();
 
         let before = state.directory_entry("sake").unwrap().revision.graph;
-        let cursor = match state.context_changes("sake", None, 100).unwrap() {
+        let cursor = match state
+            .context_changes(&state.id_of("sake"), None, 100)
+            .unwrap()
+        {
             ChangesOutcome::Page { next, .. } => next,
             ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
         };
 
         // Names a source that was never ingested.
-        let (touched, passage_removed) = state.retract_source("sake", "never-existed").unwrap();
+        let (touched, passage_removed) = state
+            .retract_source(&state.id_of("sake"), "never-existed")
+            .unwrap();
         assert_eq!(touched, 0);
         assert!(!passage_removed);
 
@@ -777,7 +799,10 @@ mod tests {
             before, after,
             "a no-op retract_source must not advance graph_revision"
         );
-        match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+        match state
+            .context_changes(&state.id_of("sake"), Some(&cursor), 100)
+            .unwrap()
+        {
             ChangesOutcome::Page { events, more, .. } => {
                 assert!(
                     events.is_empty(),
@@ -808,7 +833,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
                 Deadline::unbounded(),
             )
@@ -816,7 +841,7 @@ mod tests {
             .unwrap();
         state
             .store_passages(
-                "sake",
+                &state.id_of("sake"),
                 plain(BTreeMap::from([(
                     "doc".to_string(),
                     "杜氏は高瀬。".to_string(),
@@ -826,7 +851,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            state.retract_source_preview("sake", "doc").unwrap(),
+            state
+                .retract_source_preview(&state.id_of("sake"), "doc")
+                .unwrap(),
             (1, true),
             "a resident passage store reports the edge count and presence honestly"
         );
@@ -840,7 +867,9 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(
-            state.retract_source_preview("sake", "doc").unwrap(),
+            state
+                .retract_source_preview(&state.id_of("sake"), "doc")
+                .unwrap(),
             (1, false),
             "a passage-store load failure degrades to no-passage, not an error"
         );
@@ -860,7 +889,7 @@ mod tests {
 
         let already_expired = Deadline::after(std::time::Duration::ZERO);
         let refused = state.add_associations(
-            "sake",
+            &state.id_of("sake"),
             vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
             already_expired,
         );
@@ -869,7 +898,7 @@ mod tests {
             "an already-expired deadline must refuse before any op runs: {refused:?}"
         );
         let untouched = state
-            .read_context("sake", |context| {
+            .read_context(&state.id_of("sake"), |context| {
                 context.query(Some("蔵"), None, Some("高瀬")).is_empty()
             })
             .unwrap();
@@ -877,7 +906,7 @@ mod tests {
 
         let applied = state
             .add_associations(
-                "sake",
+                &state.id_of("sake"),
                 vec![
                     assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc")),
                     assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("doc")),
@@ -913,8 +942,10 @@ mod tests {
         // (a) Unknown context: `lookup` fails, the op passes through.
         let dir = scratch_dir("clamp-paragraphs");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let unchanged =
-            state.clamp_out_of_range_paragraphs("no-such-context", vec![op_with_paragraph(99)]);
+        let unchanged = state.clamp_out_of_range_paragraphs(
+            &state.id_of("no-such-context"),
+            vec![op_with_paragraph(99)],
+        );
         assert_eq!(
             unchanged[0].paragraph,
             Some(99),
@@ -925,11 +956,12 @@ mod tests {
         // entry survives tombstoning) but `read_unless_deleted` refuses.
         state.create("sake", ContextMeta::default()).unwrap();
         {
-            let entry = state.lookup("sake").unwrap();
+            let entry = state.lookup_named("sake").unwrap();
             let mut inner = entry.inner.write();
             state.tombstone_locked(&mut inner, &entry);
         }
-        let unchanged = state.clamp_out_of_range_paragraphs("sake", vec![op_with_paragraph(99)]);
+        let unchanged =
+            state.clamp_out_of_range_paragraphs(&state.id_of("sake"), vec![op_with_paragraph(99)]);
         assert_eq!(
             unchanged[0].paragraph,
             Some(99),
@@ -945,7 +977,7 @@ mod tests {
             state.create("sake", ContextMeta::default()).unwrap();
             state
                 .store_passages(
-                    "sake",
+                    &state.id_of("sake"),
                     plain(BTreeMap::from([(
                         "doc".to_string(),
                         "段落1\n\n段落2".to_string(),
@@ -962,7 +994,8 @@ mod tests {
         fs::write(&log, &corrupt).unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let unchanged = state.clamp_out_of_range_paragraphs("sake", vec![op_with_paragraph(1)]);
+        let unchanged =
+            state.clamp_out_of_range_paragraphs(&state.id_of("sake"), vec![op_with_paragraph(1)]);
         assert_eq!(
             unchanged[0].paragraph,
             Some(1),
@@ -975,7 +1008,7 @@ mod tests {
         fs::write(&log, &healthy).unwrap();
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let clamped = state.clamp_out_of_range_paragraphs(
-            "sake",
+            &state.id_of("sake"),
             vec![op_with_paragraph(1), op_with_paragraph(2)],
         );
         assert_eq!(

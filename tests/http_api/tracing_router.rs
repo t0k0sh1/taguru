@@ -212,9 +212,13 @@ fn a_proxied_context_verb_parents_the_shard_request_span_under_a_shard_call() {
     );
     // Seeded on the shard DIRECTLY, so exactly one request — the GET
     // below — crosses the router's proxy hop.
-    shard.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    shard.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
-    let (status, body) = router.call("GET", "/contexts/sake", None);
+    let (status, body) = router.call("GET", &format!("/contexts/{}", shard.cx("sake")), None);
     assert_eq!(status, 200, "{body}");
 
     let _ = router.stop_gracefully();
@@ -225,7 +229,7 @@ fn a_proxied_context_verb_parents_the_shard_request_span_under_a_shard_call() {
     // the router's is the one with no parent (the test sent no inbound
     // `traceparent`).
     let roots: Vec<&serde_json::Value> = tree
-        .by_name("GET /contexts/{name}")
+        .by_name("GET /contexts/{id}")
         .into_iter()
         .filter(|span| {
             span["parentSpanId"].as_str().unwrap_or_default().is_empty()
@@ -257,7 +261,7 @@ fn a_proxied_context_verb_parents_the_shard_request_span_under_a_shard_call() {
     let downstream: Vec<&serde_json::Value> = tree
         .children(shard_call)
         .into_iter()
-        .filter(|span| span["name"] == "GET /contexts/{name}")
+        .filter(|span| span["name"] == "GET /contexts/{id}")
         .collect();
     assert_eq!(
         downstream.len(),
@@ -400,10 +404,16 @@ fn a_proxied_http_error_and_a_transport_failure_mark_the_shard_call_differently(
         ],
     );
 
-    let (status, _) = router.call("GET", "/contexts/sake", None);
+    // A two-shard map probes every shard for the id's owner (#964):
+    // one GET yields both outcomes at once — `sake`'s 500 is an
+    // answer the router relays (no owner found, the refusal wins),
+    // ghost's dead port is the transport failure.
+    let (status, _) = router.call(
+        "GET",
+        "/contexts/00000000-0000-4000-8000-00000000dead",
+        None,
+    );
     assert_eq!(status, 500);
-    let (status, _) = router.call("GET", "/contexts/ghost", None);
-    assert_eq!(status, 502);
 
     let _ = router.stop_gracefully();
     let tree = SpanTree::new(collector.spans());

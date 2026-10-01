@@ -28,9 +28,12 @@ const RRF_K = 60;
 const rrf = (rank: number): number => 1.0 / (RRF_K + rank);
 
 export interface TaguruRetrieverFields extends BaseRetrieverInput {
-  /** One target `context`; name at least one of context/contexts/groups. */
+  /** One target `context` id (the `id` column of `contexts.list()`); name at least one of context/contexts/groups. */
   context?: string;
-  /** Several target `contexts` (full names). */
+  /** Several target `context` display NAMES — the cross-search body is
+   * name-addressed until #965. A name shared by several `contexts` is the
+   * server's own ambiguity refusal; the graph lane resolves each name to
+   * its id (paths are id-addressed, #964) and skips one it cannot. */
   contexts?: string[];
   /** `group` names — each searches every `context` it reaches, nested children included. */
   groups?: string[];
@@ -127,13 +130,11 @@ export class TaguruRetriever extends BaseRetriever {
   /**
    * Direct `contexts` lead in declaration order; `group`-resolved members follow
    * in name order, overlaps deduped — the server's own cross-search tie
-   * order.
+   * order. Targets are display NAMES: the cross-search body stays
+   * name-addressed until #965, and group records hold member names too.
    */
   private async resolveTargets(): Promise<string[]> {
     const targets: string[] = [];
-    if (this.context !== undefined) {
-      targets.push(this.context);
-    }
     for (const name of this.contexts ?? []) {
       if (!targets.includes(name)) {
         targets.push(name);
@@ -173,7 +174,36 @@ export class TaguruRetriever extends BaseRetriever {
     return targets;
   }
 
-  private async graphLane(target: string, query: string): Promise<Document[]> {
+  /**
+   * The graph lane's name→id bridge (#964): one directory walk, keeping
+   * only names exactly one `context` carries. Best-effort, like the group
+   * walk — a name that no longer resolves, or that several `contexts`
+   * share, is skipped by the caller rather than failing the retrieval.
+   */
+  private async idsByName(): Promise<Map<string, string>> {
+    const counted = new Map<string, string[]>();
+    try {
+      for await (const row of this.client.contexts.iter()) {
+        const ids = counted.get(row.name) ?? [];
+        ids.push(row.id);
+        counted.set(row.name, ids);
+      }
+    } catch {
+      counted.clear();
+    }
+    const unique = new Map<string, string>();
+    for (const [name, ids] of counted) {
+      if (ids.length === 1) {
+        unique.set(name, ids[0]!);
+      }
+    }
+    return unique;
+  }
+
+  /** `target` is the context ID; `label` is what the Documents' metadata
+   * names it (the display name on the cross path, matching the text
+   * lane's own tags). */
+  private async graphLane(target: string, query: string, label = target): Promise<Document[]> {
     const ctx = this.client.context(target);
     const candidates = await ctx.resolve(query, {
       dice_floor: this.dice_floor,
@@ -213,7 +243,7 @@ export class TaguruRetriever extends BaseRetriever {
     wanted.forEach(([source, paragraph], index) => {
       citations.set(citationKey(source, paragraph), fetched[index] ?? null);
     });
-    return graphDocuments(page.matches, citations, this.include_graph_only_facts, target);
+    return graphDocuments(page.matches, citations, this.include_graph_only_facts, label);
   }
 
   // No per-call `k` parameter: LangChain JS does not forward extra kwargs to
@@ -273,8 +303,16 @@ export class TaguruRetriever extends BaseRetriever {
       // target order) — run them concurrently. allSettled, not all: one
       // target erroring (a deleted context, a transient failure) should
       // not blank out the graph docs every other target already found.
+      // Targets are names; the lane runs on ids (#964) — an unresolvable
+      // name keeps its slot with no docs, so interleave order holds.
+      const ids = await this.idsByName();
       const settled = await Promise.allSettled(
-        targets.map((target) => this.graphLane(target, query)),
+        targets.map((name) => {
+          const id = ids.get(name);
+          return id === undefined
+            ? Promise.resolve<Document[]>([])
+            : this.graphLane(id, query, name);
+        }),
       );
       graphDocs = interleave(
         settled.map((outcome) => (outcome.status === "fulfilled" ? outcome.value : [])),

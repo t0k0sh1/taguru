@@ -86,14 +86,14 @@ USAGE:
                                         the portable backup (see: taguru
                                         export --help); a running server
                                         serves the same at
-                                        GET /contexts/{name}/export and
+                                        GET /contexts/{id}/export and
                                         GET /groups/{name}/export, or point
                                         export itself at one with --url
   taguru compact [CONTEXT...]           rewrite context images without the
                                         dead weight the append-only format
                                         accumulates (see: taguru compact
                                         --help); live servers use
-                                        POST /contexts/{name}/compact
+                                        POST /contexts/{id}/compact
   taguru restore --out DIR [URL]        materialize a data directory from a
                                         replication bucket's newest complete
                                         generation (see: taguru restore
@@ -176,7 +176,7 @@ USAGE:
                                         ordinary context (default
                                         'NAME::communities', or --into's
                                         name) that
-                                        POST /contexts/{name}/communities/search
+                                        POST /contexts/{id}/communities/search
                                         serves with a staleness verdict;
                                         --group derives one artifact per
                                         member context instead, transitively,
@@ -335,7 +335,7 @@ ENVIRONMENT (every knob; unset = the shown default):
                                'taguru calibrate' measures the right value)
   TAGURU_RERANK_URL            Cohere/Jina-compatible /rerank endpoint for
                                opt-in evidence reranking (#307); off keeps
-                               POST /contexts/{name}/evidence fully
+                               POST /contexts/{id}/evidence fully
                                deterministic (off)
   TAGURU_RERANK_MODEL          reranker model name
   TAGURU_RERANK_API_KEY        reranker provider credential

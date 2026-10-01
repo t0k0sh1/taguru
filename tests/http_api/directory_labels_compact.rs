@@ -12,10 +12,14 @@ use crate::support::*;
 #[test]
 fn labels_aliases_and_sources_page_with_keyset_cursors() {
     let server = Server::start("http-keyset-pages");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
             {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
@@ -24,12 +28,12 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"a.md": "本文。", "b.md": "本文。", "c.md": "本文。"}})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({
             "concepts": {"Aomine": "青嶺", "Kura": "蔵"},
             "labels": {"establishment": "創業年"},
@@ -37,27 +41,47 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
     );
 
     // labels: sorted, paged, total constant across pages.
-    let first = server.ok("GET", "/contexts/sake/labels?limit=2", None);
+    let first = server.ok(
+        "GET",
+        &format!("/contexts/{}/labels?limit=2", server.cx("sake")),
+        None,
+    );
     assert_eq!(first["total"], json!(3), "{first}");
     assert_eq!(first["labels"].as_array().unwrap().len(), 2);
     let last = first["labels"][1].as_str().unwrap();
     let second = server.ok(
         "GET",
-        &format!("/contexts/sake/labels?after={}", urlencode(last)),
+        &format!(
+            "/contexts/{}/labels?after={}",
+            server.cx("sake"),
+            urlencode(last)
+        ),
         None,
     );
     assert_eq!(second["total"], json!(3));
     assert_eq!(second["labels"].as_array().unwrap().len(), 1);
 
     // sources: keyset by id.
-    let first = server.ok("GET", "/contexts/sake/sources?limit=2", None);
+    let first = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?limit=2", server.cx("sake")),
+        None,
+    );
     assert_eq!(first["total"], json!(3), "{first}");
     assert_eq!(first["sources"], json!(["a.md", "b.md"]), "{first}");
-    let second = server.ok("GET", "/contexts/sake/sources?after=b.md", None);
+    let second = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?after=b.md", server.cx("sake")),
+        None,
+    );
     assert_eq!(second["sources"], json!(["c.md"]), "{second}");
 
     // aliases: one cursor across both namespaces, concepts first.
-    let first = server.ok("GET", "/contexts/sake/aliases?limit=2", None);
+    let first = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases?limit=2", server.cx("sake")),
+        None,
+    );
     assert_eq!(first["total"], json!(3), "{first}");
     assert_eq!(
         first["concepts"],
@@ -65,7 +89,11 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
         "{first}"
     );
     assert_eq!(first["labels"], json!({}), "{first}");
-    let second = server.ok("GET", "/contexts/sake/aliases?after=concept:Kura", None);
+    let second = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases?after=concept:Kura", server.cx("sake")),
+        None,
+    );
     assert_eq!(second["concepts"], json!({}), "{second}");
     assert_eq!(
         second["labels"],
@@ -73,7 +101,11 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
         "{second}"
     );
     // A malformed cursor is a 400, not an empty page.
-    let (status, refusal) = server.call("GET", "/contexts/sake/aliases?after=bogus", None);
+    let (status, refusal) = server.call(
+        "GET",
+        &format!("/contexts/{}/aliases?after=bogus", server.cx("sake")),
+        None,
+    );
     assert_eq!(status, 400, "{refusal}");
 }
 
@@ -84,10 +116,14 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
 #[test]
 fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering() {
     let server = Server::start("http-prefix-filter");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
             {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
@@ -96,12 +132,12 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources",
+        &format!("/contexts/{}/sources", server.cx("sake")),
         Some(json!({"passages": {"a.md": "本文。", "b.md": "本文。", "c.txt": "本文。"}})),
     );
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({
             "concepts": {"Aomine": "青嶺", "Kura": "蔵"},
             "labels": {"establishment": "創業年"},
@@ -111,20 +147,32 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
     // labels: only those starting with "杜".
     let filtered = server.ok(
         "GET",
-        &format!("/contexts/sake/labels?prefix={}", urlencode("杜")),
+        &format!(
+            "/contexts/{}/labels?prefix={}",
+            server.cx("sake"),
+            urlencode("杜")
+        ),
         None,
     );
     assert_eq!(filtered["total"], json!(1), "{filtered}");
     assert_eq!(filtered["labels"], json!(["杜氏"]), "{filtered}");
 
     // sources: only the .md files.
-    let filtered = server.ok("GET", "/contexts/sake/sources?prefix=a", None);
+    let filtered = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?prefix=a", server.cx("sake")),
+        None,
+    );
     assert_eq!(filtered["total"], json!(1), "{filtered}");
     assert_eq!(filtered["sources"], json!(["a.md"]), "{filtered}");
 
     // aliases: prefix applies within each namespace before the
     // concept:/label: cursor joins them.
-    let filtered = server.ok("GET", "/contexts/sake/aliases?prefix=A", None);
+    let filtered = server.ok(
+        "GET",
+        &format!("/contexts/{}/aliases?prefix=A", server.cx("sake")),
+        None,
+    );
     assert_eq!(filtered["total"], json!(1), "{filtered}");
     assert_eq!(
         filtered["concepts"],
@@ -134,7 +182,11 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
     assert_eq!(filtered["labels"], json!({}), "{filtered}");
 
     // No matches means total 0, not an error.
-    let empty = server.ok("GET", "/contexts/sake/sources?prefix=zzz", None);
+    let empty = server.ok(
+        "GET",
+        &format!("/contexts/{}/sources?prefix=zzz", server.cx("sake")),
+        None,
+    );
     assert_eq!(empty["total"], json!(0), "{empty}");
     assert_eq!(empty["sources"], json!([]), "{empty}");
 }
@@ -166,15 +218,15 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
     );
     let admin = Some("atok");
     let (status, _) = server.call_with_token(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
         admin,
     );
     assert_eq!(status, 200);
     server.call_with_token(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
             {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
@@ -183,16 +235,25 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
     );
     server.call_with_token(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "gone.md"})),
         admin,
     );
 
-    let (status, refused) =
-        server.call_with_token("POST", "/contexts/sake/compact", None, Some("wtok"));
+    let (status, refused) = server.call_with_token(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("sake")),
+        None,
+        Some("wtok"),
+    );
     assert_eq!(status, 403, "{refused}");
 
-    let (status, outcome) = server.call_with_token("POST", "/contexts/sake/compact", None, admin);
+    let (status, outcome) = server.call_with_token(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("sake")),
+        None,
+        admin,
+    );
     assert_eq!(status, 200, "{outcome}");
     let shed = &outcome["result"];
     assert_eq!(shed["dead_edges"], json!(1), "{outcome}");
@@ -202,7 +263,7 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
     );
     let (status, facts) = server.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵"})),
         admin,
     );
@@ -235,14 +296,14 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
     );
     let admin = Some("atok");
     server.call_with_token(
-        "PUT",
-        "/contexts/sake",
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
         admin,
     );
     server.call_with_token(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
             {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
@@ -251,7 +312,7 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
     );
     server.call_with_token(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "gone.md"})),
         admin,
     );
@@ -303,7 +364,7 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
     // Live content survived the rebuild.
     let (status, facts) = server.call_with_token(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵"})),
         admin,
     );
@@ -325,11 +386,15 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
 #[test]
 fn auto_compaction_fires_from_the_flusher_tick_by_default() {
     let server = Server::start_with_env("auto-compact", &[("TAGURU_FLUSH_SECS", "1")]);
-    let (status, _) = server.call("PUT", "/contexts/sake", Some(json!({"pinned": true})));
+    let (status, _) = server.call(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "pinned": true})),
+    );
     assert_eq!(status, 200);
     server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
             {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
@@ -338,7 +403,7 @@ fn auto_compaction_fires_from_the_flusher_tick_by_default() {
     );
     server.call(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "gone.md"})),
     );
 
@@ -389,7 +454,7 @@ fn auto_compaction_fires_from_the_flusher_tick_by_default() {
     // Live content survived the automatic rebuild.
     let (status, facts) = server.call(
         "POST",
-        "/contexts/sake/query",
+        &format!("/contexts/{}/query", server.cx("sake")),
         Some(json!({"subject": "蔵"})),
     );
     assert_eq!(status, 200);
@@ -408,10 +473,14 @@ fn auto_compaction_fires_from_the_flusher_tick_by_default() {
 #[test]
 fn compact_leaves_group_files_byte_for_byte() {
     let server = Server::start("compact-groups");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
             {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
@@ -419,7 +488,7 @@ fn compact_leaves_group_files_byte_for_byte() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/sources/retract",
+        &format!("/contexts/{}/sources/retract", server.cx("sake")),
         Some(json!({"source": "gone.md"})),
     );
     server.ok(
@@ -431,7 +500,11 @@ fn compact_leaves_group_files_byte_for_byte() {
     let before = std::fs::read(&group_file).expect("the group file must exist");
 
     // The live endpoint rewrites the context image, not the group file.
-    let shed = server.ok("POST", "/contexts/sake/compact", None);
+    let shed = server.ok(
+        "POST",
+        &format!("/contexts/{}/compact", server.cx("sake")),
+        None,
+    );
     assert_eq!(shed["dead_edges"], json!(1), "{shed}");
     let after_live = std::fs::read(&group_file).expect("the group file must survive");
     assert_eq!(

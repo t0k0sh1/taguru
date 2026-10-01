@@ -564,7 +564,7 @@ async fn call_inner(
 /// error text.
 const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
     (TAGURU_MCP_MAX_RESULT_BYTES); narrow the call (a smaller `limit` works for most tools), or \
-    for a full-context export use GET /contexts/{name}/export over the raw HTTP API, or the \
+    for a full-context export use GET /contexts/{id}/export over the raw HTTP API, or the \
     `taguru export` CLI — both are uncapped";
 
 /// Mirrors `api::deadline_exceeded`'s message: the same "budget already
@@ -604,7 +604,10 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": { "name": "create_context", "arguments": { "name": giant } },
+            // `get_context` puts its argument in the PATH — the overlong
+            // case this guards (create_context now carries its name in
+            // the body, which no URI limit ever sees).
+            "params": { "name": "get_context", "arguments": { "context": giant } },
         });
         let response = serve(
             Router::new(),
@@ -685,7 +688,7 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(reply["result"]["isError"], true, "{reply}");
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("GET /contexts/{name}/export"), "{text}");
+        assert!(text.contains("GET /contexts/{id}/export"), "{text}");
         assert!(text.contains("taguru export"), "{text}");
     }
 

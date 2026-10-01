@@ -1,4 +1,4 @@
-//! `GET`/`PUT /contexts/{name}/schema` (#380, S2 of #218's ADR 0009
+//! `GET`/`PUT /contexts/{id}/schema` (#380, S2 of #218's ADR 0009
 //! split) — the management routes over the schema document S1 (#379)
 //! already knows how to validate and persist — plus `POST .../schema/audit`
 //! and `POST .../schema/validate` (#385, S7, ADR 0009 §10): the two
@@ -25,7 +25,7 @@ use crate::schema::{
 };
 
 use super::{
-    AppBytes, AppJson, AppPath, AssociationOut, ErrorCode, Issue, MatchCursor, access_error,
+    AppBytes, AppJson, AssociationOut, ContextIdPath, ErrorCode, Issue, MatchCursor, access_error,
     association_out, deadline_exceeded, error, key_name, locator_keys, not_found, ok,
     optional_body, page_by,
 };
@@ -38,7 +38,7 @@ use super::{
 /// into one shape.
 pub async fn get_schema(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
@@ -49,12 +49,12 @@ pub async fn get_schema(
     // is recorded but not yet resolved locally) — real disk IO, so it
     // steps off the async worker like every other mutating or
     // load-bearing handler.
-    match tokio::task::block_in_place(|| state.schema_of(&name)) {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.schema_of(&id)) {
+        None => not_found(&id, started_at),
         Some(Ok(Some(installed))) => ok(installed.document(), started_at),
         Some(Ok(None)) => error(
             ErrorCode::NoSchema,
-            format!("context '{name}' has no schema document"),
+            format!("context '{id}' has no schema document"),
             started_at,
         ),
         Some(Err(message)) => {
@@ -63,11 +63,11 @@ pub async fn get_schema(
             // and unreadable-file messages both do) is for the operator,
             // not an authenticated HTTP client: logged here, never
             // forwarded into the response.
-            tracing::warn!(context = %name, error = %message, "schema load failed");
+            tracing::warn!(context = %id, error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' schema could not be loaded — see server logs"),
+                format!("context '{id}' schema could not be loaded — see server logs"),
                 started_at,
             )
         }
@@ -84,7 +84,7 @@ pub async fn get_schema(
 /// (version, caps, `is_a` cycles/depth, the reserved relation label).
 pub async fn put_schema(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(document): AppJson<SchemaDocument>,
@@ -107,8 +107,8 @@ pub async fn put_schema(
     // (also fsync + rename), and may load the context first to check
     // its live label-alias table; keep all of that off the async
     // worker like every other mutating endpoint.
-    match tokio::task::block_in_place(|| state.put_schema(&name, installed)) {
-        None => not_found(&name, started_at),
+    match tokio::task::block_in_place(|| state.put_schema(&id, installed)) {
+        None => not_found(&id, started_at),
         Some(Ok(document)) => {
             // Every destructive-ish operator action leaves one
             // self-contained `taguru::audit` line — who, what, to which
@@ -120,7 +120,7 @@ pub async fn put_schema(
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                context = %name,
+                context = %id,
                 mode = document.mode.as_str(),
                 "context schema installed",
             );
@@ -140,20 +140,20 @@ pub async fn put_schema(
             // Same posture as `get_schema`'s Load arm just above: the
             // detail can name a filesystem path, so it is logged, not
             // returned.
-            tracing::warn!(context = %name, error = %message, "schema load failed");
+            tracing::warn!(context = %id, error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' could not be loaded — see server logs"),
+                format!("context '{id}' could not be loaded — see server logs"),
                 started_at,
             )
         }
         Some(Err(PutSchemaError::Io(io_error))) => {
-            tracing::warn!(context = %name, error = %io_error, "schema write failed");
+            tracing::warn!(context = %id, error = %io_error, "schema write failed");
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' schema not persisted — see server logs"),
+                format!("context '{id}' schema not persisted — see server logs"),
                 started_at,
             )
         }
@@ -270,7 +270,7 @@ pub struct SchemaAudit {
     pub reserved_alias_conflicts: AuditAliases,
 }
 
-/// Request body for `POST /contexts/{name}/schema/audit` — an absent
+/// Request body for `POST /contexts/{id}/schema/audit` — an absent
 /// body means every default below; paging over `violations` follows the
 /// same contract `DriftAuditRequest` (`src/api/vocabulary.rs`) applies to
 /// `unsourced`. `deny_unknown_fields` (issue #623 finding 1) matches
@@ -291,7 +291,7 @@ pub struct SchemaAuditRequest {
     pub after: Option<MatchCursor>,
 }
 
-/// Request body for `POST /contexts/{name}/schema/validate` — the
+/// Request body for `POST /contexts/{id}/schema/validate` — the
 /// *proposed* document to dry-run, alongside the same paging fields
 /// [`SchemaAuditRequest`] carries. Wrapped rather than reusing `PUT
 /// /schema`'s bare-document body: [`SchemaDocument`] is itself
@@ -489,7 +489,7 @@ fn schema_audit(
     })
 }
 
-/// `POST /contexts/{name}/schema/audit` (#385, S7 of #218's ADR 0009
+/// `POST /contexts/{id}/schema/audit` (#385, S7 of #218's ADR 0009
 /// split §10): judges every live association against `name`'s installed
 /// document — the pre-existing violations `strict` itself can never
 /// surface on its own (§7.1), since a write entrance only ever judges a
@@ -497,7 +497,7 @@ fn schema_audit(
 /// its current mode) existed.
 pub async fn audit_schema(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
@@ -516,41 +516,41 @@ pub async fn audit_schema(
         // associations handler's pre-write arm all already depend on
         // (see `AppState::hidden_label`'s own doc for why the two
         // cannot nest).
-        match state.schema_of(&name) {
-            None => not_found(&name, started_at),
+        match state.schema_of(&id) {
+            None => not_found(&id, started_at),
             Some(Ok(None)) => error(
                 ErrorCode::NoSchema,
-                format!("context '{name}' has no schema document"),
+                format!("context '{id}' has no schema document"),
                 started_at,
             ),
             Some(Err(message)) => {
                 // Same posture as `get_schema`'s Load arm: the detail can
                 // name a filesystem path, so it is logged, never
                 // forwarded.
-                tracing::warn!(context = %name, error = %message, "schema load failed");
+                tracing::warn!(context = %id, error = %message, "schema load failed");
                 state.metrics().record_error(ErrorKind::Load);
                 error(
                     ErrorCode::Internal,
-                    format!("context '{name}' schema could not be loaded — see server logs"),
+                    format!("context '{id}' schema could not be loaded — see server logs"),
                     started_at,
                 )
             }
             Some(Ok(Some(installed))) => match schema_audit(
                 &state,
-                &name,
+                &id,
                 installed,
                 request.limit,
                 request.after.as_ref(),
                 deadline,
             ) {
                 Ok(audit) => ok(audit, started_at),
-                Err(failure) => access_error(&state, failure, &name, started_at),
+                Err(failure) => access_error(&state, failure, &id, started_at),
             },
         }
     })
 }
 
-/// `POST /contexts/{name}/schema/validate` (#385, S7, §10): the same
+/// `POST /contexts/{id}/schema/validate` (#385, S7, §10): the same
 /// judgment as [`audit_schema`], but over a PROPOSED document that is
 /// validated and evaluated without ever being persisted — the pre-flight
 /// §7.1 promises before a `strict` flip. Works identically whether `name`
@@ -558,7 +558,7 @@ pub async fn audit_schema(
 /// never reads or writes the resident document.
 pub async fn validate_schema(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    ContextIdPath(id): ContextIdPath,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<SchemaValidateRequest>,
 ) -> Response {
@@ -582,9 +582,9 @@ pub async fn validate_schema(
         return deadline_exceeded(started_at);
     }
     match tokio::task::block_in_place(|| {
-        schema_audit(&state, &name, installed, limit, after.as_ref(), deadline)
+        schema_audit(&state, &id, installed, limit, after.as_ref(), deadline)
     }) {
         Ok(audit) => ok(audit, started_at),
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(&state, failure, &id, started_at),
     }
 }

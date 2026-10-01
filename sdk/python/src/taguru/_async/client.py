@@ -384,9 +384,10 @@ class AsyncTaguru:
                 raise TaguruError(f"server not ready after {timeout} seconds")
             await asyncio.sleep(interval)
 
-    def context(self, name: str) -> AsyncContext:
-        """A handle bound to one ``context`` (no network call)."""
-        return AsyncContext(self, name)
+    def context(self, context_id: str) -> AsyncContext:
+        """A handle bound to one ``context`` by its id — the ``id`` column of
+        ``contexts.list()`` / ``contexts.create()`` (no network call)."""
+        return AsyncContext(self, context_id)
 
     # -- cross-context search ------------------------------------------------
 
@@ -517,17 +518,22 @@ class AsyncContexts:
         *,
         limit: int | None = None,
         after: str | None = None,
+        after_id: str | None = None,
         pinned: bool | None = None,
     ) -> ContextPage:
-        """One directory page (keyset cursor: ``after`` = last name shown).
+        """One directory page, sorted by ``(name, id)``.
 
-        ``pinned`` narrows to that pinned state; unlike ``after``, it
-        counts toward ``total``.
+        The keyset cursor is the last row shown: ``after`` its ``name``
+        and ``after_id`` its ``id`` (names are not unique, so the id
+        breaks ties). ``pinned`` narrows to that pinned state; unlike
+        the cursor, it counts toward ``total``.
         """
         result = await self._client._request_json(
             "GET",
             "/contexts",
-            params=drop_none({"limit": limit, "after": after, "pinned": pinned}),
+            params=drop_none(
+                {"limit": limit, "after": after, "after_id": after_id, "pinned": pinned}
+            ),
         )
         return decode(ContextPage, result)  # type: ignore[no-any-return]
 
@@ -536,23 +542,25 @@ class AsyncContexts:
     ) -> AsyncIterator[DirectoryEntry]:
         """Walk every directory page transparently."""
         after: str | None = None
+        after_id: str | None = None
         while True:
-            page = await self.list(limit=limit, after=after, pinned=pinned)
+            page = await self.list(limit=limit, after=after, after_id=after_id, pinned=pinned)
             if not page.contexts:
                 return
             for entry in page.contexts:
                 yield entry
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
-            after = page.contexts[-1].id
+            after = page.contexts[-1].name
+            after_id = page.contexts[-1].id
 
-    async def get(self, name: str) -> DirectoryEntry:
-        result = await self._client._request_json("GET", f"/contexts/{encode_name(name)}")
+    async def get(self, context_id: str) -> DirectoryEntry:
+        result = await self._client._request_json("GET", f"/contexts/{encode_name(context_id)}")
         return decode(DirectoryEntry, result)  # type: ignore[no-any-return]
 
-    async def exists(self, name: str) -> bool:
+    async def exists(self, context_id: str) -> bool:
         try:
-            await self.get(name)
+            await self.get(context_id)
         except NotFoundError:
             return False
         return True
@@ -565,10 +573,16 @@ class AsyncContexts:
         pinned: bool = False,
         dice_floor: float | None = None,
         semantic_floor: float | None = None,
-    ) -> bool:
-        """Create a ``context`` (409 ``ConflictError`` if it already exists)."""
+    ) -> DirectoryEntry:
+        """Create a ``context`` and return its directory row — ``id`` included,
+        the value every other call addresses it by.
+
+        ``name`` is a display string and NOT unique: creating a name again
+        mints a second, distinct ``context``.
+        """
         body = drop_none(
             {
+                "name": name,
                 "description": description,
                 "pinned": pinned,
                 "dice_floor": dice_floor,
@@ -576,16 +590,16 @@ class AsyncContexts:
             }
         )
         result = await self._client._request_json(
-            "PUT",
-            f"/contexts/{encode_name(name)}",
+            "POST",
+            "/contexts",
             json_body=body,
             retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
-        return bool(result)
+        return decode(DirectoryEntry, result)  # type: ignore[no-any-return]
 
     async def update(
         self,
-        name: str,
+        context_id: str,
         *,
         description: str | None = None,
         pinned: bool | None = None,
@@ -602,15 +616,15 @@ class AsyncContexts:
             }
         )
         result = await self._client._request_json(
-            "PATCH", f"/contexts/{encode_name(name)}", json_body=body
+            "PATCH", f"/contexts/{encode_name(context_id)}", json_body=body
         )
         return decode(ContextMeta, result)  # type: ignore[no-any-return]
 
-    async def delete(self, name: str) -> bool:
+    async def delete(self, context_id: str) -> bool:
         """Delete a ``context``, files included (admin role)."""
         result = await self._client._request_json(
             "DELETE",
-            f"/contexts/{encode_name(name)}",
+            f"/contexts/{encode_name(context_id)}",
             # A repeat delete 404s, so a phantom retry after an ambiguous
             # transport failure would surface as NotFoundError even though
             # the first delete already applied.
@@ -618,12 +632,13 @@ class AsyncContexts:
         )
         return bool(result)
 
-    async def rename(self, name: str, to: str) -> bool:
-        """Rename a ``context`` (admin role): the whole file family moves to
-        ``to``, and every ``group`` naming it is rewritten to match."""
+    async def rename(self, context_id: str, to: str) -> bool:
+        """Rename a ``context`` (admin role): a display-name change and nothing
+        else — the id, the files, and every path stay put. Names are not
+        unique, so ``to`` may already be in use."""
         result = await self._client._request_json(
             "POST",
-            f"/contexts/{encode_name(name)}/rename",
+            f"/contexts/{encode_name(context_id)}/rename",
             json_body={"to": to},
             retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
@@ -764,10 +779,10 @@ class AsyncContext:
     of one surface transfers to the others.
     """
 
-    def __init__(self, client: AsyncTaguru, name: str) -> None:
+    def __init__(self, client: AsyncTaguru, context_id: str) -> None:
         self._client = client
-        self.name = name
-        self._path = f"/contexts/{encode_name(name)}"
+        self.context_id = context_id
+        self._path = f"/contexts/{encode_name(context_id)}"
 
     async def _post(
         self, suffix: str, json_body: Any = None, retry: RetryClass = RetryClass.SAFE

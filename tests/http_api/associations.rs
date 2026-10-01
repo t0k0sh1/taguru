@@ -27,7 +27,11 @@ use crate::support::*;
 #[test]
 fn paragraph_rejects_every_non_integer_shape() {
     let server = Server::start("assoc-paragraph-shapes");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let cases: &[(&str, Value, &str)] = &[
         ("negative", json!(-1), "number"),
@@ -43,7 +47,7 @@ fn paragraph_rejects_every_non_integer_shape() {
     for (name, paragraph, expected_actual) in cases {
         let (status, body) = server.call(
             "POST",
-            "/contexts/sake/associations",
+            &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([
                 {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
                  "source": "a.md", "paragraph": paragraph}
@@ -76,7 +80,7 @@ fn paragraph_rejects_every_non_integer_shape() {
     // vacuously true for a handler that rejects everything.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "s", "label": "l", "object": "o", "weight": 1.0}
         ])),
@@ -90,12 +94,16 @@ fn paragraph_rejects_every_non_integer_shape() {
 #[test]
 fn source_over_the_name_byte_cap_is_rejected() {
     let server = Server::start("assoc-source-too-long");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let long_source = "字".repeat(400); // 1200 bytes, over the 1024-byte cap
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
              "source": long_source}
@@ -117,7 +125,11 @@ fn source_over_the_name_byte_cap_is_rejected() {
 #[test]
 fn subject_label_object_reject_every_wrong_json_type() {
     let server = Server::start("assoc-wrong-types");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     for field in ["subject", "label", "object"] {
         for (name, value) in [
@@ -127,8 +139,11 @@ fn subject_label_object_reject_every_wrong_json_type() {
         ] {
             let mut item = json!({"subject": "s", "label": "l", "object": "o", "weight": 1.0});
             item[field] = value;
-            let (status, body) =
-                server.call("POST", "/contexts/sake/associations", Some(json!([item])));
+            let (status, body) = server.call(
+                "POST",
+                &format!("/contexts/{}/associations", server.cx("sake")),
+                Some(json!([item])),
+            );
             assert_eq!(status, 400, "{field}/{name}: {body}");
             let issues = body["issues"].as_array().expect("issues array");
             assert_eq!(issues.len(), 1, "{field}/{name}: {body}");
@@ -152,7 +167,11 @@ fn subject_label_object_reject_every_wrong_json_type() {
 #[test]
 fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first() {
     let server = Server::start("assoc-retract-validation");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let long = "s".repeat(1025);
     for (name, request, offending_field) in [
@@ -187,8 +206,11 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
             "object",
         ),
     ] {
-        let (status, body) =
-            server.call("POST", "/contexts/sake/associations/retract", Some(request));
+        let (status, body) = server.call(
+            "POST",
+            &format!("/contexts/{}/associations/retract", server.cx("sake")),
+            Some(request),
+        );
         assert_eq!(status, 400, "{name}: {body}");
         assert_eq!(body["code"], json!("invalid_argument"), "{name}: {body}");
         // Fail-fast, plain-message shape: no `issues` array at all —
@@ -212,7 +234,7 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
     // rather than collect-all.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": "", "label": "", "object": "o"})),
     );
     assert_eq!(status, 400, "{body}");
@@ -226,7 +248,7 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
     // before the handler's own field-by-field walk ever runs.
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/associations/retract",
+        &format!("/contexts/{}/associations/retract", server.cx("sake")),
         Some(json!({"subject": 5, "label": "l", "object": "o"})),
     );
     // axum's `JsonRejection` maps a deserialize failure to 422, not
@@ -253,10 +275,14 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
 #[test]
 fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
     let mut server = Server::start("assoc-schema-load-failure");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
@@ -264,14 +290,14 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
     );
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "s", "label": "l", "object": "o", "weight": 1.0}
         ])),
     );
     server.ok(
         "POST",
-        "/contexts/sake/rename",
+        &format!("/contexts/{}/rename", server.cx("sake")),
         Some(json!({"to": "shochu"})),
     );
 
@@ -290,7 +316,7 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/shochu/associations",
+        &format!("/contexts/{}/associations", server.cx("shochu")),
         Some(json!([
             {"subject": "s2", "label": "l", "object": "o2", "weight": 1.0}
         ])),
@@ -312,10 +338,14 @@ fn add_associations_fails_closed_when_the_schema_image_is_corrupt() {
 #[test]
 fn aliases_success_result_is_a_bare_applied_count() {
     let server = Server::start("aliases-envelope-shape");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "l", "object": "o", "weight": 1.0}
         ])),
@@ -323,7 +353,7 @@ fn aliases_success_result_is_a_bare_applied_count() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"青嶺酒蔵": "青嶺酒造"}, "labels": {}})),
     );
     assert_eq!(status, 200, "{body}");
@@ -332,7 +362,7 @@ fn aliases_success_result_is_a_bare_applied_count() {
 
     let (status, body) = server.call(
         "DELETE",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": ["青嶺酒蔵"], "labels": []})),
     );
     assert_eq!(status, 200, "{body}");
@@ -345,24 +375,28 @@ fn aliases_success_result_is_a_bare_applied_count() {
 #[test]
 fn a_non_empty_alias_batch_bumps_the_write_counter() {
     let server = Server::start("aliases-write-counter");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "l", "object": "o", "weight": 1.0}
         ])),
     );
 
-    let before = server.ok("GET", "/contexts/sake", None);
+    let before = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(before["usage"]["writes"], json!(1), "{before}");
 
     server.ok(
         "POST",
-        "/contexts/sake/aliases",
+        &format!("/contexts/{}/aliases", server.cx("sake")),
         Some(json!({"concepts": {"青嶺酒蔵": "青嶺酒造"}, "labels": {}})),
     );
 
-    let after = server.ok("GET", "/contexts/sake", None);
+    let after = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
     assert_eq!(after["usage"]["writes"], json!(2), "{after}");
 }

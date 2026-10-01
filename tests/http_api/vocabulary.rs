@@ -141,13 +141,13 @@ fn semantic_server(tag: &str) -> Server {
 /// pair rides the same two bands.
 fn seed_semantic_corpus(server: &Server, name: &str) {
     server.ok(
-        "PUT",
-        &format!("/contexts/{name}"),
-        Some(json!({"description": "d"})),
+        "POST",
+        "/contexts",
+        Some(json!({"name": name, "description": "d"})),
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/associations"),
+        &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "鶴の井", "label": "使用米", "object": "五百万石",
              "weight": 1.0, "source": "a.md"},
@@ -159,7 +159,7 @@ fn seed_semantic_corpus(server: &Server, name: &str) {
     );
     server.ok(
         "POST",
-        &format!("/contexts/{name}/embeddings/refresh"),
+        &format!("/contexts/{}/embeddings/refresh", server.cx(name)),
         None,
     );
 }
@@ -177,17 +177,25 @@ fn has_pair(pairs: &Value, a: &str, b: &str) -> bool {
 #[test]
 fn semantic_note_explains_vectors_never_generated() {
     let server = Server::start("vocab-no-vectors");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
              "weight": 1.0, "source": "a.md"},
         ])),
     );
 
-    let audit = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
+    let audit = server.ok(
+        "POST",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
+        None,
+    );
     assert_eq!(
         audit["semantic_note"],
         json!("ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)"),
@@ -209,7 +217,7 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
 
     let low = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": 0.1})),
     );
     assert!(low["semantic_note"].is_null(), "{low}");
@@ -231,7 +239,11 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
 
     // Default floor (0.6): the tight band survives, the loose one
     // (~0.2) does not — for both the concept and the label sweep.
-    let default = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
+    let default = server.ok(
+        "POST",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
+        None,
+    );
     assert!(
         has_pair(&default["semantic_concepts"], "鶴の井", "白鷺の里"),
         "{default}"
@@ -253,7 +265,7 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
     // and the sweep comes back empty rather than erroring.
     let clamped_high = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": 2.0})),
     );
     assert_eq!(
@@ -266,7 +278,7 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
     // the explicit 0.1 floor above.
     let clamped_low = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": -1.0})),
     );
     assert!(
@@ -289,7 +301,7 @@ fn drift_audit_include_twins_propagates_cosine_floor() {
 
     let strict = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"include_twins": true, "cosine_floor": 0.6})),
     );
     let twins = &strict["twins"];
@@ -309,7 +321,7 @@ fn drift_audit_include_twins_propagates_cosine_floor() {
 
     let loose = server.ok(
         "POST",
-        "/contexts/sake/drift/audit",
+        &format!("/contexts/{}/drift/audit", server.cx("sake")),
         Some(json!({"include_twins": true, "cosine_floor": 0.1})),
     );
     assert!(
@@ -331,7 +343,11 @@ fn drift_audit_include_twins_propagates_cosine_floor() {
 #[test]
 fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
     let server = semantic_server("vocab-semantic-type-exclusion");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
     // Two DIFFERENT concepts, each the OBJECT of its own `schema:type`
     // edge (`type_name_concepts` only ever inserts the object side,
     // `src/api/vocabulary.rs`'s `names.insert(assoc.object)`) — the
@@ -342,7 +358,7 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
     // only, not everything) is provable.
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "純米酒01", "label": "schema:type", "object": "純米原料米型",
              "weight": 1.0, "source": "a.md"},
@@ -354,11 +370,15 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
              "weight": 1.0, "source": "a.md"},
         ])),
     );
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
     let before = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": 0.1})),
     );
     assert!(
@@ -373,7 +393,7 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
 
     server.ok(
         "PUT",
-        "/contexts/sake/schema",
+        &format!("/contexts/{}/schema", server.cx("sake")),
         Some(json!({
             "type": "schema", "mode": "off", "closed_labels": false,
             "types": {}, "relations": {}
@@ -382,7 +402,7 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
 
     let after = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": 0.1})),
     );
     assert!(
@@ -411,7 +431,11 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
 #[test]
 fn semantic_note_explains_the_sweep_cap_skip() {
     let server = semantic_server("vocab-sweep-cap");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     // A chain of 2001 concepts (v0000 next/続く v0001, ..., v1999
     // next/続く v2000), alternating between two labels — one
@@ -430,14 +454,18 @@ fn semantic_note_explains_the_sweep_cap_skip() {
         .collect();
     server.ok(
         "POST",
-        "/contexts/sake/associations",
+        &format!("/contexts/{}/associations", server.cx("sake")),
         Some(Value::Array(chain)),
     );
-    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake")),
+        None,
+    );
 
     let audit = server.ok(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": 0.0})),
     );
     assert_eq!(
@@ -462,11 +490,15 @@ fn semantic_note_explains_the_sweep_cap_skip() {
 #[test]
 fn dice_floor_and_cosine_floor_reject_the_wrong_json_type() {
     let server = Server::start("vocab-floor-wrong-type");
-    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"dice_floor": "high"})),
     );
     assert_eq!(status, 400, "{body}");
@@ -474,7 +506,7 @@ fn dice_floor_and_cosine_floor_reject_the_wrong_json_type() {
 
     let (status, body) = server.call(
         "POST",
-        "/contexts/sake/vocabulary/audit",
+        &format!("/contexts/{}/vocabulary/audit", server.cx("sake")),
         Some(json!({"cosine_floor": "high"})),
     );
     assert_eq!(status, 400, "{body}");

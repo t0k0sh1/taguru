@@ -550,9 +550,13 @@ fn bearer_token_gates_every_route_except_health_metrics_and_version() {
     assert_eq!(status, 200);
 
     // Writes are gated the same way.
-    let (status, _) = server.call("PUT", "/contexts/sake", Some(json!({})));
+    let (status, _) = server.call("POST", "/contexts", Some(json!({"name": "sake", })));
     assert_eq!(status, 401);
-    let (status, _) =
-        server.call_with_token("PUT", "/contexts/sake", Some(json!({})), Some("s3cret"));
+    let (status, _) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake"})),
+        Some("s3cret"),
+    );
     assert_eq!(status, 200);
 }

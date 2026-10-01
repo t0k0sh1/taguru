@@ -15,7 +15,7 @@
 //! (ADR 0006 §7).
 //!
 //! #305's `assemble` submodule is this module's first real, non-test
-//! caller: its `POST /contexts/{name}/evidence` handler builds
+//! caller: its `POST /contexts/{id}/evidence` handler builds
 //! [`EvidenceCandidate`]s from a live corpus, runs them through
 //! [`fuse`] and `select::select`, and serializes the result as ADR
 //! 0006 §10's `EvidencePackage`.

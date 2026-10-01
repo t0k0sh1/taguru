@@ -120,7 +120,7 @@
       <li><b>Graph path — one call when the structure is already right</b> (ADR 0018):
         when the keepers are the scratch's own structured associations (written by the
         session itself, nothing left to extract), the <code>promote</code> MCP tool
-        (<code>POST /contexts/{scratch}/promote</code>, body
+        (<code>POST /contexts/{scratch id}/promote</code>, body
         <code>{into, sources, audit?}</code>, <code>?dry_run=true</code> to preview)
         bundles steps 4–5: each named source moves whole — passage, <code>date</code>,
         tags, and only its <em>own</em> share of every edge's weight — with no LLM

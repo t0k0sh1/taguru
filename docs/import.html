@@ -211,7 +211,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       keeps re-importing revision files whose names keep rotating grows the <code>context</code> monotonically.
       Watch the counts with <code>taguru inspect</code> and the headroom with
       <code>taguru estimate</code>; accumulated dead weight is reclaimed by
-      <code>taguru compact</code> (offline) or <code>POST /contexts/{name}/compact</code>
+      <code>taguru compact</code> (offline) or <code>POST /contexts/{id}/compact</code>
       (live, admin) — live facts, counts, and paragraph locators are all preserved; only retracted
       records and arena debris disappear.
     </p>
@@ -238,7 +238,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       (<code>"2026-09-17"</code> is the one this build reads and writes), a file that omits it is
       read as the running build's own revision, and any other date is refused by name. Everything
       taguru writes carries it; a hand-written file may leave it out. <code>create</code> is optional
-      and carries the same fields as <code>PUT /contexts/{name}</code> (<code>description</code>,
+      and carries the same fields as the <code>POST /contexts</code> body (<code>description</code>,
       <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
       the <code>context</code> <b>does not exist yet</b>. Importing into an absent <code>context</code> without a create
       block is refused.
@@ -259,7 +259,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       The canonical may be a name first introduced by this file's associations — associations
       apply first. Re-pointing an existing alias at a <b>different</b> canonical is a conflict and
       fails the file — import must never silently rewire vocabulary. The fix is deliberately
-      two-step: retract the old registration first (<code>DELETE /contexts/{name}/aliases</code>
+      two-step: retract the old registration first (<code>DELETE /contexts/{id}/aliases</code>
       with the exact spelling, or MCP's <code>remove_aliases</code>), then re-import — the
       retraction makes the retry exact. A source file itself <b>cannot delete</b> an alias.
       Also deliberate.
@@ -306,7 +306,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <code>recall</code>, <code>query</code>, <code>explore</code>, <code>activate</code>, and
       <code>unreachable_from</code> all resolve <code>attributions[].section</code>, or
       <code>null</code> when the locator falls in no section.
-      <code>POST /contexts/{name}/citations</code> performs the same resolution for its one
+      <code>POST /contexts/{id}/citations</code> performs the same resolution for its one
       paragraph. Passage-search hits do not read this field yet and keep omitting it regardless of
       what is stored — a separate follow-up.
     </p>
@@ -329,7 +329,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       (<code>locators_dropped</code>; same usual cause as questions/sections). The same resolution
       reaches <code>attributions[].locator</code> on <code>recall</code>, <code>query</code>,
       <code>explore</code>, <code>activate</code>, <code>unreachable_from</code>, and
-      <code>POST /contexts/{name}/citations</code>'s <code>locator</code>, exactly like
+      <code>POST /contexts/{id}/citations</code>'s <code>locator</code>, exactly like
       <code>section</code>.
     </p>
 
@@ -343,7 +343,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <code>{"type": "schema", "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
       — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13): the <code>mode</code>,
       <code>closed_labels</code>, <code>types</code>, and <code>relations</code>
-      <code>PUT /contexts/{name}/schema</code> installs, under the record's own <code>type</code> and
+      <code>PUT /contexts/{id}/schema</code> installs, under the record's own <code>type</code> and
       the <code>context</code> it installs onto. Unlike a <code>group</code> record, every field but the
       optional <code>version</code> is required — there is no default for an absent one, matching the document's own at-rest
       shape: a missing field is a parse refusal, never a silently-defaulted one. A schema record
@@ -456,7 +456,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       the run — the same idempotent refresh as the server's <code>TAGURU_EMBED_AUTO</code>.
       <code>--no-embed</code> skips it. A refresh failure rolls back nothing: the graph is
       imported and durable, and the run exits 1 naming the recovery step
-      (<code>POST /contexts/{name}/embeddings/refresh</code> on a running server).
+      (<code>POST /contexts/{id}/embeddings/refresh</code> on a running server).
     </p>
   </section>
 
@@ -590,7 +590,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     <p>
       That stream is what <code>taguru export --out DIR [CONTEXT...]</code> writes (offline, under
       the directory lock), and what a running server serves at
-      <code>GET /contexts/{name}/export</code> (the body is the JSON Lines stream itself).
+      <code>GET /contexts/{id}/export</code> (the body is the JSON Lines stream itself).
       One <code>context</code> = one stream: one source file per source id, in order, with a <code>create</code>
       block (description, pinning, floors) on the first source and the alias table riding the last.
       A <code>context</code> whose schema is installed and not in <code>off</code> mode carries one more line —
@@ -624,7 +624,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     </ul>
     <pre><code><span class="c"># evacuate one context from a live server and restore it elsewhere</span>
 curl -H 'Authorization: Bearer &lt;key&gt;' \
-  localhost:8248/contexts/sake/export &gt; sake.jsonl
+  localhost:8248/contexts/$CTX/export &gt; sake.jsonl
 curl -X POST other-host:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' --data-binary @sake.jsonl
 <span class="c"># offline:  taguru export --out backups/ ; taguru import backups/</span>

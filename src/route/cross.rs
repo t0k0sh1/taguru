@@ -283,6 +283,10 @@ pub(super) async fn merge_contexts(
         )
         .await;
     let mut unreached = Vec::new();
+    // Keyed by the row's ID: two shards answering the same id is the
+    // mid-move stray (a restore not yet deleted at the source) — two
+    // rows merely SHARING A NAME are two distinct contexts now (#961
+    // decision 1) and both belong in the merged page.
     let mut rows: BTreeMap<String, (usize, crate::registry::DirectoryEntry)> = BTreeMap::new();
     let mut total = 0usize;
     for (shard, outcome) in outcomes {
@@ -292,17 +296,17 @@ pub(super) async fn merge_contexts(
                     Ok(page) => {
                         total += page.result.total;
                         for entry in page.result.contexts {
-                            match rows.get(&entry.name) {
-                                // A context answered by two shards is a
-                                // mid-move stray: the map's owner wins the
-                                // row, and the duplicate leaves the total.
+                            match rows.get(&entry.id) {
+                                // The map's owner wins the row (the map
+                                // still keys on display names), and the
+                                // duplicate leaves the total.
                                 Some((held_shard, _))
                                     if map.shard_of(&entry.name) != Some(shard)
                                         || *held_shard == shard =>
                                 {
                                     total = total.saturating_sub(1);
                                     warn!(
-                                        context = %entry.name,
+                                        context = %entry.id,
                                         "context answered by more than one shard — \
                                          mid-move stray? the route map's owner wins"
                                     );
@@ -310,14 +314,14 @@ pub(super) async fn merge_contexts(
                                 Some(_) => {
                                     total = total.saturating_sub(1);
                                     warn!(
-                                        context = %entry.name,
+                                        context = %entry.id,
                                         "context answered by more than one shard — \
                                          mid-move stray? the route map's owner wins"
                                     );
-                                    rows.insert(entry.name.clone(), (shard, entry));
+                                    rows.insert(entry.id.clone(), (shard, entry));
                                 }
                                 None => {
-                                    rows.insert(entry.name.clone(), (shard, entry));
+                                    rows.insert(entry.id.clone(), (shard, entry));
                                 }
                             }
                         }
@@ -347,15 +351,16 @@ pub(super) async fn merge_contexts(
     }
     // `clamp_page`, exactly as the single instance's `list_contexts`
     // cuts its own page: `limit=0` floors to one so the keyset
-    // listing's empty page keeps meaning "no more pages".
-    let contexts: Vec<crate::registry::DirectoryEntry> = rows
-        .into_values()
-        .map(|(_, entry)| entry)
-        .take(api::clamp_page(
-            query.limit,
-            api::MAX_MATCH_LIMIT,
-            api::MAX_MATCH_LIMIT,
-        ))
-        .collect();
+    // listing's empty page keeps meaning "no more pages". The merge
+    // re-sorts by `(name, id)` — the id-keyed map above iterates in
+    // id order, not the listing's.
+    let mut contexts: Vec<crate::registry::DirectoryEntry> =
+        rows.into_values().map(|(_, entry)| entry).collect();
+    contexts.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+    contexts.truncate(api::clamp_page(
+        query.limit,
+        api::MAX_MATCH_LIMIT,
+        api::MAX_MATCH_LIMIT,
+    ));
     router_ok(api::ContextPage { total, contexts }, unreached, started_at)
 }

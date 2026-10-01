@@ -52,9 +52,24 @@ function emptyLlm(times = 1): FakeListChatModel {
  * on the shared real server and the next run's own `create_context: true`
  * collides with it, turning one failure into a second, unrelated one. */
 async function dropContext(context: string): Promise<void> {
-  if (await client.contexts.exists(context)) {
-    await client.contexts.delete(context);
+  // `context` is a display name; deletion is id-addressed (#964).
+  for await (const row of client.contexts.iter()) {
+    if (row.name === context) {
+      await client.contexts.delete(row.id);
+    }
   }
+}
+
+/** The id behind a display name — the ingester's `context` field is a
+ * NAME (it rides the name-addressed import stream), while every
+ * verification read is id-addressed (#964). */
+async function contextIdOf(name: string): Promise<string> {
+  for await (const row of client.contexts.iter()) {
+    if (row.name === name) {
+      return row.id;
+    }
+  }
+  throw new Error(`no context named ${name}`);
 }
 
 /** A fresh subdirectory of `workDir`, one per test, so sibling tests never
@@ -114,7 +129,7 @@ describe("ingest connectors (real server)", () => {
       expect(outcome.sections_stored).toBe(1);
       expect(outcome.locators_stored).toBe(1);
 
-      const ctx = client.context("aizome");
+      const ctx = client.context(await contextIdOf("aizome"));
       const headingCitation = await ctx.citePassage(document.source, 0);
       expect(headingCitation.section).toBe("藍染工房");
 
@@ -157,7 +172,7 @@ describe("ingest connectors (real server)", () => {
       expect(outcome.ok).toBe(true);
       expect(outcome.locators_stored).toBe(document.locators.length);
 
-      const ctx = client.context("indigo-workshop");
+      const ctx = client.context(await contextIdOf("indigo-workshop"));
       const locatedCitation = await ctx.citePassage(document.source, 2);
       expect(locatedCitation.locator).toEqual({ kind: "page", value: "2" } satisfies Locator);
     } finally {
@@ -204,7 +219,7 @@ describe("ingest connectors (real server)", () => {
       expect(outcome.sections_stored).toBe(document.sections.length);
       expect(outcome.locators_stored).toBe(document.locators.length);
 
-      const ctx = client.context("weaving-studio");
+      const ctx = client.context(await contextIdOf("weaving-studio"));
       const headingCitation = await ctx.citePassage(document.source, 2);
       expect(headingCitation.section).toBe("Weaving Studio > Products");
       expect(headingCitation.locator).toEqual({ kind: "fragment", value: "products" } satisfies Locator);
@@ -248,7 +263,7 @@ describe("ingest connectors (real server)", () => {
       expect(outcome.sections_stored).toBe(document.sections.length);
       expect(outcome.locators_stored).toBe(document.locators.length);
 
-      const ctx = client.context("pottery-studio");
+      const ctx = client.context(await contextIdOf("pottery-studio"));
       const tableParagraph = document.locators[0]!.paragraph;
       const tableCitation = await ctx.citePassage(document.source, tableParagraph);
       expect(tableCitation.section).toBe("Pottery Studio > Products");
@@ -290,7 +305,7 @@ describe("ingest connectors (real server)", () => {
       expect(outcome.sections_stored).toBe(document.sections.length);
       expect(outcome.locators_stored).toBe(document.locators.length);
 
-      const ctx = client.context("glassblowing-studio");
+      const ctx = client.context(await contextIdOf("glassblowing-studio"));
       const bodyCitation = await ctx.citePassage(document.source, 1);
       expect(bodyCitation.section).toBe("Glassblowing Studio");
       expect(bodyCitation.locator).toEqual({ kind: "slide", value: "1" } satisfies Locator);
@@ -354,7 +369,7 @@ describe("ingest connectors (real server)", () => {
       expect(report.imported).toBe(4);
       expect(report.failed).toBe(0);
 
-      const ctx = client.context("ceramics-s3");
+      const ctx = client.context(await contextIdOf("ceramics-s3"));
       const pdfSource = `${store.baseUri}/report.pdf`;
       const htmlSource = `${store.baseUri}/page.html`;
       const docxSource = `${store.baseUri}/catalog.docx`;
@@ -418,7 +433,7 @@ describe("ingest connectors (real server)", () => {
         .map((line) => (JSON.parse(line) as { phase: string }).phase);
       expect(onDiskPhases).toEqual(["discovered", "parsed", "extracted", "imported"]);
 
-      const ctx = client.context("ceramics-references");
+      const ctx = client.context(await contextIdOf("ceramics-references"));
       expect(Object.keys((await ctx.lookupPassages([reference])).passages)).toContain(reference);
 
       const second = await syncReferences([reference], { ingester, checkpoints });

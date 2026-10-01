@@ -47,7 +47,7 @@ ALLOWLIST: dict[str, str] = {
         "found alongside the router/surface.yaml gap this script closes "
         "(issue #625), but out of scope for that issue's three named "
         "endpoints — likely another oversight (POST /flush and POST "
-        "/contexts/{name}/compact, equally admin, are both in the SDK); "
+        "/contexts/{id}/compact, equally admin, are both in the SDK); "
         "candidate for a follow-up issue rather than silently added here"
     ),
 }

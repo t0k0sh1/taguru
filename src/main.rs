@@ -337,7 +337,7 @@ async fn serve(
 
     // The optional evidence reranker (#307, ADR 0006 §12) — absent
     // config disables the tier entirely, at no network or credential
-    // cost; `POST /contexts/{name}/evidence` selection stays fully
+    // cost; `POST /contexts/{id}/evidence` selection stays fully
     // deterministic either way.
     let reranker = HttpReranker::from_env();
     if let Some(reranker) = &reranker {
@@ -556,7 +556,10 @@ async fn serve(
     let mcp_dispatch = app
         .clone()
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(axum::middleware::from_fn(auth::enforce_authorization));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::enforce_authorization,
+        ));
     let app = app.route(
         "/mcp",
         post(
@@ -626,7 +629,10 @@ async fn serve(
     // Keyring-free: it judges the grant the bearer gate resolves and
     // stamps, so both layers see one table per request even across a
     // hot reload.
-    let app = app.layer(axum::middleware::from_fn(auth::enforce_authorization));
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::enforce_authorization,
+    ));
     let gate = Arc::new(auth::Gate {
         keyring: keyring.clone(),
         oauth: oauth.clone(),
@@ -790,33 +796,27 @@ fn routes(
     state: AppState,
 ) -> Router<AppState> {
     let heavy_routes = Router::new()
-        .route("/contexts/{name}/compact", post(api::compact_context))
+        .route("/contexts/{id}/compact", post(api::compact_context))
         .route(
-            "/contexts/{name}/vocabulary/audit",
+            "/contexts/{id}/vocabulary/audit",
             post(api::audit_vocabulary),
         )
         // Community detection sweeps every edge of the graph — the
         // same full-scan class as the vocabulary audit.
-        .route(
-            "/contexts/{name}/communities",
-            get(api::analyze_communities),
-        )
+        .route("/contexts/{id}/communities", get(api::analyze_communities))
         // ADR 0009 §10: both O(edges), with no cheap default path —
         // unlike `audit_drift` just below, neither ever conditionally
         // skips the full scan, so both join this unconditional group
         // rather than carrying the limiter as an extension.
-        .route("/contexts/{name}/schema/audit", post(api::audit_schema))
+        .route("/contexts/{id}/schema/audit", post(api::audit_schema))
         // ADR 0012 §8: every consolidation section is O(edges) or
         // worse (the merge sweep is pairwise) — no cheap default to
         // protect, so the unconditional group, not drift's pattern.
         .route(
-            "/contexts/{name}/consolidation/audit",
+            "/contexts/{id}/consolidation/audit",
             post(api::audit_consolidation),
         )
-        .route(
-            "/contexts/{name}/schema/validate",
-            post(api::validate_schema),
-        )
+        .route("/contexts/{id}/schema/validate", post(api::validate_schema))
         .route_layer(axum::middleware::from_fn_with_state(
             heavy_ops_limiter.clone(),
             limits::enforce_heavy_ops,
@@ -829,7 +829,7 @@ fn routes(
     // the unconditional gate above; `audit_drift` only spends a
     // permit while its expensive branch actually runs.
     let drift_audit_route = Router::new()
-        .route("/contexts/{name}/drift/audit", post(api::audit_drift))
+        .route("/contexts/{id}/drift/audit", post(api::audit_drift))
         // Promote (ADR 0018) is a write bundle whose default epilogue
         // is the full consolidation audit — heavy only in that branch
         // (`audit: false` and dry runs never touch it), so it carries
@@ -839,7 +839,7 @@ fn routes(
         // "overloaded"`) instead of shedding: the batches are already
         // durable by audit time, and a 503 would hide a completed
         // write.
-        .route("/contexts/{name}/promote", post(api::promote_sources))
+        .route("/contexts/{id}/promote", post(api::promote_sources))
         .route_layer(axum::Extension(heavy_ops_limiter));
 
     Router::new()
@@ -854,11 +854,13 @@ fn routes(
         .route("/flush", post(api::flush_all))
         .route("/maintenance/compact", post(api::maintenance_compact))
         .route("/import", post(api::import_batch))
-        .route("/contexts", get(api::list_contexts))
         .route(
-            "/contexts/{name}",
+            "/contexts",
+            get(api::list_contexts).post(api::create_context),
+        )
+        .route(
+            "/contexts/{id}",
             get(api::get_context)
-                .put(api::create_context)
                 .patch(api::update_context)
                 .delete(api::delete_context),
         )
@@ -877,74 +879,62 @@ fn routes(
         .route("/recall", post(api::cross_recall))
         .route("/query", post(api::cross_query))
         .route("/sources/search", post(api::cross_search_passages))
-        .route("/contexts/{name}/export", get(api::export_context))
-        .route("/contexts/{name}/rename", post(api::rename_context))
-        .route("/contexts/{name}/associations", post(api::add_associations))
+        .route("/contexts/{id}/export", get(api::export_context))
+        .route("/contexts/{id}/rename", post(api::rename_context))
+        .route("/contexts/{id}/associations", post(api::add_associations))
         .route(
-            "/contexts/{name}/associations/retract",
+            "/contexts/{id}/associations/retract",
             post(api::retract_association),
         )
-        .route("/contexts/{name}/recall", post(api::recall))
-        .route("/contexts/{name}/query", post(api::query))
-        .route("/contexts/{name}/describe", post(api::describe))
-        .route("/contexts/{name}/explore", post(api::explore))
-        .route("/contexts/{name}/activate", post(api::activate))
-        .route("/contexts/{name}/paths", post(api::paths))
-        .route("/contexts/{name}/changes", get(api::changes))
-        .route("/contexts/{name}/resolve", post(api::resolve))
+        .route("/contexts/{id}/recall", post(api::recall))
+        .route("/contexts/{id}/query", post(api::query))
+        .route("/contexts/{id}/describe", post(api::describe))
+        .route("/contexts/{id}/explore", post(api::explore))
+        .route("/contexts/{id}/activate", post(api::activate))
+        .route("/contexts/{id}/paths", post(api::paths))
+        .route("/contexts/{id}/changes", get(api::changes))
+        .route("/contexts/{id}/resolve", post(api::resolve))
+        .route("/contexts/{id}/resolve/explain", post(api::explain_resolve))
+        .route("/contexts/{id}/resolve_label", post(api::resolve_label))
         .route(
-            "/contexts/{name}/resolve/explain",
-            post(api::explain_resolve),
-        )
-        .route("/contexts/{name}/resolve_label", post(api::resolve_label))
-        .route(
-            "/contexts/{name}/resolve_label/explain",
+            "/contexts/{id}/resolve_label/explain",
             post(api::explain_resolve_label),
         )
-        .route("/contexts/{name}/labels", get(api::labels))
+        .route("/contexts/{id}/labels", get(api::labels))
         .route(
-            "/contexts/{name}/schema",
+            "/contexts/{id}/schema",
             get(api::get_schema).put(api::put_schema),
         )
         .route(
-            "/contexts/{name}/aliases",
+            "/contexts/{id}/aliases",
             get(api::list_aliases)
                 .post(api::add_aliases)
                 .delete(api::remove_aliases),
         )
         .route(
-            "/contexts/{name}/sources",
+            "/contexts/{id}/sources",
             get(api::list_sources).post(api::store_passages),
         )
+        .route("/contexts/{id}/sources/lookup", post(api::lookup_passages))
+        .route("/contexts/{id}/sources/search", post(api::search_passages))
         .route(
-            "/contexts/{name}/sources/lookup",
-            post(api::lookup_passages),
-        )
-        .route(
-            "/contexts/{name}/sources/search",
-            post(api::search_passages),
-        )
-        .route(
-            "/contexts/{name}/sources/search/explain",
+            "/contexts/{id}/sources/search/explain",
             post(api::explain_search_passages),
         )
         .route(
-            "/contexts/{name}/communities/search",
+            "/contexts/{id}/communities/search",
             post(api::search_communities),
         )
-        .route("/contexts/{name}/evidence", post(api::assemble_evidence))
+        .route("/contexts/{id}/evidence", post(api::assemble_evidence))
+        .route("/contexts/{id}/sources/retract", post(api::retract_source))
+        .route("/contexts/{id}/citations", post(api::citation))
+        .route("/contexts/{id}/embeddings", get(api::embeddings_status))
         .route(
-            "/contexts/{name}/sources/retract",
-            post(api::retract_source),
-        )
-        .route("/contexts/{name}/citations", post(api::citation))
-        .route("/contexts/{name}/embeddings", get(api::embeddings_status))
-        .route(
-            "/contexts/{name}/embeddings/refresh",
+            "/contexts/{id}/embeddings/refresh",
             post(api::refresh_embeddings),
         )
         .route(
-            "/contexts/{name}/unreachable_from",
+            "/contexts/{id}/unreachable_from",
             post(api::unreachable_from),
         )
         .merge(heavy_routes)

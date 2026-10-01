@@ -1,10 +1,10 @@
 //! `taguru benchmark search` (issue #260, ADR 0003 §11): builds one
 //! per-model corpus from a finished `taguru benchmark extract` results
 //! directory, runs `eval.jsonl`'s shared question set against each
-//! corpus over `POST /contexts/{name}/sources/search`, and writes
+//! corpus over `POST /contexts/{id}/sources/search`, and writes
 //! `RESULTS_DIR/retrieval.json` — the one search endpoint ADR 0003
 //! §11 names for this verb; no other retrieval endpoint is called
-//! (see the module-level note on `POST /contexts/{name}/recall` below
+//! (see the module-level note on `POST /contexts/{id}/recall` below
 //! for why one might look tempting and isn't used).
 //!
 //! Gold-data-free and judgment-free by construction, the same posture
@@ -30,7 +30,7 @@
 //! found by reading the server's own implementation while building
 //! this:
 //!
-//! - `POST /contexts/{name}/embeddings/refresh` only re-embeds concept
+//! - `POST /contexts/{id}/embeddings/refresh` only re-embeds concept
 //!   and label GLOSSES (`registry/embeddings.rs`'s `refresh_embeddings`,
 //!   what `resolve`'s semantic fallback reads) — never passage
 //!   vectors, which is what `sources/search`'s vector lane actually
@@ -39,7 +39,7 @@
 //!   `auto_embed` and `TAGURU_EMBED_PASSAGES`) and have no HTTP
 //!   endpoint at all. So this module never calls embeddings/refresh —
 //!   there is nothing useful it would do — and instead reads
-//!   `GET /contexts/{name}/embeddings` once per corpus, purely as
+//!   `GET /contexts/{id}/embeddings` once per corpus, purely as
 //!   diagnostic evidence for [`CorpusBlock::passage_vectors`], for why
 //!   the vector lane may answer `ran: false`.
 //! - `Context::recall(cue)` (`src/context/query.rs`) requires `cue` to
@@ -48,7 +48,7 @@
 //!   harness resolves a cue via `resolve_label` *before* calling
 //!   `recall`, for exactly this reason). A hand-written `eval.jsonl`'s
 //!   `cues[]` are natural-language strings, not stored ids, so driving
-//!   `expected_concepts` through `POST /contexts/{name}/recall` would
+//!   `expected_concepts` through `POST /contexts/{id}/recall` would
 //!   silently miss almost everything. `expected_concepts` is instead
 //!   folded into the same recall@k/MRR computation `expected_sources`
 //!   feeds, checked against the very `sources/search` hits already
@@ -87,7 +87,7 @@ usage: taguru benchmark search --eval FILE [--url URL] [--config FILE]
 Builds one per-model corpus (a context named PREFIX::MODEL_ID) from a
 finished `taguru benchmark extract` results directory's source files,
 runs eval.jsonl's shared question set against each corpus over
-POST /contexts/{name}/sources/search (ADR 0003 §11), and writes
+POST /contexts/{id}/sources/search (ADR 0003 §11), and writes
 RESULTS_DIR/retrieval.json: per-case/per-model hit counts, lane
 evidence, and model-pair hit-set overlap — gold-data-free and
 judgment-free by construction. When a case carries expected_sources or
@@ -266,7 +266,22 @@ pub(super) fn run_search(args: &[String]) -> i32 {
             )
         };
         let available = block.outcome == "built" || block.outcome == "search_only";
-        availability.insert(model.model_id.clone(), (context, available));
+        // The search phase addresses the corpus by id (#964); the
+        // block keeps the name for the report. A corpus that stops
+        // resolving between its build and here counts as unavailable.
+        let addressable = if available {
+            api.context_id_by_name(&context).ok().flatten()
+        } else {
+            None
+        };
+        match addressable {
+            Some(corpus_id) => {
+                availability.insert(model.model_id.clone(), (corpus_id, true));
+            }
+            None => {
+                availability.insert(model.model_id.clone(), (context, false));
+            }
+        }
         corpus_blocks.insert(model.model_id.clone(), block);
     }
 
@@ -494,8 +509,16 @@ fn build_corpus(
     context: &str,
 ) -> CorpusBlock {
     let marker = ownership_marker(&manifest.run_id, &model.model_id, run_index);
-    match api.get_envelope(&["contexts", context]) {
-        Ok(entry) => {
+    // The corpus is created by NAME on the import wire (the rewritten
+    // header's create block) but read by id (#964) — resolved here
+    // for the ownership check; a name nothing answers to is the
+    // first-run case.
+    let resolved = match api.context_id_by_name(context) {
+        Ok(resolved) => resolved,
+        Err(message) => return corpus_block(context, "failed", Some(message)),
+    };
+    match resolved.map(|corpus_id| api.get_envelope(&["contexts", &corpus_id])) {
+        Some(Ok(entry)) => {
             let existing = entry
                 .get("description")
                 .and_then(Value::as_str)
@@ -512,10 +535,10 @@ fn build_corpus(
                 );
             }
         }
-        Err(ApiFailure::NotFound { .. }) => {
+        None | Some(Err(ApiFailure::NotFound { .. })) => {
             // Fine — the first batch's `create` block below makes it.
         }
-        Err(ApiFailure::Other(message)) => {
+        Some(Err(ApiFailure::Other(message))) => {
             return corpus_block(context, "failed", Some(message));
         }
     }
@@ -577,26 +600,32 @@ fn build_corpus(
         reason: (!failures.is_empty()).then(|| failures.join("; ")),
         segments_imported: imported,
         segments_failed: failed,
-        passage_vectors: fetch_passage_vectors(api, context),
+        // The freshly imported corpus reads by id (#964); best-effort
+        // like the fetch itself.
+        passage_vectors: api
+            .context_id_by_name(context)
+            .ok()
+            .flatten()
+            .and_then(|corpus_id| fetch_passage_vectors(api, &corpus_id)),
     }
 }
 
 fn search_only_probe(api: &Api, context: &str) -> CorpusBlock {
-    match api.get_envelope(&["contexts", context]) {
-        Ok(_) => CorpusBlock {
+    match api.context_id_by_name(context) {
+        Ok(Some(corpus_id)) => CorpusBlock {
             context: context.to_string(),
             outcome: "search_only".to_string(),
             reason: None,
             segments_imported: 0,
             segments_failed: 0,
-            passage_vectors: fetch_passage_vectors(api, context),
+            passage_vectors: fetch_passage_vectors(api, &corpus_id),
         },
-        Err(ApiFailure::NotFound { .. }) => corpus_block(
+        Ok(None) => corpus_block(
             context,
             "failed",
             Some("--skip-import given but this context does not exist".to_string()),
         ),
-        Err(ApiFailure::Other(message)) => corpus_block(context, "failed", Some(message)),
+        Err(message) => corpus_block(context, "failed", Some(message)),
     }
 }
 
@@ -1320,7 +1349,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["model"],
             "Number of passage hits sources/search returned for a case, already truncated to \
              the case's own limit.",
-            "POST /contexts/{name}/sources/search",
+            "POST /contexts/{id}/sources/search",
             None,
         ),
     );
@@ -1331,7 +1360,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "ratio",
             &["model"],
             "Share of successfully searched cases whose search returned zero hits.",
-            "POST /contexts/{name}/sources/search",
+            "POST /contexts/{id}/sources/search",
             None,
         ),
     );
@@ -1343,7 +1372,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             &["model"],
             "Number of distinct source segments among a case's hits — a coarse diversity \
              signal.",
-            "POST /contexts/{name}/sources/search",
+            "POST /contexts/{id}/sources/search",
             None,
         ),
     );
@@ -1354,7 +1383,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["model"],
             "Hits a case's search found via the lexical (BM25) lane only.",
-            "POST /contexts/{name}/sources/search response plan.lanes",
+            "POST /contexts/{id}/sources/search response plan.lanes",
             None,
         ),
     );
@@ -1365,7 +1394,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["model"],
             "Hits found via the semantic (vector) lane only.",
-            "POST /contexts/{name}/sources/search response plan.lanes",
+            "POST /contexts/{id}/sources/search response plan.lanes",
             Some(
                 "0 for every case when the vector lane never ran — see each case's own \
                  models.*.plan.vector.reason.",
@@ -1379,7 +1408,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["model"],
             "Hits both lanes agreed on.",
-            "POST /contexts/{name}/sources/search response plan.lanes",
+            "POST /contexts/{id}/sources/search response plan.lanes",
             None,
         ),
     );
@@ -1392,7 +1421,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "Hits whose per-hit lane evidence was readable but named neither lane — expected to \
              be 0 in practice; tracked so a genuine occurrence is visible rather than silently \
              folded into bm25_only/vector_only.",
-            "POST /contexts/{name}/sources/search response hits[].lanes",
+            "POST /contexts/{id}/sources/search response hits[].lanes",
             None,
         ),
     );

@@ -3512,7 +3512,7 @@ fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
     }
 
     let attributions = state
-        .read_context("e2e", |context| {
+        .read_context(&state.id_of("e2e"), |context| {
             context.recall("私")[0].attributions.clone()
         })
         .expect("apply_batch's create header must have stood up the context");

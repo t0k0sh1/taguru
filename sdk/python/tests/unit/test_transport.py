@@ -29,7 +29,8 @@ from taguru._shared import (
 from .conftest import async_client, err_response, ok_response, sync_client
 
 DIRECTORY_ROW = {
-    "id": "sake",
+    "id": "00000000-0000-4000-8000-000000000001",
+    "name": "sake",
     "description": "酒蔵の知識",
     "pinned": False,
     "loaded": True,
@@ -73,8 +74,9 @@ def test_unknown_fields_are_ignored() -> None:
     row = {**DIRECTORY_ROW, "brand_new_field": {"nested": True}}
     row["stats"] = {**DIRECTORY_ROW["stats"], "another_new_stat": 7}  # type: ignore[dict-item]
     client = sync_client(lambda _req: ok_response(row))
-    entry = client.contexts.get("sake")
-    assert entry.id == "sake"
+    entry = client.contexts.get("00000000-0000-4000-8000-000000000001")
+    assert entry.id == "00000000-0000-4000-8000-000000000001"
+    assert entry.name == "sake"
 
 
 def test_describe_null_result_is_none_not_error() -> None:
@@ -523,8 +525,9 @@ def test_after_cursor_rides_the_request_body_verbatim() -> None:
 
 async def test_async_client_mirrors_sync() -> None:
     client = async_client(lambda _req: ok_response(DIRECTORY_ROW))
-    entry = await client.contexts.get("sake")
-    assert entry.id == "sake"
+    entry = await client.contexts.get("00000000-0000-4000-8000-000000000001")
+    assert entry.id == "00000000-0000-4000-8000-000000000001"
+    assert entry.name == "sake"
     await client.close()
 
 

@@ -70,9 +70,9 @@ def test_classify_compares_only_the_first_array_element() -> None:
 def test_classify_request_flags_a_new_top_level_required_field() -> None:
     base = {"origins": ["x"]}
     head = {"origins": ["x"], "query": "y"}
-    required = {"/contexts/{name}/evidence": ["query"]}
+    required = {"/contexts/{id}/evidence": ["query"]}
     findings = check_contract.classify_request(
-        base, head, "op.request", "/contexts/{name}/evidence", required
+        base, head, "op.request", "/contexts/{id}/evidence", required
     )
     assert findings == [
         (
@@ -86,9 +86,9 @@ def test_classify_request_flags_a_new_top_level_required_field() -> None:
 def test_classify_request_leaves_a_new_top_level_optional_field_compatible() -> None:
     base = {"origins": ["x"]}
     head = {"origins": ["x"], "query": "y"}
-    required = {"/contexts/{name}/evidence": ["origins"]}
+    required = {"/contexts/{id}/evidence": ["origins"]}
     findings = check_contract.classify_request(
-        base, head, "op.request", "/contexts/{name}/evidence", required
+        base, head, "op.request", "/contexts/{id}/evidence", required
     )
     assert findings == [("compatible", "op.request.query", "field added")]
 
@@ -99,9 +99,9 @@ def test_classify_request_does_not_confuse_a_nested_field_with_a_required_top_le
     # only the exact top-level path counts, not just the last segment.
     base = {"origins": ["x"], "filter": {}}
     head = {"origins": ["x"], "filter": {"query": "nested, not top-level"}}
-    required = {"/contexts/{name}/evidence": ["query"]}
+    required = {"/contexts/{id}/evidence": ["query"]}
     findings = check_contract.classify_request(
-        base, head, "op.request", "/contexts/{name}/evidence", required
+        base, head, "op.request", "/contexts/{id}/evidence", required
     )
     assert findings == [("compatible", "op.request.filter.query", "field added")]
 
@@ -109,7 +109,7 @@ def test_classify_request_does_not_confuse_a_nested_field_with_a_required_top_le
 def test_classify_request_with_no_route_never_promotes_to_breaking() -> None:
     base = {"origins": ["x"]}
     head = {"origins": ["x"], "query": "y"}
-    required = {"/contexts/{name}/evidence": ["query"]}
+    required = {"/contexts/{id}/evidence": ["query"]}
     findings = check_contract.classify_request(base, head, "op.request", None, required)
     assert findings == [("compatible", "op.request.query", "field added")]
 
