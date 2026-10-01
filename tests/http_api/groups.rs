@@ -733,3 +733,135 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     assert_eq!(banana["revision"]["passages"], json!(1), "{banana}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// Members are ids (#965): a name — in a create, in either PATCH list, or
+/// in any of the three cross-search routes — is a 400 that says so, and
+/// refuses before anything is looked up or applied.
+#[test]
+fn a_context_name_where_an_id_belongs_is_a_400_everywhere_members_are_listed() {
+    let server = Server::start("groups-names-refused");
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.ok(
+        "PUT",
+        "/groups/g",
+        Some(json!({"context_ids": [server.cx("sake")]})),
+    );
+
+    let refused_with_a_name = |method: &str, path: &str, body: Value, field: &str| {
+        let (status, refused) = server.call(method, path, Some(body));
+        assert_eq!(status, 400, "{path} {field}: {refused}");
+        assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains(field) && error.contains("'sake' is not a context id"),
+            "{path}: {error}"
+        );
+    };
+    refused_with_a_name(
+        "PUT",
+        "/groups/named",
+        json!({"context_ids": ["sake"]}),
+        "context_ids",
+    );
+    refused_with_a_name(
+        "PATCH",
+        "/groups/g",
+        json!({"add_context_ids": ["sake"]}),
+        "add_context_ids",
+    );
+    refused_with_a_name(
+        "PATCH",
+        "/groups/g",
+        json!({"remove_context_ids": ["sake"]}),
+        "remove_context_ids",
+    );
+    refused_with_a_name(
+        "POST",
+        "/recall",
+        json!({"context_ids": ["sake"], "cue": "蔵"}),
+        "context_ids",
+    );
+    refused_with_a_name(
+        "POST",
+        "/query",
+        json!({"context_ids": ["sake"], "label": "l"}),
+        "context_ids",
+    );
+    refused_with_a_name(
+        "POST",
+        "/sources/search",
+        json!({"context_ids": ["sake"], "query": "蔵"}),
+        "context_ids",
+    );
+
+    // Nothing applied: no `named` group, `g` unchanged.
+    assert_eq!(server.call("GET", "/groups/named", None).0, 404);
+    assert_eq!(
+        server.ok("GET", "/groups/g", None)["context_ids"],
+        server.cx_sorted(&["sake"])
+    );
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// A rename touches no group: membership names ids, which a rename never
+/// changes — and a cross-search served after the rename (and after an
+/// identical one that filled the retrieval cache under the old name)
+/// answers with the NEW display name, beside the unchanged id.
+#[test]
+fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_name() {
+    let server = Server::start("groups-rename-by-id");
+    server.ok("POST", "/contexts", Some(json!({"name": "before"})));
+    let id = server.cx("before");
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                     "weight": 1.0, "source": "a.md"}])),
+    );
+    server.ok(
+        "PUT",
+        "/groups/g",
+        Some(json!({"context_ids": [id.clone()]})),
+    );
+    let fingerprint = server.ok("GET", "/groups/g", None)["fingerprint"].clone();
+
+    let recall = || {
+        server.ok(
+            "POST",
+            "/recall",
+            Some(json!({"context_ids": [id.clone()], "cue": "蔵"})),
+        )
+    };
+    let before = recall();
+    assert_eq!(before["matches"][0]["context_id"], json!(id), "{before}");
+    assert_eq!(before["matches"][0]["context_name"], json!("before"));
+    assert_eq!(recall(), before, "an identical recall is stable (cached)");
+
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/rename"),
+        Some(json!({"to": "after"})),
+    );
+
+    let group = server.ok("GET", "/groups/g", None);
+    assert_eq!(group["context_ids"], json!([id.clone()]), "{group}");
+    assert_eq!(
+        group["fingerprint"], fingerprint,
+        "a rename moves no revision counter, so the group's fingerprint stays"
+    );
+    let after = recall();
+    assert_eq!(after["matches"][0]["context_id"], json!(id), "{after}");
+    assert_eq!(
+        after["matches"][0]["context_name"],
+        json!("after"),
+        "the cached page must not serve the old display name: {after}"
+    );
+    let via_group = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"groups": ["g"], "cue": "蔵"})),
+    );
+    assert_eq!(via_group["matches"][0]["context_name"], json!("after"));
+    assert_eq!(via_group["plan"]["context_ids"], json!([id]), "{via_group}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
