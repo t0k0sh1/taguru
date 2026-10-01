@@ -4042,7 +4042,7 @@ fn extract_honors_taguru_config_when_the_flag_is_absent() {
         &[
             "extract",
             "--context",
-            "sake",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
             "--out",
             &out_dir.display().to_string(),
             "/nonexistent-item",
@@ -4154,8 +4154,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
         "the whole-set refusal must name the missing member: {report}"
     );
     assert_eq!(
-        report["batches"][0]["context"],
-        serde_json::json!("sake"),
+        report["batches"][0]["context_id"],
+        serde_json::json!("cef2e28b-43f0-4b6c-8201-abab0785399f"),
         "the batch before the group refusal stays landed: {report}"
     );
     assert!(
@@ -4241,7 +4241,10 @@ fn a_failing_files_apply_does_not_stop_the_files_after_it() {
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("missing"), "{stderr}");
+    assert!(
+        stderr.contains("ffa63583-dfa6-406b-87d2-84b86b0d693a"),
+        "{stderr}"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("1 of 2 source(s) applied"),
@@ -4341,7 +4344,7 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: context 'sake' schema is already stated by an earlier \
+            "taguru: import: {}: context 'cef2e28b-43f0-4b6c-8201-abab0785399f' schema is already stated by an earlier \
              file, {} — one record owns one context's schema",
             second.display(),
             first.display()
