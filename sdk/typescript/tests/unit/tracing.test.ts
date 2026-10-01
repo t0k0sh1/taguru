@@ -123,7 +123,8 @@ function routed(calls: Array<{ path: string; headers: Record<string, string> }>)
         plan: {
           contexts: [
             {
-              context: "sake",
+              context_id: "id-sake",
+              context_name: "sake",
               lanes: { bm25: { ran: true }, vector: { ran: false, reason: "no provider" } },
             },
           ],

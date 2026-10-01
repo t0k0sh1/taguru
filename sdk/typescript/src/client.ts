@@ -463,8 +463,8 @@ export class Taguru {
   // -- cross-`context` search ------------------------------------------------
 
   /**
-   * Recall across several `contexts` at once, every match tagged. `contexts`
-   * takes full names; each `groups` entry searches every `context` the `group`
+   * Recall across several `contexts` at once, every match tagged. `context_ids`
+   * takes context ids (never names, #965); each `groups` entry searches every `context` the `group`
    * reaches (nested children included), overlaps deduped. At least one of
    * the two must name something. Weights share one scale, so past the limit
    * the strongest |weight| survives exactly as within one `context`. `after`
@@ -474,7 +474,7 @@ export class Taguru {
   async recall(
     cue: string,
     options: {
-      contexts?: string[];
+      context_ids?: string[];
       groups?: string[];
       limit?: number;
       after?: CrossMatchCursor;
@@ -482,7 +482,7 @@ export class Taguru {
   ): Promise<CrossMatchPage> {
     const result = await this.requestJson("POST", "/recall", {
       jsonBody: dropUndefined({
-        contexts: options.contexts,
+        context_ids: options.context_ids,
         groups: options.groups,
         cue,
         limit: options.limit,
@@ -501,7 +501,7 @@ export class Taguru {
    */
   async query(
     options: {
-      contexts?: string[];
+      context_ids?: string[];
       groups?: string[];
       subject?: OneOrMany;
       label?: OneOrMany;
@@ -514,7 +514,7 @@ export class Taguru {
   ): Promise<CrossMatchPage> {
     const result = await this.requestJson("POST", "/query", {
       jsonBody: dropUndefined({
-        contexts: options.contexts,
+        context_ids: options.context_ids,
         groups: options.groups,
         subject: options.subject,
         label: options.label,
@@ -541,7 +541,7 @@ export class Taguru {
   async searchPassages(
     query: string,
     options: {
-      contexts?: string[];
+      context_ids?: string[];
       groups?: string[];
       limit?: number;
       semantic_floor?: number;
@@ -552,7 +552,7 @@ export class Taguru {
   ): Promise<CrossPassagePage> {
     const result = await this.requestJson("POST", "/sources/search", {
       jsonBody: dropUndefined({
-        contexts: options.contexts,
+        context_ids: options.context_ids,
         groups: options.groups,
         query,
         limit: options.limit,
@@ -771,17 +771,17 @@ export class Groups {
 
   /**
    * Create a `group` (409 ConflictError if it already exists). Every listed
-   * member — `context` or child `group` — must already exist; a `group` and a
-   * `context` may share the same name without conflict.
+   * member — a `context` (by id) or a child `group` (by name) — must already
+   * exist; a `group` and a `context` may share the same name without conflict.
    */
   async create(
     name: string,
-    options: { description?: string; contexts?: string[]; groups?: string[] } = {},
+    options: { description?: string; context_ids?: string[]; groups?: string[] } = {},
   ): Promise<boolean> {
     const result = await this.client.requestJson("PUT", `/groups/${encodeName(name)}`, {
       jsonBody: dropUndefined({
         description: options.description ?? "",
-        contexts: options.contexts,
+        context_ids: options.context_ids,
         groups: options.groups,
       }),
       retry: "unsafe_on_ambiguous",
@@ -799,8 +799,8 @@ export class Groups {
     name: string,
     options: {
       description?: string;
-      add_contexts?: string[];
-      remove_contexts?: string[];
+      add_context_ids?: string[];
+      remove_context_ids?: string[];
       add_groups?: string[];
       remove_groups?: string[];
     } = {},
@@ -808,8 +808,8 @@ export class Groups {
     const result = await this.client.requestJson("PATCH", `/groups/${encodeName(name)}`, {
       jsonBody: dropUndefined({
         description: options.description,
-        add_contexts: options.add_contexts,
-        remove_contexts: options.remove_contexts,
+        add_context_ids: options.add_context_ids,
+        remove_context_ids: options.remove_context_ids,
         add_groups: options.add_groups,
         remove_groups: options.remove_groups,
       }),

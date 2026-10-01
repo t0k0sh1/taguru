@@ -205,12 +205,12 @@ describe("envelope and raw-body handling", () => {
     );
 
     await client.recall("cue", {
-      contexts: ["sake"],
-      after: { weight: 0.5, context: "sake", subject: "a", label: "b", object: "c" },
+      context_ids: ["sake"],
+      after: { weight: 0.5, context_id: "sake", subject: "a", label: "b", object: "c" },
     });
     expect(bodies[bodies.length - 1]).toBe(
-      '{"contexts":["sake"],"cue":"cue","after":' +
-        '{"weight":0.5,"context":"sake","subject":"a","label":"b","object":"c"}}',
+      '{"context_ids":["sake"],"cue":"cue","after":' +
+        '{"weight":0.5,"context_id":"sake","subject":"a","label":"b","object":"c"}}',
     );
   });
 
@@ -693,7 +693,8 @@ describe("retrieve loop", () => {
           plan: {
             contexts: [
               {
-                context: "sake",
+                context_id: "id-sake",
+                context_name: "sake",
                 lanes: {
                   bm25: { ran: true },
                   vector: { ran: false, reason: "no embedding provider is configured" },
