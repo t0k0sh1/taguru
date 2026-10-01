@@ -72,7 +72,7 @@ const testSchema = (
   closedLabels = false,
 ): SchemaDocument => ({
   type: "schema",
-  version: "2026-09-17",
+  version: "2026-10-01",
   mode: mode as SchemaDocument["mode"],
   closed_labels: closedLabels,
   types: Object.fromEntries(
@@ -274,7 +274,7 @@ describe("the producer parity contract", () => {
     expect(PROMPT_VERSION).toBe(6);
     // The file-format revision (src/format.rs FORMAT_VERSION): pinned as a
     // literal so a drift from the Rust side is a visible edit here.
-    expect(FORMAT_VERSION).toBe("2026-09-17");
+    expect(FORMAT_VERSION).toBe("2026-10-01");
     const prompt = systemPrompt([], 0);
     expect(prompt).toContain(
       "the paragraph whose sentences state it, never a heading-only paragraph",

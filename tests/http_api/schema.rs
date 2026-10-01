@@ -83,7 +83,7 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
     // The body omitted `version` (= this server's own, ADR 0043); what
     // installs — and is served back — states it.
     let mut stated = valid_document();
-    stated["version"] = json!("2026-09-17");
+    stated["version"] = json!("2026-10-01");
     let installed = server.ok(
         "PUT",
         &format!("/contexts/{}/schema", server.cx("sake")),

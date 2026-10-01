@@ -88,7 +88,7 @@ def test_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     stream = ctx.export()
     assert stream.count('"type":"source"') >= 1
     # Everything taguru writes carries the format version (ADR 0042).
-    assert '"version":"2026-09-17"' in stream
+    assert '"version":"2026-10-01"' in stream
 
     # The stream names its context by id (#965): a restore under a fresh id
     # and name is a copy, not a replace of the original.

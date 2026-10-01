@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
-        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}"#;
 
         let parsed = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
@@ -881,7 +881,7 @@ mod tests {
         // earlier servers sent, and a null version are all refused: the
         // server and this CLI must be the same release.
         let other_version =
-            header.replace("\"version\":\"2026-09-17\"", "\"version\":\"2008-10-17\"");
+            header.replace("\"version\":\"2026-10-01\"", "\"version\":\"2008-10-17\"");
         let error = parse_analysis(&format!("{other_version}\n{line}\n"))
             .err()
             .expect("another format revision must be refused");
@@ -895,10 +895,10 @@ mod tests {
                 "\"type\":\"communities_manifest\"",
             ),
             header.replace(
-                "\"type\":\"communities\",\"version\":\"2026-09-17\"",
+                "\"type\":\"communities\",\"version\":\"2026-10-01\"",
                 "\"taguru_communities\":1",
             ),
-            header.replace("\"version\":\"2026-09-17\"", "\"version\":null"),
+            header.replace("\"version\":\"2026-10-01\"", "\"version\":null"),
         ] {
             assert!(
                 parse_analysis(&format!("{broken}\n{line}\n")).is_err(),
@@ -906,7 +906,7 @@ mod tests {
             );
         }
         // The version column is optional on read: absent is this build's own.
-        let unversioned = header.replace(",\"version\":\"2026-09-17\"", "");
+        let unversioned = header.replace(",\"version\":\"2026-10-01\"", "");
         parse_analysis(&format!("{unversioned}\n{line}\n")).expect("an absent version reads");
     }
 
@@ -940,7 +940,7 @@ mod tests {
     /// runaway positive strength is capped at 1e6.
     #[test]
     fn a_zero_strength_member_lands_at_the_singleton_weight() {
-        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
         let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
         let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);

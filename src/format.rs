@@ -8,7 +8,7 @@
 /// value for every record type: a revision is a statement about the
 /// whole family of shapes docs/import.html and its siblings describe,
 /// not about one of them.
-pub(crate) const FORMAT_VERSION: &str = "2026-09-17";
+pub(crate) const FORMAT_VERSION: &str = "2026-10-01";
 
 /// Judges a record's `version` column. Absent means "whatever the
 /// running build reads" — the courtesy a hand-written file gets, and
@@ -122,7 +122,7 @@ mod tests {
         assert!(error.contains("'2008-10-17'"), "{error}");
         assert!(error.contains(FORMAT_VERSION), "{error}");
         // A near-miss is still a miss: equality, never a prefix or a range.
-        assert!(check_version(Some("2026-09-17 ")).is_err());
+        assert!(check_version(Some("2026-10-01 ")).is_err());
         assert!(check_version(Some("")).is_err());
     }
 
@@ -130,7 +130,7 @@ mod tests {
     /// fact, and changing it must be a visible edit here too.
     #[test]
     fn the_format_version_is_the_published_date() {
-        assert_eq!(FORMAT_VERSION, "2026-09-17");
+        assert_eq!(FORMAT_VERSION, "2026-10-01");
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
         let id = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
         assert_eq!(
             source_header_line("docs/a.md", id, None),
-            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63"}"#
+            r#"{"type":"source","version":"2026-10-01","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63"}"#
         );
         assert_eq!(
             source_header_line(
@@ -149,7 +149,7 @@ mod tests {
                     description: "酒蔵"
                 })
             ),
-            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63","create":{"name":"sake","description":"酒蔵"}}"#
+            r#"{"type":"source","version":"2026-10-01","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63","create":{"name":"sake","description":"酒蔵"}}"#
         );
     }
 
@@ -178,11 +178,11 @@ mod tests {
         let parse = |text: &str| serde_json::from_str::<Versioned>(text);
         assert_eq!(parse("{}").unwrap().version, None);
         assert_eq!(
-            parse(r#"{"version":"2026-09-17"}"#)
+            parse(r#"{"version":"2026-10-01"}"#)
                 .unwrap()
                 .version
                 .as_deref(),
-            Some("2026-09-17")
+            Some("2026-10-01")
         );
         // An explicit null is a value, not an omission; so is a number.
         assert!(parse(r#"{"version":null}"#).is_err());

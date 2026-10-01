@@ -617,7 +617,7 @@ only under `warn`.
     "http_contract": {"current": 2, "supported": [2]},
     "mcp_contract": {"current": 1, "supported": [1]},
     "mcp_protocol": {"supported": ["2024-11-05", "2025-03-26", "2025-06-18"]},
-    "record_formats": ["2026-09-17"],
+    "record_formats": ["2026-10-01"],
     "image_formats": [1, 2, 3, 4, 5, 6]
   }
   ```

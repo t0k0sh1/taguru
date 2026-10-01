@@ -442,7 +442,7 @@ describe("TaguruIngester", () => {
     const server = new FakeServer();
     server.schemaDocument = {
       type: "schema",
-      version: "2026-09-17",
+      version: "2026-10-01",
       mode: "warn",
       closed_labels: false,
       types: { Brewery: { is_a: [] }, Person: { is_a: [] } },

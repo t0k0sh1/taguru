@@ -108,7 +108,7 @@ fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
     let evaluation: Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
     assert_eq!(evaluation["type"], "evaluation");
-    assert_eq!(evaluation["version"], "2026-09-17");
+    assert_eq!(evaluation["version"], "2026-10-01");
     assert_eq!(evaluation["thresholds"], Value::Null, "{evaluation}");
     assert_eq!(evaluation["corpus"]["stable"], true, "{evaluation}");
     assert_eq!(

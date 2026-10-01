@@ -740,7 +740,7 @@ mod tests {
         let text = String::from_utf8(document_bytes(&valid()).unwrap()).unwrap();
         let compact: String = text.split_whitespace().collect();
         assert!(
-            compact.starts_with(r#"{"type":"schema","version":"2026-09-17","mode":"strict""#),
+            compact.starts_with(r#"{"type":"schema","version":"2026-10-01","mode":"strict""#),
             "{compact}"
         );
     }

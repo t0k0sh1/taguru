@@ -449,7 +449,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
             ),
             // GET /contexts, one page then the terminator.
             (
@@ -533,7 +533,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
             ),
             // GET /contexts, first page then the terminating empty one.
             (
@@ -612,7 +612,7 @@ fn spawn_mismatched_health_stub() -> String {
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
             // /version: this build's record format, so the preflight
             // passes silently and the skew line is the only warning.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -670,7 +670,7 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
             // /health: no version key, no skew warning.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
             // /version: this build's record format, so no refusal.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
@@ -738,7 +738,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-09-17"]}"#.to_string(),
+                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
             ),
             // GET /contexts: one context, then the terminator.
             (
@@ -864,7 +864,7 @@ fn a_row_without_a_name_is_a_counted_resolve_failure() {
     std::thread::spawn(move || {
         let responses = [
             r#"{"status":"ok"}"#,
-            r#"{"record_formats":["2026-09-17"]}"#,
+            r#"{"record_formats":["2026-10-01"]}"#,
             r#"{"result":{"id":"00000000-0000-4000-8000-000000000001"}}"#,
         ];
         for body in responses {

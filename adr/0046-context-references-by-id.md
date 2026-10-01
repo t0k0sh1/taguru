@@ -59,10 +59,13 @@ a label that the importing side was free to give to something else.
 6. **No compatibility** (ADR 0045 §2.7). A file or response still
    carrying `context` fails with `unknown field`. `http_contract` is not
    bumped again: the unreleased `http_contract` 2 already covers the
-   break (ADR 0045 §8). Whether `FORMAT_VERSION` should also change for
-   this column rename is left open, and this item records only what
-   shipped: it did not change, so an old file fails on `unknown field
-   `context`` rather than on the version check.
+   break (ADR 0045 §8). `FORMAT_VERSION` moves from `2026-09-17` to
+   `2026-10-01`: a column rename plus a newly required `create.name` is
+   a revision of the family of shapes (ADR 0042 §2), and one date names
+   every record type, so every stamped record takes the new date. A
+   file that carries an older date is refused by name; one that omits
+   `version` means the running build's own and meets `unknown field`
+   at the old `context` column instead.
 7. **Out of scope here, in later #965 steps or other issues**: group
    records' `contexts` and the group API's member lists, cross-search
    request and response (`context_ids`, `context_id` + `context_name`),

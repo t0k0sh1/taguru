@@ -2111,7 +2111,7 @@ fn a_group_exports_as_one_import_record() {
     assert_eq!(status, 200, "{exported}");
     assert_eq!(
         exported,
-        json!({"type": "group", "version": "2026-09-17", "id": "kura", "description": "蔵まとめ",
+        json!({"type": "group", "version": "2026-10-01", "id": "kura", "description": "蔵まとめ",
                "contexts": ["bunko", "sake"], "groups": ["kid"]})
     );
 

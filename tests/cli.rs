@@ -1474,7 +1474,7 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
     let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
     let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
     assert_eq!(measurements["type"], "benchmark_measurements");
-    assert_eq!(measurements["version"], "2026-09-17");
+    assert_eq!(measurements["version"], "2026-10-01");
     assert_eq!(measurements["percentile_method"], "nearest-rank");
     assert!(measurements["cells"]["m.run01"].is_object());
     assert!(measurements["models"]["m"].is_object());
@@ -1715,7 +1715,7 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
 
     let lines = read_differences_lines(&dir);
     assert_eq!(lines[0]["type"], "benchmark_differences");
-    assert_eq!(lines[0]["version"], "2026-09-17");
+    assert_eq!(lines[0]["version"], "2026-10-01");
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],

@@ -662,7 +662,7 @@ impl Api {
         };
         // All-or-nothing: `filter_map` would silently drop a malformed
         // element (e.g. a stray number in the array), which could turn
-        // `["2026-09-17", 7]` into a false `["2026-09-17"]` match this
+        // `["2026-10-01", 7]` into a false `["2026-10-01"]` match this
         // CLI reads as "the server carries only that format" instead of
         // "this capability array is malformed" — the latter is treated
         // like an absent key (the server names no readable list) rather

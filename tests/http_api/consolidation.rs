@@ -334,7 +334,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     )
     .unwrap();
     assert_eq!(manifest["type"], json!("consolidation_manifest"));
-    assert_eq!(manifest["version"], json!("2026-09-17"));
+    assert_eq!(manifest["version"], json!("2026-10-01"));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
 
     // Second run over the unchanged graph: zero LLM calls.

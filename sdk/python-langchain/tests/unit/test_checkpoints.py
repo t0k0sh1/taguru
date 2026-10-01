@@ -293,7 +293,7 @@ def test_a_changed_schema_invalidates_checkpoints_even_though_content_is_unchang
 
     fake_server.schema_document = {
         "type": "schema",
-        "version": "2026-09-17",
+        "version": "2026-10-01",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}},

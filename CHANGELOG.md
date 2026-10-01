@@ -25,7 +25,10 @@ Entries that change an on-disk format or a response shape say so.
   `batches[i].context` / `schemas[i].context` became `context_id`, and
   promote's `into` is the destination's id (a name is a 400). There is
   no compatibility with the old column: a file or response still
-  carrying `context` fails with "unknown field `context`".
+  carrying `context` fails with "unknown field `context`". The file
+  format revision (`version`) moves to `"2026-10-01"` with it — every
+  record family, since one date names the whole family — and a file
+  stamped with any other date is refused by name.
   `taguru extract --context` and `taguru benchmark extract --context`
   take an id; the new `--name` (with `--description`) adds the create
   block. A router in front of shards sends a header whose id no shard
@@ -156,7 +159,7 @@ Entries that change an on-disk format or a response shape say so.
   of `PUT /contexts/{name}/schema`, MCP's `put_schema` /
   `validate_schema` arguments, and `{stem}.schema.json` at rest — opens
   with `"type": "schema"` and carries the shared format `version`:
-  `{"type": "schema", "version": "2026-09-17", "mode": …}`. `version`
+  `{"type": "schema", "version": "2026-10-01", "mode": …}`. `version`
   may be left off (it then means the running server's own) and whatever
   installs is stored and served with it stated; `"schema": 1` is no
   longer read anywhere. No conversion exists. To carry an installed
@@ -172,7 +175,7 @@ Entries that change an on-disk format or a response shape say so.
   derivation records stored inside those contexts, and the header line
   of `GET /contexts/{name}/communities`, name their `type` and the
   format `version` like every other record: `{"type": "communities",
-  "version": "2026-09-17", "context": …}` opens the analysis stream
+  "version": "2026-10-01", "context": …}` opens the analysis stream
   (`taguru_communities` is gone — the `type` column is what frees the
   name its own `communities` count already held), the stored manifests
   are `{"type": "communities_manifest", …}` and `{"type":
@@ -191,7 +194,7 @@ Entries that change an on-disk format or a response shape say so.
   left out), and `benchmark_manifest`, `benchmark_runs`,
   `benchmark_measurements`, `benchmark_differences`,
   `benchmark_retrieval`, each always written with `"version":
-  "2026-09-17"`. The integer stamps (1–3) and `manifest.json`'s `1..=N`
+  "2026-10-01"`. The integer stamps (1–3) and `manifest.json`'s `1..=N`
   range acceptance are gone: only this build's revision is read. The
   header line of `runs/*.jsonl` and of `differences.jsonl` no longer
   carries `kind: "header"` — it names its `type` instead. With old
@@ -204,7 +207,7 @@ Entries that change an on-disk format or a response shape say so.
   revision in an optional `version` date, as the import stream's records
   do: `{"type": "eval", "name": …}` on line 1 of `eval.jsonl`,
   `{"type": "evaluate_thresholds", "aggregate": …}`, `{"type":
-  "evaluation", "version": "2026-09-17", …}` for `evaluation.json`, and
+  "evaluation", "version": "2026-10-01", …}` for `evaluation.json`, and
   `{"type": "evaluation_changes", "version": …}` as `changes.jsonl`'s
   header (which no longer carries `kind: "header"`). The two files a
   person writes may leave `version` out. `taguru evaluate compare`
@@ -217,10 +220,11 @@ Entries that change an on-disk format or a response shape say so.
   record now states three facts in three columns: `type` (what it is),
   `version` (the file format's revision, as a date), and `id` (which
   one). The source file header is `{"type": "source", "version":
-  "2026-09-17", "id": "docs/a.md", "context": "sake"}` — `taguru_batch`
-  is gone and the header's `source` is `id`; a `group` record is
-  `{"type": "group", "id": "kura", …}` (`name` is `id`); a `schema`
-  record is `{"type": "schema", "context": "sake", …}`. `version` may
+  "2026-10-01", "id": "docs/a.md", "context_id": "<uuid>"}` —
+  `taguru_batch` is gone and the header's `source` is `id`; a `group`
+  record is `{"type": "group", "id": "kura", …}` (`name` is `id`); a
+  `schema` record is `{"type": "schema", "context_id": "<uuid>", …}`
+  (the `context_id` column is #965's). `version` may
   be omitted, and then means the running build's own revision;
   everything taguru writes carries it, and any other date is refused
   by name. There is no transition alias: re-extract, or export again

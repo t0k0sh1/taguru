@@ -3053,7 +3053,7 @@ fn schema_digests_are_stable_across_key_order_and_whitespace() {
         "types": {"Brewery": {"is_a": ["Organization"]}, "Organization": {"is_a": []}},
         "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Organization"]}}
     }"#;
-    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"version":"2026-09-17","type":"schema"}"#;
+    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"version":"2026-10-01","type":"schema"}"#;
 
     let a: crate::schema::SchemaDocument = serde_json::from_str(ordered).unwrap();
     let b: crate::schema::SchemaDocument = serde_json::from_str(reordered_and_compact).unwrap();

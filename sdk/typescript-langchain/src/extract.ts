@@ -37,7 +37,7 @@ export const PROMPT_VERSION = 6;
 // The file-format revision every record this module writes is stamped
 // with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
 // record's `version` column beside its `type`.
-export const FORMAT_VERSION = "2026-09-17";
+export const FORMAT_VERSION = "2026-10-01";
 export const CHUNK_BYTES = 24 * 1024;
 export const VOCABULARY_CAP = 200;
 export const MAX_NAME_BYTES = 1024;

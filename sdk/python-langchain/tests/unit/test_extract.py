@@ -407,7 +407,7 @@ def test_the_prompt_version_and_wording_track_extract_rs() -> None:
     assert PROMPT_VERSION == 6
     # The file-format revision (src/format.rs FORMAT_VERSION): pinned as
     # a literal so a drift from the Rust side is a visible edit here.
-    assert FORMAT_VERSION == "2026-09-17"
+    assert FORMAT_VERSION == "2026-10-01"
     prompt = system_prompt([], 0, 0)
     assert "the paragraph whose sentences state it, never a heading-only paragraph" in prompt
     assert '"[3] ## Abstract"' in prompt

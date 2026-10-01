@@ -448,7 +448,7 @@ describe("sources and citations", () => {
     expect(lines.length).toBeGreaterThan(0);
     const header = JSON.parse(lines[0]!);
     expect(header.type).toBe("communities");
-    expect(header.version).toBe("2026-09-17");
+    expect(header.version).toBe("2026-10-01");
     expect(header.context).toBe(name);
     await client.contexts.delete(contextId);
   });
@@ -851,7 +851,7 @@ describe("groups and cross-context search", () => {
       contexts: string[];
     };
     expect(record.type).toBe("group");
-    expect(record.version).toBe("2026-09-17");
+    expect(record.version).toBe("2026-10-01");
     expect(record.id).toBe(group);
     expect(record.contexts).toEqual([sake, tea].sort());
 

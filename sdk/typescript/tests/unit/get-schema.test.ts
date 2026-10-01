@@ -12,7 +12,7 @@ import { type StubRequest, errBody, okBody, stubClient } from "./stub.js";
 
 const SCHEMA_DOCUMENT: SchemaDocument = {
   type: "schema",
-  version: "2026-09-17",
+  version: "2026-10-01",
   mode: "strict",
   closed_labels: false,
   types: {
@@ -31,7 +31,7 @@ describe("getSchema", () => {
     const document = await client.context("aomine").getSchema();
 
     expect(document.type).toBe("schema");
-    expect(document.version).toBe("2026-09-17");
+    expect(document.version).toBe("2026-10-01");
     expect(document.mode).toBe("strict");
     expect(document.closed_labels).toBe(false);
     expect(Object.keys(document.types).sort()).toEqual(["Brewery", "Organization", "Person"]);

@@ -2178,7 +2178,7 @@ mod tests {
         let line = render_group("kura", &record);
         assert_eq!(
             line,
-            "{\"type\":\"group\",\"version\":\"2026-09-17\",\"id\":\"kura\",\
+            "{\"type\":\"group\",\"version\":\"2026-10-01\",\"id\":\"kura\",\
              \"description\":\"蔵まとめ\",\"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
@@ -2187,7 +2187,7 @@ mod tests {
         let bare = render_group("kid", &GroupRecord::default());
         assert_eq!(
             bare,
-            "{\"type\":\"group\",\"version\":\"2026-09-17\",\"id\":\"kid\"}\n"
+            "{\"type\":\"group\",\"version\":\"2026-10-01\",\"id\":\"kid\"}\n"
         );
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
         assert_eq!(stream.groups[0].1, GroupRecord::default());
@@ -2225,7 +2225,7 @@ mod tests {
         let line = render_schema("cef2e28b-43f0-4b6c-8201-abab0785399f", &document);
         assert_eq!(
             line,
-            "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"mode\":\"warn\",\
+            "{\"type\":\"schema\",\"version\":\"2026-10-01\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"mode\":\"warn\",\
              \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
              \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
         );
@@ -2294,7 +2294,7 @@ mod tests {
         let first_line = rendered.stream.lines().next().unwrap();
         assert!(
             first_line.starts_with(
-                "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\""
+                "{\"type\":\"schema\",\"version\":\"2026-10-01\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\""
             ),
             "the schema record must ride first — {}",
             rendered.stream

@@ -75,7 +75,7 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
         .collect();
     let header = &lines[0];
     assert_eq!(header["type"], "communities");
-    assert_eq!(header["version"], "2026-09-17");
+    assert_eq!(header["version"], "2026-10-01");
     assert_eq!(header["algorithm"], "louvain-cc/1");
     assert_eq!(header["revision"]["graph"].as_u64(), Some(revision));
     assert_eq!(header["concept_count"], 8);

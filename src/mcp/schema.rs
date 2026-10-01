@@ -543,7 +543,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "type": { "type": "string", "enum": ["schema"], "description": "what this document is — always \"schema\"" },
-                    "version": { "type": "string", "description": "the format revision, a date (currently \"2026-09-17\"); omit it to mean the running server's own" },
+                    "version": { "type": "string", "description": "the format revision, a date (currently \"2026-10-01\"); omit it to mean the running server's own" },
                     "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
                     "closed_labels": { "type": "boolean", "description": "when true, an association whose label has no relation entry here refuses too, not just a domain/range mismatch" },
                     "types": {
@@ -870,7 +870,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                         "description": "the proposed schema document, same shape as put_schema's own arguments (type, version, mode, closed_labels, types, relations), never installed",
                         "properties": {
                             "type": { "type": "string", "enum": ["schema"], "description": "what this document is — always \"schema\"" },
-                            "version": { "type": "string", "description": "the format revision, a date (currently \"2026-09-17\"); omit it to mean the running server's own" },
+                            "version": { "type": "string", "description": "the format revision, a date (currently \"2026-10-01\"); omit it to mean the running server's own" },
                             "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
                             "closed_labels": { "type": "boolean" },
                             "types": {

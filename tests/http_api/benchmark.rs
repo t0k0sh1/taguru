@@ -182,7 +182,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["type"], "benchmark_manifest");
-    assert_eq!(manifest["version"], "2026-09-17");
+    assert_eq!(manifest["version"], "2026-10-01");
     assert_eq!(manifest["harness"]["execution"], "subprocess");
     assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
@@ -210,7 +210,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     // version (ADR 0042). Every line after it says what it is in the
     // same `type` column, and none carries a `kind` (ADR 0042 §3.4).
     assert_eq!(lines[0]["type"], "benchmark_runs", "{}", lines[0]);
-    assert_eq!(lines[0]["version"], "2026-09-17", "{}", lines[0]);
+    assert_eq!(lines[0]["version"], "2026-10-01", "{}", lines[0]);
     assert!(
         lines.iter().all(|line| line.get("kind").is_none()),
         "{lines:?}"

@@ -843,7 +843,7 @@ fn spawn_mismatched_health_stub() -> String {
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
             // /version: this build's record format, so the preflight
             // passes and the import itself is what fails below.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-09-17"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -921,7 +921,7 @@ fn spawn_413_then_drop_stub() -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0u8; 2048];
             let _ = stream.read(&mut buffer);
-            let body = r#"{"record_formats":["2026-09-17"]}"#;
+            let body = r#"{"record_formats":["2026-10-01"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -984,7 +984,7 @@ fn spawn_413_twice_then_drop_stub() -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0u8; 2048];
             let _ = stream.read(&mut buffer);
-            let body = r#"{"record_formats":["2026-09-17"]}"#;
+            let body = r#"{"record_formats":["2026-10-01"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
