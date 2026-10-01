@@ -981,7 +981,7 @@ export class TaguruIngester {
     outcome.invalid_dropped = extraction.dropped;
     const description = this.create_context ? (this.context_description ?? null) : null;
     const ndjson = renderBatch(
-      await this.headerContextId(),
+      await this.headerContextId(options.dry_run === true),
       this.create_context ? this.context : null,
       options.source,
       description,
@@ -1122,7 +1122,7 @@ export class TaguruIngester {
    * them" would be a coin flip.
    */
   /** @internal — the S3 connector's deletion sweep resolves through it too. */
-  async contextId(): Promise<string | null> {
+  async contextId(strict = false): Promise<string | null> {
     const matches: string[] = [];
     try {
       for await (const row of this.client.contexts.iter()) {
@@ -1130,7 +1130,10 @@ export class TaguruIngester {
           matches.push(row.id);
         }
       }
-    } catch {
+    } catch (error) {
+      if (strict) {
+        throw error;
+      }
       return null;
     }
     if (matches.length > 1) {
@@ -1145,9 +1148,12 @@ export class TaguruIngester {
   /**
    * The id every batch header names: the existing context's, or — on a
    * first ingest — one minted here, stable for this ingester's lifetime.
+   * A real import refuses to guess when the directory cannot be listed (a
+   * minted id would create a duplicate of a context that exists); a dry
+   * run only renders NDJSON, so it keeps the offline-tolerant read.
    */
-  private async headerContextId(): Promise<string> {
-    const existing = await this.contextId();
+  private async headerContextId(dryRun: boolean): Promise<string> {
+    const existing = await this.contextId(!dryRun);
     if (existing !== null) {
       return existing;
     }

@@ -278,6 +278,63 @@ describe("TaguruIngester", () => {
     expect(header.create).toEqual({ name: "sake", description: "酒蔵の知識" });
   });
 
+  // A context the fake directory does not list ("brand-new"): the header
+  // names a context by id (#965), so a first ingest mints one client-side.
+  const NEW_CONTEXT = {
+    context: "brand-new",
+    create_context: true,
+    context_description: "新しい文脈",
+    refresh_embeddings: false, // the fake directory never lists the new context
+  };
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("mints one id for a first ingest and names the context in create", async () => {
+    const server = new FakeServer();
+    const ingester = make(server, [MODEL_ANSWER, MODEL_ANSWER], NEW_CONTEXT);
+    await ingester.ingestText(DOC_TEXT, { source: "docs/a.md" });
+    await ingester.ingestText(DOC_TEXT, { source: "docs/b.md" });
+    const headers = server.imported.map((batch) => JSON.parse(batch.split("\n", 1)[0]!));
+    expect(headers).toHaveLength(2);
+    expect(headers[0].context_id).toMatch(UUID);
+    // The same id for every batch of this ingester's lifetime.
+    expect(headers[1].context_id).toBe(headers[0].context_id);
+    for (const header of headers) {
+      expect(header.create).toEqual({ name: "brand-new", description: "新しい文脈" });
+    }
+  });
+
+  it("a dry run and the import it precedes agree on the minted id", async () => {
+    const server = new FakeServer();
+    const ingester = make(server, [MODEL_ANSWER, MODEL_ANSWER], NEW_CONTEXT);
+    const dry = await ingester.ingestText(DOC_TEXT, { source: "docs/a.md", dry_run: true });
+    const dryId = JSON.parse(dry.ndjson!.split("\n", 1)[0]!).context_id;
+    await ingester.ingestText(DOC_TEXT, { source: "docs/a.md" });
+    expect(JSON.parse(server.imported[0]!.split("\n", 1)[0]!).context_id).toBe(dryId);
+  });
+
+  it("a failed directory listing does not mint a duplicate on a real import", async () => {
+    // "The context exists but I cannot see it" must not become "mint a fresh
+    // id and create a second one": a real import throws; a dry run, which
+    // only renders NDJSON, still works.
+    const server = new FakeServer();
+    const client = server.client();
+    client.contexts.iter = () => {
+      throw new Error("directory unavailable");
+    };
+    const ingester = new TaguruIngester({
+      llm: new FakeListChatModel({ responses: [MODEL_ANSWER, MODEL_ANSWER] }),
+      client,
+      questions: 2,
+      ...NEW_CONTEXT,
+    });
+    const dry = await ingester.ingestText(DOC_TEXT, { source: "docs/a.md", dry_run: true });
+    expect(dry.ok).toBe(true);
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/a.md" })).rejects.toThrow(
+      /directory unavailable/,
+    );
+    expect(server.imported).toHaveLength(0);
+  });
+
   it("requires a source id on documents", async () => {
     const server = new FakeServer();
     const outcomes = await make(server, [MODEL_ANSWER, MODEL_ANSWER]).ingestDocuments([

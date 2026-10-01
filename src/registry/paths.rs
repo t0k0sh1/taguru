@@ -465,6 +465,43 @@ mod tests {
     use super::*;
     use crate::registry::test_support::scratch_dir;
 
+    /// `derived_context_id` is consumed only by taguru-code's sync (a
+    /// module cargo-mutants does not cover), so its bytes are pinned here
+    /// against the layout written out by hand: the first 16 SHA-256 bytes
+    /// with the v4 version nibble and the RFC 4122 variant bits forced.
+    /// A re-run of `taguru-code sync` finds last run's context only while
+    /// these literals hold.
+    #[test]
+    fn derived_context_ids_are_pinned_deterministic_v4_shaped_and_distinct() {
+        assert_eq!(
+            derived_context_id("sake"),
+            "cef2e28b-43f0-4b6c-8201-abab0785399f"
+        );
+        assert_eq!(
+            derived_context_id("code"),
+            "5694d08a-2e53-4fca-a0c3-103e5ad6f607"
+        );
+        assert_eq!(derived_context_id("sake"), derived_context_id("sake"));
+        for seed in ["", "sake", "code", "酒蔵"] {
+            assert!(is_context_id(&derived_context_id(seed)), "{seed:?}");
+        }
+    }
+
+    /// One spelling per id: everything `Uuid::try_parse` accepts beyond
+    /// the canonical lowercase hyphenated form is refused, as is a name.
+    #[test]
+    fn only_the_canonical_lowercase_hyphenated_uuid_is_a_context_id() {
+        assert!(is_context_id("cef2e28b-43f0-4b6c-8201-abab0785399f"));
+        assert!(!is_context_id("CEF2E28B-43F0-4B6C-8201-ABAB0785399F"));
+        assert!(!is_context_id("cef2e28b43f04b6c8201abab0785399f"));
+        assert!(!is_context_id("{cef2e28b-43f0-4b6c-8201-abab0785399f}"));
+        assert!(!is_context_id(
+            "urn:uuid:cef2e28b-43f0-4b6c-8201-abab0785399f"
+        ));
+        assert!(!is_context_id("sake"));
+        assert!(!is_context_id(""));
+    }
+
     /// The half-done-move contract `boot_with` leans on. `landed` and
     /// `complete` must move independently: a failed move is never
     /// complete (so the marker stays for the next boot to retry), and

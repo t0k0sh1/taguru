@@ -57,9 +57,12 @@ a label that the importing side was free to give to something else.
    words a single instance would — so a sharded deployment answers
    exactly as a single one.
 6. **No compatibility** (ADR 0045 §2.7). A file or response still
-   carrying `context` fails with `unknown field`. `FORMAT_VERSION` is
-   not bumped: the unreleased `http_contract` 2 already covers the
-   break (ADR 0045 §8), and `unknown field` names the column.
+   carrying `context` fails with `unknown field`. `http_contract` is not
+   bumped again: the unreleased `http_contract` 2 already covers the
+   break (ADR 0045 §8). Whether `FORMAT_VERSION` should also change for
+   this column rename is left open, and this item records only what
+   shipped: it did not change, so an old file fails on `unknown field
+   `context`` rather than on the version check.
 7. **Out of scope here, in later #965 steps or other issues**: group
    records' `contexts` and the group API's member lists, cross-search
    request and response (`context_ids`, `context_id` + `context_name`),
