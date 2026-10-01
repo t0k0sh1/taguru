@@ -628,11 +628,12 @@ pub async fn search_communities(
         return deadline_exceeded(started_at);
     }
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
+    let source_name = state.name_of_stem(&id);
     let derived = request
         .derived
         .clone()
-        .unwrap_or_else(|| derived_context_name(&state.name_of_stem(&id)));
-    if let Some(refusal) = check_derived_scope(&grant, &id, &derived, started_at) {
+        .unwrap_or_else(|| derived_context_name(&source_name));
+    if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
         return refusal;
     }
     // The source context anchors the staleness verdict; its absence is

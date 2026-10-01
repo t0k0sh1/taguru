@@ -131,7 +131,8 @@ async function main(): Promise<void> {
         console.log(`  ${line}`);
       }
     }
-    console.log(`context created yet? ${await client.contexts.exists("sougetsu-kb")}`);
+    // The directory is name-searchable; paths take the id column (#964).
+    console.log(`context created yet? ${(await ingester.contextId()) !== null}`);
 
     console.log("\n== 2. apply the reviewed batches — the NDJSON *is* the import payload ==");
     for (const outcome of reviewed) {
@@ -143,7 +144,11 @@ async function main(): Promise<void> {
       );
     }
 
-    const ctx = client.context("sougetsu-kb");
+    const contextId = await ingester.contextId();
+    if (contextId === null) {
+      throw new Error("the sougetsu-kb context was not created");
+    }
+    const ctx = client.context(contextId);
     console.log("\n== 3. read the graph back with the core SDK ==");
     console.log(`sources: ${JSON.stringify((await ctx.listSources()).sources)}`);
     const description = await ctx.describe("蒼月堂");

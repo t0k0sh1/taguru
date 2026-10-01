@@ -386,7 +386,9 @@ impl AppState {
             {
                 self.0.metrics.record_storage_quota_refusal();
                 break 'write Err(AccessError::QuotaExceeded(storage_quota_message(
-                    id, used, ceiling,
+                    &inner.name,
+                    used,
+                    ceiling,
                 )));
             }
             let first_seq = inner.wal_seq;

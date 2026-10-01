@@ -178,7 +178,13 @@ async function main(): Promise<void> {
     //    docs/evidence.html. Context.assembleEvidence(), not a bare
     //    client-level call — every read/write method is bound to one
     //    context, named after the server's own vocabulary.
-    const context = client.context("aomine-evidence");
+    //    Paths address a context by id (#964), so ask the ingester which id
+    //    the name it created the context under landed on.
+    const contextId = await ingester.contextId();
+    if (contextId === null) {
+      throw new Error("the aomine-evidence context was not created");
+    }
+    const context = client.context(contextId);
     console.log(`\n== ${QUERY} ==`);
     const generous = await context.assembleEvidence(["青嶺酒造"], { text_fallback_query: QUERY });
     printPackage("generous budget (server defaults)", generous);

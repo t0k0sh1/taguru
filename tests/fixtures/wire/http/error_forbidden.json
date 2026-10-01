@@ -10,7 +10,7 @@
   },
   "response": {
     "code": "forbidden",
-    "error": "this key's scope does not extend to the artifact context 'forbidden-corpus::communities' — grant it alongside '00000000-0000-4000-8000-000000000001'",
+    "error": "this key's scope does not extend to the artifact context 'forbidden-corpus::communities' — grant it alongside 'forbidden-corpus'",
     "status": "error",
     "time": 0.0
   },

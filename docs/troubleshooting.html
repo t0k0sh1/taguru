@@ -293,7 +293,10 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       <i>bytes</i>. For a deletion request (GDPR-style right to be forgotten) or a bad ingest
       you want gone entirely, you need both.
     </p>
-    <pre><code><span class="c"># 1. preview what the retraction would touch — writes nothing</span>
+    <pre><code><span class="c"># 0. look up the context id (the `id` column of GET /contexts)</span>
+CTX=$(curl -s localhost:8248/contexts | jq -r '.result.contexts[] | select(.name=="sake") | .id')
+
+<span class="c"># 1. preview what the retraction would touch — writes nothing</span>
 curl -X POST "localhost:8248/contexts/$CTX/sources/retract?dry_run=true" \
   -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
 

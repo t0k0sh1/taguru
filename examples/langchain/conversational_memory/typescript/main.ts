@@ -142,7 +142,6 @@ async function main(): Promise<void> {
       create_context: true,
       context_description: "アシスタントがユーザーについて記憶していること",
     });
-    const retriever = new TaguruRetriever({ context: "assistant-memory", client, k: 4 });
     const chat = await makeLlm(FAKE_REPLIES);
     const respond = PROMPT.pipe(chat).pipe(new StringOutputParser());
 
@@ -155,6 +154,14 @@ async function main(): Promise<void> {
       throw new Error(`failed to ingest ${memorized!.source}: ${memorized!.error}`);
     }
     console.log(`memorized ${memorized!.source}: ${memorized!.associations} facts`);
+
+    // The retriever and the core SDK address a context by its id (#964); the
+    // ingester created it by name, so ask it which id that name landed on.
+    const contextId = await ingester.contextId();
+    if (contextId === null) {
+      throw new Error("the memory context was not created");
+    }
+    const retriever = new TaguruRetriever({ context: contextId, client, k: 4 });
 
     console.log("\n== session 2 (2026-07-12): every turn first recalls, then answers ==");
     for (const turn of TURNS) {
@@ -169,7 +176,7 @@ async function main(): Promise<void> {
     console.log(SESSION_2);
     const corrected = await ingester.ingestText(SESSION_2, { source: "conversations/2026-07-12" });
     console.log(`memorized ${corrected.source}: ${corrected.associations} facts`);
-    const ctx = client.context("assistant-memory");
+    const ctx = client.context(contextId);
     for (const match of (await ctx.query({ subject: "たぐる導入", label: "締切" })).matches) {
       const sign = match.weight >= 0 ? "+" : "";
       console.log(`  たぐる導入 –締切→ ${match.object}: weight ${sign}${match.weight}`);

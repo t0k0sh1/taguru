@@ -93,7 +93,7 @@
             <td><code>context</code></td>
             <td>one 文脈 — one frame in which one spelling means one referent</td>
             <td>the label/concept vocabulary and its aliases; the finest unit a search can include or exclude</td>
-            <td><code>PUT /contexts/{id}</code></td>
+            <td><code>POST /contexts</code></td>
           </tr>
           <tr>
             <td><code>group</code></td>
@@ -280,7 +280,7 @@
     <p class="note">
       Bodies (a <code>recall</code> request, an import source's <code>context</code> field) carry a
       slash-bearing name as-is. Only when the name itself sits in the URL path —
-      <code>PUT /contexts/{id}</code>, <code>PUT /groups/{name}</code> — does the slash need
+      <code>PUT /groups/{name}</code> — does the slash need
       percent-encoding (<code>paper%2Fbert</code>), the same as any other path segment; otherwise
       it would split the route in two.
     </p>

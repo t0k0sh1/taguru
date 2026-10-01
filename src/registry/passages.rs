@@ -85,7 +85,7 @@ impl AppState {
         if let Some((used, ceiling)) = self.storage_quota_excess(&fence, &entry) {
             self.0.metrics.record_storage_quota_refusal();
             return Some(Err(PassagesWriteError::QuotaExceeded(
-                super::storage_quota_message(id, used, ceiling),
+                super::storage_quota_message(&fence.name, used, ceiling),
             )));
         }
         hit_quota_write_checkpoint();

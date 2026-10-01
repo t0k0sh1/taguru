@@ -150,7 +150,11 @@ def main() -> int:
             assert outcome.ndjson is not None
             for line in outcome.ndjson.strip().splitlines():
                 print(f"  {line}")
-        print(f"context created yet? {client.contexts.exists('sougetsu-kb')}")
+        # The directory is name-searchable; paths take the id column (#964).
+        print(
+            "context created yet? "
+            f"{any(row.name == 'sougetsu-kb' for row in client.contexts.iter())}"
+        )
 
         print("\n== 2. apply the reviewed batches — the NDJSON *is* the import payload ==")
         for outcome in reviewed:
@@ -162,7 +166,8 @@ def main() -> int:
                 f"questions={applied.questions_stored} passage={applied.passage_stored}"
             )
 
-        ctx = client.context("sougetsu-kb")
+        context_id = next(row.id for row in client.contexts.iter() if row.name == "sougetsu-kb")
+        ctx = client.context(context_id)
         print("\n== 3. read the graph back with the core SDK ==")
         print(f"sources: {ctx.list_sources().sources}")
         description = ctx.describe("蒼月堂")

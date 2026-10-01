@@ -171,7 +171,13 @@ async function main(): Promise<void> {
     }
 
     // -- read: the retriever composes like any other LCEL component --------
-    const retriever = new TaguruRetriever({ context: "aomine-qa", client, k: 6 });
+    // The retriever addresses a context by its id (#964); the ingester
+    // created it by name, so ask it which id that name landed on.
+    const contextId = await ingester.contextId();
+    if (contextId === null) {
+      throw new Error("the aomine-qa context was not created");
+    }
+    const retriever = new TaguruRetriever({ context: contextId, client, k: 6 });
     const llm = await makeLlm(FAKE_ANSWERS);
     const chain = RunnableSequence.from([
       {

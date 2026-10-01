@@ -438,12 +438,13 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
 fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
     let server = Server::start("keysetcap");
     server.ok("POST", "/contexts", Some(json!({"name": "sake", })));
+    let id = server.cx("sake");
     let long = "n".repeat(2000); // over MAX_CURSOR_BYTES either way
 
     for path in [
-        format!("/contexts/sake/sources?prefix={long}"),
-        format!("/contexts/sake/aliases?prefix={long}"),
-        format!("/contexts/sake/labels?prefix={long}"),
+        format!("/contexts/{id}/sources?prefix={long}"),
+        format!("/contexts/{id}/aliases?prefix={long}"),
+        format!("/contexts/{id}/labels?prefix={long}"),
         format!("/groups?prefix={long}"),
     ] {
         let (status, body) = server.call("GET", &path, None);
@@ -451,9 +452,9 @@ fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
         assert_eq!(body["code"], "invalid_argument", "{path}: {body}");
     }
     for path in [
-        format!("/contexts/sake/sources?after={long}"),
-        format!("/contexts/sake/aliases?after={long}"),
-        format!("/contexts/sake/labels?after={long}"),
+        format!("/contexts/{id}/sources?after={long}"),
+        format!("/contexts/{id}/aliases?after={long}"),
+        format!("/contexts/{id}/labels?after={long}"),
         format!("/groups?after={long}"),
     ] {
         let (status, body) = server.call("GET", &path, None);

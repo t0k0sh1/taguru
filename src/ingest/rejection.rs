@@ -624,7 +624,8 @@ pub(crate) fn apply_batch(
             // deepen the collision.
             Err(CreateError::AmbiguousName(count)) => {
                 return Err(ApplyRefusal::Io(format!(
-                    "context name '{}' is ambiguous: {count} contexts share it; import by a                      unique name (ids reach the import header in a later release)",
+                    "context name '{}' is ambiguous: {count} contexts share it; import by a \
+                     unique name (ids reach the import header in a later release)",
                     batch.context
                 )));
             }

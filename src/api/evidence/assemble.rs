@@ -442,8 +442,9 @@ pub async fn assemble_evidence(
         tracing::info!(taguru.reason = "communities_disabled", "taguru.skip");
         LanePlan::skipped("include_communities was false")
     } else {
-        let derived = derived_context_name(&state.name_of_stem(&id));
-        if let Some(refusal) = check_derived_scope(&grant, &id, &derived, started_at) {
+        let source_name = state.name_of_stem(&id);
+        let derived = derived_context_name(&source_name);
+        if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
             return refusal;
         }
         if deadline.expired() {

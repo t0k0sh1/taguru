@@ -77,7 +77,12 @@ fn metrics_expose_prometheus_text_reflecting_traffic() {
     );
     // The raw paths never become label values; unmatched requests all
     // share one bucket.
-    assert!(!text.contains("nope1"), "raw path leaked into labels");
+    for raw in [
+        "00000000-0000-4000-8000-00000000dea1",
+        "00000000-0000-4000-8000-00000000dea2",
+    ] {
+        assert!(!text.contains(raw), "raw path {raw} leaked into labels");
+    }
     assert!(!text.contains("/definitely/not/a/route"));
     assert!(text.contains("route=\"<unmatched>\""));
 

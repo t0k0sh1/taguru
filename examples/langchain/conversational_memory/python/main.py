@@ -157,7 +157,6 @@ def main() -> int:
             create_context=True,
             context_description="アシスタントがユーザーについて記憶していること",
         )
-        retriever = TaguruRetriever(context="assistant-memory", client=client, k=4)
         chat = make_llm(FAKE_REPLIES)
         respond = PROMPT | chat | StrOutputParser()
 
@@ -171,6 +170,11 @@ def main() -> int:
             return 1
         print(f"memorized {memorized.source}: {memorized.associations} facts")
 
+        # The retriever and the core SDK address a context by its id (#964);
+        # the ingester created it by name, so read the id off the directory.
+        context_id = next(row.id for row in client.contexts.iter() if row.name == "assistant-memory")
+        retriever = TaguruRetriever(context=context_id, client=client, k=4)
+
         print("\n== session 2 (2026-07-12): every turn first recalls, then answers ==")
         for turn in TURNS:
             print(f"\nuser: {turn}")
@@ -182,7 +186,7 @@ def main() -> int:
         print(SESSION_2)
         memorized = ingester.ingest_text(SESSION_2, source="conversations/2026-07-12")
         print(f"memorized {memorized.source}: {memorized.associations} facts")
-        ctx = client.context("assistant-memory")
+        ctx = client.context(context_id)
         for match in ctx.query(subject="たぐる導入", label="締切").matches:
             print(f"  たぐる導入 –締切→ {match.object}: weight {match.weight:+g}")
 

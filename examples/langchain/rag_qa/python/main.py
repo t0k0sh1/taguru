@@ -184,7 +184,10 @@ def main() -> int:
             print(f"ingested {outcome.source}: {outcome.associations} facts, {outcome.aliases} aliases")
 
         # -- read: the retriever composes like any other LCEL component --------
-        retriever = TaguruRetriever(context="aomine-qa", client=client, k=6)
+        # The retriever addresses a context by its id (#964); the ingester
+        # created it by name, so read the id off the directory.
+        context_id = next(row.id for row in client.contexts.iter() if row.name == "aomine-qa")
+        retriever = TaguruRetriever(context=context_id, client=client, k=6)
         llm = make_llm(FAKE_ANSWERS)
         chain = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}

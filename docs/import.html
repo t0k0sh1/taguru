@@ -238,7 +238,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       (<code>"2026-09-17"</code> is the one this build reads and writes), a file that omits it is
       read as the running build's own revision, and any other date is refused by name. Everything
       taguru writes carries it; a hand-written file may leave it out. <code>create</code> is optional
-      and carries the same fields as <code>PUT /contexts/{id}</code> (<code>description</code>,
+      and carries the same fields as the <code>POST /contexts</code> body (<code>description</code>,
       <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
       the <code>context</code> <b>does not exist yet</b>. Importing into an absent <code>context</code> without a create
       block is refused.
