@@ -26,14 +26,14 @@ classes:
     recall:
       route: "POST /recall"
       args: [cue]
-      options: [contexts, groups, limit, after]
+      options: [context_ids, groups, limit, after]
     query:
       route: "POST /query"
-      options: [contexts, groups, subject, label, object, subject_types, object_types, limit, after]
+      options: [context_ids, groups, subject, label, object, subject_types, object_types, limit, after]
     search_passages:
       route: "POST /sources/search"
       args: [query]
-      options: [contexts, groups, limit, semantic_floor, tags, since, until]
+      options: [context_ids, groups, limit, semantic_floor, tags, since, until]
     close: {}
 
   Contexts:
@@ -60,11 +60,11 @@ classes:
     create:
       route: "PUT /groups/{name}"
       args: [name]
-      options: [description, contexts, groups]
+      options: [description, context_ids, groups]
     update:
       route: "PATCH /groups/{name}"
       args: [name]
-      options: [description, add_contexts, remove_contexts, add_groups, remove_groups]
+      options: [description, add_context_ids, remove_context_ids, add_groups, remove_groups]
     delete: { route: "DELETE /groups/{name}", args: [name] }
     rename: { route: "POST /groups/{name}/rename", args: [name, to] }
     export: { route: "GET /groups/{name}/export", args: [name] }

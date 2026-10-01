@@ -102,7 +102,8 @@ def routed_handler(calls: list[tuple[str, dict[str, str]]]):
                     "plan": {
                         "contexts": [
                             {
-                                "context": "sake",
+                                "context_id": "id-sake",
+                                "context_name": "sake",
                                 "lanes": {
                                     "bm25": {"ran": True},
                                     "vector": {"ran": False, "reason": "no provider"},

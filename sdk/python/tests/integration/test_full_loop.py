@@ -340,7 +340,7 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
     explained = ctx.explain_search_passages("共通語の資料", "b.md", tags=["酒"])
     assert explained.verdict == "filtered_out"
 
-    cross = client.search_passages("共通語の資料", contexts=[fresh_name], tags=["酒"])
+    cross = client.search_passages("共通語の資料", context_ids=[context_id], tags=["酒"])
     assert {hit.source for hit in cross.hits} == {"a.md"}
     cross_plan = cross.plan.contexts[0].filter
     assert cross_plan is not None and cross_plan.eligible_sources == 1
