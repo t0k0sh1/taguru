@@ -582,7 +582,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "into": { "type": "string", "description": "the destination context (from list_contexts) — must already exist" },
+                    "into": { "type": "string", "description": "the destination context's id (the id column of list_contexts, not its name) — must already exist" },
                     "sources": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "the scratch source ids to promote — every one must exist here" },
                     "audit": { "type": "boolean", "description": "run the destination's consolidation audit after the apply (default true; dry_run never audits)" },
                     "dry_run": { "type": "boolean", "description": "preview only — report the same response shape (`batches`), write nothing, no audit" }

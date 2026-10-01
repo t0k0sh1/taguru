@@ -89,10 +89,12 @@
 
   <section id="cli">
     <h2>The CLI shape</h2>
-    <pre><code>taguru benchmark extract --models models.json --context bench \
+    <pre><code>taguru benchmark extract --models models.json --context cef2e28b-43f0-4b6c-8201-abab0785399f --name bench \
   --out results/ --runs 3 corpus/</code></pre>
     <pre><code>--models FILE        model matrix (schema below)
---context NAME       the context every cell's source files target
+--context ID         the context every cell's source files target, by id (a
+                    UUID: the id of an existing context, or a fresh one with --name)
+--name NAME          create block name, used only when no context carries --context
 --out DIR            results directory; re-running the same --out resumes —
                     a cell already recorded complete or failed is never re-run
 --runs N             runs per model, 1-99 (default 1)

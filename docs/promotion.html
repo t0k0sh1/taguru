@@ -121,7 +121,9 @@
         when the keepers are the scratch's own structured associations (written by the
         session itself, nothing left to extract), the <code>promote</code> MCP tool
         (<code>POST /contexts/{scratch id}/promote</code>, body
-        <code>{into, sources, audit?}</code>, <code>?dry_run=true</code> to preview)
+        <code>{into, sources, audit?}</code> — <code>into</code> is the destination's
+        <b>id</b> (the <code>id</code> column of <code>GET /contexts</code>), not its name —
+        <code>?dry_run=true</code> to preview)
         bundles steps 4–5: each named source moves whole — passage, <code>date</code>,
         tags, and only its <em>own</em> share of every edge's weight — with no LLM
         anywhere in the path. Source ids survive, so promoted citations still name the
@@ -136,7 +138,8 @@
         and retirement (step 6). Steps 3–4 below are the <b>text path</b>, needed only
         when the keepers exist as prose that still wants extraction.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
-        passages (or hand-write the source file), targeting the <b>permanent</b> <code>context</code> — keeping
+        passages (or hand-write the source file), targeting the <b>permanent</b> <code>context</code>
+        (<code>--context</code> takes its id) — keeping
         the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s:
         <code>--source-id</code>, <code>--date</code>, and <code>--tag</code> bake all three
         conventions into the emitted source file directly (ADR 0017), so no hand-editing of the
