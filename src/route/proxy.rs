@@ -147,17 +147,30 @@ enum Owner {
     Answered(Response),
 }
 
-async fn resolve_owner(
+/// [`locate_owner`]'s verdict: the owning shard, a clean "no shard
+/// holds it" (every shard answered 404), or a response that already is
+/// the answer (a refusal passed through, an unreachable shard, a
+/// mid-move stray held by several).
+pub(super) enum Located {
+    Shard(usize),
+    Missing,
+    Answered(Response),
+}
+
+/// [`resolve_owner`] for callers that treat "nowhere" as a state, not
+/// an error — `POST /import`, whose header's `create` block is what
+/// decides where an id that no shard holds yet should land (#965).
+pub(super) async fn locate_owner(
     state: &RouterState,
     map: &RouteMap,
     id: &str,
     headers: &HeaderMap,
     deadline: Deadline,
     started_at: Instant,
-) -> Owner {
+) -> Located {
     let shards: Vec<usize> = map.all().collect();
     if let [only] = shards.as_slice() {
-        return Owner::Shard(*only);
+        return Located::Shard(*only);
     }
     let path = format!("/contexts/{id}");
     let outcomes = state
@@ -186,13 +199,13 @@ async fn resolve_owner(
         }
     }
     match owners.as_slice() {
-        [owner] => Owner::Shard(*owner),
+        [owner] => Located::Shard(*owner),
         [] => {
             if let Some(answer) = refused {
-                return Owner::Answered(passthrough(answer));
+                return Located::Answered(passthrough(answer));
             }
             if !unreached.is_empty() {
-                return Owner::Answered(api::error(
+                return Located::Answered(api::error(
                     ErrorCode::ShardUnreachable,
                     format!(
                         "context '{id}' was not found on any reachable shard, and these \
@@ -202,13 +215,9 @@ async fn resolve_owner(
                     started_at,
                 ));
             }
-            Owner::Answered(api::error(
-                ErrorCode::NoContext,
-                format!("context '{id}' not found"),
-                started_at,
-            ))
+            Located::Missing
         }
-        several => Owner::Answered(api::error(
+        several => Located::Answered(api::error(
             ErrorCode::Conflict,
             format!(
                 "context '{id}' is held by {} shards ({}) — mid-move stray? finish the move \
@@ -220,6 +229,25 @@ async fn resolve_owner(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            started_at,
+        )),
+    }
+}
+
+async fn resolve_owner(
+    state: &RouterState,
+    map: &RouteMap,
+    id: &str,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Owner {
+    match locate_owner(state, map, id, headers, deadline, started_at).await {
+        Located::Shard(shard) => Owner::Shard(shard),
+        Located::Answered(response) => Owner::Answered(response),
+        Located::Missing => Owner::Answered(api::error(
+            ErrorCode::NoContext,
+            format!("context '{id}' not found"),
             started_at,
         )),
     }

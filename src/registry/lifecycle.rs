@@ -13,9 +13,9 @@ impl AppState {
     /// name already in use mints a second, distinct `context`. That is
     /// also why no reservation set is needed here anymore: the stem is
     /// a UUID minted right here, so no concurrent create, delete, or
-    /// rename can be working on the same file family. Callers that DO
-    /// want at-most-one-per-name (the import header's `create` block)
-    /// go through [`AppState::create_if_absent`] instead.
+    /// rename can be working on the same file family. The import
+    /// header's `create` block brings its own id and goes through
+    /// [`AppState::create_if_absent`] instead.
     ///
     /// The registry lock is NOT held across the disk work
     /// (`save_files`' fsyncs — seconds on slow storage, behind which
@@ -33,18 +33,31 @@ impl AppState {
     /// same-name-same-stem model recycled those on the next create;
     /// the id model just leaves a few bytes behind.)
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<String, CreateError> {
+        let id = mint_context_id();
+        self.create_registered(&id, name, meta)?;
+        Ok(id)
+    }
+
+    /// The body shared by [`Self::create`] (a minted `id`) and
+    /// [`Self::create_if_absent`] (the import header's own `id`):
+    /// persist the family under `id`, then register it.
+    fn create_registered(
+        &self,
+        id: &str,
+        name: &str,
+        meta: ContextMeta,
+    ) -> Result<(), CreateError> {
         // An empty name would render every listing row and log line
         // blank — refuse it at the lowest boundary, so no entrance
         // (import, direct call) can conjure one.
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
-        let id = mint_context_id();
-        let (stats, usage, context) = self.create_files(&id, name, &meta)?;
+        let (stats, usage, context) = self.create_files(id, name, &meta)?;
         self.0.registry.write().insert(
             name,
             Arc::new(Entry::new(
-                id.clone(),
+                id.to_string(),
                 name.to_string(),
                 meta,
                 stats,
@@ -60,47 +73,57 @@ impl AppState {
                 None,
             )),
         );
-        Ok(id)
+        Ok(())
     }
 
-    /// The import header's create semantics: exactly one `context` per
-    /// name, however many batches race. Resolves `name` first — an
-    /// existing `context` is the answer (`Ok(None)`), an ambiguous one
-    /// is refused (several already share the name; minting a third
-    /// would make the header's target even less recoverable) — and
-    /// only creates when nothing carries the name. The name is
-    /// reserved in `pending_creates` for the disk work's duration, so
-    /// a concurrent batch of the same stream sees "taken" instead of
-    /// minting a twin; it reports `Ok(None)` exactly as if the winner
-    /// had already registered, and its subsequent by-name operations
-    /// wait out the same window the pre-id create had.
+    /// The import header's create semantics (#965 decision 2): exactly
+    /// one `context` per `id`, however many batches race. A `context`
+    /// already registered under `id` is the answer (`Ok(false)` — the
+    /// header's `create` block is ignored, never a rename or a
+    /// reconfiguration); otherwise the family is created under THE
+    /// HEADER'S id, so an export restored here keeps the id every
+    /// other record points at. The id is reserved in `pending_creates`
+    /// for the disk work's duration, so a concurrent batch of the same
+    /// stream sees "taken" instead of writing the same family twice;
+    /// it reports `Ok(false)` exactly as if the winner had already
+    /// registered.
+    ///
+    /// Unlike [`Self::create`], the stem here is NOT freshly minted, so
+    /// the clean-slate argument does not hold: an image already on disk
+    /// under an id the registry does not know (a context whose load
+    /// failed hard enough to be left unregistered) refuses with `Io`
+    /// rather than being written over.
     pub fn create_if_absent(
         &self,
+        id: &str,
         name: &str,
         meta: ContextMeta,
-    ) -> Result<Option<String>, CreateError> {
+    ) -> Result<bool, CreateError> {
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
         {
             let registry = self.0.registry.read();
-            match registry.resolve(name) {
-                NameResolution::One(_) => return Ok(None),
-                NameResolution::Ambiguous(count) => {
-                    return Err(CreateError::AmbiguousName(count));
-                }
-                NameResolution::None => {}
+            if registry.get_id(id).is_some() {
+                return Ok(false);
             }
             // Reserved under the registry read guard, so this
             // check-then-insert cannot interleave with another
-            // create_if_absent of the same name (both would need the
+            // create_if_absent of the same id (both would need the
             // pending lock inside the same registry guard).
-            if !self.0.pending_creates.lock().insert(name.to_string()) {
-                return Ok(None);
+            if !self.0.pending_creates.lock().insert(id.to_string()) {
+                return Ok(false);
             }
         }
-        let outcome = self.create(name, meta).map(Some);
-        self.0.pending_creates.lock().remove(name);
+        let outcome = if image_path(&self.0.data_dir, id).exists() {
+            Err(CreateError::Io(io::Error::other(format!(
+                "files for context id {id} already exist in the data directory but no \
+                 context is registered under it"
+            ))))
+        } else {
+            self.create_registered(id, name, meta).map(|()| true)
+        };
+        self.0.pending_creates.lock().remove(id);
         outcome
     }
 

@@ -1208,9 +1208,10 @@ where
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let AppPath(id) = AppPath::<String>::from_request_parts(parts, state).await?;
-        match uuid::Uuid::try_parse(&id) {
-            Ok(parsed) if parsed.to_string() == id => Ok(Self(id)),
-            _ => Err(coded(
+        if crate::registry::is_context_id(&id) {
+            Ok(Self(id))
+        } else {
+            Err(coded(
                 axum::http::StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidArgument,
                 format!(
@@ -1218,7 +1219,7 @@ where
                      (a lowercase hyphenated UUID), not the context's name"
                 ),
                 Instant::now(),
-            )),
+            ))
         }
     }
 }

@@ -51,16 +51,13 @@ impl std::fmt::Display for SchemaApplyError {
 /// and [`crate::api::import_outcome`].
 pub(crate) fn apply_schema_record(
     state: &AppState,
-    context: &str,
+    context_id: &str,
     installed: schema::InstalledSchema,
 ) -> Result<schema::SchemaDocument, SchemaApplyError> {
-    // The record still names its context (until #965); `put_schema`
-    // is id-keyed. A missing OR ambiguous name is the same refusal:
-    // the record's target does not resolve to exactly one context.
-    let Some(context_id) = state.context_id_of(context) else {
-        return Err(SchemaApplyError::NoContext);
-    };
-    match state.put_schema(&context_id, installed) {
+    // The record's `context_id` is the id `put_schema` is keyed on; an
+    // id nothing is registered under is the same `NoContext` refusal
+    // `put_schema` itself answers with.
+    match state.put_schema(context_id, installed) {
         None => Err(SchemaApplyError::NoContext),
         Some(Ok(document)) => Ok(document),
         Some(Err(crate::registry::PutSchemaError::ReservedAlias(alias))) => {

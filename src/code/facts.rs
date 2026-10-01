@@ -175,12 +175,17 @@ pub(crate) fn build(path: &str, symbols: &[SymbolNode]) -> FileFacts {
 
 /// Renders one file's batch as the JSONL `taguru import` reads:
 /// header, passage, sections, locators, associations. `create` adds
-/// the header's create block so the first sync can mint the `context`.
-pub(crate) fn render_batch(context: &str, facts: &FileFacts, create: Option<&str>) -> String {
+/// the header's create block so the first sync can mint the `context`
+/// under `context_id`.
+pub(crate) fn render_batch(
+    context_id: &str,
+    facts: &FileFacts,
+    create: Option<crate::format::HeaderCreate<'_>>,
+) -> String {
     let mut lines = Vec::new();
     lines.push(crate::format::source_header_line(
         &facts.source,
-        context,
+        context_id,
         create,
     ));
     if !facts.passage.is_empty() {
@@ -489,15 +494,24 @@ mod tests {
             (323, 347),
         )];
         let facts = build("src/ingest/model.rs", &symbols);
-        let batch = render_batch("code", &facts, Some("code map"));
+        let id = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
+        let batch = render_batch(
+            id,
+            &facts,
+            Some(crate::format::HeaderCreate {
+                name: "code",
+                description: "code map",
+            }),
+        );
         let lines: Vec<serde_json::Value> = batch
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
 
         assert_eq!(lines[0]["type"], "source");
-        assert_eq!(lines[0]["context"], "code");
+        assert_eq!(lines[0]["context_id"], id);
         assert_eq!(lines[0]["id"], "src/ingest/model.rs");
+        assert_eq!(lines[0]["create"]["name"], "code");
         assert_eq!(lines[0]["create"]["description"], "code map");
         assert!(lines[1]["passage"].is_string());
         assert_eq!(lines[2]["section"], "fn parse_batch");
@@ -508,7 +522,7 @@ mod tests {
         assert_eq!(last["label"], "defined_in");
         assert_eq!(last["paragraph"], 0);
         // Without create, the header carries no create block at all.
-        let plain = render_batch("code", &facts, None);
+        let plain = render_batch(id, &facts, None);
         let header: serde_json::Value =
             serde_json::from_str(plain.lines().next().unwrap()).unwrap();
         assert!(header.get("create").is_none());

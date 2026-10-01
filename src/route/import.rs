@@ -26,17 +26,60 @@ pub(super) async fn route_import(
     // Route every batch before anything ships: a stream naming an
     // unroutable context refuses whole, like any other invalid stream.
     let mut chunks: Vec<(usize, Vec<std::ops::Range<usize>>)> = Vec::new();
+    // The route map keys on display names, but the stream's headers
+    // carry ids (#965): an id some shard already holds routes to that
+    // shard (asked once per distinct id), and an id nobody holds yet
+    // lands where its create block's NAME routes — the one place the
+    // map's vocabulary still applies. Later batches and schema records
+    // of the same id follow the first batch's verdict.
+    let mut owner_of: BTreeMap<String, usize> = BTreeMap::new();
     for (batch, range) in stream.batches.iter().zip(slices) {
-        let Some(shard) = map.shard_of(&batch.context) else {
-            return api::error(
-                ErrorCode::NoContext,
-                format!(
-                    "source '{}': context '{}' has no route-map entry and no '*' \
-                     fallback (TAGURU_ROUTE_MAP); nothing was applied",
-                    batch.source, batch.context
-                ),
-                started_at,
-            );
+        let shard = match owner_of.get(&batch.context_id) {
+            Some(shard) => *shard,
+            None => {
+                let shard = match locate_owner(
+                    &state,
+                    &map,
+                    &batch.context_id,
+                    &headers,
+                    deadline,
+                    started_at,
+                )
+                .await
+                {
+                    Located::Shard(shard) => shard,
+                    Located::Answered(response) => return response,
+                    Located::Missing => {
+                        let Some(spec) = &batch.create else {
+                            return api::error(
+                                ErrorCode::NoContext,
+                                format!(
+                                    "source '{}': context '{}' does not exist on any shard \
+                                     and the source file brought no create block; nothing \
+                                     was applied",
+                                    batch.source, batch.context_id
+                                ),
+                                started_at,
+                            );
+                        };
+                        let Some(shard) = map.shard_of(&spec.name) else {
+                            return api::error(
+                                ErrorCode::NoContext,
+                                format!(
+                                    "source '{}': context '{}' (create name '{}') has no \
+                                     route-map entry and no '*' fallback (TAGURU_ROUTE_MAP); \
+                                     nothing was applied",
+                                    batch.source, batch.context_id, spec.name
+                                ),
+                                started_at,
+                            );
+                        };
+                        shard
+                    }
+                };
+                owner_of.insert(batch.context_id.clone(), shard);
+                shard
+            }
         };
         match chunks.last_mut() {
             Some((last_shard, ranges)) if *last_shard == shard => ranges.push(range),
@@ -56,16 +99,27 @@ pub(super) async fn route_import(
     // ships, the same posture as the batch loop just above (ADR 0009
     // §13).
     let mut schema_shards: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (index, (context, _)) in stream.schemas.iter().enumerate() {
-        let Some(shard) = map.shard_of(context) else {
-            return api::error(
-                ErrorCode::NoContext,
-                format!(
-                    "schema record: context '{context}' has no route-map entry and no '*' \
-                     fallback (TAGURU_ROUTE_MAP); nothing was applied"
-                ),
-                started_at,
-            );
+    for (index, (context_id, _)) in stream.schemas.iter().enumerate() {
+        let shard = match owner_of.get(context_id) {
+            Some(shard) => *shard,
+            None => {
+                match locate_owner(&state, &map, context_id, &headers, deadline, started_at).await {
+                    Located::Shard(shard) => shard,
+                    Located::Answered(response) => return response,
+                    Located::Missing => {
+                        return api::error(
+                            ErrorCode::NoContext,
+                            format!(
+                                "schema record: context '{context_id}' does not exist on any \
+                             shard — a schema record's context must already exist (created \
+                             by an earlier source file of the same stream, or previously); \
+                             nothing was applied"
+                            ),
+                            started_at,
+                        );
+                    }
+                }
+            }
         };
         schema_shards.entry(shard).or_default().push(index);
     }

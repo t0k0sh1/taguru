@@ -231,7 +231,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         segments.insert(
             key,
             SegmentReport {
-                context: batch.context.clone(),
+                context_id: batch.context_id.clone(),
                 counts: judged.counts,
                 unanchored,
             },
@@ -468,7 +468,7 @@ impl Counts {
 
 #[derive(Serialize)]
 struct SegmentReport {
-    context: String,
+    context_id: String,
     #[serde(flatten)]
     counts: Counts,
     /// Every association that is not strictly anchored, or cites a

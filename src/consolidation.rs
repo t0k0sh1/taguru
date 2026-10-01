@@ -231,7 +231,16 @@ fn drive(
     // The stored judgments this run can reuse. A manifest whose
     // detector differs marks every stored judgment incomparable —
     // loudly, the communities behavior for a changed algorithm.
-    let (manifest_detector, judged) = stored_judgments(&api, &artifact, &candidates)?;
+    // The artifact is found by NAME (the only handle `--into` gives)
+    // but written by id (#965): a context already carrying the name
+    // keeps its id, and a first run mints one the create block then
+    // registers.
+    let existing_artifact = api.context_id_by_name(&artifact)?;
+    let artifact_id = existing_artifact
+        .clone()
+        .unwrap_or_else(crate::registry::mint_context_id);
+    let (manifest_detector, judged) =
+        stored_judgments(&api, existing_artifact.as_deref(), &candidates)?;
     let comparable = match &manifest_detector {
         Some(detector) if detector != CONSOLIDATION_DETECTOR => {
             eprintln!(
@@ -290,6 +299,7 @@ fn drive(
             judgment["action"].as_str().unwrap_or("-"),
         ));
         batches.push(judgment_batch(
+            &artifact_id,
             &artifact,
             context,
             candidate,
@@ -299,7 +309,7 @@ fn drive(
     }
     // The manifest travels LAST, the communities ordering: its
     // presence at the new stamp means every judgment before it landed.
-    batches.push(manifest_batch(&artifact, context));
+    batches.push(manifest_batch(&artifact_id, context));
     for chunk in crate::remote::pack_import_chunks(&batches) {
         api.import(&chunk)?;
     }
@@ -377,7 +387,7 @@ fn flatten(audit: &ConsolidationAudit) -> Vec<Candidate> {
 /// exist yet) and the set of judgment sources already stored.
 fn stored_judgments(
     api: &Api,
-    artifact: &str,
+    artifact_id: Option<&str>,
     candidates: &[Candidate],
 ) -> Result<(Option<String>, BTreeSet<String>), String> {
     let mut wanted: Vec<String> = vec![MANIFEST_SOURCE.to_string()];
@@ -387,12 +397,11 @@ fn stored_judgments(
             .map(|candidate| judgment_source(&candidate.fingerprint)),
     );
     let body = json!({ "sources": wanted });
-    // The artifact is created by NAME on the import wire but read by
-    // id (#964); a name nothing answers to is a first run.
-    let Some(artifact_id) = api.context_id_by_name(artifact)? else {
+    // A name nothing answers to is a first run.
+    let Some(artifact_id) = artifact_id else {
         return Ok((None, BTreeSet::new()));
     };
-    let found = match api.post_envelope(&["contexts", &artifact_id, "sources", "lookup"], &body) {
+    let found = match api.post_envelope(&["contexts", artifact_id, "sources", "lookup"], &body) {
         Ok(result) => result,
         Err(ApiFailure::NotFound { .. }) => return Ok((None, BTreeSet::new())),
         Err(ApiFailure::Other(error)) => return Err(error),
@@ -483,7 +492,8 @@ fn parse_judgment(content: &str) -> Option<Value> {
 /// when the artifact `context` does not exist yet, so repeating it on
 /// every batch was pure payload (issue #752).
 fn judgment_batch(
-    artifact: &str,
+    artifact_id: &str,
+    artifact_name: &str,
     context: &str,
     candidate: &Candidate,
     judgment: &Value,
@@ -499,7 +509,16 @@ fn judgment_batch(
     let description = create.then(|| {
         format!("Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete")
     });
-    let header = crate::format::source_header_line(&source, artifact, description.as_deref());
+    let header = crate::format::source_header_line(
+        &source,
+        artifact_id,
+        description
+            .as_deref()
+            .map(|description| crate::format::HeaderCreate {
+                name: artifact_name,
+                description,
+            }),
+    );
     let association = json!({
         "subject": candidate.headline,
         "label": judgment["verdict"],
@@ -528,8 +547,8 @@ fn judge_manifest(manifest: &Value) -> Result<(), String> {
     }
 }
 
-fn manifest_batch(artifact: &str, context: &str) -> String {
-    let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact, None);
+fn manifest_batch(artifact_id: &str, context: &str) -> String {
+    let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact_id, None);
     let manifest = json!({
         "type": MANIFEST_TYPE,
         "version": crate::format::FORMAT_VERSION,

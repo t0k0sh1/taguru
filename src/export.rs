@@ -119,6 +119,10 @@ pub(crate) const EMPTY_SOURCE: &str = "export:empty";
 /// under a single registry fence so the graph half cannot shear
 /// against the passage half (see [`AppState::export_context`]).
 pub(crate) struct ExportSnapshot {
+    /// The display name — what the first batch's create block carries,
+    /// so a restore onto a server that lacks the id mints the context
+    /// under its own name (#965).
+    pub(crate) name: String,
     pub(crate) meta: ContextMeta,
     pub(crate) associations: Vec<Association>,
     /// (alias, canonical) pairs, concept namespace.
@@ -154,13 +158,14 @@ struct HeaderLine<'a> {
     record_type: &'static str,
     version: &'static str,
     id: &'a str,
-    context: &'a str,
+    context_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     create: Option<CreateLine<'a>>,
 }
 
 #[derive(Clone, Copy, Serialize)]
 struct CreateLine<'a> {
+    name: &'a str,
     description: &'a str,
     #[serde(skip_serializing_if = "is_false")]
     pinned: bool,
@@ -237,7 +242,7 @@ struct SchemaLine<'a> {
     #[serde(rename = "type")]
     record_type: &'static str,
     version: &'static str,
-    context: &'a str,
+    context_id: &'a str,
     mode: crate::schema::SchemaMode,
     closed_labels: bool,
     types: &'a BTreeMap<String, crate::schema::TypeDef>,
@@ -251,14 +256,14 @@ struct SchemaLine<'a> {
 /// (`src/ingest.rs`) calls it directly to re-render a parsed record
 /// for the wire, the same way it re-renders `group` records via
 /// [`render_group`].
-pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocument) -> String {
+pub(crate) fn render_schema(context_id: &str, document: &crate::schema::SchemaDocument) -> String {
     let mut line = String::new();
     push_line(
         &mut line,
         &SchemaLine {
             record_type: "schema",
             version: crate::format::FORMAT_VERSION,
-            context,
+            context_id,
             mode: document.mode,
             closed_labels: document.closed_labels,
             types: &document.types,
@@ -347,6 +352,7 @@ pub(crate) fn filter_to_sources(
         })
         .collect();
     ExportSnapshot {
+        name: snapshot.name,
         meta: snapshot.meta,
         associations,
         concept_aliases: snapshot.concept_aliases,
@@ -401,7 +407,7 @@ struct Bucket<'a> {
 /// this runs (see `AppState::export_context`), so a deadline that is
 /// already tight when this is called cannot shorten that collection.
 pub(crate) fn render(
-    context: &str,
+    context_id: &str,
     snapshot: &ExportSnapshot,
     deadline: Deadline,
 ) -> Result<Rendered, String> {
@@ -524,6 +530,7 @@ pub(crate) fn render(
     }
 
     let create = CreateLine {
+        name: &snapshot.name,
         description: &snapshot.meta.description,
         pinned: snapshot.meta.pinned,
         dice_floor: snapshot.meta.dice_floor,
@@ -539,7 +546,7 @@ pub(crate) fn render(
     if let Some(document) = &snapshot.schema
         && document.mode != crate::schema::SchemaMode::Off
     {
-        stream.push_str(&render_schema(context, document));
+        stream.push_str(&render_schema(context_id, document));
     }
     let mut association_lines = 0usize;
     let mut passages = 0usize;
@@ -553,7 +560,7 @@ pub(crate) fn render(
                 record_type: "source",
                 version: crate::format::FORMAT_VERSION,
                 id: EMPTY_SOURCE,
-                context,
+                context_id,
                 create: Some(create),
             },
         );
@@ -568,7 +575,7 @@ pub(crate) fn render(
                     record_type: "source",
                     version: crate::format::FORMAT_VERSION,
                     id: source,
-                    context,
+                    context_id,
                     create: (index == 0).then_some(create),
                 },
             );
@@ -1093,18 +1100,23 @@ fn remote_export_one(
     // through the same parser `taguru import` trusts.
     let parsed = crate::ingest::parse_stream(stream.as_bytes())
         .map_err(|error| format!("context '{name}': not a taguru export stream: {error}"))?;
-    // Same wrong-name refusal as remote_export_group's: import applies
-    // each batch to its EMBEDDED context name, whatever file it rode
-    // in on, so a stream for a different context saved under this
-    // name would poison that other context on a later directory
-    // import. A context export stream carries only this context's
-    // batches (and its own schema record) — never a group record.
+    // Same wrong-target refusal as remote_export_group's: import applies
+    // each batch to its EMBEDDED context id, whatever file it rode in
+    // on, so a stream for a different context saved under this name
+    // would poison that other context on a later directory import. A
+    // context export stream carries only this context's batches (and
+    // its own schema record) — never a group record.
     if let Some(other) = parsed
         .batches
         .iter()
-        .map(|batch| batch.context.as_str())
-        .chain(parsed.schemas.iter().map(|(context, _)| context.as_str()))
-        .find(|context| *context != name)
+        .map(|batch| batch.context_id.as_str())
+        .chain(
+            parsed
+                .schemas
+                .iter()
+                .map(|(context_id, _)| context_id.as_str()),
+        )
+        .find(|context_id| *context_id != id)
     {
         return Err(format!(
             "context '{name}': not a taguru export stream: the response carries context \
@@ -1805,6 +1817,7 @@ mod tests {
 
     fn snapshot(associations: Vec<Association>) -> ExportSnapshot {
         ExportSnapshot {
+            name: "テスト".to_string(),
             meta: ContextMeta {
                 description: "テスト".to_string(),
                 pinned: false,

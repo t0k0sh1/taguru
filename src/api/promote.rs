@@ -38,8 +38,8 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 pub struct PromoteRequest {
-    /// The destination `context` — must already exist; promote never
-    /// creates one.
+    /// The destination `context`'s id — must already exist; promote
+    /// never creates one.
     pub into: String,
     /// The scratch source ids to promote. Every one must exist in the
     /// promoting `context` (a passage or a live attribution) or the
@@ -111,11 +111,20 @@ pub async fn promote_sources(
     if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
         return refusal;
     }
-    // `into` is a display NAME while the path is the id (#964) — the
-    // self-promotion check resolves it before comparing. An ambiguous
-    // `into` resolves to None here and falls through to the existence
-    // and landing checks below, which own that refusal.
-    if state.context_id_of(&request.into).as_deref() == Some(id.as_str()) {
+    // `into` is a context id, like the path's (#965): anything else is
+    // refused as one before any other check can misread it.
+    if !crate::registry::is_context_id(&request.into) {
+        return error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "'into' '{}' is not a context id: it takes the id column of GET /contexts \
+                 (a lowercase hyphenated UUID), not the context's name",
+                request.into
+            ),
+            started_at,
+        );
+    }
+    if request.into == id {
         return error(
             ErrorCode::InvalidArgument,
             format!(
@@ -152,14 +161,14 @@ pub async fn promote_sources(
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies (`/import`'s discipline).
     if let Some(axum::Extension(grant)) = &grant
-        && !grant.allows_context(&request.into)
+        && !grant.allows_context(&state.name_of_stem(&request.into))
     {
         return validation_error(
             ErrorCode::Forbidden,
             format!(
                 "key '{}' has no grant on context '{}' ('into'); nothing was applied",
                 key_name(&key),
-                request.into
+                state.name_of_stem(&request.into)
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),
@@ -175,7 +184,7 @@ pub async fn promote_sources(
     // typo'd name refuses before the scratch is even materialized (a
     // deletion between here and the apply is still caught: the create
     // blocks are stripped below, so `apply_batch` answers NoContext).
-    if !state.context_exists(&request.into) {
+    if !state.context_id_exists(&request.into) {
         return validation_error(
             ErrorCode::NoContext,
             format!(
@@ -294,13 +303,14 @@ pub async fn promote_sources(
             // lanes are live, and the stop is a resumable prefix.
             if !query.dry_run
                 && batch.carries_growth()
-                && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
+                && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context_id)
             {
                 state.metrics().record_storage_quota_refusal();
                 return Err(Box::new(quota_refusal(
                     index,
                     total,
                     batch,
+                    &batch.display_name(&state),
                     outcomes.len(),
                     used,
                     ceiling,
@@ -326,7 +336,7 @@ pub async fn promote_sources(
                         target: "taguru::audit",
                         key = %key_name(&key),
                         from = %id,
-                        context = %batch.context,
+                        context = %batch.context_id,
                         source = %batch.source,
                         retracted = applied.retracted,
                         associations = applied.associations,
@@ -451,15 +461,9 @@ fn landing_audit(
     into: &str,
     deadline: Deadline,
 ) -> Result<ConsolidationAudit, &'static str> {
-    // `into` is the destination's display NAME (the request body's
-    // vocabulary until #965); the audit reads are id-keyed. A name
-    // that stopped resolving — deleted, or made ambiguous by a racing
-    // same-name create — is the same "no_context" degrade a deleted
-    // destination always was.
-    let Some(into) = state.context_id_of(into) else {
-        return Err("no_context");
-    };
-    let into = into.as_str();
+    // `into` is the destination's id, which the audit reads are keyed
+    // on. One that stopped resolving — a delete won the race — is the
+    // same "no_context" degrade a deleted destination always was.
     let hidden = state.hidden_label(into);
     let effective: HashMap<String, u64> = match state.source_effective_times(into) {
         None => return Err("no_context"),
@@ -542,6 +546,7 @@ fn quota_refusal(
     index: usize,
     total: usize,
     batch: &crate::ingest::Batch,
+    destination: &str,
     landed: usize,
     used: u64,
     ceiling: u64,
@@ -554,7 +559,7 @@ fn quota_refusal(
         landed,
         false,
         ErrorCode::StorageFull,
-        crate::registry::storage_quota_message(&batch.context, used, ceiling),
+        crate::registry::storage_quota_message(destination, used, ceiling),
         QUOTA_NEXT_STEP,
         started_at,
     )

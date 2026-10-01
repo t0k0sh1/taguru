@@ -286,10 +286,13 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     let stream = api.get_raw(&["contexts", id, "communities"])?;
     let analysis = parse_analysis(&stream)?;
 
-    // The derived artifact is addressed by NAME on the import wire
-    // (its header creates it) but by id on every read — resolved
-    // once here; `None` is a first run.
+    // The derived artifact is found by NAME but written and read by
+    // id (#965) — resolved once here; `None` is a first run, whose
+    // header then registers a freshly minted id under the name.
     let derived_id = api.context_id_by_name(derived)?;
+    let artifact_id = derived_id
+        .clone()
+        .unwrap_or_else(crate::registry::mint_context_id);
     // The previous manifest, if an artifact exists: the fingerprint
     // ledger this run diffs against. An algorithm change invalidates
     // every fingerprint — incomparable digests must not "match".
@@ -432,7 +435,14 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
             })
             .collect(),
     };
-    let batches = render_batches(name, derived, &analysis, &summaries, &manifest)?;
+    let batches = render_batches(
+        name,
+        derived,
+        &artifact_id,
+        &analysis,
+        &summaries,
+        &manifest,
+    )?;
     for chunk in crate::remote::pack_import_chunks(&batches) {
         api.import(&chunk)?;
     }
@@ -442,16 +452,10 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     // for them. Retraction reads the artifact's id fresh — the import
     // above may have just created it.
     if !vanished.is_empty() {
-        let derived_id = match derived_id {
-            Some(derived_id) => derived_id,
-            None => api
-                .context_id_by_name(derived)?
-                .ok_or_else(|| format!("derived context '{derived}' vanished after import"))?,
-        };
         for community in &vanished {
             retract_source(
                 api,
-                &derived_id,
+                &artifact_id,
                 &format!("{COMMUNITY_SOURCE_PREFIX}{community}"),
             )?;
         }
@@ -545,6 +549,7 @@ fn summarize(
 fn render_batches(
     name: &str,
     derived: &str,
+    derived_id: &str,
     analysis: &Analysis,
     summaries: &BTreeMap<&str, String>,
     manifest: &CommunitiesManifest,
@@ -562,8 +567,13 @@ fn render_batches(
         first = false;
         let mut lines = vec![crate::format::source_header_line(
             &source,
-            derived,
-            description.as_deref(),
+            derived_id,
+            description
+                .as_deref()
+                .map(|description| crate::format::HeaderCreate {
+                    name: derived,
+                    description,
+                }),
         )];
         let summary = summaries
             .get(community.id.as_str())
@@ -596,7 +606,7 @@ fn render_batches(
         serde_json::to_string(manifest).map_err(|error| format!("manifest: {error}"))?;
     batches.push(
         [
-            crate::format::source_header_line(MANIFEST_SOURCE, derived, None),
+            crate::format::source_header_line(MANIFEST_SOURCE, derived_id, None),
             render(&json!({"passage": manifest_text}))?,
         ]
         .join("\n"),

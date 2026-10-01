@@ -408,17 +408,20 @@ pub(super) fn run_remote(
                 }
                 for (index, (batch, range)) in stream.batches.iter().zip(ranges).enumerate() {
                     if let Some(earlier) =
-                        owners.get(&(batch.context.clone(), batch.source.clone()))
+                        owners.get(&(batch.context_id.clone(), batch.source.clone()))
                     {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_source_message(&batch.context, &batch.source, earlier)
+                            duplicate_source_message(&batch.context_id, &batch.source, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
-                    owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
+                    owners.insert(
+                        (batch.context_id.clone(), batch.source.clone()),
+                        path.clone(),
+                    );
                     if let Some(rules) = sensitive_rules {
                         let hits = sensitive_hits(batch, index, rules);
                         if !hits.is_empty() {
@@ -431,7 +434,7 @@ pub(super) fn run_remote(
                                 refused_batch_message(index, batch)
                             );
                             refused.push(serde_json::json!({
-                                "context": batch.context,
+                                "context_id": batch.context_id,
                                 "source": batch.source,
                                 "error": refused_batch_error(&hits),
                             }));
@@ -445,7 +448,7 @@ pub(super) fn run_remote(
                         label: format!(
                             "{}: context '{}' source '{}'",
                             path.display(),
-                            batch.context,
+                            batch.context_id,
                             batch.source
                         ),
                         kind: UnitKind::Batch,

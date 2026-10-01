@@ -33,33 +33,37 @@ struct SourceHeader<'a> {
     record_type: &'static str,
     version: &'static str,
     id: &'a str,
-    context: &'a str,
+    context_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    create: Option<CreateDescription<'a>>,
+    create: Option<HeaderCreate<'a>>,
 }
 
-#[derive(serde::Serialize)]
-struct CreateDescription<'a> {
-    description: &'a str,
+/// The create block a writer outside `taguru export` brings: the
+/// display name the `context` gets when its `context_id` is not yet on
+/// the server, and the description it starts with (#965).
+#[derive(Clone, Copy, serde::Serialize)]
+pub(crate) struct HeaderCreate<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) description: &'a str,
 }
 
 /// One source file's header line, columns in reading order — what the
-/// record is, which revision, which source, which `context` — with a
-/// create block only when the writer brings a description for a
+/// record is, which revision, which source, which `context` (by id) —
+/// with a create block only when the writer brings a name for a
 /// `context` that may not exist yet. Every writer outside
 /// `taguru export` (which carries the full create block) renders its
 /// header here, so the line is spelled one way.
 pub(crate) fn source_header_line(
     id: &str,
-    context: &str,
-    create_description: Option<&str>,
+    context_id: &str,
+    create: Option<HeaderCreate<'_>>,
 ) -> String {
     serde_json::to_string(&SourceHeader {
         record_type: "source",
         version: FORMAT_VERSION,
         id,
-        context,
-        create: create_description.map(|description| CreateDescription { description }),
+        context_id,
+        create,
     })
     .expect("a struct of strings always serializes")
 }
@@ -131,13 +135,21 @@ mod tests {
 
     #[test]
     fn a_source_header_line_spells_its_columns_in_reading_order() {
+        let id = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
         assert_eq!(
-            source_header_line("docs/a.md", "sake", None),
-            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context":"sake"}"#
+            source_header_line("docs/a.md", id, None),
+            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63"}"#
         );
         assert_eq!(
-            source_header_line("docs/a.md", "sake", Some("酒蔵")),
-            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context":"sake","create":{"description":"酒蔵"}}"#
+            source_header_line(
+                "docs/a.md",
+                id,
+                Some(HeaderCreate {
+                    name: "sake",
+                    description: "酒蔵"
+                })
+            ),
+            r#"{"type":"source","version":"2026-09-17","id":"docs/a.md","context_id":"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63","create":{"name":"sake","description":"酒蔵"}}"#
         );
     }
 

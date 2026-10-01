@@ -150,7 +150,7 @@ use groups::{
 };
 use import::route_import;
 use maintenance::{broadcast_flush, broadcast_maintenance};
-use proxy::{proxy_context_root, proxy_context_sub};
+use proxy::{Located, locate_owner, proxy_context_root, proxy_context_sub};
 #[cfg(test)]
 use scatter::abort_rank;
 use scatter::{gather, plan_scatter, shard_body};

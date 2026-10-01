@@ -1199,6 +1199,7 @@ pub fn run(args: &[String]) -> i32 {
         .unwrap_or_else(|| args.out.join(TRACE_DIR_NAME));
     let mut run = Run {
         context: args.context,
+        create_name: args.create_name,
         description: args.description,
         force: args.force,
         dry_run: args.dry_run,

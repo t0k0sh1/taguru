@@ -30,6 +30,39 @@ pub(crate) fn mint_context_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A `context` id derived from `seed` instead of minted: the same seed
+/// always yields the same canonical id. For the offline flows that must
+/// name their one context in a header BEFORE any server state exists
+/// (`taguru-code sync` renders its batches ahead of booting the data
+/// directory) and need a re-run to find the context it made last time.
+/// Shaped like a v4 UUID (the random-bytes layout, fed SHA-256 bytes
+/// instead), so every reader of a context id accepts it unchanged.
+#[allow(dead_code)] // consumed by taguru-code's sync; the server binaries never derive an id
+pub(crate) fn derived_context_id(seed: &str) -> String {
+    let hex = crate::sha256::sha256_hex(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .expect("sha256_hex is lowercase hex");
+    }
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// Whether `value` is a `context` id in the one spelling the server
+/// accepts — a UUID in its canonical hyphenated lowercase form, exactly
+/// what [`mint_context_id`] produces. `Uuid::try_parse` alone also
+/// takes uppercase, braces, URNs, and hyphen-less digits; two spellings
+/// of one id would be two different map keys and two different file
+/// stems, so the round trip through `to_string` must reproduce `value`.
+/// Shared by the `/contexts/{id}` path extractor and the import
+/// stream's `context_id` columns, so every entrance refuses the same
+/// set of strings.
+pub(crate) fn is_context_id(value: &str) -> bool {
+    uuid::Uuid::try_parse(value).is_ok_and(|parsed| parsed.to_string() == value)
+}
+
 /// Encodes a `group` name as a file stem: bytes outside [A-Za-z0-9_-]
 /// become %XX. Group names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data

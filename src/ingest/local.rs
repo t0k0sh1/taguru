@@ -49,17 +49,20 @@ pub(super) fn run_local(
             Ok(stream) => {
                 for (index, batch) in stream.batches.into_iter().enumerate() {
                     if let Some(earlier) =
-                        owners.get(&(batch.context.clone(), batch.source.clone()))
+                        owners.get(&(batch.context_id.clone(), batch.source.clone()))
                     {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_source_message(&batch.context, &batch.source, earlier)
+                            duplicate_source_message(&batch.context_id, &batch.source, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
-                    owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
+                    owners.insert(
+                        (batch.context_id.clone(), batch.source.clone()),
+                        path.clone(),
+                    );
                     if let Some(rules) = sensitive_rules {
                         let hits = sensitive_hits(&batch, index, rules);
                         if !hits.is_empty() {
@@ -72,7 +75,7 @@ pub(super) fn run_local(
                                 refused_batch_message(index, &batch)
                             );
                             refused.push(FailedBatch {
-                                context: batch.context.clone(),
+                                context_id: batch.context_id.clone(),
                                 source: batch.source.clone(),
                                 error: refused_batch_error(&hits),
                             });
@@ -250,7 +253,7 @@ pub(super) fn run_local(
                 } else {
                     println!("{}: {}", path.display(), report(batch, &applied));
                 }
-                touched.insert(batch.context.clone());
+                touched.insert(batch.context_id.clone());
                 ops_since_flush += batch.op_count();
             }
             Err(refusal) => {
@@ -262,13 +265,13 @@ pub(super) fn run_local(
                 // the context up — skipping it here would leave those
                 // writes' glosses unembedded for good.
                 if refusal.wrote_anything() {
-                    touched.insert(batch.context.clone());
+                    touched.insert(batch.context_id.clone());
                 }
                 ops_since_flush += refusal.ops_written();
                 failures += 1;
                 if as_json {
                     failed_batches.push(FailedBatch {
-                        context: batch.context.clone(),
+                        context_id: batch.context_id.clone(),
                         source: batch.source.clone(),
                         error: refusal.text(),
                     });
@@ -293,23 +296,25 @@ pub(super) fn run_local(
     // rather than judged as one whole set.
     let mut schema_failures = 0usize;
     let mut json_schemas: Vec<crate::api::SchemaImportOutcome> = Vec::new();
-    for (path, context, installed) in &schemas {
-        match apply_schema_record(&state, context, installed.clone()) {
+    for (path, context_id, installed) in &schemas {
+        match apply_schema_record(&state, context_id, installed.clone()) {
             Ok(document) => {
                 if as_json {
-                    json_schemas.push(crate::api::schema_import_outcome(context, &document));
+                    json_schemas.push(crate::api::schema_import_outcome(context_id, &document));
                 } else {
                     println!(
-                        "{}: context '{context}' schema installed (mode: {})",
+                        "{}: context '{}' schema installed (mode: {})",
                         path.display(),
+                        state.name_of_stem(context_id),
                         document.mode.as_str()
                     );
                 }
             }
             Err(error) => {
                 eprintln!(
-                    "taguru: import: {}: context '{context}': {error}",
-                    path.display()
+                    "taguru: import: {}: context '{}': {error}",
+                    path.display(),
+                    state.name_of_stem(context_id)
                 );
                 schema_failures += 1;
             }
@@ -384,17 +389,14 @@ pub(super) fn run_local(
 
     let mut embed_failures = 0;
     if state.embeddings_configured() {
-        for name in &touched {
-            // `touched` carries the stream's display names; the
-            // refresh calls are id-keyed (#964). Every touched name
-            // just applied a batch in THIS single-process run —
-            // `apply_batch` refuses an ambiguous name before touching
-            // it and nothing else mutates the registry meanwhile — so
-            // resolution cannot fail here.
-            let Some(id) = state.context_id_of(name) else {
-                unreachable!("context '{name}' applied a batch but no longer resolves");
-            };
-            match state.refresh_embeddings(&id, Deadline::unbounded()) {
+        for id in &touched {
+            // `touched` carries the headers' ids — what the refresh
+            // calls are keyed on. The label in the lines below is the
+            // display name, read once here; nothing else mutates the
+            // registry in this single-process run, so a touched id
+            // still resolves.
+            let name = state.name_of_stem(id);
+            match state.refresh_embeddings(id, Deadline::unbounded()) {
                 None | Some(Ok((0, _))) => {}
                 Some(Ok((embedded, _))) => {
                     if !as_json {
@@ -415,7 +417,7 @@ pub(super) fn run_local(
             // the glosses above embed automatically left the vector
             // lane silently absent until a manual refresh (#479).
             if state.passage_embedding_enabled() {
-                match state.refresh_passage_embeddings(&id, Deadline::unbounded()) {
+                match state.refresh_passage_embeddings(id, Deadline::unbounded()) {
                     None | Some(Ok(crate::registry::PassageRefreshOutcome { embedded: 0, .. })) => {
                     }
                     Some(Ok(outcome)) => {
@@ -489,7 +491,7 @@ pub(super) fn run_local(
 /// avoids) to know — reported as 0/false rather than guessed.
 fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
     crate::api::ImportOutcome {
-        context: batch.context.clone(),
+        context_id: batch.context_id.clone(),
         source: batch.source.clone(),
         created: false,
         retracted: 0,
@@ -523,7 +525,7 @@ fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
 /// applied or sent.
 #[derive(serde::Serialize)]
 struct FailedBatch {
-    context: String,
+    context_id: String,
     source: String,
     error: String,
 }

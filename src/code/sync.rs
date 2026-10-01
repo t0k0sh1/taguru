@@ -436,6 +436,12 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     let paths: Vec<String> = supported.iter().map(|(path, _)| path.clone()).collect();
     let contents = walk.read_worktree(&paths);
     let mut batches = Vec::new();
+    // The headers name the context by id (#965), and this flow renders
+    // them before any server state exists. The id is derived from the
+    // `--context` name, so a re-run finds the context the last sync
+    // made; a data directory that already holds the name under another
+    // id is re-headed onto it right after boot (below).
+    let header_context_id = crate::registry::derived_context_id(&args.context);
     let mut warnings = Vec::new();
     let mut binaries = 0usize;
     let mut unchanged = 0usize;
@@ -454,7 +460,14 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         symbol_count += symbols.len();
         let facts = facts::build(path, &symbols);
         warnings.extend(facts.warnings.iter().cloned());
-        let rendered = facts::render_batch(&args.context, &facts, Some(CREATE_DESCRIPTION));
+        let rendered = facts::render_batch(
+            &header_context_id,
+            &facts,
+            Some(crate::format::HeaderCreate {
+                name: &args.context,
+                description: CREATE_DESCRIPTION,
+            }),
+        );
         let batch = crate::ingest::parse_batch(rendered.as_bytes())
             .map_err(|message| format!("{path}: rendered source file refused: {message}"))?;
         batches.push((path.clone(), batch, fingerprint));
@@ -520,6 +533,15 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // resolves again right after.
     let resolve_id = |state: &crate::registry::AppState| state.context_id_of(&args.context);
     let context_id = resolve_id(&state);
+    // A data directory that already holds this name under another id
+    // (a map written before headers carried ids) keeps the context it
+    // has: the batches are re-headed onto it rather than minting a twin
+    // under the derived id.
+    if let Some(existing) = &context_id {
+        for (_, batch, _) in &mut batches {
+            batch.context_id.clone_from(existing);
+        }
+    }
     for source in &retractions {
         let Some(context_id) = context_id.as_deref() else {
             // Nothing imported yet under this context — the
