@@ -379,10 +379,10 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 
     <h3><code>group</code> records</h3>
     <p>
-      <code>{"type": "group", "id": "…", "description": "…", "contexts": […], "groups": […]}</code>
+      <code>{"type": "group", "id": "…", "description": "…", "context_ids": […], "groups": […]}</code>
       — one line states one <b><code>group</code>'s</b> complete truth, the way a source file states a source's:
       applying it is a create-or-replace of the whole record, never a delta, so re-importing
-      stays idempotent. Only <code>type</code> and <code>id</code> are required; absent fields read as empty. A <code>group</code>
+      stays idempotent. Members are listed by <code>context</code> <b>id</b> (the canonical UUID), never by name — a name in <code>context_ids</code> refuses the record. Only <code>type</code> and <code>id</code> are required; absent fields read as empty. A <code>group</code>
       record stands alone between sources (it closes the source before it — operation lines after
       one need a fresh header), and <code>taguru export</code> writes each <code>group</code> as its own
       <code>{group}.group.jsonl</code> beside the <code>context</code> streams.

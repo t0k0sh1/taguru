@@ -195,12 +195,12 @@ async function pdfToSections(pdfPath: string, paperId: PaperId): Promise<Section
  * Create the group, or fold new contexts into an existing one — group
  * creation 409s on a rerun, so the idempotence has to be handled here.
  */
-async function ensureGroup(client: Taguru, name: string, description: string, contexts: string[]): Promise<void> {
+async function ensureGroup(client: Taguru, name: string, description: string, contextIds: string[]): Promise<void> {
   try {
-    await client.groups.create(name, { description, contexts });
+    await client.groups.create(name, { description, context_ids: contextIds });
   } catch (error) {
     if (error instanceof ConflictError) {
-      await client.groups.update(name, { add_contexts: contexts });
+      await client.groups.update(name, { add_context_ids: contextIds });
     } else {
       throw error;
     }
@@ -274,11 +274,13 @@ async function main(): Promise<void> {
         throw new Error(`FAILED to ingest ${outcome?.source ?? context}: ${outcome?.error}`);
       }
       console.log(`ingested ${context}: ${outcome.associations} facts, ${outcome.aliases} aliases`);
-      paperContexts[section.paper].push(context);
       const sectionId = await ingester.contextId();
-      if (sectionId !== null) {
-        sectionIds.set(context, sectionId);
+      if (sectionId === null) {
+        throw new Error(`${context} was not created`);
       }
+      sectionIds.set(context, sectionId);
+      // Groups hold context ids, never names.
+      paperContexts[section.paper].push(sectionId);
     }
 
     for (const paperId of paperIds) {
