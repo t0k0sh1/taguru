@@ -129,14 +129,14 @@ fn a_tight_timeout_cuts_a_multi_batch_import_short_instead_of_running_it_to_comp
     let server = Server::start_with_env("timeout-import", &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")]);
     let mut stream = String::new();
     stream.push_str(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-0\", \
-         \"create\": {\"description\": \"d\"}}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-0\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n",
     );
     stream
         .push_str("{\"subject\": \"s0\", \"label\": \"l\", \"object\": \"o0\", \"weight\": 1.0}\n");
     for i in 1..BATCH_COUNT {
         stream.push_str(&format!(
-            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-{i}\"}}\n"
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-{i}\"}}\n"
         ));
         stream.push_str(&format!(
             "{{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o{i}\", \"weight\": 1.0}}\n"

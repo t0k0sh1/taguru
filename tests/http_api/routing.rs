@@ -129,24 +129,24 @@ fn seed(server: &Server) {
     // forwards the filter through its scatter-gather re-serialization;
     // both texts share 麹 for the rank-interleaved passage merge.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-a\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-a\"}\n",
         "{\"passage\": \"麹と水で仕込む。\\n\\n辛口の酒は麹の使い方で決まる。\", \
           \"stored_at\": 1700000000, \"tags\": [\"仕込み\"]}\n",
         "{\"subject\": \"青嶺\", \"label\": \"銘柄である\", \"object\": \"酒\", \"weight\": 2.0}\n",
         "{\"subject\": \"辛口\", \"label\": \"特徴\", \"object\": \"酒\", \"weight\": 1.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"type\": \"source\", \"context\": \"glossary\", \"id\": \"doc-b\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\", \"id\": \"doc-b\"}\n",
         "{\"passage\": \"麹（こうじ）は蒸した米に麹菌を生やしたもの。\", \"stored_at\": 1700000001}\n",
         "{\"subject\": \"辛口\", \"label\": \"意味する\", \"object\": \"甘くない\", \"weight\": 2.0}\n",
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
-        "{\"type\": \"source\", \"context\": \"breweries\", \"id\": \"doc-c\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"96ba89e7-84ee-4b65-b772-bdf9ae741e0d\", \"id\": \"doc-c\"}\n",
         "{\"subject\": \"青嶺酒造\", \"label\": \"造る\", \"object\": \"青嶺\", \"weight\": -2.5}\n",
         // A schema record (ADR 0009 §13, #384): sake lives on shard A —
         // this proves the router's OWN routing table for schema
         // records (never broadcast, unlike groups) sends it to the
         // right shard rather than reusing whatever shard a nearby
         // batch chunk happened to land on.
-        "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
           \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"type\": \"group\", \"id\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
@@ -603,7 +603,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     // the record must NOT have been applied when the refusal comes
     // back from the group projection on another shard.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"scoped-doc\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"scoped-doc\"}\n",
         "{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}\n",
         "{\"type\": \"group\", \"id\": \"overreach\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
@@ -766,9 +766,9 @@ fn schema_outcomes_answer_in_stream_order_not_shard_number_order() {
     router.ok("POST", "/contexts", Some(json!({"name": "ctx_b", })));
 
     let stream = concat!(
-        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"schema\", \"context\": \"ctx_b\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"95bfaef9-c0e5-4b4e-b190-ac513437c3b7\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -805,9 +805,9 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
     // record's context does not exist on its own shard.
 
     let stream = concat!(
-        "{\"type\": \"schema\", \"context\": \"ctx_ok\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"fcfec05a-7189-4690-9983-dfaca77715e4\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -1041,9 +1041,9 @@ fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
     // stream-level parsing accepts it, so only the owning shard's own
     // dry run can refuse it.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"type\": \"source\", \"context\": \"ctx_b\", \"id\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"95bfaef9-c0e5-4b4e-b190-ac513437c3b7\", \"id\": \"b.md\"}\n",
         "{\"subject\": \"p\", \"label\": \"q\", \"object\": \"r\", \"weight\": 1.0}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -1082,7 +1082,7 @@ fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
         &[],
     );
 
-    let schema_only = "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
+    let schema_only = "{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
     let (status, body) = post_import(&router, schema_only, None);
     assert_eq!(status, 404, "{body}");
@@ -1122,9 +1122,9 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
     // run — and the rewrap must name BOTH landed counts, the
     // both-nonzero arm of its landed message.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
-        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
@@ -1155,7 +1155,7 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
     );
     router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"ctx_a\", \"id\": \"a.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"id\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
         "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
@@ -1185,7 +1185,7 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
     );
     router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })));
     let stream = concat!(
-        "{\"type\": \"schema\", \"context\": \"ctx_a\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
@@ -1221,9 +1221,9 @@ fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
     // preflight (scope checks only) and refuses on the real run —
     // AFTER the stub shard's batch chunk landed.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"stubbed\", \"id\": \"doc\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"6030dd60-5e04-40cb-8aae-bd67951549b7\", \"id\": \"doc\"}\n",
         "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
-        "{\"type\": \"schema\", \"context\": \"ghost\", \"mode\": \"warn\", \
+        "{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
     );
     let (status, body) = post_import(&router, stream, None);

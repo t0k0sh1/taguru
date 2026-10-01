@@ -588,8 +588,8 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
 #[test]
 fn the_mcp_import_tool_applies_a_multi_line_stream() {
     let server = Server::start("mcp-import");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-mcp\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-mcp\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
 
@@ -614,8 +614,8 @@ fn the_mcp_import_tool_applies_a_multi_line_stream() {
 
     // dry_run previews without writing: the context this batch would
     // create does not exist afterward.
-    let preview_stream = "{\"type\": \"source\", \"context\": \"bunko\", \"id\": \"s\", \
-                          \"create\": {\"description\": \"d\"}}\n";
+    let preview_stream = "{\"type\": \"source\", \"context_id\": \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\", \"id\": \"s\", \
+                          \"create\": {\"name\": \"bunko\", \"description\": \"d\"}}\n";
     let (status, preview_answer) = server.call(
         "POST",
         "/mcp",

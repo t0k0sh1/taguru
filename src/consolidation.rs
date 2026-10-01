@@ -594,6 +594,7 @@ mod tests {
             payload: json!({"a": "a", "b": "b"}),
         };
         let batch = judgment_batch(
+            "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
             "sake::consolidation",
             "sake",
             &candidate,
@@ -611,6 +612,7 @@ mod tests {
         );
 
         let later = judgment_batch(
+            "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
             "sake::consolidation",
             "sake",
             &candidate,

@@ -204,7 +204,7 @@ fn ownership_marker_differs_across_run_index_for_the_same_run_id_and_model() {
 
 #[test]
 fn rewrite_batch_header_replaces_context_and_stamps_the_marker() {
-    let original = "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"docs/a.md\"}\n\
+    let original = "{\"type\": \"source\",\"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"docs/a.md\"}\n\
                      {\"subject\":\"s\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n";
     let rewritten = rewrite_batch_header(
         original,
@@ -230,7 +230,7 @@ fn rewrite_batch_header_replaces_context_and_stamps_the_marker() {
 
 #[test]
 fn rewrite_batch_header_overwrites_any_existing_create_block() {
-    let original = "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"docs/a.md\",\"create\":{\"description\":\"whatever the cell wrote\"}}\n";
+    let original = "{\"type\": \"source\",\"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"docs/a.md\",\"create\": {\"name\": \"sake\", \"description\":\"whatever the cell wrote\"}}\n";
     let rewritten = rewrite_batch_header(original, "sake::gpt-4o", "owner-marker").unwrap();
     let header: Value = serde_json::from_str(rewritten.lines().next().unwrap()).unwrap();
     assert_eq!(header["create"]["description"], "owner-marker");
@@ -248,8 +248,7 @@ fn rewrite_batch_header_refuses_a_non_json_header() {
 
 #[test]
 fn rewrite_batch_header_drops_blank_lines() {
-    let original =
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"s\"}\n\n{\"passage\":\"x\"}\n\n";
+    let original = "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"s\"}\n\n{\"passage\":\"x\"}\n\n";
     let rewritten = rewrite_batch_header(original, "c2", "m").unwrap();
     assert_eq!(rewritten.lines().count(), 2);
 }

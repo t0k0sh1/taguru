@@ -1592,7 +1592,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s0"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
             "\n",
@@ -1649,7 +1649,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s0"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"cargo-nextest","weight":1.0}"#,
             "\n",
@@ -2330,7 +2330,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
+            r#"{"type": "source","context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":2.0}"#,
             "\n",
@@ -2426,7 +2426,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
+            r#"{"type": "source","context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":1.0}"#,
             "\n",
@@ -9191,7 +9191,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     // is 0.9.3-shaped input too: no trace beside it.
     std::fs::write(
         out.join("b.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"b.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"b.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\\n\\n蔵は山にある。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"所在\",\"object\":\"山\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
@@ -9311,21 +9311,21 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     // CONTEXT alias, one passage-less batch (skipped, counted).
     std::fs::write(
         dir.join("c.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"c.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"c.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("nopassage.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"n.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"n.md\"}\n\
          {\"subject\":\"a\",\"label\":\"l\",\"object\":\"b\",\"weight\":1.0}\n",
     )
     .unwrap();
     let vocabulary = dir.join("vocabulary.jsonl");
     std::fs::write(
         &vocabulary,
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"prior.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"prior.md\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
     )
@@ -10937,14 +10937,14 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
     let out = batch_dir("extract-anchoring-failed");
     std::fs::write(
         out.join("good.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"good.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"good.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"ラーメン\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         out.join("broken.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\"}\n",
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\"}\n",
     )
     .unwrap();
     let report_path = out.join("anchoring.json");

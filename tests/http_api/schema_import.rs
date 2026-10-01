@@ -38,7 +38,7 @@ fn document(mode: &str) -> serde_json::Value {
 /// never typed, so only the subject side violates (§6.1: untyped never
 /// violates).
 fn domain_violation_batch() -> String {
-    "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+    "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
      {\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
      {\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": 1.0}\n"
         .to_string()
@@ -115,7 +115,7 @@ fn strict_domain_violation_on_a_later_batch_reports_a_durable_prefix() {
     let server = Server::start("schema-import-strict-prefix");
     seed(&server, "strict");
 
-    let clean_batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"clean.md\"}\n\
+    let clean_batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"clean.md\"}\n\
                         {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                         \"weight\": 1.0}\n";
     let stream = format!("{clean_batch}{}", domain_violation_batch());
@@ -169,8 +169,9 @@ fn warn_domain_violation_applies_and_reports_the_same_issue() {
 /// envelope's cross-batch `issues` cap independently of any one
 /// batch's own truncation.
 fn many_domain_violations_batch(source: &str, count: usize) -> String {
-    let mut batch =
-        format!("{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"{source}\"}}\n");
+    let mut batch = format!(
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"{source}\"}}\n"
+    );
     for i in 0..count {
         batch.push_str(&format!(
             "{{\"subject\": \"P{i}\", \"label\": \"schema:type\", \"object\": \"Person\", \
@@ -264,7 +265,7 @@ fn a_type_declared_after_the_fact_it_types_still_validates() {
     let server = Server::start("schema-import-order");
     seed(&server, "strict");
 
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
                  {\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \
                  \"weight\": 1.0}\n\
                  {\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Brewery\", \
@@ -306,7 +307,7 @@ fn a_batch_label_alias_resolving_to_the_reserved_label_refuses_in_every_mode() {
         Some(document("off")),
     );
 
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
                  {\"alias\": \"種別\", \"canonical\": \"schema:type\", \"kind\": \"label\"}\n";
     let (status, body) = post_import(&server, batch, None);
     assert_eq!(status, 409, "{body}");

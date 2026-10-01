@@ -531,7 +531,7 @@ fn segment_outcome_rates_counts_interrupted_in_the_denominator_only() {
 #[test]
 fn analyze_batch_counts_every_vocabulary_shape_once() {
     let batch = "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"s\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"s\"}
 {\"passage\":\"lorem ipsum\"}
 {\"paragraph\":0,\"question\":\"who?\"}
 {\"subject\":\"alice\",\"label\":\"knows\",\"object\":\"bob\",\"weight\":1.0,\"paragraph\":0}
@@ -720,7 +720,7 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
     fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
 
     let batch = "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
@@ -867,7 +867,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/m/run01/brewery.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"Beer Co\",\"label\":\"brews\",\"object\":\"Lager\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"Beer Co\",\"label\":\"brews\",\"object\":\"Ale\",\"weight\":1.0,\"paragraph\":0}
@@ -881,7 +881,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/m/run01/sake.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/sake.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/sake.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"Sake Co\",\"label\":\"brews\",\"object\":\"Junmai\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"Sake Co\",\"label\":\"brews\",\"object\":\"Ginjo\",\"weight\":1.0,\"paragraph\":1}
@@ -891,7 +891,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/m/run02/brewery.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"BEER CO\",\"label\":\"brews\",\"object\":\"LAGER\",\"weight\":-1.0,\"paragraph\":5}
 {\"subject\":\"BEER CO\",\"label\":\"brews\",\"object\":\"ALE\",\"weight\":1.0,\"paragraph\":0}
@@ -1497,7 +1497,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/alpha/run01/brewery.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":1}
@@ -1513,7 +1513,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/alpha/run01/sake.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/sake.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/sake.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"sake co\",\"label\":\"brews\",\"object\":\"junmai\",\"weight\":1.0,\"paragraph\":0}
 ",
@@ -1522,7 +1522,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/alpha/run02/brewery.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":1}
@@ -1538,7 +1538,7 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     fs::write(
         dir.join("cells/beta/run01/brewery.jsonl"),
         "\
-{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}
+{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}
 {\"passage\":\"text\"}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"ale\",\"weight\":1.0,\"paragraph\":0}
 {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":-1.0,\"paragraph\":1}

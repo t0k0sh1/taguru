@@ -611,8 +611,8 @@ fn add_associations_warn_mode_response_shape() {
 fn import_reports_locator_bookkeeping() {
     let server =
         Server::start_with_env("contract-import", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
-    let batch = "{\"type\": \"source\", \"context\": \"corpus-f\", \"id\": \"doc.md\", \
-                 \"create\": {\"description\": \"wire-contract import corpus\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"685ce7fe-340e-4e5e-a292-df7f89b60283\", \"id\": \"doc.md\", \
+                 \"create\": {\"name\": \"corpus-f\", \"description\": \"wire-contract import corpus\"}}\n\
                  {\"passage\": \"導入。\\n\\n本編。\"}\n\
                  {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
                  {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
@@ -649,11 +649,11 @@ fn import_refusal_pins_the_durable_prefix_fields() {
         "contract-import-refusal",
         &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
     );
-    let stream = "{\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-1\", \
-                   \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"2eed3710-ffe1-45c6-879f-f4efcbb46b36\", \"id\": \"doc-1\", \
+                   \"create\": {\"name\": \"corpus-h\", \"description\": \"wire-contract refusal corpus\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                   \"weight\": 1.0}\n\
-                  {\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context_id\": \"2eed3710-ffe1-45c6-879f-f4efcbb46b36\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
@@ -679,11 +679,11 @@ fn import_with_schema_reports_the_schema_outcome() {
         "contract-import-schema",
         &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")],
     );
-    let stream = "{\"type\": \"source\", \"context\": \"corpus-g\", \"id\": \"doc.md\", \
-                  \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb\", \"id\": \"doc.md\", \
+                  \"create\": {\"name\": \"corpus-g\", \"description\": \"wire-contract schema-carrying import\"}}\n\
                   {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
                   \"weight\": 1.0}\n\
-                  {\"type\": \"schema\", \"context\": \"corpus-g\", \"mode\": \"warn\", \
+                  {\"type\": \"schema\", \"context_id\": \"aae8fff9-33c6-451f-bbe7-41ec6bb9d2bb\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \
                   \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \
                   \"range\": [\"Concept\"]}}}\n";

@@ -52,17 +52,17 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"酒蔵の知識\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\"}\n\
          {\"paragraph\": 0, \"section\": \"概要\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
           \"weight\": 1.0, \"paragraph\": 1}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
-         {\"type\": \"source\", \"context\": \"酒蔵\", \"id\": \"c.md\", \
-          \"create\": {\"description\": \"蔵元台帳\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"e13aa81d-4ce5-4637-818f-e3b241d28629\", \"id\": \"c.md\", \
+          \"create\": {\"name\": \"酒蔵\", \"description\": \"蔵元台帳\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
          {\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
           \"contexts\": [\"sake\", \"酒蔵\"]}\n",
@@ -464,8 +464,8 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // WRONG context.
             (
                 "HTTP/1.1 200 OK",
-                "{\"type\": \"source\",\"context\":\"other\",\"id\":\"a.md\",\
-                 \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
+                "{\"type\": \"source\",\"context_id\": \"d9298a10-d1b0-4358-b7dc-4bd85dac641b\",\"id\":\"a.md\",\
+                 \"create\": {\"name\": \"other\", \"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
                     .to_string(),
             ),
             // GET /groups, one page then the terminator.
@@ -547,8 +547,8 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /contexts/sake/export: a real batch stream.
             (
                 "HTTP/1.1 200 OK",
-                "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"a.md\",\
-                 \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
+                "{\"type\": \"source\",\"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"a.md\",\
+                 \"create\": {\"name\": \"sake\", \"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
                     .to_string(),
             ),
             // GET /groups, one page then the terminator.

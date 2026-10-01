@@ -1356,9 +1356,9 @@ mod tests {
         AppState::boot(dir, usize::MAX, None).unwrap()
     }
 
-    fn schema_line(context: &str) -> String {
+    fn schema_line(context_id: &str) -> String {
         format!(
-            "{{\"type\": \"schema\", \"context\": \"{context}\", \"mode\": \"warn\", \
+            "{{\"type\": \"schema\", \"context_id\": \"{context_id}\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
              \"relations\": {{}}}}\n"
         )
@@ -1395,7 +1395,11 @@ mod tests {
         let state = scratch_state("schema-loop-budget-no-batches");
         state.create("sake", ContextMeta::default()).unwrap();
         state.create("bunko", ContextMeta::default()).unwrap();
-        let body = format!("{}{}", schema_line("sake"), schema_line("bunko"));
+        let body = format!(
+            "{}{}",
+            schema_line(&state.id_of("sake")),
+            schema_line(&state.id_of("bunko"))
+        );
 
         // The first record installs for real; the second's deadline
         // check reports expired — proving the check runs on a LATER
@@ -1446,10 +1450,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_loop_counts_a_landed_batch_of_the_same_stream_in_durable_batches() {
         let state = scratch_state("schema-loop-budget-with-batch");
-        let body = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n"
+        let body = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n"
             .to_string()
-            + &schema_line("sake");
+            + &schema_line("cef2e28b-43f0-4b6c-8201-abab0785399f");
 
         // The batch lands; the schema loop's very first iteration
         // reports expired.
@@ -1481,10 +1485,12 @@ mod tests {
         );
     }
 
-    fn one_batch(context: &str) -> crate::ingest::Batch {
+    fn one_batch(context_id: &str) -> crate::ingest::Batch {
         let stream = crate::ingest::parse_stream(
-            format!("{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"a.md\"}}\n")
-                .as_bytes(),
+            format!(
+                "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"a.md\"}}\n"
+            )
+            .as_bytes(),
         )
         .unwrap();
         stream.batches.into_iter().next().unwrap()
@@ -1496,7 +1502,7 @@ mod tests {
     /// generic `Access` arm's bare message.
     #[tokio::test]
     async fn quota_refusal_from_apply_reroutes_a_deep_write_path_quota_refusal() {
-        let batch = one_batch("sake");
+        let batch = one_batch("cef2e28b-43f0-4b6c-8201-abab0785399f");
         let refusal = crate::ingest::ApplyRefusal::Access(AccessError::QuotaExceeded(
             "context 'sake' is at its storage quota".to_string(),
         ));
@@ -1533,7 +1539,7 @@ mod tests {
     /// `Access(QuotaExceeded(_))`.
     #[test]
     fn quota_refusal_from_apply_ignores_every_other_refusal_kind() {
-        let batch = one_batch("sake");
+        let batch = one_batch("cef2e28b-43f0-4b6c-8201-abab0785399f");
         let refusal = crate::ingest::ApplyRefusal::Io("disk full".to_string());
         assert!(
             quota_refusal_from_apply(

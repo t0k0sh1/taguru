@@ -31,8 +31,8 @@ fn schema_line(context: &str, mode: &str) -> String {
 fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_it() {
     let server = Server::start("schema-stream-install");
     let stream = format!(
-        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-          \"create\": {{\"description\": \"d\"}}}}\n\
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+          \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
          {schema_record}\
          {{\"type\": \"group\", \"id\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
         schema_record = schema_line("sake", "warn"),
@@ -70,7 +70,7 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
     server.ok("POST", "/contexts", Some(json!({"name": "plain", })));
     let (status, plain) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"plain\", \"id\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"a116c9ed-46d6-4077-b4a4-3317d30fd88f\", \"id\": \"b.md\"}\n",
         None,
     );
     assert_eq!(status, 200, "{plain}");
@@ -112,7 +112,7 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
     assert_eq!(create("sake").0, 200);
     assert_eq!(create("bunko").0, 200);
     let stream = format!(
-        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}}\n\
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
         schema_record = schema_line("bunko", "warn"),
@@ -160,8 +160,8 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
 fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_durable() {
     let server = Server::start("schema-stream-no-context");
     let stream = format!(
-        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-          \"create\": {{\"description\": \"d\"}}}}\n\
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+          \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {schema_record}",
         schema_record = schema_line("ghost", "warn"),

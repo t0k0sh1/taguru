@@ -1673,7 +1673,7 @@ mod tests {
         let snapshot_a = state_a
             .export_context(&state_a.id_of("sake"), Deadline::unbounded())
             .unwrap();
-        let rendered = render("sake", &snapshot_a, Deadline::unbounded()).unwrap();
+        let rendered = render(&state_a.id_of("sake"), &snapshot_a, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.aliases_dropped, 1, "the edgeless canonical");
 
         // Restore into a fresh directory, twice — the second pass
@@ -1701,8 +1701,8 @@ mod tests {
         // "export:unsourced" id now (import stamped it from the batch
         // header). Re-rendering must NOT refuse — it folds back into a
         // sourceless batch — so the backup stream is a true fixed point.
-        let rendered_b =
-            render("sake", &snapshot_b, Deadline::unbounded()).expect("re-export must not refuse");
+        let rendered_b = render(&state_b.id_of("sake"), &snapshot_b, Deadline::unbounded())
+            .expect("re-export must not refuse");
         let rendered_c = {
             let state_c =
                 crate::registry::AppState::boot(scratch_dir("roundtrip-c"), usize::MAX, None)
@@ -1716,7 +1716,7 @@ mod tests {
                     .unwrap();
             }
             render(
-                "sake",
+                &state_c.id_of("sake"),
                 &state_c
                     .export_context(&state_c.id_of("sake"), Deadline::unbounded())
                     .unwrap(),
@@ -1885,7 +1885,12 @@ mod tests {
             }],
         );
         edge.weight = (2.0 + 4.0) / 3.0; // attributed 2.0 + unsourced 4.0
-        let rendered = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snapshot(vec![edge]),
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.batches, 2);
         let unsourced: Vec<&str> = rendered
             .stream
@@ -2006,7 +2011,12 @@ mod tests {
             "a promotion never carries the scratch's schema"
         );
 
-        let rendered = render("perm", &filtered, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "017a80b6-80ac-4531-b4ca-a82c4659f007",
+            &filtered,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.batches, 1, "{}", rendered.stream);
         assert!(
             !rendered.stream.contains(UNSOURCED_SOURCE),
@@ -2049,7 +2059,12 @@ mod tests {
                 paragraph: None,
             }],
         );
-        let rendered = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snapshot(vec![edge]),
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.batches, 1, "just the reserved batch");
         assert_eq!(rendered.association_lines, 2);
         assert!(
@@ -2075,7 +2090,12 @@ mod tests {
                 paragraph: None,
             }],
         );
-        let refusal = render("sake", &snapshot(vec![edge]), Deadline::unbounded()).unwrap_err();
+        let refusal = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snapshot(vec![edge]),
+            Deadline::unbounded(),
+        )
+        .unwrap_err();
         assert!(refusal.contains("reserved"), "{refusal}");
     }
 
@@ -2095,7 +2115,12 @@ mod tests {
             ("orphan".to_string(), "退役した概念".to_string()),
         ];
         snapshot.label_aliases = vec![("toji".to_string(), "杜氏".to_string())];
-        let rendered = render("sake", &snapshot, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snapshot,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.aliases, 2);
         assert_eq!(rendered.aliases_dropped, 1);
         let last_lines: Vec<&str> = rendered.stream.lines().rev().take(2).collect();
@@ -2124,7 +2149,12 @@ mod tests {
             ("toji".to_string(), "杜氏".to_string()),
             ("orphan-label".to_string(), "廃止銘柄".to_string()),
         ];
-        let rendered = render("sake", &snapshot, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snapshot,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.aliases, 1, "the live 杜氏 alias");
         assert_eq!(rendered.aliases_dropped, 1, "the dead-label alias");
         assert!(!rendered.stream.contains("orphan-label"));
@@ -2192,16 +2222,16 @@ mod tests {
     #[test]
     fn a_schema_renders_as_one_record_and_round_trips() {
         let document = warn_schema_document();
-        let line = render_schema("sake", &document);
+        let line = render_schema("cef2e28b-43f0-4b6c-8201-abab0785399f", &document);
         assert_eq!(
             line,
-            "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context\":\"sake\",\"mode\":\"warn\",\
+            "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"mode\":\"warn\",\
              \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
              \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
         assert_eq!(stream.schemas.len(), 1);
-        assert_eq!(stream.schemas[0].0, "sake");
+        assert_eq!(stream.schemas[0].0, "cef2e28b-43f0-4b6c-8201-abab0785399f");
         assert_eq!(stream.schemas[0].1.document(), &document);
     }
 
@@ -2224,7 +2254,12 @@ mod tests {
 
         let mut no_schema = snapshot(vec![edge.clone()]);
         no_schema.schema = None;
-        let rendered = render("sake", &no_schema, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &no_schema,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert!(
             !rendered.stream.contains("\"schema\""),
             "{}",
@@ -2236,7 +2271,12 @@ mod tests {
             mode: crate::schema::SchemaMode::Off,
             ..warn_schema_document()
         });
-        let rendered = render("sake", &off_schema, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &off_schema,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert!(
             !rendered.stream.contains("\"schema\""),
             "mode: off must not export — {}",
@@ -2245,11 +2285,16 @@ mod tests {
 
         let mut warn_schema = snapshot(vec![edge]);
         warn_schema.schema = Some(warn_schema_document());
-        let rendered = render("sake", &warn_schema, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &warn_schema,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         let first_line = rendered.stream.lines().next().unwrap();
         assert!(
             first_line.starts_with(
-                "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context\":\"sake\""
+                "{\"type\":\"schema\",\"version\":\"2026-09-17\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\""
             ),
             "the schema record must ride first — {}",
             rendered.stream
@@ -2262,9 +2307,9 @@ mod tests {
     #[test]
     fn stream_counts_reads_batches_and_lines_back_out_of_a_stream() {
         let stream = concat!(
-            "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"a.md\"}\n",
+            "{\"type\": \"source\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"a.md\"}\n",
             "{\"subject\":\"s\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n",
-            "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"b.md\"}\n",
+            "{\"type\": \"source\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"b.md\"}\n",
             "{\"subject\":\"s2\",\"label\":\"l2\",\"object\":\"o2\",\"weight\":2.0}\n",
             "{\"alias\":\"a\",\"canonical\":\"b\",\"kind\":\"concept\"}\n",
         );
@@ -2295,8 +2340,12 @@ mod tests {
         for reserved in [UNSOURCED_SOURCE, EMPTY_SOURCE] {
             let mut snap = snapshot(Vec::new());
             snap.passages = vec![(reserved.to_string(), plain_passage("x"))];
-            let refusal = render("sake", &snap, Deadline::unbounded())
-                .expect_err("a reserved source id must refuse");
+            let refusal = render(
+                "cef2e28b-43f0-4b6c-8201-abab0785399f",
+                &snap,
+                Deadline::unbounded(),
+            )
+            .expect_err("a reserved source id must refuse");
             assert!(refusal.contains("reserved by export"), "{refusal}");
         }
     }
@@ -2311,7 +2360,12 @@ mod tests {
             ("b.md".to_string(), plain_passage("弐")),
             ("c.md".to_string(), plain_passage("参")),
         ];
-        let rendered = render("sake", &snap, Deadline::unbounded()).unwrap();
+        let rendered = render(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            &snap,
+            Deadline::unbounded(),
+        )
+        .unwrap();
         assert_eq!(rendered.passages, 3);
         assert_eq!(rendered.batches, 3, "one batch per source");
         for text in ["壱", "弐", "参"] {
@@ -2352,7 +2406,7 @@ mod tests {
             ("the concept-alias loop", with_concept_alias),
             ("the label-alias loop", with_label_alias),
         ] {
-            let refusal = render("sake", &snap, expired)
+            let refusal = render("cef2e28b-43f0-4b6c-8201-abab0785399f", &snap, expired)
                 .expect_err(&format!("{reaches} must refuse on an expired deadline"));
             assert!(
                 refusal.contains("deadline exceeded"),

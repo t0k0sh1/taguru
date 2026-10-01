@@ -737,11 +737,11 @@ fn a_cross_context_stream_does_not_let_sibling_vocabulary_vouch() {
     let server = Server::start("promote-preview-contexts");
     // alpha interns Foo; beta's alias names Foo without interning it.
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", ",
-        "\"create\": {\"description\": \"a\"}}\n",
+        "{\"type\": \"source\", \"context_id\": \"8ed3f6ad-685b-459e-ad70-22518e1af76c\", \"id\": \"a.md\", ",
+        "\"create\": {\"name\": \"alpha\", \"description\": \"a\"}}\n",
         "{\"subject\": \"Foo\", \"label\": \"関連\", \"object\": \"Bar\", \"weight\": 1.0}\n",
-        "{\"type\": \"source\", \"context\": \"beta\", \"id\": \"b.md\", ",
-        "\"create\": {\"description\": \"b\"}}\n",
+        "{\"type\": \"source\", \"context_id\": \"f44e64e7-5f39-48e9-b73f-8dfa94721c4c\", \"id\": \"b.md\", ",
+        "\"create\": {\"name\": \"beta\", \"description\": \"b\"}}\n",
         "{\"subject\": \"X\", \"label\": \"関連\", \"object\": \"Y\", \"weight\": 1.0}\n",
         "{\"alias\": \"ふー\", \"canonical\": \"Foo\", \"kind\": \"concept\"}\n",
     );

@@ -3122,9 +3122,9 @@ mod tests {
     async fn import_budget_refusal_carries_the_durable_prefix_fields() {
         let stream = crate::ingest::parse_stream(
             concat!(
-                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", ",
-                "\"create\": {\"description\": \"d\"}}\n",
-                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n",
+                "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", ",
+                "\"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n",
+                "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n",
             )
             .as_bytes(),
         )

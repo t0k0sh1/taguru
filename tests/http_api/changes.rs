@@ -130,7 +130,7 @@ fn an_import_feeds_the_same_events_as_its_component_writes() {
     server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     let cursor = tail_cursor(&server, "sake");
 
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc.md\"}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc.md\"}\n\
                  {\"passage\": \"本文。\"}\n\
                  {\"subject\": \"a\", \"label\": \"r\", \"object\": \"b\", \"weight\": 1.0}\n\
                  {\"subject\": \"a\", \"label\": \"r\", \"object\": \"c\", \"weight\": 1.0}\n";

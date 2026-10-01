@@ -1334,7 +1334,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
 
     std::fs::write(
         dir.join("cells/m/run01/brewery.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
     )
@@ -1586,14 +1586,14 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
 
     std::fs::write(
         dir.join("cells/m1/run01/brewery.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("cells/m2/run01/brewery.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"corpus/brewery.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"corpus/brewery.md\"}\n\
          {\"passage\":\"text\"}\n\
          {\"subject\":\"beer co\",\"label\":\"brews\",\"object\":\"lager\",\"weight\":-1.0,\"paragraph\":0}\n",
     )
@@ -1938,8 +1938,8 @@ fn the_mcp_bridge_applies_a_multi_line_import_stream_through_a_live_server() {
         .spawn()
         .expect("bridge must spawn");
 
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-bridge\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-bridge\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
     let request = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -2187,8 +2187,8 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     std::fs::create_dir_all(dir.join("batches")).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("batches/a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"酒蔵の知識\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\"}\n\
          {\"paragraph\": 0, \"section\": \"概要\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
@@ -2198,7 +2198,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("batches/b.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
     )
     .expect("fixture must be writable");
@@ -2334,8 +2334,8 @@ fn export_refuses_an_empty_data_directory_and_an_uncreatable_out() {
     // Seed one context so the run gets to --out creation, then block it.
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2382,11 +2382,11 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"old\", \"id\": \"b.md\", \
-         \"create\": {\"description\": \"o\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"cba06b57-36fa-467e-94b0-7b561eae9439\", \"id\": \"b.md\", \
+         \"create\": {\"name\": \"old\", \"description\": \"o\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
          {\"type\": \"group\", \"id\": \"kura\", \"description\": \"k\", \
          \"contexts\": [\"sake\"]}\n\
@@ -2488,8 +2488,8 @@ fn export_counts_an_unknown_context_as_a_failure() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2537,8 +2537,8 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2601,11 +2601,11 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     // first.jsonl claims three sources in one stream — all novel.
     std::fs::write(
         dir.join("first.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s2\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s2\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s3\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s3\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2613,11 +2613,11 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     // own — one refused FILE, but three separate ownership conflicts.
     std::fs::write(
         dir.join("second.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o1b\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s2\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s2\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o2b\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"s3\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s3\"}\n\
          {\"subject\": \"a\", \"label\": \"l\", \"object\": \"o3b\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2927,15 +2927,15 @@ fn compact_rewrites_a_data_directory_offline() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     // A revision that drops the fact leaves dead records behind…
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -2977,14 +2977,14 @@ fn compact_dry_run_reports_dead_weight_without_rewriting() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -3046,14 +3046,14 @@ fn compact_json_emits_a_single_parseable_document_dry_run_and_real() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -3120,14 +3120,14 @@ fn compact_parallel_output_matches_the_sequential_run_byte_for_byte() {
         // something actually sorts it.
         std::fs::write(
             dir.join("a.jsonl"),
-            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+            "{\"type\": \"source\", \"context_id\": \"b9dd960c-1753-459a-b811-5d3cb845a57d\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"charlie\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+             {\"type\": \"source\", \"context_id\": \"8ed3f6ad-685b-459e-ad70-22518e1af76c\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"alpha\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+             {\"type\": \"source\", \"context_id\": \"f144a690-7dc4-484d-9f9f-e6a7d9b9ff53\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"bravo\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");
@@ -3135,11 +3135,11 @@ fn compact_parallel_output_matches_the_sequential_run_byte_for_byte() {
         // the first, leaving dead edges for compact to reclaim.
         std::fs::write(
             dir.join("b.jsonl"),
-            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\"}\n\
+            "{\"type\": \"source\", \"context_id\": \"b9dd960c-1753-459a-b811-5d3cb845a57d\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context_id\": \"8ed3f6ad-685b-459e-ad70-22518e1af76c\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context_id\": \"f144a690-7dc4-484d-9f9f-e6a7d9b9ff53\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");
@@ -3218,8 +3218,8 @@ fn compact_counts_an_unknown_context_as_a_failure_on_every_local_path() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -3275,8 +3275,8 @@ fn compact_accepts_a_single_config_flag() {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -4108,8 +4108,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let batch = dir.join("a.jsonl");
     std::fs::write(
         &batch,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-          \"create\": {\"description\": \"酒\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+          \"create\": {\"name\": \"sake\", \"description\": \"酒\"}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -4169,7 +4169,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"type\": \"source\", \"context\": \"ghost\", \"id\": \"g.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"id\": \"g.md\", \"create\": {\"name\": \"ghost\"}}\n",
     )
     .expect("fixture must be writable");
     let healed = run_with_env(
@@ -4218,14 +4218,14 @@ fn a_failing_files_apply_does_not_stop_the_files_after_it() {
     let broken = dir.join("a.jsonl");
     std::fs::write(
         &broken,
-        "{\"type\": \"source\", \"context\": \"missing\", \"id\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"ffa63583-dfa6-406b-87d2-84b86b0d693a\", \"id\": \"a.md\"}\n\
          {\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     let healthy = dir.join("b.jsonl");
     std::fs::write(
         &healthy,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\", \"create\": {\"name\": \"sake\"}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -4324,7 +4324,7 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let dir = common::scratch_dir("cli-import-restated-records");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let first = dir.join("first.jsonl");
-    let records = "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
+    let records = "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
                    \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
                    {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n";
     std::fs::write(&first, records).expect("fixture must be writable");
@@ -4373,8 +4373,8 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let batch = dir.join("a.jsonl");
     std::fs::write(
         &batch,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-          \"create\": {\"description\": \"酒\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+          \"create\": {\"name\": \"sake\", \"description\": \"酒\"}}\n\
          {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");

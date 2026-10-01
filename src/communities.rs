@@ -954,8 +954,15 @@ mod tests {
             levels: 1,
             communities: Vec::new(),
         };
-        let batches = render_batches("c", "c::communities", &analysis, &summaries, &manifest)
-            .expect("render");
+        let batches = render_batches(
+            "c",
+            "c::communities",
+            "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
+            &analysis,
+            &summaries,
+            &manifest,
+        )
+        .expect("render");
         let community_batch = &batches[0];
         let weights: Vec<(String, f64)> = community_batch
             .lines()

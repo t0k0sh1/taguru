@@ -47,10 +47,10 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     std::fs::write(
         &file,
         format!(
-            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"clean.md\", \"create\": {{\"name\": \"sake\", \"description\": \"酒蔵\"}}}}\n\
              {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
              {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
-             {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"leaky.md\"}}\n\
+             {{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"leaky.md\"}}\n\
              {{\"subject\": \"高瀬\", \"label\": \"連絡先\", \"object\": \"{mail}\", \"weight\": 1.0}}\n\
              {{\"passage\": \"高瀬の連絡先は {mail}。\"}}\n"
         ),
@@ -185,7 +185,7 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     let broken = batches.join("broken.jsonl");
     std::fs::write(
         &broken,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\nnot json\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\nnot json\n",
     )
     .expect("fixture must be writable");
     let (code, stdout, stderr) = run_cli(
@@ -226,13 +226,13 @@ fn a_full_remote_import_matches_the_local_import_of_the_same_stream() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"酒蔵の知識\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"酒蔵の知識\"}}\n\
          {\"passage\": \"青嶺酒造の紹介。\\n\\n代表銘柄は青嶺。\", \"stored_at\": 1700000000}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"代表銘柄\", \"object\": \"青嶺\", \
           \"weight\": 1.0, \"paragraph\": 1}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
-         {\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n\
+         {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n",
     )
     .expect("fixture must be writable");
@@ -293,8 +293,8 @@ fn a_remote_dry_run_previews_every_chunk_and_writes_nothing() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -334,8 +334,8 @@ fn remote_json_matches_the_local_jsons_own_shape() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -385,8 +385,8 @@ fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -435,8 +435,8 @@ fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
     let mut content = String::new();
     for i in 0..6 {
         content.push_str(&format!(
-            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s{i}.md\", \
-             \"create\": {{\"description\": \"d\"}}}}\n\
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s{i}.md\", \
+             \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
              {{\"subject\": \"s{i}\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n"
         ));
     }
@@ -488,8 +488,8 @@ fn a_lone_batch_the_server_still_413s_is_a_hard_error_naming_both_remedies() {
     std::fs::write(
         &file,
         format!(
-            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"big.md\", \
-             \"create\": {{\"description\": \"d\"}}}}\n{{\"passage\": \"{passage}\"}}\n"
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"big.md\", \
+             \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n{{\"passage\": \"{passage}\"}}\n"
         ),
     )
     .expect("fixture must be writable");
@@ -529,11 +529,11 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let batch_file = batches.join("01-batches.jsonl");
     std::fs::write(
         &batch_file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"beer\", \"id\": \"b.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"b.md\", \
+         \"create\": {\"name\": \"beer\", \"description\": \"d\"}}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -572,18 +572,18 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"a\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"missing\", \"id\": \"bad.md\"}\n\
+         {\"type\": \"source\", \"context_id\": \"ffa63583-dfa6-406b-87d2-84b86b0d693a\", \"id\": \"bad.md\"}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"c\", \"id\": \"c.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"c.md\", \
+         \"create\": {\"name\": \"c\", \"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"e\", \"id\": \"e.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"3f79bb7b-435b-4532-9651-daefd374cdc6\", \"id\": \"e.md\", \
+         \"create\": {\"name\": \"e\", \"description\": \"d\"}}\n\
          {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
-         {\"type\": \"schema\", \"context\": \"a\", \"mode\": \"warn\", \
+         {\"type\": \"schema\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
          {\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"a\"]}\n",
     )
@@ -641,13 +641,13 @@ fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field()
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"a\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"missing\", \"id\": \"bad.md\"}\n\
+         {\"type\": \"source\", \"context_id\": \"ffa63583-dfa6-406b-87d2-84b86b0d693a\", \"id\": \"bad.md\"}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"c\", \"id\": \"c.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"c.md\", \
+         \"create\": {\"name\": \"c\", \"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -704,7 +704,7 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \"create\": {\"name\": \"a\"}}\n",
     )
     .expect("fixture must be writable");
     let (code, _stdout, stderr) = run_cli(
@@ -735,7 +735,7 @@ fn a_malformed_or_non_http_url_is_a_usage_error_not_a_transport_failure() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \"create\": {\"name\": \"a\"}}\n",
     )
     .expect("fixture must be writable");
 
@@ -764,7 +764,7 @@ fn no_embed_combined_with_url_is_a_usage_error_before_any_request() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \"create\": {\"name\": \"a\"}}\n",
     )
     .expect("fixture must be writable");
     let (code, _stdout, stderr) = run_cli(
@@ -797,8 +797,8 @@ fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n",
     )
     .expect("fixture must be writable");
 
@@ -863,7 +863,7 @@ fn a_mismatched_server_version_prints_the_skew_warning_once() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \"create\": {\"name\": \"a\"}}\n",
     )
     .expect("fixture must be writable");
     let (_code, _stdout, stderr) =
@@ -1028,11 +1028,11 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"a\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"b\", \"id\": \"b.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"3e23e816-0039-494a-b389-4f6564e1b134\", \"id\": \"b.md\", \
+         \"create\": {\"name\": \"b\", \"description\": \"d\"}}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -1081,10 +1081,10 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
     let seed = batches.join("seed.jsonl");
     std::fs::write(
         &seed,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"a\", \"description\": \"d\"}}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"schema:type\", \"object\": \"Brewery\", \"weight\": 1.0}\n\
-         {\"type\": \"schema\", \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
+         {\"type\": \"schema\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"mode\": \"strict\", \"closed_labels\": false, \
          \"types\": {\"Brewery\": {\"is_a\": []}, \"Person\": {\"is_a\": []}}, \
          \"relations\": {\"杜氏\": {\"domain\": [\"Brewery\"], \"range\": [\"Person\"]}}}\n",
     )
@@ -1092,7 +1092,7 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
     let violating = batches.join("violating.jsonl");
     std::fs::write(
         &violating,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"b.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"b.md\"}\n\
          {\"subject\": \"高瀬\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
          {\"subject\": \"高瀬\", \"label\": \"杜氏\", \"object\": \"個人A\", \"weight\": 1.0}\n",
     )
