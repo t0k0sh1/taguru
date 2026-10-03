@@ -130,7 +130,7 @@ proptest = "1.11.0"
 # iai-callgrind was renamed gungraun at 0.17.0; the old name is frozen
 # at 0.16.1 with no further security fixes, so this targets the
 # maintained successor under its new name.
-gungraun = "0.19.4"
+gungraun = "0.20.0"
 # Validates model_output_json_schema() against the shared accepted/rejected
 # fixture corpus (tests/fixtures/model_output). Dev-only: the schema is a
 # plain serde_json::Value the crate never validates against at runtime.
