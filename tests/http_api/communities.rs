@@ -85,6 +85,9 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
     let header = &lines[0];
     assert_eq!(header["type"], "communities");
     assert_eq!(header["version"], "2026-10-01");
+    // The header names the analyzed context by id (#966).
+    assert_eq!(header["context_id"], json!(server.cx("corpus")));
+    assert!(header.get("context").is_none(), "{header}");
     assert_eq!(header["algorithm"], "louvain-cc/1");
     assert_eq!(header["revision"]["graph"].as_u64(), Some(revision));
     assert_eq!(header["concept_count"], 8);
@@ -1397,5 +1400,119 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         vec!["L0-0"],
         "the community must fill the page — the manifest's higher rank is \
          absorbed by the extra slot, never at the community's expense: {page}"
+    );
+}
+
+/// Builds a one-community artifact for the source context `source_id`
+/// by hand, under the default artifact id the server derives from it
+/// (#966), and returns that id.
+fn seed_artifact_by_id(server: &Server, source_id: &str, summary: &str) -> String {
+    let revision = server.ok("GET", &format!("/contexts/{source_id}"), None)["revision"].clone();
+    let artifact_id = communities_artifact_id(source_id);
+    server.create_with_id(&artifact_id, json!({"name": "twin::communities"}));
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context_id": source_id,
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+        ],
+    });
+    server.ok(
+        "POST",
+        &format!("/contexts/{artifact_id}/sources"),
+        Some(json!({"passages": {
+            "community:L0-0": summary,
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{artifact_id}/associations"),
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
+        ])),
+    );
+    artifact_id
+}
+
+/// The derived artifact is tied to its source by ID (#966): two
+/// contexts sharing a display name each find their own artifact, a
+/// rename of the source detaches nothing, an artifact whose manifest
+/// names a different source is refused, and a `derived_id` that is not
+/// an id is a 400 rather than a lookup by name.
+#[test]
+fn a_rename_or_a_twin_name_never_detaches_the_artifact_from_its_source() {
+    let server = Server::start("communities-by-id");
+    let a = server.create_context("twin");
+    let b = server.create_context("twin");
+    for id in [&a, &b] {
+        server.ok(
+            "POST",
+            &format!("/contexts/{id}/associations"),
+            Some(json!([{"subject": "a1", "label": "近い", "object": "a2", "weight": 2.0}])),
+        );
+    }
+    let art_a = seed_artifact_by_id(&server, &a, "甲の共同体: 夏目漱石の交流。");
+    let art_b = seed_artifact_by_id(&server, &b, "乙の共同体: 夏目漱石の交流。");
+    assert_ne!(art_a, art_b, "two sources, two artifacts");
+
+    let search = |source: &str, body: Value| {
+        server.call(
+            "POST",
+            &format!("/contexts/{source}/communities/search"),
+            Some(body),
+        )
+    };
+    for (source, artifact, marker) in [(&a, &art_a, "甲"), (&b, &art_b, "乙")] {
+        let (status, page) = search(source, json!({"query": "夏目漱石"}));
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["result"]["derived_id"], json!(artifact), "{page}");
+        assert!(
+            page["result"]["hits"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(marker),
+            "each source reads ITS artifact: {page}"
+        );
+    }
+
+    // Renaming the source moves no id, so the artifact still answers.
+    server.ok(
+        "POST",
+        &format!("/contexts/{a}/rename"),
+        Some(json!({"to": "renamed"})),
+    );
+    let (status, page) = search(&a, json!({"query": "夏目漱石"}));
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["result"]["derived_id"], json!(art_a), "{page}");
+    assert_eq!(
+        page["result"]["plan"]["contexts"][0]["context_name"],
+        "renamed"
+    );
+
+    // An override aimed at the OTHER source's artifact: its manifest
+    // names that source's id, so it is refused, not served.
+    let (status, refused) = search(&a, json!({"query": "夏目漱石", "derived_id": art_b}));
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains(&b),
+        "the refusal names the id the manifest recorded: {refused}"
+    );
+
+    // A name where an id belongs is a 400, never a lookup by name.
+    let (status, refused) = search(
+        &a,
+        json!({"query": "夏目漱石", "derived_id": "twin::communities"}),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("'twin::communities' is not a context id"),
+        "{refused}"
     );
 }

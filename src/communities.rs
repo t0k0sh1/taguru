@@ -156,6 +156,9 @@ pub fn run(args: &[String]) -> i32 {
         (None, None) => return usage("--context ID (or --group NAME) is required"),
         _ => {}
     }
+    if into.is_some() && group.is_some() {
+        return usage("--into names one artifact; with --group each member gets its own");
+    }
     if let Some(into) = &into
         && !crate::registry::is_context_id(into)
     {
@@ -163,9 +166,6 @@ pub fn run(args: &[String]) -> i32 {
             "--into '{into}' is not a context id: it takes a lowercase hyphenated UUID, \
              the id column of GET /contexts"
         ));
-    }
-    if into.is_some() && group.is_some() {
-        return usage("--into names one artifact; with --group each member gets its own");
     }
 
     // The config file first, then the URL default off the (possibly

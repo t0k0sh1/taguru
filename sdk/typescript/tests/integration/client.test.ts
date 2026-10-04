@@ -381,7 +381,7 @@ describe("sources and citations", () => {
     const manifest = {
       type: "communities_manifest",
       algorithm: "louvain-cc/1",
-      source_context: name,
+      source_context_id: contextId,
       revision,
       levels: 1,
       communities: [
@@ -398,8 +398,11 @@ describe("sources and citations", () => {
       { subject: "community:L0-0", label: "contains", object: "高瀬", weight: 2.0 },
     ]);
 
-    let page = await ctx.searchCommunities("青嶺酒造");
-    expect(page.derived).toBe(derived);
+    // The default artifact id derives from the source's id server-side,
+    // so a hand-minted artifact is addressed with `derived_id`.
+    let page = await ctx.searchCommunities("青嶺酒造", { derived_id: derivedId });
+    expect(page.derived_id).toBe(derivedId);
+    expect(page.derived_name).toBe(derived);
     expect(page.stale).toBe(false);
     expect(page.hits[0]!.community).toBe("L0-0");
     expect(page.hits[0]!.level).toBe(0);
@@ -409,7 +412,7 @@ describe("sources and citations", () => {
     await ctx.addAssociations([
       { subject: "青嶺酒造", label: "所在地", object: "山あい", weight: 1.0 },
     ]);
-    page = await ctx.searchCommunities("青嶺酒造");
+    page = await ctx.searchCommunities("青嶺酒造", { derived_id: derivedId });
     expect(page.stale).toBe(true);
     expect(page.revision.current_graph).toBeGreaterThan(page.revision.recorded_graph);
 
@@ -449,7 +452,7 @@ describe("sources and citations", () => {
     const header = JSON.parse(lines[0]!);
     expect(header.type).toBe("communities");
     expect(header.version).toBe("2026-10-01");
-    expect(header.context).toBe(name);
+    expect(header.context_id).toBe(contextId);
     await client.contexts.delete(contextId);
   });
 });

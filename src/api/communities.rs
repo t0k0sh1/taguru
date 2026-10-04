@@ -410,7 +410,10 @@ pub(crate) fn community_hits(
 ) -> Result<CommunityLaneOutcome, Response> {
     // Display names for the messages only — every lookup below is by id.
     let source_name = state.name_of_stem(source_id);
-    let derived = format!("{} ({derived_id})", state.name_of_stem(derived_id));
+    let derived = match state.name_of_stem(derived_id) {
+        name if name == derived_id => derived_id.to_string(),
+        name => format!("{name} ({derived_id})"),
+    };
     // No artifact context at all — the shared verdict both the
     // manifest lookup and the artifact search below answer with,
     // since either one finding the context gone means the same thing.

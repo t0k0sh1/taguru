@@ -263,8 +263,10 @@ ENVIRONMENT (every knob; unset = the shown default):
                                log carries the key name; rotate by overlap
   TAGURU_KEY_GRANTS            JSON grants per key name: {\"ci\": \"read\",
                                \"bot\": {\"role\": \"write\", \"contexts\":
-                               [\"sake\"]}} — roles read ⊂ write ⊂ admin;
-                               unnamed keys keep the full historical grant
+                               [\"<context id>\"]}} — roles read ⊂ write ⊂
+                               admin; contexts are IDs (GET /contexts), never
+                               names; unnamed keys keep the full historical
+                               grant
                                These three (the auth table) hot-reload:
                                SIGHUP, or an edited --config file (picked
                                up within ~5s), swaps them live — fail
@@ -298,8 +300,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_AUTO_COMPACT_RATIO    that trigger: compact once dead edges /
                                total edges exceeds this (0.5 — dead weight
                                outgrew live content)
-  TAGURU_CONTEXT_QUOTAS        JSON ceilings per context name:
-                               {\"sake\": {\"storage_bytes\": 1073741824,
+  TAGURU_CONTEXT_QUOTAS        JSON ceilings per context ID (not name):
+                               {\"<context id>\": {\"storage_bytes\": 1073741824,
                                \"cache_bytes\": 134217728}} — storage refuses
                                growth writes at the ceiling (507; retract/
                                compact/delete stay open), cache evicts the

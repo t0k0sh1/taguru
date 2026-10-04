@@ -116,7 +116,8 @@ use tracing::{error, info, warn};
 ///   ceiling above. `0`/`false` restores manual-only compaction for
 ///   operators who prefer scheduled quiet-window sweeps.
 /// - `TAGURU_CONTEXT_QUOTAS`: per-`context` ceilings, one JSON object in
-///   the `TAGURU_KEY_GRANTS` mold — `{"name": {"storage_bytes": N,
+///   the `TAGURU_KEY_GRANTS` mold, keyed by context ID (a display name
+///   refuses boot) — `{"<context id>": {"storage_bytes": N,
 ///   "cache_bytes": M}}`, each field optional but never both absent.
 ///   `storage_bytes` refuses growth writes (507 `storage_full`) once
 ///   the `context`'s on-disk family reaches it; retract/compact/delete
