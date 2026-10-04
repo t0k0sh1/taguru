@@ -177,7 +177,7 @@ impl AppState {
             labels.retain(|(a, b, _)| !context.labels_share_subject(a, b));
         }) {
             Ok(()) => {}
-            Err(AccessError::NotFound) | Err(AccessError::AmbiguousName(_)) => return None,
+            Err(AccessError::NotFound) => return None,
             Err(AccessError::Load(message))
             | Err(AccessError::Unpersisted(message))
             | Err(AccessError::QuotaExceeded(message)) => {
@@ -283,7 +283,7 @@ impl AppState {
             (concepts, labels)
         }) {
             Ok(glosses) => glosses,
-            Err(AccessError::NotFound) | Err(AccessError::AmbiguousName(_)) => return None,
+            Err(AccessError::NotFound) => return None,
             // A read never yields Unpersisted or QuotaExceeded; the
             // arms are for the type, not a path.
             Err(AccessError::Load(message))

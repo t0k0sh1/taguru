@@ -161,7 +161,7 @@ pub async fn promote_sources(
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies (`/import`'s discipline).
     if let Some(axum::Extension(grant)) = &grant
-        && !grant.allows_context(&state.name_of_stem(&request.into))
+        && !grant.allows_context(&request.into)
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -559,7 +559,7 @@ fn quota_refusal(
         landed,
         false,
         ErrorCode::StorageFull,
-        crate::registry::storage_quota_message(destination, used, ceiling),
+        crate::registry::storage_quota_message(destination, &batch.context_id, used, ceiling),
         QUOTA_NEXT_STEP,
         started_at,
     )

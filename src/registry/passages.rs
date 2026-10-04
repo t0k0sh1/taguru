@@ -85,7 +85,7 @@ impl AppState {
         if let Some((used, ceiling)) = self.storage_quota_excess(&fence, &entry) {
             self.0.metrics.record_storage_quota_refusal();
             return Some(Err(PassagesWriteError::QuotaExceeded(
-                super::storage_quota_message(&fence.name, used, ceiling),
+                super::storage_quota_message(&fence.name, &entry.id, used, ceiling),
             )));
         }
         hit_quota_write_checkpoint();
@@ -337,7 +337,7 @@ mod tests {
     use crate::registry::ContextMeta;
     use crate::registry::LOAD_FAILURE_RETRY;
     use crate::registry::paths::{passages_path, passages_wal_path, sources_path};
-    use crate::registry::test_support::{plain, scratch_dir, stem_on_disk};
+    use crate::registry::test_support::{plain, scratch_dir, stem_on_disk, test_id};
     use crate::registry::{BootOptions, ContextQuota};
 
     #[test]
@@ -686,7 +686,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "sake".to_string(),
+                    test_id("sake"),
                     ContextQuota {
                         storage_bytes: Some(1),
                         cache_bytes: None,
@@ -697,7 +697,7 @@ mod tests {
         )
         .unwrap();
         state
-            .create("sake", ContextMeta::default())
+            .create_if_absent(&test_id("sake"), "sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
 

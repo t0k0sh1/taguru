@@ -1336,11 +1336,6 @@ pub struct MaintenanceCompactionOutcome {
 #[derive(Debug)]
 pub enum AccessError {
     NotFound,
-    /// Several `contexts` share the requested name (a hand-assembled
-    /// data directory; see [`ContextTable`]) — refused explicitly
-    /// rather than served from one of them by coin flip. Carries the
-    /// collision count for the message.
-    AmbiguousName(usize),
     /// The `context` exists but its image could not be loaded from disk.
     Load(String),
     /// The write-ahead log could not durably record the operation;
@@ -1363,10 +1358,12 @@ pub enum AccessError {
 
 /// The one refusal message every storage-quota gate serves (the write
 /// path's two gates and the import loop's pre-check), naming the ways
-/// down so a refused client is never stranded at the ceiling.
-pub(crate) fn storage_quota_message(name: &str, used: u64, ceiling: u64) -> String {
+/// down so a refused client is never stranded at the ceiling. The quota
+/// entry is keyed by `id` (#966), so the message carries it beside the
+/// display `name`.
+pub(crate) fn storage_quota_message(name: &str, id: &str, used: u64, ceiling: u64) -> String {
     format!(
-        "context '{name}' is at its storage quota ({used} of {ceiling} bytes): \
+        "context '{name}' ({id}) is at its storage quota ({used} of {ceiling} bytes): \
          retract or compact to shrink it, or raise its TAGURU_CONTEXT_QUOTAS entry"
     )
 }
@@ -1465,14 +1462,18 @@ pub struct ContextQuota {
     pub cache_bytes: Option<u64>,
 }
 
-/// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping `context`
+/// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping `context` id
 /// names to [`ContextQuota`]s, the same declarative-policy shape as
 /// `TAGURU_KEY_GRANTS`. And the same failure posture: a deployment that
 /// DECLARED quotas must not run without them, so any parse or
 /// validation error refuses boot (the caller exits) instead of the
-/// env module's usual warn-and-default. Naming a `context` that does not
-/// exist yet is fine — `contexts` are created at runtime, and the
-/// declaration simply waits for the name.
+/// env module's usual warn-and-default. Keys are context IDs (#966):
+/// a key that is not one — a display name, say — would match no
+/// `context` ever and so silently leave it uncapped, which a declared
+/// ceiling must never do, so it refuses boot too. Naming an id that
+/// does not exist yet is fine — `contexts` are created at runtime
+/// (an import header may even choose the id), and the declaration
+/// simply waits for it.
 pub fn parse_context_quotas(json: Option<&str>) -> Result<HashMap<String, ContextQuota>, String> {
     let Some(json) = json else {
         return Ok(HashMap::new());
@@ -1483,10 +1484,17 @@ pub fn parse_context_quotas(json: Option<&str>) -> Result<HashMap<String, Contex
     let quotas: HashMap<String, ContextQuota> = serde_json::from_str(json).map_err(|error| {
         format!(
             "TAGURU_CONTEXT_QUOTAS is not the documented JSON shape \
-             ({{\"name\": {{\"storage_bytes\": …, \"cache_bytes\": …}}}}): {error}"
+             ({{\"<context id>\": {{\"storage_bytes\": …, \"cache_bytes\": …}}}}): {error}"
         )
     })?;
     for (name, quota) in &quotas {
+        if !is_context_id(name) {
+            return Err(format!(
+                "TAGURU_CONTEXT_QUOTAS key '{name}' is not a context id: keys are \
+                 lowercase hyphenated UUIDs — the id column of GET /contexts — not \
+                 display names"
+            ));
+        }
         if quota.storage_bytes.is_none() && quota.cache_bytes.is_none() {
             return Err(format!(
                 "TAGURU_CONTEXT_QUOTAS declares no ceiling for '{name}' — \
@@ -3277,7 +3285,7 @@ impl AppState {
         name: &str,
         operate: impl FnOnce(&mut Context) -> T,
     ) -> Result<T, AccessError> {
-        let entry = self.lookup_resolved(name)?;
+        let entry = self.lookup_named(name).ok_or(AccessError::NotFound)?;
         let result = {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
@@ -3325,31 +3333,12 @@ impl AppState {
     /// (the import header, cross-`context` bodies) that then continue
     /// on the id-keyed data paths. `None` for a missing OR ambiguous
     /// name — the ambiguous case is logged by the index, and callers
-    /// that must refuse it loudly resolve through
-    /// [`Self::lookup_resolved`] instead.
+    /// that must refuse it loudly have no wire name left to refuse:
+    /// the server never resolves a name (#966), so only the offline
+    /// `taguru-code sync` still calls this.
+    #[allow(dead_code)] // the server binary resolves no names; taguru-code's sync does
     pub(crate) fn context_id_of(&self, name: &str) -> Option<String> {
         self.lookup_named(name).map(|entry| entry.id.clone())
-    }
-
-    /// [`Self::context_id_of`] with the ambiguity kept loud: the
-    /// cross-search bodies still name their targets (until #965), and
-    /// a name several `contexts` share must refuse as its own
-    /// conflict — never fold into "not found", never pick one.
-    pub(crate) fn resolve_wire_name(&self, name: &str) -> Result<String, AccessError> {
-        self.lookup_resolved(name).map(|entry| entry.id.clone())
-    }
-
-    /// [`Self::lookup_named`] reporting through [`AccessError`]: a
-    /// missing name is `NotFound`, an ambiguous one is its own
-    /// explicit refusal (issue #961 decision 1) — never folded into
-    /// "not found", never resolved by picking a claimant.
-    fn lookup_resolved(&self, name: &str) -> Result<Arc<Entry>, AccessError> {
-        let registry = self.0.registry.read();
-        match registry.resolve(name) {
-            NameResolution::One(entry) => Ok(Arc::clone(entry)),
-            NameResolution::None => Err(AccessError::NotFound),
-            NameResolution::Ambiguous(count) => Err(AccessError::AmbiguousName(count)),
-        }
     }
 
     /// The id — and so the file stem — of the `context` `name`

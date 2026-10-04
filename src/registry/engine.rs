@@ -299,10 +299,13 @@ impl AppState {
         inner: &EntryInner,
         entry: &Entry,
     ) -> Option<(u64, u64)> {
-        // `TAGURU_CONTEXT_QUOTAS` still keys on display names (#966
-        // moves it to ids); the entry's current name is authoritative
-        // and already in hand under the caller's lock.
-        let ceiling = self.0.context_quotas.get(&inner.name)?.storage_bytes?;
+        // `TAGURU_CONTEXT_QUOTAS` keys on context ids (#966); the
+        // entry's id never moves, so no lock is needed to read it.
+        let ceiling = self
+            .0
+            .context_quotas
+            .get(entry.id.as_str())?
+            .storage_bytes?;
         let disk = *entry.disk.lock();
         // A resident store knows its pending log; a cold one uses the
         // scan/eviction-seeded field — the same read `gauge_snapshot`
@@ -387,6 +390,7 @@ impl AppState {
                 self.0.metrics.record_storage_quota_refusal();
                 break 'write Err(AccessError::QuotaExceeded(storage_quota_message(
                     &inner.name,
+                    &entry.id,
                     used,
                     ceiling,
                 )));
@@ -680,9 +684,6 @@ impl AppState {
                 // the graph and the delete cleared the vectors.
                 Slot::Cold | Slot::Deleted => 0,
             };
-            // The quota table is still keyed by display name (#966
-            // moves it to ids); read it under the same lock as the
-            // rest of this entry's snapshot.
             let name = inner.name.clone();
             drop(inner);
             // Cached vector stores, resident passages, the BM25 index,
@@ -699,7 +700,7 @@ impl AppState {
             let over_ceiling = self
                 .0
                 .context_quotas
-                .get(&name)
+                .get(entry.id.as_str())
                 .and_then(|quota| quota.cache_bytes)
                 .is_some_and(|ceiling| bytes as u64 > ceiling);
             total += bytes;
@@ -940,7 +941,7 @@ fn warn_if_recovery_flush_missed(name: &str, flushed: bool) {
 mod tests {
     use super::*;
     use crate::registry::test_support::{
-        assoc_op, loaded_map, plain, rendered, scratch_dir, stem_on_disk,
+        assoc_op, loaded_map, plain, rendered, scratch_dir, stem_on_disk, test_id,
     };
 
     #[test]
@@ -985,14 +986,39 @@ mod tests {
         assert!(parse_context_quotas(None).unwrap().is_empty());
 
         let quotas = parse_context_quotas(Some(
-            r#"{"context-a": {"storage_bytes": 1024, "cache_bytes": 2048},
-                "context-b": {"storage_bytes": 512}}"#,
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {"storage_bytes": 1024, "cache_bytes": 2048},
+                "ead6ef03-d61e-460c-933d-6d450c50a1e5": {"storage_bytes": 512}}"#,
         ))
         .unwrap();
-        assert_eq!(quotas["context-a"].storage_bytes, Some(1024));
-        assert_eq!(quotas["context-a"].cache_bytes, Some(2048));
-        assert_eq!(quotas["context-b"].storage_bytes, Some(512));
-        assert_eq!(quotas["context-b"].cache_bytes, None);
+        assert_eq!(
+            quotas["cef2e28b-43f0-4b6c-8201-abab0785399f"].storage_bytes,
+            Some(1024)
+        );
+        assert_eq!(
+            quotas["cef2e28b-43f0-4b6c-8201-abab0785399f"].cache_bytes,
+            Some(2048)
+        );
+        assert_eq!(
+            quotas["ead6ef03-d61e-460c-933d-6d450c50a1e5"].storage_bytes,
+            Some(512)
+        );
+        assert_eq!(
+            quotas["ead6ef03-d61e-460c-933d-6d450c50a1e5"].cache_bytes,
+            None
+        );
+
+        // A key that is not a context id would match no context ever and
+        // so silently leave it uncapped — a display name refuses boot
+        // by name, as does a non-canonical spelling of an id (#966).
+        for key in ["sake", "CEF2E28B-43F0-4B6C-8201-ABAB0785399F"] {
+            let error =
+                parse_context_quotas(Some(&format!(r#"{{"{key}": {{"storage_bytes": 1}}}}"#)))
+                    .unwrap_err();
+            assert!(
+                error.contains(&format!("'{key}' is not a context id")),
+                "{key}: {error}"
+            );
+        }
 
         // Set-but-empty, broken JSON, a ceiling-less quota, a typo'd
         // field name, and a zero ceiling: each refuses loudly.
@@ -1000,10 +1026,10 @@ mod tests {
             "",
             "   ",
             "{not json}",
-            r#"{"a": {}}"#,
-            r#"{"a": {"storage_byte": 1}}"#,
-            r#"{"a": {"storage_bytes": 0}}"#,
-            r#"{"a": {"cache_bytes": 0, "storage_bytes": 1}}"#,
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {}}"#,
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {"storage_byte": 1}}"#,
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {"storage_bytes": 0}}"#,
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {"cache_bytes": 0, "storage_bytes": 1}}"#,
         ] {
             assert!(parse_context_quotas(Some(broken)).is_err(), "{broken:?}");
         }
@@ -1023,7 +1049,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "capped".to_string(),
+                    test_id("capped"),
                     ContextQuota {
                         storage_bytes: Some(1),
                         cache_bytes: None,
@@ -1036,7 +1062,7 @@ mod tests {
 
         // Creation is never gated: a declared name may not exist yet.
         state
-            .create("capped", ContextMeta::default())
+            .create_if_absent(&test_id("capped"), "capped", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
         // The first write lands — nothing is on disk yet — and its WAL
@@ -1131,7 +1157,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "capped".to_string(),
+                    test_id("capped"),
                     ContextQuota {
                         storage_bytes: Some(1),
                         cache_bytes: None,
@@ -1143,7 +1169,7 @@ mod tests {
         .unwrap();
 
         state
-            .create("capped", ContextMeta::default())
+            .create_if_absent(&test_id("capped"), "capped", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
         // First write lands (nothing on disk yet) and carries the
@@ -1249,7 +1275,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "capped".to_string(),
+                    test_id("capped"),
                     ContextQuota {
                         storage_bytes: Some(1),
                         cache_bytes: None,
@@ -1261,7 +1287,7 @@ mod tests {
         .unwrap();
 
         state
-            .create("capped", ContextMeta::default())
+            .create_if_absent(&test_id("capped"), "capped", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
         // First write lands (nothing on disk yet) and carries the
@@ -1543,7 +1569,7 @@ mod tests {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             for name in ["old", "hog", "fresh"] {
                 state
-                    .create(name, ContextMeta::default())
+                    .create_if_absent(&test_id(name), name, ContextMeta::default())
                     .map_err(|_| "create")
                     .unwrap();
                 state
@@ -1571,7 +1597,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "hog".to_string(),
+                    test_id("hog"),
                     ContextQuota {
                         storage_bytes: None,
                         cache_bytes: Some(1),
@@ -3840,7 +3866,7 @@ mod tests {
                 as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>);
             let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
             state
-                .create("sake", ContextMeta::default())
+                .create_if_absent(&test_id("sake"), "sake", ContextMeta::default())
                 .map_err(|_| "create")
                 .unwrap();
             state
@@ -3889,7 +3915,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "sake".to_string(),
+                    test_id("sake"),
                     ContextQuota {
                         storage_bytes: Some(1),
                         cache_bytes: None,

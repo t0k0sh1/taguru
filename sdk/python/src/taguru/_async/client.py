@@ -1361,16 +1361,16 @@ class AsyncContext:
         *,
         limit: int | None = None,
         semantic_floor: float | None = None,
-        derived: str | None = None,
+        derived_id: str | None = None,
     ) -> CommunityPage:
         """Global search over this ``context``'s community-summary artifact
         (built offline by ``taguru communities``) — corpus-overview
         questions passage search answers poorly. Hits are ranked LLM
         summaries of densely connected concept clusters, each with its
         hierarchy level, member concepts, and sizes; the page's ``stale``
-        flag means the source graph moved since derivation. ``derived``
-        names the artifact ``context`` when it was built with ``--into``
-        (default ``{name}::communities``). A missing artifact raises with
+        flag means the source graph moved since derivation. ``derived_id``
+        is the artifact ``context``'s id when it was built with ``--into``
+        (default: the id derived from this ``context``'s own). A missing artifact raises with
         the build command in the message — it is not an empty result.
         """
         body = drop_none(
@@ -1378,7 +1378,7 @@ class AsyncContext:
                 "query": query,
                 "limit": limit,
                 "semantic_floor": semantic_floor,
-                "derived": derived,
+                "derived_id": derived_id,
             }
         )
         result = await self._post("/communities/search", body)

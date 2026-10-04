@@ -1332,13 +1332,6 @@ fn export_one(
             .export_context(id, Deadline::unbounded())
             .map_err(|failure| match failure {
                 AccessError::NotFound => "no such context".to_string(),
-                // Unreachable on an id-addressed export, kept for
-                // exhaustiveness.
-                AccessError::AmbiguousName(count) => {
-                    format!(
-                        "context name is ambiguous ({count} contexts share it); rename them apart"
-                    )
-                }
                 AccessError::Load(error) => error,
                 AccessError::Unpersisted(error) => error,
                 // The CLI runs with Deadline::unbounded(), which never

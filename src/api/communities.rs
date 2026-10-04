@@ -41,14 +41,24 @@ use crate::registry::{AppState, ContextRevision};
 use super::sources::{SearchContextPlan, SearchPlan, passages_unreadable};
 use super::{
     AppJson, ContextIdPath, ErrorCode, MAX_MATCH_LIMIT, access_error, cache_and_serve, clamp,
-    deadline_exceeded, error, not_found, ok, replay_cached_search, search_log_enabled,
+    deadline_exceeded, error, invalid_context_ids, not_found, ok, replay_cached_search,
+    search_log_enabled,
 };
 
-/// The derived `context` a source `context`'s artifact lives in by
-/// default. `search` accepts an override for artifacts built with
-/// `taguru communities --into`.
+/// The display name a source `context`'s artifact is created under by
+/// default (a label only — nothing looks an artifact up by it, #966).
 pub(crate) fn derived_context_name(source: &str) -> String {
     format!("{source}::communities")
+}
+
+/// The id a source `context`'s artifact lives under by default: derived
+/// from the SOURCE'S ID, so the pair stays tied through renames and
+/// duplicate display names, and the offline `taguru communities` and
+/// the server find the same artifact without asking each other (#966).
+/// `search` accepts an override (`derived_id`) for artifacts built with
+/// `taguru communities --into`.
+pub(crate) fn derived_context_id_of(source_id: &str) -> String {
+    crate::registry::derived_context_id(&format!("{source_id}::communities"))
 }
 
 /// The reserved source id carrying the derivation record inside a
@@ -87,9 +97,11 @@ pub(crate) struct CommunitiesManifest {
     )]
     pub version: Option<String>,
     pub algorithm: String,
-    /// The `context` the artifact was derived from — `search` refuses a
-    /// `derived` override pointing at another `context`'s artifact.
-    pub source_context: String,
+    /// The ID of the `context` the artifact was derived from — `search`
+    /// refuses a `derived_id` override pointing at another `context`'s
+    /// artifact. An id, not a name: a rename or a second context with
+    /// the same display name cannot redirect it (#966).
+    pub source_context_id: String,
     /// The source `context`'s revision at derivation time (snapshotted
     /// BEFORE the analysis — see the module doc for why that order).
     pub revision: ContextRevision,
@@ -157,10 +169,9 @@ pub async fn analyze_communities(
     match outcome {
         Err(failure) => access_error(&state, failure, &id, started_at),
         Ok(Err(_)) => deadline_exceeded(started_at),
-        // The header's `context` value stays the display name until
-        // #965 renames the column — the same posture every other wire
-        // body keeps.
-        Ok(Ok(analysis)) => match render_analysis(&state.name_of_stem(&id), revision, &analysis) {
+        // The header names the analyzed context by id (`context_id`,
+        // #966 — the column the #965 rename of the others left).
+        Ok(Ok(analysis)) => match render_analysis(&id, revision, &analysis) {
             Some(body) => (
                 StatusCode::OK,
                 [(
@@ -185,7 +196,7 @@ pub async fn analyze_communities(
 /// The analysis stream's body: header line, then one community per
 /// line. `None` only if serialization itself refuses.
 fn render_analysis(
-    name: &str,
+    id: &str,
     revision: ContextRevision,
     analysis: &CommunityAnalysis,
 ) -> Option<String> {
@@ -194,7 +205,7 @@ fn render_analysis(
         #[serde(rename = "type")]
         record_type: &'static str,
         version: &'static str,
-        context: &'a str,
+        context_id: &'a str,
         algorithm: &'a str,
         revision: ContextRevision,
         concept_count: usize,
@@ -205,7 +216,7 @@ fn render_analysis(
     let mut body = serde_json::to_string(&Header {
         record_type: ANALYSIS_TYPE,
         version: crate::format::FORMAT_VERSION,
-        context: name,
+        context_id: id,
         algorithm: analysis.algorithm,
         revision,
         concept_count: analysis.concept_count,
@@ -230,17 +241,19 @@ pub struct SearchCommunitiesRequest {
     /// One-call override of the artifact's semantic-lane floor — the
     /// same knob `search_passages` takes, applied to the same search.
     pub semantic_floor: Option<f32>,
-    /// The artifact `context` to search; omitted means
-    /// `{name}::communities`. For artifacts built with `--into`.
-    pub derived: Option<String>,
+    /// The artifact `context`'s id; omitted means the default artifact
+    /// of the path's `context` ([`derived_context_id_of`]). For
+    /// artifacts built with `--into`.
+    pub derived_id: Option<String>,
 }
 
 /// [`search_communities`]' result: the staleness verdict beside the
 /// ranked summaries it qualifies.
 #[derive(Serialize, Deserialize)]
 pub struct CommunityPage {
-    /// The artifact `context` that answered.
-    pub derived: String,
+    /// The artifact `context` that answered, by id and display name.
+    pub derived_id: String,
+    pub derived_name: String,
     /// The algorithm that built it — comparable against the analysis
     /// verb's current one.
     pub algorithm: String,
@@ -386,8 +399,8 @@ fn community_search_io_failure(
 #[allow(clippy::result_large_err)] // the Err IS the response served next
 pub(crate) fn community_hits(
     state: &AppState,
-    name: &str,
-    derived: &str,
+    source_id: &str,
+    derived_id: &str,
     query: &str,
     limit: usize,
     semantic_floor: Option<f32>,
@@ -395,26 +408,18 @@ pub(crate) fn community_hits(
     deadline: Deadline,
     started_at: Instant,
 ) -> Result<CommunityLaneOutcome, Response> {
+    // Display names for the messages only — every lookup below is by id.
+    let source_name = state.name_of_stem(source_id);
+    let derived = format!("{} ({derived_id})", state.name_of_stem(derived_id));
     // No artifact context at all — the shared verdict both the
     // manifest lookup and the artifact search below answer with,
     // since either one finding the context gone means the same thing.
     let no_artifact_context = || {
         CommunityLaneOutcome::NoArtifact(format!(
-            "no communities artifact for '{name}': context '{derived}' does not \
+            "no communities artifact for '{source_name}': context '{derived}' does not \
              exist — run `taguru communities` to build it"
         ))
     };
-    // `derived` is a display NAME (the default is built from the
-    // source's own name, and the `derived` override stays a name until
-    // #965); the artifact reads below are id-keyed. An ambiguous name
-    // refuses like every name boundary; a missing one is the
-    // build-the-artifact verdict.
-    let derived_id = match state.resolve_wire_name(derived) {
-        Ok(derived_id) => derived_id,
-        Err(crate::registry::AccessError::NotFound) => return Ok(no_artifact_context()),
-        Err(failure) => return Err(access_error(state, failure, derived, started_at)),
-    };
-    let derived_id = derived_id.as_str();
 
     // The manifest is the artifact's identity: no artifact context, or
     // an artifact without its record, both answer "build one" rather
@@ -464,16 +469,15 @@ pub(crate) fn community_hits(
             },
         },
     };
-    // The manifest records the source's display NAME (the CLI writes
-    // it, and names stay the manifest's vocabulary until #965); the
-    // caller addressed the source by id.
-    let source_name = state.name_of_stem(name);
-    if manifest.source_context != source_name {
+    // The manifest records the source's ID (the CLI writes it), compared
+    // to the one the caller addressed.
+    if manifest.source_context_id != source_id {
         return Err(error(
             ErrorCode::Conflict,
             format!(
-                "artifact '{derived}' was derived from '{}', not '{source_name}'",
-                manifest.source_context
+                "artifact '{derived}' was derived from context {}, not '{source_name}' \
+                 ({source_id})",
+                manifest.source_context_id
             ),
             started_at,
         ));
@@ -554,7 +558,7 @@ pub(crate) fn community_hits(
     });
     let members = match members {
         Ok(members) => members,
-        Err(failure) => return Err(access_error(state, failure, derived, started_at)),
+        Err(failure) => return Err(access_error(state, failure, derived_id, started_at)),
     };
 
     let hits: Vec<CommunityHit> = ranked
@@ -589,27 +593,32 @@ pub(crate) fn community_hits(
     }))
 }
 
-/// The auth middleware checked the PATH `context`; `derived` is a second
-/// read target (a communities artifact) and gets the same per-`context`
-/// grant check — otherwise a context-scoped key could read any `context`
-/// by naming it here. Shared by `search_communities` and #305's
-/// `assemble_evidence` communities lane, the two callers that ever
-/// name a second, derived `context` this way.
+/// The auth middleware checked the PATH `context`; the artifact is a
+/// second read target (a communities artifact) and gets the same
+/// per-`context` grant check — otherwise a context-scoped key could read
+/// any `context` by naming it here. Shared by `search_communities` and
+/// #305's `assemble_evidence` communities lane, the two callers that
+/// ever name a second, derived `context` this way. Grants list ids
+/// (#966), so the artifact needs its own id in the grant — the id
+/// `GET /contexts` shows once the artifact is built.
 pub(crate) fn check_derived_scope(
+    state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
-    name: &str,
-    derived: &str,
+    source_id: &str,
+    derived_id: &str,
     started_at: Instant,
 ) -> Option<Response> {
     let Some(axum::Extension(grant)) = grant else {
         return None;
     };
-    (!grant.allows_context(derived)).then(|| {
+    (!grant.allows_context(derived_id)).then(|| {
         error(
             ErrorCode::Forbidden,
             format!(
                 "this key's scope does not extend to the artifact context \
-                 '{derived}' — grant it alongside '{name}'"
+                 '{}' ({derived_id}) — grant it alongside '{}' ({source_id})",
+                state.name_of_stem(derived_id),
+                state.name_of_stem(source_id)
             ),
             started_at,
         )
@@ -628,12 +637,17 @@ pub async fn search_communities(
         return deadline_exceeded(started_at);
     }
     let limit = clamp(request.limit, 5, MAX_MATCH_LIMIT);
-    let source_name = state.name_of_stem(&id);
-    let derived = request
-        .derived
+    if let Some(derived_id) = &request.derived_id
+        && let Some(refusal) =
+            invalid_context_ids("derived_id", std::slice::from_ref(derived_id), started_at)
+    {
+        return refusal;
+    }
+    let derived_id = request
+        .derived_id
         .clone()
-        .unwrap_or_else(|| derived_context_name(&source_name));
-    if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
+        .unwrap_or_else(|| derived_context_id_of(&id));
+    if let Some(refusal) = check_derived_scope(&state, &grant, &id, &derived_id, started_at) {
         return refusal;
     }
     // The source context anchors the staleness verdict; its absence is
@@ -647,7 +661,7 @@ pub async fn search_communities(
     // re-keys the staleness verdict the cached payload states.
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchCommunities,
-        &[derived.clone(), id.clone()],
+        &[derived_id.clone(), id.clone()],
         serde_json::to_string(&(
             "search_communities",
             &request.query,
@@ -679,7 +693,7 @@ pub async fn search_communities(
     let found = match community_hits(
         &state,
         &id,
-        &derived,
+        &derived_id,
         &request.query,
         limit,
         request.semantic_floor,
@@ -697,16 +711,14 @@ pub async fn search_communities(
     let empty = found.hits.is_empty();
     // One search, one aggregate count: `name` (the real, requested
     // context) is what `note_search` bumps `taguru_searches_total`
-    // for. `derived` (the community-detection artifact) still gets its
+    // for. The artifact (the community-detection artifact) still gets its
     // own per-context read row via `note_read` — same as `note_search`
     // would give it — just without a second aggregate increment (#562
     // item 7; the aggregate and per-context families are coupled in
     // one call, `gauges.rs`'s `note_search`, so counting both contexts
-    // in it was the only way to update per-context for `derived` too).
+    // in it was the only way to update per-context for the artifact too).
     state.note_search(SearchOp::SearchCommunities, &id, empty);
-    if let Some(derived_id) = state.context_id_of(&derived) {
-        state.note_read(&derived_id, empty);
-    }
+    state.note_read(&derived_id, empty);
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
@@ -723,7 +735,8 @@ pub async fn search_communities(
     // same rule as search_passages.
     let key = key.filter(|_| !found.lanes.embedding_failed());
     let payload = CommunityPage {
-        derived,
+        derived_name: state.name_of_stem(&derived_id),
+        derived_id,
         algorithm: found.algorithm,
         stale: found.stale,
         revision: CommunityRevisions {
@@ -731,7 +744,7 @@ pub async fn search_communities(
             current_graph: current.graph,
         },
         // The plan entry names the SOURCE context — the caller asked
-        // about it; which artifact answered is `derived`'s job.
+        // about it; which artifact answered is `derived_id`'s job.
         plan: SearchPlan {
             contexts: vec![SearchContextPlan::of(
                 &id,

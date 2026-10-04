@@ -807,7 +807,8 @@ class CommunityPage:
     since the artifact was derived (the summaries describe an older graph;
     re-run ``taguru communities`` to refresh)."""
 
-    derived: str
+    derived_id: str
+    derived_name: str
     algorithm: str
     stale: bool
     revision: CommunityRevisions

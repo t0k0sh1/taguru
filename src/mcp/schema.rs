@@ -639,7 +639,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 5" },
                     "semantic_floor": { "type": "number", "description": "one-call override of the artifact's vector-lane cosine floor (0-1)" },
-                    "derived": { "type": "string", "description": "the artifact context to search; omitted means '{context}::communities'" }
+                    "derived_id": { "type": "string", "description": "the artifact context's id (the id column of list_contexts); omitted means the default artifact of `context`" }
                 }),
                 &["context", "query"],
             ),

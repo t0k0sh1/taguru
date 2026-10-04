@@ -148,7 +148,7 @@ classes:
     search_communities:
       route: "POST /contexts/{id}/communities/search"
       args: [query]
-      options: [limit, semantic_floor, derived]
+      options: [limit, semantic_floor, derived_id]
     analyze_communities: { route: "GET /contexts/{id}/communities" }
     explain_search_passages:
       route: "POST /contexts/{id}/sources/search/explain"

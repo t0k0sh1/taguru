@@ -29,14 +29,15 @@ use crate::remote::default_base_url;
 use crate::remote::{Api, ApiFailure};
 
 const CONSOLIDATION_USAGE: &str =
-    "usage: taguru consolidation --context NAME [--checks LIST] [--into NAME]
+    "usage: taguru consolidation --context ID [--checks LIST] [--into ID]
                              [--dry-run] [--config FILE] [--url URL] [URL]
 
 Judges a RUNNING server's consolidation-audit candidates (merge /
 contradiction / staleness — ADR 0012) with the extract LLM and stores
-the judgments as an ordinary derived context (default
-'NAME::consolidation'), one source per candidate keyed by its content
-fingerprint. Incremental by that fingerprint: a candidate already
+the judgments as an ordinary derived context, one source per
+candidate keyed by its content fingerprint. The derived context's id
+comes from the source's id (so renaming the source never detaches it);
+its display name defaults to 'NAME::consolidation'. Incremental by that fingerprint: a candidate already
 judged — accepted OR dismissed — is reused without an LLM call, until
 its evidence changes and its fingerprint moves with it.
 
@@ -47,7 +48,7 @@ APIs. --dry-run reports what would be judged without calling the LLM
 or writing anything.
 
 --checks LIST     comma-separated sections (default: merge,contradiction,staleness)
---into NAME       the judgment context (default: 'CONTEXT::consolidation')
+--into ID         the judgment context's id (default: derived from --context's id)
 
 The LLM rides the extract provider: TAGURU_EXTRACT_URL,
 TAGURU_EXTRACT_MODEL, TAGURU_EXTRACT_API_KEY (docs/extract.html) —
@@ -105,18 +106,18 @@ pub fn run(args: &[String]) -> i32 {
                     context = Some(name.clone());
                 }
                 Some(name) if name.starts_with('-') => {
-                    return usage("--context needs a name");
+                    return usage("--context needs a context id");
                 }
                 Some(_) => return usage("--context given twice"),
-                None => return usage("--context needs a name"),
+                None => return usage("--context needs a context id"),
             },
             "--into" => match rest.next() {
                 Some(name) if into.is_none() && !name.starts_with('-') => {
                     into = Some(name.clone());
                 }
-                Some(name) if name.starts_with('-') => return usage("--into needs a name"),
+                Some(name) if name.starts_with('-') => return usage("--into needs a context id"),
                 Some(_) => return usage("--into given twice"),
-                None => return usage("--into needs a name"),
+                None => return usage("--into needs a context id"),
             },
             "--checks" => match rest.next() {
                 Some(list) if !list.starts_with('-') => checks = list.clone(),
@@ -153,6 +154,14 @@ pub fn run(args: &[String]) -> i32 {
     let Some(context) = context else {
         return usage("--context is required");
     };
+    if let Some(into) = &into
+        && !crate::registry::is_context_id(into)
+    {
+        return usage(&format!(
+            "--into '{into}' is not a context id: it takes a lowercase hyphenated UUID, \
+             the id column of GET /contexts"
+        ));
+    }
     let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
     // SAFETY (same contract as serve/communities): applied while the
     // process is still single-threaded.
@@ -195,18 +204,22 @@ fn drive(
     let api = Api::new(base.to_string());
     eprintln!("consolidation → {base}");
     api.warn_on_version_skew("consolidation");
-    // `--context` takes the id (#964); the default artifact NAME is
+    // `--context` takes the id (#964); the artifact's display name is
     // built from the source's display name, never from the id.
-    let artifact = match into.map(str::to_string) {
-        Some(artifact) => artifact,
-        None => {
-            let row = api.get(&["contexts", context])?;
-            let name = row["name"]
-                .as_str()
-                .ok_or_else(|| format!("context '{context}': the row carries no name"))?;
-            format!("{name}::consolidation")
-        }
-    };
+    let row = api.get(&["contexts", context])?;
+    let source_name = row["name"]
+        .as_str()
+        .ok_or_else(|| format!("context '{context}': the row carries no name"))?
+        .to_string();
+    let artifact = format!("{source_name}::consolidation");
+    // The artifact is addressed by id alone (#966): `--into`'s, or the
+    // one derived from the source's id — no name lookup, so a rename of
+    // either context, or a second context with the same display name,
+    // cannot redirect the run. A first run registers it through the
+    // create block under `artifact`.
+    let artifact_id = into.map(str::to_string).unwrap_or_else(|| {
+        crate::registry::derived_context_id(&format!("{context}::consolidation"))
+    });
 
     let checks: Vec<&str> = checks
         .split(',')
@@ -231,16 +244,7 @@ fn drive(
     // The stored judgments this run can reuse. A manifest whose
     // detector differs marks every stored judgment incomparable —
     // loudly, the communities behavior for a changed algorithm.
-    // The artifact is found by NAME (the only handle `--into` gives)
-    // but written by id (#965): a context already carrying the name
-    // keeps its id, and a first run mints one the create block then
-    // registers.
-    let existing_artifact = api.context_id_by_name(&artifact)?;
-    let artifact_id = existing_artifact
-        .clone()
-        .unwrap_or_else(crate::registry::mint_context_id);
-    let (manifest_detector, judged) =
-        stored_judgments(&api, existing_artifact.as_deref(), &candidates)?;
+    let (manifest_detector, judged) = stored_judgments(&api, &artifact_id, &candidates)?;
     let comparable = match &manifest_detector {
         Some(detector) if detector != CONSOLIDATION_DETECTOR => {
             eprintln!(
@@ -301,7 +305,7 @@ fn drive(
         batches.push(judgment_batch(
             &artifact_id,
             &artifact,
-            context,
+            &format!("'{source_name}' ({context})"),
             candidate,
             &judgment,
             batches.is_empty(),
@@ -314,7 +318,7 @@ fn drive(
         api.import(&chunk)?;
     }
     report.push_str(&format!(
-        "judged {} ({} apply, {} dismiss), {} reused → '{artifact}'\n",
+        "judged {} ({} apply, {} dismiss), {} reused → '{artifact}' ({artifact_id})\n",
         fresh.len(),
         applied,
         dismissed,
@@ -387,7 +391,7 @@ fn flatten(audit: &ConsolidationAudit) -> Vec<Candidate> {
 /// exist yet) and the set of judgment sources already stored.
 fn stored_judgments(
     api: &Api,
-    artifact_id: Option<&str>,
+    artifact_id: &str,
     candidates: &[Candidate],
 ) -> Result<(Option<String>, BTreeSet<String>), String> {
     let mut wanted: Vec<String> = vec![MANIFEST_SOURCE.to_string()];
@@ -397,10 +401,7 @@ fn stored_judgments(
             .map(|candidate| judgment_source(&candidate.fingerprint)),
     );
     let body = json!({ "sources": wanted });
-    // A name nothing answers to is a first run.
-    let Some(artifact_id) = artifact_id else {
-        return Ok((None, BTreeSet::new()));
-    };
+    // An id nothing answers to is a first run.
     let found = match api.post_envelope(&["contexts", artifact_id, "sources", "lookup"], &body) {
         Ok(result) => result,
         Err(ApiFailure::NotFound { .. }) => return Ok((None, BTreeSet::new())),
@@ -507,7 +508,7 @@ fn judgment_batch(
         "evidence": candidate.payload,
     });
     let description = create.then(|| {
-        format!("Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete")
+        format!("Consolidation judgments for {context} (ADR 0012); derived, safe to delete")
     });
     let header = crate::format::source_header_line(
         &source,
@@ -547,13 +548,13 @@ fn judge_manifest(manifest: &Value) -> Result<(), String> {
     }
 }
 
-fn manifest_batch(artifact_id: &str, context: &str) -> String {
+fn manifest_batch(artifact_id: &str, context_id: &str) -> String {
     let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact_id, None);
     let manifest = json!({
         "type": MANIFEST_TYPE,
         "version": crate::format::FORMAT_VERSION,
         "detector": CONSOLIDATION_DETECTOR,
-        "context": context,
+        "context_id": context_id,
     });
     let passage = json!({"passage": manifest.to_string()});
     format!("{header}\n{passage}")
@@ -596,7 +597,7 @@ mod tests {
         let batch = judgment_batch(
             "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
             "sake::consolidation",
-            "sake",
+            "'sake' (3b1c6e0a-aaaa-4bbb-8ccc-0000000000aa)",
             &candidate,
             &json!({"verdict": "apply", "action": "alias", "rationale": "同一"}),
             true,

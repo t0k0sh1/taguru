@@ -32,6 +32,7 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
 use crate::api;
+use crate::registry::is_context_id;
 
 /// Paths that answer without credentials. `/live` (liveness) and
 /// `/health` (readiness — 503 while the write path is degraded) are
@@ -119,8 +120,9 @@ impl Role {
     }
 }
 
-/// One key's grant: its role, and the `contexts` it may touch (`None` =
-/// every `context`). The default — and the grant of any key
+/// One key's grant: its role, and the `contexts` it may touch, listed by
+/// context ID (`None` = every `context`; #966 — a display name repeats
+/// and changes under rename, an id does not). The default — and the grant of any key
 /// `TAGURU_KEY_GRANTS` does not name — is exactly what every key
 /// could do before grants existed: admin, everywhere.
 #[derive(Clone, Debug, PartialEq)]
@@ -139,15 +141,16 @@ impl Default for KeyGrant {
 }
 
 impl KeyGrant {
-    pub fn allows_context(&self, name: &str) -> bool {
+    /// Whether the grant covers the `context` with this ID.
+    pub fn allows_context(&self, id: &str) -> bool {
         self.contexts
             .as_ref()
-            .is_none_or(|allowed| allowed.contains(name))
+            .is_none_or(|allowed| allowed.contains(id))
     }
 }
 
 /// One entry of the `TAGURU_KEY_GRANTS` JSON: `"read"` as shorthand,
-/// or `{"role": "write", "contexts": ["sake"]}` in full.
+/// or `{"role": "write", "contexts": ["<context id>"]}` in full.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum GrantSpec {
@@ -246,10 +249,12 @@ impl Keyring {
 
     /// Applies `TAGURU_KEY_GRANTS` — a JSON object mapping key names to
     /// grants: `{"ci": "read", "bot": {"role": "write", "contexts":
-    /// ["sake"]}}`. Refusals are boot refusals, keyring-style: a grant
-    /// naming no configured key is a typo that would silently guard
-    /// nobody, and an empty `contexts` list would grant nothing at all —
-    /// omitting the field is how "every `context`" is said.
+    /// ["<context id>"]}}`. Refusals are boot refusals, keyring-style: a
+    /// grant naming no configured key is a typo that would silently guard
+    /// nobody, an empty `contexts` list would grant nothing at all —
+    /// omitting the field is how "every `context`" is said — and an entry
+    /// that is not a context id (a display name, say) would match no
+    /// `context` ever, silently locking the key out.
     pub fn apply_grants(&mut self, json: Option<&str>) -> Result<(), String> {
         let Some(json) = json else {
             return Ok(());
@@ -292,7 +297,16 @@ impl Keyring {
                          nothing — omit the field to grant every context"
                     ));
                 }
-                Some(list) => Some(Arc::new(list.into_iter().collect())),
+                Some(list) => {
+                    if let Some(bad) = list.iter().find(|entry| !is_context_id(entry)) {
+                        return Err(format!(
+                            "TAGURU_KEY_GRANTS key '{name}': '{bad}' is not a context id: \
+                             contexts takes lowercase hyphenated UUIDs — the id column of \
+                             GET /contexts — not display names"
+                        ));
+                    }
+                    Some(Arc::new(list.into_iter().collect()))
+                }
             };
             self.grants.insert(name, KeyGrant { role, contexts });
         }
@@ -909,11 +923,9 @@ pub async fn enforce_authorization(
     // is not a context and is not listed here mis-answers 403 for
     // scoped keys, never leaks open (a prefix test would silently
     // swallow future `/groups/...` sub-routes instead of forcing that
-    // decision). Grants still hold display names until #966, so the
-    // path's id maps back to the entry's current name before the
-    // grant is consulted; an id nothing answers to keeps its own
-    // spelling, which no name-listing grant can match — the same 403
-    // an unknown NAME always drew from a scoped key.
+    // decision). Grants list ids (#966), so the path's id is judged
+    // as is; an id nothing answers to is simply not in the grant — the
+    // same 403 an unknown context always drew from a scoped key.
     if grant.contexts.is_some()
         && !matches!(
             route.as_str(),
@@ -922,11 +934,10 @@ pub async fn enforce_authorization(
     {
         let context = api::path_param(&mut parts, "id").await;
         if let Some(context) = context {
-            // Grants list display names until #966; the path carries
-            // the id — the refusal names both so the caller can match
-            // it against either the directory or their grant.
-            let name = state.name_of_stem(&context);
-            if !grant.allows_context(&name) {
+            if !grant.allows_context(&context) {
+                // The grant is by id; the refusal also names the
+                // context's display name, for the human reading it.
+                let name = state.name_of_stem(&context);
                 return api::error(
                     api::ErrorCode::Forbidden,
                     format!(
@@ -1644,7 +1655,7 @@ mod tests {
             Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
         keyring
             .apply_grants(Some(
-                r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
+                r#"{"reader": "read", "bot": {"role": "write", "contexts": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
             ))
             .unwrap();
         assert_eq!(keyring.granted_key_count(), 2);
@@ -1655,13 +1666,23 @@ mod tests {
         // OAuth delegations ("key@client") inherit the key's grant.
         let delegated = keyring.grant_of("bot@claude-abc123");
         assert_eq!(delegated.role, Role::Write);
-        assert!(delegated.allows_context("sake"));
-        assert!(!delegated.allows_context("bunko"));
+        assert!(delegated.allows_context("cef2e28b-43f0-4b6c-8201-abab0785399f"));
+        assert!(!delegated.allows_context("ead6ef03-d61e-460c-933d-6d450c50a1e5"));
 
         for (grants, complaint) in [
             (r#"{"ghost": "read"}"#, "no configured key"),
             (r#"{"reader": "supreme"}"#, "unknown role"),
             (r#"{"reader": {"role": "read", "contexts": []}}"#, "empty"),
+            // A display name would match no context ever — a silent
+            // lock-out — so it refuses boot (#966).
+            (
+                r#"{"reader": {"role": "read", "contexts": ["sake"]}}"#,
+                "'sake' is not a context id",
+            ),
+            (
+                r#"{"reader": {"role": "read", "contexts": ["CEF2E28B-43F0-4B6C-8201-ABAB0785399F"]}}"#,
+                "is not a context id",
+            ),
             ("not json", "documented JSON shape"),
             ("", "empty"),
         ] {
@@ -1792,9 +1813,8 @@ mod tests {
 
     /// The authorization layer end to end: role refusals, `context`
     /// grants, and the untouched full-grant default, all in the
-    /// ApiError shape with a 403. Paths carry ids (#964) while the
-    /// grants still list display names, so the middleware's id→name
-    /// mapping is exactly what these assertions ride through.
+    /// ApiError shape with a 403. Paths carry ids (#964) and so do the
+    /// grants (#966): the middleware judges the path's id as is.
     #[tokio::test]
     async fn granted_keys_are_held_to_role_and_context() {
         let dir = crate::registry::test_support::scratch_dir("auth-grants");
@@ -1808,9 +1828,9 @@ mod tests {
         let mut keyring =
             Keyring::parse(None, Some("boss:tok-a,reader:tok-b,bot:tok-c".to_string())).unwrap();
         keyring
-            .apply_grants(Some(
-                r#"{"reader": "read", "bot": {"role": "write", "contexts": ["sake"]}}"#,
-            ))
+            .apply_grants(Some(&format!(
+                r#"{{"reader": "read", "bot": {{"role": "write", "contexts": ["{sake}"]}}}}"#,
+            )))
             .unwrap();
         let keyring = SharedKeyring::new(keyring);
         let app = || {
@@ -1914,9 +1934,9 @@ mod tests {
 
     /// The scope check reads the path param through the same decoding
     /// `Path` gives handlers, not the raw percent-encoded segment — an
-    /// id split across a percent-encoded byte must still resolve to
-    /// the context (and so to the granted display name), not be
-    /// refused for comparing unequal to the still-encoded form.
+    /// id split across a percent-encoded byte must still decode to
+    /// the granted id, not be refused for comparing unequal to the
+    /// still-encoded form.
     #[tokio::test]
     async fn scope_check_matches_a_percent_encoded_context_id() {
         let dir = crate::registry::test_support::scratch_dir("auth-encoded-id");
@@ -1926,7 +1946,9 @@ mod tests {
             .unwrap();
         let mut keyring = Keyring::parse(None, Some("bot:tok-c".to_string())).unwrap();
         keyring
-            .apply_grants(Some(r#"{"bot": {"role": "write", "contexts": ["sake"]}}"#))
+            .apply_grants(Some(&format!(
+                r#"{{"bot": {{"role": "write", "contexts": ["{sake}"]}}}}"#
+            )))
             .unwrap();
         let keyring = SharedKeyring::new(keyring);
         let gate = Arc::new(Gate {
@@ -1946,7 +1968,7 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(gate, require_bearer));
 
         // The first byte percent-encoded: decodes to the minted id,
-        // which resolves to "sake", exactly the granted context.
+        // exactly the granted one.
         let encoded = format!("%{:02x}{}", sake.as_bytes()[0], &sake[1..]);
         let response = app
             .oneshot(

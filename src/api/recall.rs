@@ -15,7 +15,7 @@ use crate::registry::{AccessError, AppState};
 use crate::schema::InstalledSchema;
 
 use super::aliases::{OneOrMany, as_refs, validate_positions};
-use super::groups::{scope_allows_id, scope_refusal};
+use super::groups::{scope_allows, scope_refusal};
 use super::invalid_context_ids;
 use super::{
     AppJson, ContextIdPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT,
@@ -168,8 +168,7 @@ pub async fn recall(
 /// list over the input-items cap; a direct id that is not a context id
 /// (a name, say — 400, before any lookup); a direct id beyond the key's
 /// grant ([`scope_refusal`] — whole-request, and before existence, so
-/// grants cannot probe ids; grants still speak display names, #966, so
-/// each id is read back to its name for the judgement); the first
+/// grants cannot probe ids); the first
 /// direct id that does not exist (`no_context`, before any `context` is
 /// searched); and the first `group` name that is not a `group`
 /// (`no_group` — `group` rows are visible to every key, so that refusal
@@ -215,9 +214,7 @@ pub(super) fn cross_targets(
         .into_iter()
         .filter(|id| seen.insert(id.clone()))
         .collect();
-    // Grants judge display names (#966 moves them to ids).
-    let direct_names: Vec<String> = ids.iter().map(|id| state.name_of_stem(id)).collect();
-    if let Some(refusal) = scope_refusal(grant, key, &direct_names, started_at) {
+    if let Some(refusal) = scope_refusal(state, grant, key, &ids, started_at) {
         return Err(Box::new(refusal));
     }
     // A missing listed context refuses now, exactly as the old
@@ -241,7 +238,7 @@ pub(super) fn cross_targets(
             Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
         };
         for id in resolved {
-            if scope_allows_id(state, grant, &id) && seen.insert(id.clone()) {
+            if scope_allows(grant, &id) && seen.insert(id.clone()) {
                 ids.push(id);
             }
         }

@@ -63,30 +63,20 @@ pub struct GroupEntry {
     pub fingerprint: String,
 }
 
-/// [`scope_allows`] for a member held by id: grants still speak display
-/// names (#966 moves them to ids), so the id is read back to its
-/// current name first. A member the registry no longer holds is judged
-/// as its bare id, which no name-keyed grant allows — filtered out.
-pub(super) fn scope_allows_id(
-    state: &AppState,
-    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
-    id: &str,
-) -> bool {
-    grant.is_none() || scope_allows(grant, &state.name_of_stem(id))
-}
-
-/// Whether the key's grant lets it see the named `context` — no grant
-/// means everything is visible. The one predicate behind every place
+/// Whether the key's grant lets it see the `context` with this id — no
+/// grant means everything is visible (grants list ids, #966; a member
+/// the registry no longer holds is simply not in the grant, so it is
+/// filtered out). The one predicate behind every place
 /// that FILTERS to the grant rather than refusing ([`group_entry`],
 /// [`cross_targets`]'s `group` resolution), so "the slice a context-scoped key
 /// sees" is defined exactly once and the two surfaces cannot drift.
 pub(super) fn scope_allows(
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
-    name: &str,
+    id: &str,
 ) -> bool {
     grant
         .as_ref()
-        .is_none_or(|axum::Extension(grant)| grant.allows_context(name))
+        .is_none_or(|axum::Extension(grant)| grant.allows_context(id))
 }
 
 /// The grant-filtered view of one `group` row. Deliberately different from
@@ -110,7 +100,7 @@ fn group_entry(
     Ok(GroupEntry {
         name,
         description: record.description,
-        context_ids: scoped_member_contexts(state, record.context_ids, grant),
+        context_ids: scoped_member_contexts(record.context_ids, grant),
         groups: record.groups,
         fingerprint,
     })
@@ -168,7 +158,7 @@ fn group_fingerprint(
         if deadline.expired() || injected_fingerprint_loop_expiry() {
             return Err(DeadlineExceeded);
         }
-        if !scope_allows_id(state, grant, &context) {
+        if !scope_allows(grant, &context) {
             continue;
         }
         let Some(revision) = state.context_revision(&context) else {
@@ -236,26 +226,27 @@ fn injected_fingerprint_loop_expiry() -> bool {
 /// generic over the collection each output shape wants, so the
 /// surfaces cannot drift in what a context-scoped key sees.
 pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
-    state: &AppState,
     context_ids: BTreeSet<String>,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> C {
     context_ids
         .into_iter()
-        .filter(|id| scope_allows_id(state, grant, id))
+        .filter(|id| scope_allows(grant, id))
         .collect()
 }
 
-/// The gate for a context-scoped key on any operation whose `context` names
+/// The gate for a context-scoped key on any operation whose `context` ids
 /// ride the body or the stored record rather than the path — `group` writes
 /// (through [`scoped_group_refusal`], at membership granularity, the
 /// import gate's pre-apply judgement) and the cross-`context` searches:
 /// one involved `context` beyond the grant refuses the request whole.
 /// Checked BEFORE existence on purpose: existence-first would answer
-/// 404 for a name the grant excludes and 403 for a live one, handing
-/// a context-scoped key an oracle for which `context` names exist beyond
-/// its grant.
+/// 404 for an id the grant excludes and 403 for a live one, handing
+/// a context-scoped key an oracle for which `context` ids exist beyond
+/// its grant. The refusal names the id the grant is judged by and, for
+/// the human reading it, the context's current display name.
 pub(super) fn scope_refusal<'a>(
+    state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     involved: impl IntoIterator<Item = &'a String>,
@@ -270,29 +261,12 @@ pub(super) fn scope_refusal<'a>(
     Some(error(
         ErrorCode::Forbidden,
         format!(
-            "key '{}' has no grant on context '{refused}'; nothing was applied",
+            "key '{}' has no grant on context '{}' ({refused}); nothing was applied",
             key_name(key),
+            state.name_of_stem(refused),
         ),
         started_at,
     ))
-}
-
-/// [`scope_refusal`] over `context` ids: grants judge display names
-/// (#966 moves them to ids), so each id is read back to its current
-/// name once, here — which is also how the refusal names the context,
-/// the way its operator wrote the grant.
-pub(super) fn scope_refusal_ids(
-    state: &AppState,
-    grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
-    key: &Option<axum::Extension<crate::auth::AuthKey>>,
-    ids: &BTreeSet<String>,
-    started_at: Instant,
-) -> Option<Response> {
-    if grant.is_none() {
-        return None;
-    }
-    let names: BTreeSet<String> = ids.iter().map(|id| state.name_of_stem(id)).collect();
-    scope_refusal(grant, key, &names, started_at)
 }
 
 /// The gate every `group` write runs, wrapped around
@@ -314,7 +288,7 @@ fn scoped_group_refusal<'r, 'd>(
     }
     let mut involved = state.group_context_closures(closure_roots);
     involved.extend(direct.into_iter().cloned());
-    scope_refusal_ids(state, grant, key, &involved, started_at)
+    scope_refusal(state, grant, key, &involved, started_at)
 }
 
 /// The `group` directory: every `group`'s name, description, member

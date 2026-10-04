@@ -31,7 +31,7 @@ use crate::registry::{AppState, PassageSearchLanes};
 
 use crate::api::aliases::OneOrMany;
 use crate::api::communities::{
-    CommunityLaneOutcome, check_derived_scope, community_hits, derived_context_name,
+    CommunityLaneOutcome, check_derived_scope, community_hits, derived_context_id_of,
 };
 use crate::api::resolve::{ResolveRequest, resolve_served};
 use crate::api::sources::{
@@ -442,9 +442,8 @@ pub async fn assemble_evidence(
         tracing::info!(taguru.reason = "communities_disabled", "taguru.skip");
         LanePlan::skipped("include_communities was false")
     } else {
-        let source_name = state.name_of_stem(&id);
-        let derived = derived_context_name(&source_name);
-        if let Some(refusal) = check_derived_scope(&grant, &source_name, &derived, started_at) {
+        let derived_id = derived_context_id_of(&id);
+        if let Some(refusal) = check_derived_scope(&state, &grant, &id, &derived_id, started_at) {
             return refusal;
         }
         if deadline.expired() {
@@ -466,7 +465,7 @@ pub async fn assemble_evidence(
         match community_hits(
             &state,
             &id,
-            &derived,
+            &derived_id,
             &canonical_query,
             search_limit,
             request.semantic_floor,
