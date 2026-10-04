@@ -932,18 +932,18 @@ pub async fn enforce_authorization(
         )
     {
         let context = api::path_param(&mut parts, "id").await;
-        if let Some(context) = context {
-            if !grant.allows_context(&context) {
-                // Echoes the id as given and nothing the registry
-                // knows about it: a display name here would tell a
-                // scoped key both that an out-of-grant id is live and
-                // what it is called (an existence oracle).
-                return api::error(
-                    api::ErrorCode::Forbidden,
-                    format!("key '{}' has no grant on context '{context}'", key.0),
-                    started_at,
-                );
-            }
+        if let Some(context) = context
+            && !grant.allows_context(&context)
+        {
+            // Echoes the id as given and nothing the registry knows
+            // about it: a display name here would tell a scoped key
+            // both that an out-of-grant id is live and what it is
+            // called (an existence oracle).
+            return api::error(
+                api::ErrorCode::Forbidden,
+                format!("key '{}' has no grant on context '{context}'", key.0),
+                started_at,
+            );
         }
     }
     // The grant extension came in on the request (the gate stamped
@@ -1902,13 +1902,10 @@ mod tests {
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("({bunko})")),
-            "{body}"
-        );
+        let message = body["error"].as_str().unwrap();
+        assert!(message.contains(&format!("'{bunko}'")), "{body}");
+        // The id as given, never the display name (an existence oracle).
+        assert!(!message.contains("bunko'"), "{body}");
         assert_eq!(
             send("DELETE", format!("/contexts/{sake}"), "tok-c")
                 .await
