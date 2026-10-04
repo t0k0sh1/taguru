@@ -231,7 +231,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         segments.insert(
             key,
             SegmentReport {
-                context: batch.context.clone(),
+                context_id: batch.context_id.clone(),
                 counts: judged.counts,
                 unanchored,
             },
@@ -468,7 +468,7 @@ impl Counts {
 
 #[derive(Serialize)]
 struct SegmentReport {
-    context: String,
+    context_id: String,
     #[serde(flatten)]
     counts: Counts,
     /// Every association that is not strictly anchored, or cites a
@@ -765,7 +765,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("prior.jsonl"),
-            "{\"type\": \"source\",\"context\":\"c\",\"id\":\"prior.md\"}\n\
+            "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"prior.md\"}\n\
              {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
              {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
         )
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn listing_lines_cap_and_count_by_reason() {
         let segment = SegmentReport {
-            context: "c".to_string(),
+            context_id: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![
                 named(Some(2), false, false, Some(true)),
@@ -1017,7 +1017,7 @@ mod tests {
         // A reason with a zero count is left out of the header, not
         // printed as "0 alias-only".
         let one_reason = SegmentReport {
-            context: "c".to_string(),
+            context_id: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![named(Some(2), false, false, None)],
         };
@@ -1026,7 +1026,7 @@ mod tests {
             "a.md: 1 unanchored"
         );
         let alias_and_locator = SegmentReport {
-            context: "c".to_string(),
+            context_id: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![named(Some(2), false, true, Some(false))],
         };
@@ -1035,7 +1035,7 @@ mod tests {
             "a.md: 1 alias-only, 1 invalid locator(s)"
         );
         let clean = SegmentReport {
-            context: "c".to_string(),
+            context_id: "c".to_string(),
             counts: Counts::default(),
             unanchored: Vec::new(),
         };
@@ -1053,7 +1053,7 @@ mod tests {
         let file = dir.join("b.jsonl");
         std::fs::write(
             &file,
-            "{\"type\": \"source\",\"context\":\"c\",\"id\":\"b.md\"}\n\
+            "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"b.md\"}\n\
              {\"passage\":\"本文\"}\n\
              {\"subject\":\"a\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n\
              {\"alias\":\"x\",\"canonical\":\"a\",\"kind\":\"concept\"}\n\

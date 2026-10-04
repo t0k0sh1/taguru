@@ -1654,7 +1654,8 @@ class AsyncContext:
     ) -> PromoteOutcome:
         """Move named scratch sources whole into the established
         ``context`` ``into`` (ADR 0018) — the export/import round trip in
-        one call, without re-extraction.
+        one call, without re-extraction. ``into`` is the destination's
+        id (the ``id`` of its directory row), not its name (#965).
 
         Each source moves whole (passage, date, tags, only its own
         share of every edge's weight); source ids survive, and

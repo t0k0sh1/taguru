@@ -72,7 +72,7 @@ const testSchema = (
   closedLabels = false,
 ): SchemaDocument => ({
   type: "schema",
-  version: "2026-09-17",
+  version: "2026-10-01",
   mode: mode as SchemaDocument["mode"],
   closed_labels: closedLabels,
   types: Object.fromEntries(
@@ -274,7 +274,7 @@ describe("the producer parity contract", () => {
     expect(PROMPT_VERSION).toBe(6);
     // The file-format revision (src/format.rs FORMAT_VERSION): pinned as a
     // literal so a drift from the Rust side is a visible edit here.
-    expect(FORMAT_VERSION).toBe("2026-09-17");
+    expect(FORMAT_VERSION).toBe("2026-10-01");
     const prompt = systemPrompt([], 0);
     expect(prompt).toContain(
       "the paragraph whose sentences state it, never a heading-only paragraph",
@@ -961,15 +961,22 @@ describe("batch rendering", () => {
       2,
       2,
     );
-    const body = renderBatch("sake", "docs/aomine.md", "酒蔵の記憶", extraction, "一段落目。\n\n二段落目。");
+    const body = renderBatch(
+      "cef2e28b-43f0-4b6c-8201-abab0785399f",
+      "sake",
+      "docs/aomine.md",
+      "酒蔵の記憶",
+      extraction,
+      "一段落目。\n\n二段落目。",
+    );
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(5);
     expect(lines[0]).toEqual({
       type: "source",
       version: FORMAT_VERSION,
       id: "docs/aomine.md",
-      context: "sake",
-      create: { description: "酒蔵の記憶" },
+      context_id: "cef2e28b-43f0-4b6c-8201-abab0785399f",
+      create: { name: "sake", description: "酒蔵の記憶" },
     });
     expect(lines[1]).toEqual({ passage: "一段落目。\n\n二段落目。" });
     expect(lines[2]).toEqual({ paragraph: 1, question: "二行目には何が書いてある?" });
@@ -983,7 +990,7 @@ describe("batch rendering", () => {
       0,
       1,
     );
-    const body = renderBatch("ctx", "src", null, extraction, null);
+    const body = renderBatch("cef2e28b-43f0-4b6c-8201-abab0785399f", null, "src", null, extraction, null);
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(2);
     expect(lines[1]).not.toHaveProperty("paragraph");
@@ -995,7 +1002,8 @@ describe("batch rendering", () => {
     // section-then-locator emission order (src/export.rs:447-464).
     const extraction = merge([output({ questions: [{ paragraph: 0, question: "q?" }] })], 1, 2);
     const body = renderBatch(
-      "ctx",
+      "cef2e28b-43f0-4b6c-8201-abab0785399f",
+      null,
       "src",
       null,
       extraction,
@@ -1017,7 +1025,8 @@ describe("batch rendering", () => {
     // otherwise import refuses the batch outright (src/ingest.rs:1518-1524).
     const extraction = merge([], 0, 1);
     const body = renderBatch(
-      "ctx",
+      "cef2e28b-43f0-4b6c-8201-abab0785399f",
+      null,
       "src",
       null,
       extraction,
@@ -1046,7 +1055,7 @@ describe("batch rendering", () => {
       duplicates: 0,
       dropped: 0,
     };
-    const body = renderBatch("ctx", "src", null, extraction, null);
+    const body = renderBatch("cef2e28b-43f0-4b6c-8201-abab0785399f", null, "src", null, extraction, null);
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(3);
     expect(lines[1]).toEqual({ alias: "a", canonical: "b,c", kind: "concept" });
@@ -1155,9 +1164,9 @@ describe("renderBatch single-batch invariant (issue #737)", () => {
     // the passage on one line with its newlines escaped, so the spoofed
     // header can never become a stream line of its own.
     const hostilePassage =
-      '一段落目。\n{"type": "source", "context": "evil", "id": "x"}\n二段落目。';
+      '一段落目。\n{"type": "source", "context_id": "evil", "id": "x"}\n二段落目。';
     const extraction = merge([output({ associations: [association("a", "b", "c", 1.0)] })], 0, 1);
-    const body = renderBatch("sake", "doc.md", null, extraction, hostilePassage);
+    const body = renderBatch("cef2e28b-43f0-4b6c-8201-abab0785399f", null, "doc.md", null, extraction, hostilePassage);
     const lines = body.trim().split("\n").map((line) => JSON.parse(line));
     const headers = lines.filter((line) => line.type === "source");
     expect(headers).toHaveLength(1);
@@ -1165,7 +1174,7 @@ describe("renderBatch single-batch invariant (issue #737)", () => {
       type: "source",
       version: FORMAT_VERSION,
       id: "doc.md",
-      context: "sake",
+      context_id: "cef2e28b-43f0-4b6c-8201-abab0785399f",
     });
     expect(lines[1]).toEqual({ passage: hostilePassage });
   });

@@ -36,7 +36,7 @@ pub struct ImportQuery {
 /// per-file report line carries.
 #[derive(Serialize)]
 pub struct ImportOutcome {
-    pub context: String,
+    pub context_id: String,
     pub source: String,
     pub created: bool,
     pub retracted: usize,
@@ -90,7 +90,7 @@ pub struct ImportStreamOutcome {
 /// would be worse than none (ADR 0009 §13).
 #[derive(Serialize)]
 pub struct SchemaImportOutcome {
-    pub context: String,
+    pub context_id: String,
     pub mode: &'static str,
     pub types: usize,
     pub relations: usize,
@@ -102,11 +102,11 @@ pub struct SchemaImportOutcome {
 /// apply_schema_record`] returns — one computation, not two that
 /// could drift.
 pub(crate) fn schema_import_outcome(
-    context: &str,
+    context_id: &str,
     document: &crate::schema::SchemaDocument,
 ) -> SchemaImportOutcome {
     SchemaImportOutcome {
-        context: context.to_string(),
+        context_id: context_id.to_string(),
         mode: document.mode.as_str(),
         types: document.types.len(),
         relations: document.relations.len(),
@@ -135,7 +135,7 @@ pub(crate) fn import_outcome(
     applied: &crate::ingest::Applied,
 ) -> ImportOutcome {
     ImportOutcome {
-        context: batch.context.clone(),
+        context_id: batch.context_id.clone(),
         source: batch.source.clone(),
         created: applied.created,
         retracted: applied.retracted,
@@ -273,7 +273,7 @@ pub(super) fn import_refusal(
         // The five AccessError arms — status, metric, message — live
         // in access_error_noted; import just supplies the batch note.
         crate::ingest::ApplyRefusal::Access(failure) => {
-            access_error_noted(state, failure, &batch.context, note, started_at)
+            access_error_noted(state, failure, &batch.context_id, note, started_at)
         }
         refusal @ crate::ingest::ApplyRefusal::NoContext(_) => {
             let (integrity, durable_batches) = stream_integrity(durable_batches, dry_run);
@@ -310,7 +310,7 @@ pub(super) fn import_refusal(
             // and the status keeps the capacity/conflict distinction
             // every partial write reports.
             if applied > 0 {
-                state.note_write(&batch.context);
+                state.note_write(&batch.context_id);
             }
             let code = if full {
                 ErrorCode::StorageFull
@@ -672,7 +672,7 @@ pub(super) fn import_batch_note(
         "source file {} of {total} (context '{}', source '{}') {verb} — the {done} source file(s) \
          before it {clause}; {next_step}: ",
         index + 1,
-        batch.context,
+        batch.context_id,
         batch.source,
     )
 }
@@ -857,7 +857,7 @@ pub async fn import_batch(
         && let Some(refused) = stream
             .batches
             .iter()
-            .find(|batch| !grant.allows_context(&batch.context))
+            .find(|batch| !grant.allows_context(&batch.display_name(&state)))
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -865,7 +865,7 @@ pub async fn import_batch(
                 "key '{}' has no grant on context '{}' (source '{}'); nothing \
                  was applied",
                 key_name(&key),
-                refused.context,
+                refused.display_name(&state),
                 refused.source
             ),
             RefusalDetail {
@@ -880,17 +880,18 @@ pub async fn import_batch(
     // just below, since schemas install before groups restore (ADR
     // 0009 §13).
     if let Some(axum::Extension(grant)) = &grant
-        && let Some((context, _)) = stream
+        && let Some((context_id, _)) = stream
             .schemas
             .iter()
-            .find(|(context, _)| !grant.allows_context(context))
+            .find(|(context_id, _)| !grant.allows_context(&state.name_of_stem(context_id)))
     {
         return validation_error(
             ErrorCode::Forbidden,
             format!(
-                "key '{}' has no grant on context '{context}' (a schema record); nothing \
+                "key '{}' has no grant on context '{}' (a schema record); nothing \
                  was applied",
-                key_name(&key)
+                key_name(&key),
+                state.name_of_stem(context_id)
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),
@@ -970,7 +971,7 @@ pub async fn import_batch(
             // behind this for the batch that crosses mid-apply.
             if !query.dry_run
                 && batch.carries_growth()
-                && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
+                && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context_id)
             {
                 state.metrics().record_storage_quota_refusal();
                 return Err(Box::new(stream_refusal(
@@ -980,7 +981,11 @@ pub async fn import_batch(
                     outcomes.len(),
                     query.dry_run,
                     ErrorCode::StorageFull,
-                    crate::registry::storage_quota_message(&batch.context, used, ceiling),
+                    crate::registry::storage_quota_message(
+                        &batch.display_name(&state),
+                        used,
+                        ceiling,
+                    ),
                     QUOTA_NEXT_STEP,
                     started_at,
                 )));
@@ -1003,7 +1008,7 @@ pub async fn import_batch(
                     tracing::info!(
                         target: "taguru::audit",
                         key = %key_name(&key),
-                        context = %batch.context,
+                        context = %batch.context_id,
                         source = %batch.source,
                         created = applied.created,
                         retracted = applied.retracted,
@@ -1242,13 +1247,14 @@ pub async fn export_context(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    // The stream's `context` fields carry the DISPLAY name, not the
-    // path's id: import headers stay name-addressed until #965, so an
-    // exported stream must round-trip through `POST /import` as-is.
+    // The stream's `context_id` fields carry the path's id and the
+    // first batch's create block the display name (#965), so an exported
+    // stream round-trips through `POST /import` as-is — onto a server
+    // that already holds the id, or one that lacks it.
     let rendered = tokio::task::block_in_place(|| {
         state
             .export_context(&id, deadline)
-            .map(|snapshot| crate::export::render(&state.name_of_stem(&id), &snapshot, deadline))
+            .map(|snapshot| crate::export::render(&id, &snapshot, deadline))
     });
     export_response(&state, &id, rendered, deadline, started_at)
 }
@@ -1350,9 +1356,9 @@ mod tests {
         AppState::boot(dir, usize::MAX, None).unwrap()
     }
 
-    fn schema_line(context: &str) -> String {
+    fn schema_line(context_id: &str) -> String {
         format!(
-            "{{\"type\": \"schema\", \"context\": \"{context}\", \"mode\": \"warn\", \
+            "{{\"type\": \"schema\", \"context_id\": \"{context_id}\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
              \"relations\": {{}}}}\n"
         )
@@ -1368,6 +1374,43 @@ mod tests {
             AppBytes(axum::body::Bytes::from(body.to_string())),
         )
         .await
+    }
+
+    /// A batch that got partway (`Partial`) wrote something: its
+    /// context's write counter moves exactly when `applied > 0`.
+    #[test]
+    fn a_partial_refusal_counts_as_a_write_only_when_something_landed() {
+        let state = scratch_state("partial-note-write");
+        state.create("sake", ContextMeta::default()).unwrap();
+        let context_id = state.id_of("sake");
+        let stream = format!(
+            "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"a.md\"}}\n"
+        );
+        let parsed = crate::ingest::parse_stream(std::io::Cursor::new(stream)).unwrap();
+        let batch = &parsed.batches[0];
+        let refuse = |applied: usize| {
+            import_refusal(
+                &state,
+                batch,
+                crate::ingest::ApplyRefusal::Partial {
+                    applied,
+                    message: "boom".to_string(),
+                    full: false,
+                },
+                "",
+                0,
+                0,
+                false,
+                Instant::now(),
+            )
+        };
+        let writes = || state.directory_entry("sake").unwrap().usage.writes;
+
+        assert_eq!(writes(), 0);
+        refuse(0);
+        assert_eq!(writes(), 0, "nothing landed: not a write");
+        refuse(3);
+        assert_eq!(writes(), 1, "three ops landed: one write noted");
     }
 
     /// `true` once `context` has an installed schema, `false` for a
@@ -1389,7 +1432,11 @@ mod tests {
         let state = scratch_state("schema-loop-budget-no-batches");
         state.create("sake", ContextMeta::default()).unwrap();
         state.create("bunko", ContextMeta::default()).unwrap();
-        let body = format!("{}{}", schema_line("sake"), schema_line("bunko"));
+        let body = format!(
+            "{}{}",
+            schema_line(&state.id_of("sake")),
+            schema_line(&state.id_of("bunko"))
+        );
 
         // The first record installs for real; the second's deadline
         // check reports expired — proving the check runs on a LATER
@@ -1440,10 +1487,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_loop_counts_a_landed_batch_of_the_same_stream_in_durable_batches() {
         let state = scratch_state("schema-loop-budget-with-batch");
-        let body = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n"
+        let body = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n"
             .to_string()
-            + &schema_line("sake");
+            + &schema_line("cef2e28b-43f0-4b6c-8201-abab0785399f");
 
         // The batch lands; the schema loop's very first iteration
         // reports expired.
@@ -1475,10 +1522,12 @@ mod tests {
         );
     }
 
-    fn one_batch(context: &str) -> crate::ingest::Batch {
+    fn one_batch(context_id: &str) -> crate::ingest::Batch {
         let stream = crate::ingest::parse_stream(
-            format!("{{\"type\": \"source\", \"context\": \"{context}\", \"id\": \"a.md\"}}\n")
-                .as_bytes(),
+            format!(
+                "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"a.md\"}}\n"
+            )
+            .as_bytes(),
         )
         .unwrap();
         stream.batches.into_iter().next().unwrap()
@@ -1490,7 +1539,7 @@ mod tests {
     /// generic `Access` arm's bare message.
     #[tokio::test]
     async fn quota_refusal_from_apply_reroutes_a_deep_write_path_quota_refusal() {
-        let batch = one_batch("sake");
+        let batch = one_batch("cef2e28b-43f0-4b6c-8201-abab0785399f");
         let refusal = crate::ingest::ApplyRefusal::Access(AccessError::QuotaExceeded(
             "context 'sake' is at its storage quota".to_string(),
         ));
@@ -1527,7 +1576,7 @@ mod tests {
     /// `Access(QuotaExceeded(_))`.
     #[test]
     fn quota_refusal_from_apply_ignores_every_other_refusal_kind() {
-        let batch = one_batch("sake");
+        let batch = one_batch("cef2e28b-43f0-4b6c-8201-abab0785399f");
         let refusal = crate::ingest::ApplyRefusal::Io("disk full".to_string());
         assert!(
             quota_refusal_from_apply(

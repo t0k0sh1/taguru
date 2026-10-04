@@ -448,7 +448,7 @@ describe("sources and citations", () => {
     expect(lines.length).toBeGreaterThan(0);
     const header = JSON.parse(lines[0]!);
     expect(header.type).toBe("communities");
-    expect(header.version).toBe("2026-09-17");
+    expect(header.version).toBe("2026-10-01");
     expect(header.context).toBe(name);
     await client.contexts.delete(contextId);
   });
@@ -462,18 +462,17 @@ describe("transfer and maintenance", () => {
     await ctx.addAliases({ concepts: { Aomine: "青嶺酒造" } });
     const stream = await ctx.export();
 
+    // The stream names its context by id (#965): a restore under a fresh id
+    // and name is a copy, not a replace of the original.
     const restoredName = `${name}-restored`;
-    const renamed = stream.replaceAll(`"${name}"`, `"${restoredName}"`);
+    const restoredId = randomUUID();
+    const renamed = stream
+      .replaceAll(contextId, restoredId)
+      .replaceAll(`"${name}"`, `"${restoredName}"`);
     const outcomes = await client.importBatches(renamed);
-    expect(outcomes.batches.every((o) => o.context === restoredName)).toBe(true);
+    expect(outcomes.batches.every((o) => o.context_id === restoredId)).toBe(true);
 
-    let restoredId: string | undefined;
-    for await (const listed of client.contexts.iter()) {
-      if (listed.name === restoredName) {
-        restoredId = listed.id;
-      }
-    }
-    const restored = client.context(restoredId!);
+    const restored = client.context(restoredId);
     const before = (await restored.query({ subject: "青嶺酒造", label: "杜氏" })).matches[0]!;
     await client.importBatches(renamed);
     const after = (await restored.query({ subject: "青嶺酒造", label: "杜氏" })).matches[0]!;
@@ -511,15 +510,15 @@ describe("transfer and maintenance", () => {
     const destinationId = (await client.contexts.create(destination)).id;
     const scratch = client.context(contextId);
 
-    const preview = await scratch.promote(destination, ["docs/aomine.md"], { dry_run: true });
+    const preview = await scratch.promote(destinationId, ["docs/aomine.md"], { dry_run: true });
     expect(preview.batches).toHaveLength(1);
     expect(preview.audit).toBeUndefined();
     // A dry run writes nothing.
     expect((await client.context(destinationId).listSources()).total).toBe(0);
 
-    const outcome = await scratch.promote(destination, ["docs/aomine.md"]);
+    const outcome = await scratch.promote(destinationId, ["docs/aomine.md"]);
     expect(outcome.batches[0]!.source).toBe("docs/aomine.md");
-    expect(outcome.batches[0]!.context).toBe(destination);
+    expect(outcome.batches[0]!.context_id).toBe(destinationId);
     expect(outcome.audit).toBeDefined();
     expect(outcome.audit!.detector).toBe("consolidation/1");
     expect((await client.context(destinationId).listSources()).total).toBe(1);
@@ -852,7 +851,7 @@ describe("groups and cross-context search", () => {
       contexts: string[];
     };
     expect(record.type).toBe("group");
-    expect(record.version).toBe("2026-09-17");
+    expect(record.version).toBe("2026-10-01");
     expect(record.id).toBe(group);
     expect(record.contexts).toEqual([sake, tea].sort());
 

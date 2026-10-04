@@ -400,7 +400,13 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let (code, stdout, stderr) = run_extract(
         &out,
         &[],
-        &["--dry-run", "--context", "sake", aomine_src, takase_src],
+        &[
+            "--dry-run",
+            "--context",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            aomine_src,
+            takase_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.matches("would extract").count(), 2, "{stdout}");
@@ -456,6 +462,8 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         &[
             "--lossy",
             "--context",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            "--name",
             "sake",
             "--description",
             "酒蔵の記憶",
@@ -556,6 +564,8 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
         &[
             "--lossy",
             "--context",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            "--name",
             "sake",
             "--description",
             "酒蔵の記憶",
@@ -579,7 +589,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
             "--lossy",
             "--force",
             "--context",
-            "sake",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
             aomine_src,
             takase_src,
         ],
@@ -598,7 +608,13 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--lossy", "--context", "vats", aomine_src, takase_src],
+        &[
+            "--lossy",
+            "--context",
+            "be6cba13-824c-4d6c-877d-f4c5ddedc3e0",
+            aomine_src,
+            takase_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
@@ -623,8 +639,16 @@ fn extract_parallel_output_matches_the_sequential_run_byte_for_byte() {
     let doc_src = doc.to_str().unwrap();
 
     let probe = batch_dir("extract-par-probe");
-    let (code, dry_stdout, stderr) =
-        run_extract(&probe, &[], &["--dry-run", "--context", "c", doc_src]);
+    let (code, dry_stdout, stderr) = run_extract(
+        &probe,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
     let total_chunks = chunk_count_from_dry_run(&dry_stdout);
     assert!(
@@ -648,7 +672,7 @@ fn extract_parallel_output_matches_the_sequential_run_byte_for_byte() {
             ("TAGURU_EXTRACT_URL", seq_url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {seq_stdout}\nstderr: {stderr}");
     assert!(seq_stdout.contains("1 written"), "{seq_stdout}");
@@ -662,7 +686,13 @@ fn extract_parallel_output_matches_the_sequential_run_byte_for_byte() {
             ("TAGURU_EXTRACT_URL", par_url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--parallel", "4", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--parallel",
+            "4",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {par_stdout}\nstderr: {stderr}");
 
@@ -715,7 +745,13 @@ fn extract_rejects_a_non_positive_parallel_flag() {
     let (code, _, stderr) = run_extract(
         &out,
         &[],
-        &["--context", "c", "--parallel", "0", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--parallel",
+            "0",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--parallel needs an integer"), "{stderr}");
@@ -725,7 +761,7 @@ fn extract_rejects_a_non_positive_parallel_flag() {
         &[],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--parallel",
             "nope",
             doc.to_str().unwrap(),
@@ -754,8 +790,15 @@ fn extract_rejects_a_non_positive_parallel_env_var() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_PARALLEL", bad),
         ];
-        let (code, _, stderr) =
-            run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+        let (code, _, stderr) = run_extract(
+            &out,
+            &provider,
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                doc.to_str().unwrap(),
+            ],
+        );
         assert_eq!(code, 2, "{bad}: {stderr}");
         assert!(
             stderr.contains("TAGURU_EXTRACT_PARALLEL needs an integer"),
@@ -789,7 +832,13 @@ fn extract_parallel_flag_overrides_the_environment_variable() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--context", "c", "--parallel", "2", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--parallel",
+            "2",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -810,8 +859,16 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
     let doc_src = doc.to_str().unwrap();
     let out = batch_dir("extract-earlystop-out");
 
-    let (code, dry_stdout, stderr) =
-        run_extract(&out, &[], &["--dry-run", "--context", "c", doc_src]);
+    let (code, dry_stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
     let total_chunks = chunk_count_from_dry_run(&dry_stdout);
     let failing_index = 1usize;
@@ -852,7 +909,7 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--parallel",
             &workers.to_string(),
             doc_src,
@@ -917,7 +974,7 @@ fn a_late_chunk_failure_names_its_checkpoints_and_a_rerun_resumes_from_them() {
     let out = batch_dir("extract-resume-hint-out");
     let args = [
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--chunk-bytes",
         "700",
         doc.to_str().unwrap(),
@@ -992,7 +1049,11 @@ fn a_transient_five_hundred_recovers_on_retry() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -1024,7 +1085,11 @@ fn a_429_with_retry_after_is_honored_before_the_retry() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     let elapsed = started.elapsed();
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -1063,7 +1128,12 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--candidates", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--candidates",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -1096,7 +1166,11 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
@@ -1146,7 +1220,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
         ],
         &[
             "--context",
-            "ops",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
             "--coverage",
             "--diagnostics-out",
             diagnostics.to_str().unwrap(),
@@ -1218,7 +1292,12 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "ops", "--coverage", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
+            "--coverage",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
@@ -1256,7 +1335,7 @@ fn extract_suffixed_source_ids_respect_the_name_cap() {
         ],
         &[
             "--context",
-            "ops",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
             "--source-id",
             &over,
             docs.to_str().unwrap(),
@@ -1282,7 +1361,7 @@ fn extract_suffixed_source_ids_respect_the_name_cap() {
         ],
         &[
             "--context",
-            "ops",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
             "--source-id",
             &at_cap,
             docs.to_str().unwrap(),
@@ -1307,7 +1386,7 @@ fn extract_source_id_usage_errors_name_their_cause() {
         &[],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--source-id",
             "a",
             "--source-id",
@@ -1317,8 +1396,17 @@ fn extract_source_id_usage_errors_name_their_cause() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--source-id given twice"), "{stderr}");
-    let (code, _, stderr) =
-        run_extract(&out, &[], &["--context", "c", "--source-id", "", "doc.md"]);
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--source-id",
+            "",
+            "doc.md",
+        ],
+    );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--source-id must not be empty"), "{stderr}");
     let _ = std::fs::remove_dir_all(&out);
@@ -1350,7 +1438,7 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
     ];
     let flags = [
         "--context",
-        "ops",
+        "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
         "--source-id",
         "session:claude:abc",
         "--date",
@@ -1476,7 +1564,7 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
         ],
         &[
             "--context",
-            "ops",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
             "--source-id",
             "session:claude:abc",
             nested_a.join("x.md").to_str().unwrap(),
@@ -1527,7 +1615,11 @@ fn extract_coverage_env_resolves_like_its_boolean_siblings() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_COVERAGE", "1"),
         ],
-        &["--context", "ops", docs.to_str().unwrap()],
+        &[
+            "--context",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
+            docs.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -1553,7 +1645,11 @@ fn extract_coverage_env_resolves_like_its_boolean_siblings() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_COVERAGE", "0"),
         ],
-        &["--context", "ops", docs.to_str().unwrap()],
+        &[
+            "--context",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
+            docs.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
@@ -1567,7 +1663,11 @@ fn extract_coverage_env_resolves_like_its_boolean_siblings() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_COVERAGE", "banana"),
         ],
-        &["--context", "ops", docs.to_str().unwrap()],
+        &[
+            "--context",
+            "a92c36e6-6a25-4e99-bf86-2faa8e87987b",
+            docs.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -1592,7 +1692,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s0"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
             "\n",
@@ -1618,7 +1718,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--vocabulary",
             vocab.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -1649,7 +1749,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     std::fs::write(
         &vocab,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s0"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s0"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"cargo-nextest","weight":1.0}"#,
             "\n",
@@ -1666,7 +1766,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--vocabulary",
             vocab.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -1685,7 +1785,7 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--vocabulary",
             docs.join("missing.jsonl").to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -1721,7 +1821,11 @@ fn extract_vocabulary_accepts_a_previous_extract_out_directory() {
     let (code, stdout, stderr) = run_extract(
         &prior,
         &provider,
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -1739,7 +1843,7 @@ fn extract_vocabulary_accepts_a_previous_extract_out_directory() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--vocabulary",
             prior.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -1800,7 +1904,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -1895,7 +1999,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -1911,7 +2015,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -1949,7 +2053,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--dry-run",
@@ -1963,7 +2067,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-context",
             "live",
             doc.to_str().unwrap(),
@@ -1981,7 +2085,11 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CHUNK_CONTEXT", "bogus"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -2047,7 +2155,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -2165,7 +2273,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -2180,7 +2288,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -2239,7 +2347,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     ];
     let args = [
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--chunk-bytes",
         "700",
         "--max-output-tokens",
@@ -2330,7 +2438,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
+            r#"{"type": "source","context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":2.0}"#,
             "\n",
@@ -2365,7 +2473,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-context",
             "ingested",
             "--vocabulary",
@@ -2409,7 +2517,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-context",
             "ingested",
             "--vocabulary",
@@ -2426,7 +2534,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     std::fs::write(
         &export,
         concat!(
-            r#"{"type": "source","context":"c","id":"minutes-1.md"}"#,
+            r#"{"type": "source","context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5","id":"minutes-1.md"}"#,
             "\n",
             r#"{"subject":"委員会","label":"決定","object":"予算案","weight":1.0}"#,
             "\n",
@@ -2459,7 +2567,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-context",
             "ingested",
             "--vocabulary",
@@ -2486,7 +2594,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-context",
             "ingested",
             doc.to_str().unwrap(),
@@ -2536,7 +2644,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -2562,7 +2670,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--force",
@@ -2622,7 +2730,9 @@ fn extract_prunes_an_alias_that_would_rewire_an_earlier_segments_concept() {
         &provider,
         &[
             "--context",
-            "spec",
+            "d4f02eaa-fd1a-4e9d-a7d1-0972ca8e47fa",
+            "--name",
+            "specs",
             "--description",
             "product spec sheets",
             a.to_str().unwrap(),
@@ -2686,7 +2796,9 @@ fn extract_prunes_an_alias_that_would_rewire_an_earlier_segments_concept() {
         &provider,
         &[
             "--context",
-            "spec",
+            "d4f02eaa-fd1a-4e9d-a7d1-0972ca8e47fa",
+            "--name",
+            "specs",
             "--description",
             "product spec sheets",
             a.to_str().unwrap(),
@@ -2739,7 +2851,12 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--redact", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--redact",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests = requests.join().unwrap();
@@ -2824,7 +2941,12 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
             ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--redact", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--redact",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
@@ -2839,7 +2961,7 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--redact",
             "secrets",
             doc.to_str().unwrap(),
@@ -2859,7 +2981,11 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests = requests.join().unwrap();
@@ -2895,7 +3021,12 @@ fn extract_redact_refuses_a_batch_carrying_sensitive_content_and_drops_placehold
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--redact", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--redact",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -2932,7 +3063,12 @@ fn extract_redact_refuses_a_batch_carrying_sensitive_content_and_drops_placehold
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--redact", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--redact",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -2961,7 +3097,12 @@ fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
     )
     .unwrap();
     let out = batch_dir("extract-redact-env-out");
-    let args = ["--dry-run", "--context", "c", doc.to_str().unwrap()];
+    let args = [
+        "--dry-run",
+        "--context",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        doc.to_str().unwrap(),
+    ];
 
     // `pii` from the environment: one of the two would be masked.
     let (code, stdout, stderr) = run_extract(&out, &[("TAGURU_EXTRACT_REDACT", "pii")], &args);
@@ -2989,7 +3130,7 @@ fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
             "secrets",
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             doc.to_str().unwrap(),
         ],
     );
@@ -3066,7 +3207,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--redact",
             "--redact-rules",
             rules.to_str().unwrap(),
@@ -3101,7 +3242,11 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
             ("TAGURU_EXTRACT_REDACT", "1"),
             ("TAGURU_EXTRACT_REDACT_RULES", rules.to_str().unwrap()),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
@@ -3125,7 +3270,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--redact",
             "--redact-rules",
             rules.to_str().unwrap(),
@@ -3155,7 +3300,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--redact",
             "--redact-rules",
             rules.to_str().unwrap(),
@@ -3170,7 +3315,12 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     let (code, _, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_REDACT_RULES", rules.to_str().unwrap())],
-        &["--dry-run", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--redact-rules needs --redact"), "{stderr}");
@@ -3196,7 +3346,11 @@ fn extract_candidates_env_var_enables_the_block_and_rejects_bad_values() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CANDIDATES", "true"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests = requests.join().unwrap();
@@ -3213,7 +3367,11 @@ fn extract_candidates_env_var_enables_the_block_and_rejects_bad_values() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CANDIDATES", "nope"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -3242,7 +3400,11 @@ fn a_non_retryable_four_hundred_fails_without_spending_the_retry_budget() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     let elapsed = started.elapsed();
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
@@ -3292,7 +3454,11 @@ fn the_extract_timeout_knob_bounds_a_stalled_provider() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_TIMEOUT_SECS", "1"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "{stderr}");
     // ureq 3 renders its timeout error as "timeout: <phase>".
@@ -3356,7 +3522,12 @@ fn extract_persists_the_manifest_after_each_document_not_only_at_the_end() {
         .arg("extract")
         .env("TAGURU_EXTRACT_URL", &url)
         .env("TAGURU_EXTRACT_MODEL", "stub-model")
-        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ])
         .arg(&fast)
         .arg(&slow)
         .stdout(Stdio::null())
@@ -3401,7 +3572,7 @@ fn extract_fact_budget_flag_is_folded_into_the_system_prompt() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--fact-budget",
             "3",
             doc.to_str().unwrap(),
@@ -3455,7 +3626,7 @@ fn extract_schema_flag_folds_the_type_and_relation_block_into_the_system_prompt(
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             schema_path.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -3496,7 +3667,7 @@ fn extract_schema_flag_fails_the_run_at_startup_when_the_file_does_not_parse() {
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             schema_path.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -3524,7 +3695,7 @@ fn extract_schema_flag_fails_the_run_at_startup_when_the_file_does_not_exist() {
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             missing_path.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -3568,7 +3739,7 @@ fn extract_schema_flag_fails_the_run_at_startup_when_schema_install_refuses_the_
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             schema_path.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -3594,7 +3765,12 @@ fn extract_schema_env_var_fails_the_run_at_startup_the_same_as_the_flag() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_SCHEMA", schema_path.to_str().unwrap())],
-        &["--dry-run", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("broken.schema.json"), "{stderr}");
@@ -3627,7 +3803,11 @@ fn extract_max_attempts_env_var_extends_corrective_retries_past_the_default() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_ATTEMPTS", "3"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -3654,7 +3834,11 @@ fn extract_max_attempts_of_one_skips_the_corrective_turn() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("chunk 1/1"), "{stderr}");
@@ -3685,8 +3869,15 @@ fn extract_rejects_a_max_attempts_env_var_outside_its_range() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_ATTEMPTS", bad),
         ];
-        let (code, _, stderr) =
-            run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+        let (code, _, stderr) = run_extract(
+            &out,
+            &provider,
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                doc.to_str().unwrap(),
+            ],
+        );
         assert_eq!(code, 2, "{bad}: {stderr}");
         assert!(
             stderr.contains("TAGURU_EXTRACT_MAX_ATTEMPTS needs an integer between 1 and 10"),
@@ -3719,7 +3910,11 @@ fn extract_corrective_context_bytes_caps_the_replayed_bad_answer() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "10"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -3761,7 +3956,11 @@ fn extract_corrective_context_bytes_of_zero_omits_the_bad_answer() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "0"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -3791,8 +3990,15 @@ fn extract_rejects_a_corrective_context_bytes_env_var_that_is_not_a_number() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", bad),
         ];
-        let (code, _, stderr) =
-            run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+        let (code, _, stderr) = run_extract(
+            &out,
+            &provider,
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                doc.to_str().unwrap(),
+            ],
+        );
         assert_eq!(code, 2, "{bad}: {stderr}");
         assert!(
             stderr.contains("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES needs an integer"),
@@ -3831,7 +4037,7 @@ fn extract_a_length_limited_bad_answer_asks_for_shorter_and_names_the_fact_budge
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--fact-budget",
             "4",
             doc.to_str().unwrap(),
@@ -3878,7 +4084,11 @@ fn extract_default_request_body_carries_exactly_the_base_keys() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -3917,7 +4127,7 @@ fn structured_output_json_schema_sends_the_canonical_schema_without_probing() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "json-schema",
             doc.to_str().unwrap(),
@@ -3970,7 +4180,7 @@ fn structured_output_json_object_sends_json_mode_without_probing() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "json-object",
             doc.to_str().unwrap(),
@@ -4012,7 +4222,7 @@ fn structured_output_off_with_a_budget_sends_max_tokens_and_no_response_format()
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4049,7 +4259,7 @@ fn extract_rejects_a_bad_structured_output_value() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--structured-output",
                 bad,
                 doc.to_str().unwrap(),
@@ -4068,7 +4278,11 @@ fn extract_rejects_a_bad_structured_output_value() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_STRUCTURED_OUTPUT", "json_schema"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -4096,7 +4310,7 @@ fn extract_rejects_a_bad_max_output_tokens_value() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--max-output-tokens",
                 bad,
                 doc.to_str().unwrap(),
@@ -4115,7 +4329,11 @@ fn extract_rejects_a_bad_max_output_tokens_value() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS", "0"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -4155,7 +4373,7 @@ fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4198,7 +4416,11 @@ fn chunk_bytes_flag_and_env_set_the_chunk_cap() {
     std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
     let out = batch_dir("extract-chunkbytes-out");
     let dry = |env: &[(&str, &str)], extra: &[&str]| {
-        let mut args = vec!["--dry-run", "--context", "c"];
+        let mut args = vec![
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ];
         args.extend_from_slice(extra);
         args.push(doc.to_str().unwrap());
         run_extract(&out, env, &args)
@@ -4277,7 +4499,7 @@ fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4333,7 +4555,7 @@ fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             floor.to_str().unwrap(),
@@ -4384,7 +4606,7 @@ fn escalation_factor_env_caps_the_resend_and_zero_uncaps_it() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--force",
                 "--max-output-tokens",
                 "512",
@@ -4416,7 +4638,11 @@ fn escalation_factor_env_caps_the_resend_and_zero_uncaps_it() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_ESCALATION_FACTOR", "two"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -4461,7 +4687,7 @@ fn a_length_terminated_answer_that_happens_to_parse_is_never_treated_as_success(
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4509,7 +4735,7 @@ fn length_limited_without_a_configured_budget_splits_instead_of_escalating() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "json-object",
             doc.to_str().unwrap(),
@@ -4563,7 +4789,7 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4646,7 +4872,7 @@ fn a_runaway_answer_fails_the_source_after_one_round_with_the_move_recorded() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4707,7 +4933,7 @@ fn runaway_ratio_zero_keeps_the_pre_0035_path_end_to_end() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4777,7 +5003,7 @@ content-length: 0
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -4823,7 +5049,7 @@ fn a_minimum_unit_that_still_hits_length_after_escalation_fails_the_source() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4863,7 +5089,7 @@ fn refusal_is_terminal_with_no_corrective_turn() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4903,7 +5129,7 @@ fn an_empty_answer_gets_exactly_one_corrective_however_high_max_attempts_is() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -4943,7 +5169,7 @@ fn stop_malformed_still_runs_the_ordinary_corrective_loop_under_ladder_mode() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "json-object",
             doc.to_str().unwrap(),
@@ -4992,7 +5218,7 @@ fn auto_probe_resolves_to_json_schema_when_the_backend_honors_it() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "auto",
             doc.to_str().unwrap(),
@@ -5050,7 +5276,7 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "auto",
             "--max-output-tokens",
@@ -5176,7 +5402,7 @@ fn auto_probe_falls_back_to_json_object_when_json_schema_is_not_honored() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "auto",
             doc.to_str().unwrap(),
@@ -5236,7 +5462,7 @@ fn auto_probe_falls_back_to_prompted_json_when_neither_probe_succeeds() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "auto",
             doc.to_str().unwrap(),
@@ -5275,7 +5501,7 @@ fn auto_probe_is_skipped_under_dry_run() {
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--structured-output",
             "auto",
             doc.to_str().unwrap(),
@@ -5304,8 +5530,15 @@ fn changing_structured_output_mode_forces_a_re_extraction() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, _) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, _) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 written"), "{stdout}");
     assert_eq!(requests.join().unwrap().len(), 1);
@@ -5317,7 +5550,7 @@ fn changing_structured_output_mode_forces_a_re_extraction() {
     ];
     let mode_args = [
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--structured-output",
         "json-object",
         doc.to_str().unwrap(),
@@ -5345,6 +5578,57 @@ fn changing_structured_output_mode_forces_a_re_extraction() {
 }
 
 #[test]
+fn changing_the_create_block_forces_a_re_extraction() {
+    // `--name` and `--description` are baked into every emitted header
+    // (#965), so a changed one must re-extract instead of skipping and
+    // leaving the old header in place; an unchanged one skips.
+    let docs = batch_dir("extract-createmanifest-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-createmanifest-out");
+    let id = "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5";
+
+    let extract = |extra: &[&str], expect_written: bool| {
+        let (url, requests) = if expect_written {
+            stub_chat_server(vec![json!({"associations": []}).to_string()])
+        } else {
+            (
+                "http://127.0.0.1:9".to_string(),
+                std::thread::spawn(Vec::new),
+            )
+        };
+        let provider = [
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ];
+        let mut args = vec!["--context", id];
+        args.extend(extra);
+        args.push(doc.to_str().unwrap());
+        let (code, stdout, _) = run_extract(&out, &provider, &args);
+        assert_eq!(code, 0, "{stdout}");
+        if expect_written {
+            assert!(stdout.contains("1 written"), "{extra:?}: {stdout}");
+            assert_eq!(requests.join().unwrap().len(), 1, "{extra:?}");
+        } else {
+            assert!(stdout.contains("1 unchanged"), "{extra:?}: {stdout}");
+        }
+    };
+
+    extract(&[], true);
+    // No create block -> a name: the header changes.
+    extract(&["--name", "specs"], true);
+    // Unchanged: skipped.
+    extract(&["--name", "specs"], false);
+    // A new name, then a new description: each re-extracts.
+    extract(&["--name", "manuals"], true);
+    extract(&["--name", "manuals", "--description", "d"], true);
+    extract(&["--name", "manuals", "--description", "d"], false);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
 fn changing_max_output_tokens_forces_a_re_extraction() {
     let docs = batch_dir("extract-budgetmanifest-docs");
     let doc = docs.join("a.md");
@@ -5356,8 +5640,15 @@ fn changing_max_output_tokens_forces_a_re_extraction() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, _) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, _) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(requests.join().unwrap().len(), 1);
 
@@ -5368,7 +5659,7 @@ fn changing_max_output_tokens_forces_a_re_extraction() {
     ];
     let budget_args = [
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--max-output-tokens",
         "512",
         doc.to_str().unwrap(),
@@ -5427,8 +5718,15 @@ fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 association(s)"), "{stdout}");
     assert!(!stdout.contains("dropped"), "{stdout}");
@@ -5475,8 +5773,15 @@ fn strict_default_fails_the_source_when_the_corrected_answer_is_still_invalid() 
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stderr.contains("associations[0].weight: expected finite non-zero number"),
@@ -5515,8 +5820,15 @@ fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let written = stray_batch_files(&out);
     assert_eq!(written.len(), 1, "{written:?}");
@@ -5538,7 +5850,12 @@ fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--force", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--force",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -5583,8 +5900,15 @@ fn a_shadowing_alias_earns_a_cross_chunk_corrective_turn() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("dropped"), "{stdout}");
     assert!(!stdout.contains("removed"), "{stdout}");
@@ -5627,8 +5951,15 @@ fn an_uncorrected_shadowing_alias_is_removed_and_the_document_still_lands() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 association(s), 0 alias(es)"), "{stdout}");
     assert!(
@@ -5701,7 +6032,7 @@ fn a_cut_off_cross_chunk_correction_is_resent_once_at_the_escalated_budget() {
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -5793,7 +6124,7 @@ fn a_correction_cut_off_at_the_escalated_budget_leaves_its_alias_to_the_prune() 
         &provider,
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
             doc.to_str().unwrap(),
@@ -5874,8 +6205,15 @@ fn a_cut_off_correction_without_a_budget_is_not_resent() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 association(s), 0 alias(es)"), "{stdout}");
     let cut_off = format!(
@@ -5925,8 +6263,15 @@ fn a_dangling_alias_is_pruned_mechanically_with_zero_corrective_turns() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("dropped"), "{stdout}");
     assert!(
@@ -5978,7 +6323,13 @@ fn an_out_of_range_question_paragraph_earns_a_corrective_turn() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--questions", "1", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--questions",
+            "1",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 question(s)"), "{stdout}");
@@ -6013,8 +6364,16 @@ fn a_chunk_1_alias_resolved_by_a_later_chunk_needs_no_corrective_turn() {
     let doc_src = doc.to_str().unwrap();
     let out = batch_dir("extract-strict-crosschunk-out");
 
-    let (code, dry_stdout, stderr) =
-        run_extract(&out, &[], &["--dry-run", "--context", "c", doc_src]);
+    let (code, dry_stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
     let total_chunks = chunk_count_from_dry_run(&dry_stdout);
     assert!(
@@ -6041,7 +6400,11 @@ fn a_chunk_1_alias_resolved_by_a_later_chunk_needs_no_corrective_turn() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "c", doc_src]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("dropped"), "{stdout}");
     assert_eq!(
@@ -6084,7 +6447,12 @@ fn lossy_flag_skips_correction_and_marks_the_drop_explicitly() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--lossy", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--lossy",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 item(s) dropped (--lossy)"), "{stdout}");
@@ -6123,7 +6491,11 @@ fn strict_default_with_max_attempts_of_one_skips_the_validity_corrective_turn() 
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -6152,8 +6524,15 @@ fn extract_rejects_a_bad_lossy_env_var_value() {
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ("TAGURU_EXTRACT_LOSSY", "nope"),
     ];
-    let (code, _, stderr) =
-        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    let (code, _, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains("TAGURU_EXTRACT_LOSSY takes 1/true or 0/false"),
@@ -6189,7 +6568,11 @@ fn extract_lossy_env_var_enables_lossy_mode_without_the_flag() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_LOSSY", "true"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("(--lossy)"), "{stdout}");
@@ -6226,7 +6609,7 @@ fn diagnostics_out_writes_one_record_per_attempt_with_the_shared_state_vocabular
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6300,7 +6683,7 @@ fn diagnostics_out_flag_wins_over_the_environment_variable() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             flag_path.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6337,7 +6720,11 @@ fn diagnostics_env_var_alone_opens_the_sidecar() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_DIAGNOSTICS", diag.to_str().unwrap()),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let records = read_attempt_records(&diag);
@@ -6365,7 +6752,11 @@ fn diagnostics_raw_bytes_env_var_rejects_a_non_integer() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", "not-a-number"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -6408,7 +6799,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--max-output-tokens",
                 "512",
                 "--diagnostics-out",
@@ -6449,7 +6840,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--max-output-tokens",
                 "512",
                 "--diagnostics-out",
@@ -6488,7 +6879,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
             ],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--max-output-tokens",
                 "512",
                 "--diagnostics-out",
@@ -6550,7 +6941,7 @@ fn diagnostics_records_a_timeout_as_a_single_attempt_with_no_provider_metadata()
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6594,7 +6985,7 @@ fn diagnostics_records_a_non_retryable_http_error_as_transport() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6639,7 +7030,7 @@ fn diagnostics_reports_provider_token_usage_when_present() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6682,7 +7073,7 @@ fn diagnostics_raw_bytes_attaches_a_capped_response_text() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6723,7 +7114,7 @@ fn diagnostics_omits_response_text_when_raw_bytes_is_unset() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6785,7 +7176,7 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
             "--out",
             out.to_str().unwrap(),
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
         ])
@@ -6866,7 +7257,11 @@ fn extract_without_diagnostics_out_writes_no_sidecar() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -6899,7 +7294,7 @@ fn dry_run_opens_no_diagnostics_sidecar_and_no_trace() {
         &[
             "--dry-run",
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -6957,7 +7352,7 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -7027,7 +7422,7 @@ fn diagnostics_records_every_chunk_attempt_under_parallel() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--parallel",
             "2",
             "--diagnostics-out",
@@ -7077,7 +7472,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -7176,7 +7571,7 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -7248,7 +7643,12 @@ fn extract_lossy_flag_overrides_the_environment_variable() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_LOSSY", "false"),
         ],
-        &["--lossy", "--context", "c", doc.to_str().unwrap()],
+        &[
+            "--lossy",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("(--lossy)"), "{stdout}");
@@ -7306,8 +7706,16 @@ fn setup_one_checkpointed_chunk_and_one_failure(
     let doc_src = doc.to_str().unwrap().to_string();
     let out = batch_dir(&format!("{tag}-out"));
 
-    let (code, dry_stdout, stderr) =
-        run_extract(&out, &[], &["--dry-run", "--context", "c", &doc_src]);
+    let (code, dry_stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            &doc_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
     assert_eq!(
         chunk_count_from_dry_run(&dry_stdout),
@@ -7340,7 +7748,11 @@ fn setup_one_checkpointed_chunk_and_one_failure(
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", &doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            &doc_src,
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -7384,7 +7796,7 @@ fn checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_recalling
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -7418,7 +7830,12 @@ fn dry_run_reports_a_reusable_count_from_a_prior_incomplete_run() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_MODEL", "stub-model")],
-        &["--dry-run", "--context", "c", doc_src],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
@@ -7456,7 +7873,12 @@ fn force_ignores_existing_checkpoints_and_recalls_every_chunk() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--force", "--context", "c", doc_src],
+        &[
+            "--force",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -7498,7 +7920,13 @@ fn resume_from_read_plan_steer_also_ignore_existing_checkpoints() {
                 ("TAGURU_EXTRACT_URL", url.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", "--resume-from", step, doc_src],
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--resume-from",
+                step,
+                doc_src,
+            ],
         );
         assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
         assert_eq!(
@@ -7540,7 +7968,13 @@ fn a_changed_fact_budget_invalidates_checkpoints_even_though_content_is_unchange
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--fact-budget", "3", "--context", "c", doc_src],
+        &[
+            "--fact-budget",
+            "3",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -7592,7 +8026,12 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
         .arg("extract")
         .env("TAGURU_EXTRACT_URL", &url)
         .env("TAGURU_EXTRACT_MODEL", "stub-model")
-        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ])
         .arg(&doc)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -7625,7 +8064,11 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", &doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            &doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("1 written"), "{stdout}");
@@ -7685,7 +8128,7 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
             "--out",
             out.to_str().unwrap(),
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--max-output-tokens",
             "512",
         ])
@@ -7728,7 +8171,13 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--max-output-tokens", "512", &doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--max-output-tokens",
+            "512",
+            &doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -7882,7 +8331,12 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         .arg("extract")
         .env("TAGURU_EXTRACT_URL", &url)
         .env("TAGURU_EXTRACT_MODEL", "stub-model")
-        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ])
         .arg(&doc)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -7926,7 +8380,11 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", &doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            &doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
@@ -8004,7 +8462,12 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
         .arg("extract")
         .env("TAGURU_EXTRACT_URL", &url)
         .env("TAGURU_EXTRACT_MODEL", "stub-model")
-        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ])
         .arg(&doc)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -8108,7 +8571,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--questions",
             "2",
             "--diagnostics-out",
@@ -8284,7 +8747,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(requests.join().unwrap().len(), 3);
@@ -8311,7 +8774,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc_src,
@@ -8352,7 +8815,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
             ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
@@ -8407,7 +8870,7 @@ fn trace_records_every_lost_item_with_its_original_text() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--questions",
             "1",
             "--diagnostics-out",
@@ -8553,7 +9016,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--diagnostics-out",
             diag.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -8717,7 +9180,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 1);
     let after_failure = read_attempts_log(&out);
@@ -8751,7 +9214,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let after_resume = read_attempts_log(&out);
@@ -8794,7 +9257,12 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--force", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--force",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let after_force = read_attempts_log(&out);
@@ -8829,7 +9297,11 @@ fn attempts_log_can_be_switched_off() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_TRACE_ATTEMPTS", "off"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
@@ -8881,7 +9353,7 @@ fn trace_steering_record_carries_candidates_and_reuse_vocabulary() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--candidates",
             first.to_str().unwrap(),
             second.to_str().unwrap(),
@@ -8974,7 +9446,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             empty_schema.to_str().unwrap(),
             doc.to_str().unwrap(),
@@ -9011,7 +9483,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--schema",
             full_schema.to_str().unwrap(),
             "--force",
@@ -9086,7 +9558,11 @@ fn extract_metrics_script_aggregates_a_real_run() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9181,7 +9657,11 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9191,7 +9671,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     // is 0.9.3-shaped input too: no trace beside it.
     std::fs::write(
         out.join("b.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"b.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"b.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\\n\\n蔵は山にある。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"所在\",\"object\":\"山\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
@@ -9263,7 +9743,10 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     assert_eq!(report["segments"]["b.md"]["anchored_strict"], 0, "{report}");
     assert_eq!(report["segments"]["b.md"]["anchored_with_aliases"], 1);
     let a_key = doc.to_str().unwrap();
-    assert_eq!(report["segments"][a_key]["context"], "c");
+    assert_eq!(
+        report["segments"][a_key]["context_id"],
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"
+    );
 
     // The aggregation script folds the matched document in and warns
     // about the trace-less one instead of inventing a row.
@@ -9311,21 +9794,21 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     // CONTEXT alias, one passage-less batch (skipped, counted).
     std::fs::write(
         dir.join("c.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"c.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"c.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"あおみね\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("nopassage.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"n.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"n.md\"}\n\
          {\"subject\":\"a\",\"label\":\"l\",\"object\":\"b\",\"weight\":1.0}\n",
     )
     .unwrap();
     let vocabulary = dir.join("vocabulary.jsonl");
     std::fs::write(
         &vocabulary,
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"prior.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"prior.md\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
          {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
     )
@@ -9419,7 +9902,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(requests.join().unwrap().len(), 1);
@@ -9439,7 +9922,13 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let (code2, _stdout2, stderr2) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_MODEL", "stub-model")],
-        &["--context", "c", "--replay", "strict", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--replay",
+            "strict",
+            doc_src,
+        ],
     );
     assert_eq!(code2, 0, "stderr: {stderr2}");
     assert!(
@@ -9564,7 +10053,7 @@ fn replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9581,7 +10070,7 @@ fn replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--replay",
             "auto",
             "--fact-budget",
@@ -9636,7 +10125,7 @@ fn replay_strict_fails_on_a_changed_document_with_the_miss_reason_on_stderr() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9651,7 +10140,7 @@ fn replay_strict_fails_on_a_changed_document_with_the_miss_reason_on_stderr() {
         &[("TAGURU_EXTRACT_MODEL", "stub-model")],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--replay",
             "strict",
             "--replay-from",
@@ -9703,7 +10192,12 @@ fn replay_auto_pins_each_documents_own_system_prompt_independently() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_a_src, doc_b_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_a_src,
+            doc_b_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9719,7 +10213,7 @@ fn replay_auto_pins_each_documents_own_system_prompt_independently() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--replay",
             "auto",
             "--fact-budget",
@@ -9770,7 +10264,7 @@ fn replay_does_not_pin_when_the_log_names_two_distinct_system_prompts() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9807,7 +10301,13 @@ fn replay_does_not_pin_when_the_log_names_two_distinct_system_prompts() {
             ("TAGURU_EXTRACT_URL", url2.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--replay", "auto", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--replay",
+            "auto",
+            doc_src,
+        ],
     );
     assert_eq!(code2, 0, "stderr: {stderr2}");
     assert_eq!(requests2.join().unwrap().len(), 0, "{stderr2}");
@@ -9848,8 +10348,16 @@ fn replay_is_deterministic_under_parallel() {
     let doc_src = doc.to_str().unwrap();
 
     let probe = batch_dir("extract-replay-parallel-probe");
-    let (code, dry_stdout, stderr) =
-        run_extract(&probe, &[], &["--dry-run", "--context", "c", doc_src]);
+    let (code, dry_stdout, stderr) = run_extract(
+        &probe,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc_src,
+        ],
+    );
     assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
     let total_chunks = chunk_count_from_dry_run(&dry_stdout);
     assert!(
@@ -9873,7 +10381,13 @@ fn replay_is_deterministic_under_parallel() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", "--parallel", "4", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--parallel",
+            "4",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (recorded_batch_name, _) = read_trace(&recorded_out);
@@ -9888,7 +10402,7 @@ fn replay_is_deterministic_under_parallel() {
             &[("TAGURU_EXTRACT_MODEL", "stub-model")],
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--replay",
                 "strict",
                 "--replay-from",
@@ -9942,7 +10456,7 @@ fn replay_from_env_var_is_honored_with_no_flag() {
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -9954,7 +10468,13 @@ fn replay_from_env_var_is_honored_with_no_flag() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_REPLAY_FROM", replay_from.to_str().unwrap()),
         ],
-        &["--context", "c", "--replay", "strict", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--replay",
+            "strict",
+            doc_src,
+        ],
     );
     assert_eq!(code2, 0, "stderr: {stderr2}");
     assert!(
@@ -9982,7 +10502,13 @@ fn replay_strict_still_requires_the_model_env_var() {
     let (code, _stdout, stderr) = run_extract(
         &out,
         &[],
-        &["--context", "c", "--replay", "strict", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--replay",
+            "strict",
+            doc_src,
+        ],
     );
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("TAGURU_EXTRACT_MODEL"), "{stderr}");
@@ -10008,7 +10534,7 @@ fn replay_strict_with_structured_output_auto_and_no_url_is_a_usage_error() {
         &[("TAGURU_EXTRACT_MODEL", "stub-model")],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--replay",
             "strict",
             "--structured-output",
@@ -10057,7 +10583,7 @@ fn resume_from_call_through_verify_all_fold_into_replay_auto() {
                 ("TAGURU_EXTRACT_URL", url.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", doc_src],
+            &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
         );
         assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
 
@@ -10068,7 +10594,13 @@ fn resume_from_call_through_verify_all_fold_into_replay_auto() {
                 ("TAGURU_EXTRACT_URL", url2.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", "--resume-from", step, doc_src],
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--resume-from",
+                step,
+                doc_src,
+            ],
         );
         assert_eq!(code2, 0, "{step}: stderr: {stderr2}");
         assert_eq!(
@@ -10110,7 +10642,7 @@ fn resume_from_read_plan_steer_all_fold_into_an_unreplayed_run() {
                 ("TAGURU_EXTRACT_URL", url.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", doc_src],
+            &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
         );
         assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
 
@@ -10126,7 +10658,13 @@ fn resume_from_read_plan_steer_all_fold_into_an_unreplayed_run() {
                 ("TAGURU_EXTRACT_URL", url2.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", "--resume-from", step, doc_src],
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                "--resume-from",
+                step,
+                doc_src,
+            ],
         );
         assert_eq!(code2, 0, "{step}: stderr: {stderr2}");
         assert!(
@@ -10174,7 +10712,7 @@ fn resume_from_prompt_disables_the_system_pin_so_a_settings_change_falls_through
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
         ],
-        &["--context", "c", doc_src],
+        &["--context", "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", doc_src],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -10187,7 +10725,7 @@ fn resume_from_prompt_disables_the_system_pin_so_a_settings_change_falls_through
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--resume-from",
             "prompt",
             "--fact-budget",
@@ -10227,7 +10765,13 @@ fn resume_from_rejects_an_unknown_step_name() {
     let (code, _stdout, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_MODEL", "stub-model")],
-        &["--context", "c", "--resume-from", "escalate", doc_src],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--resume-from",
+            "escalate",
+            doc_src,
+        ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
@@ -10275,7 +10819,7 @@ fn a_failed_overview_is_recorded_once_and_never_re_asked_on_resume() {
     let out = batch_dir("extract-overview-resume-out");
     let args = [
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--chunk-bytes",
         "700",
         "--chunk-context",
@@ -10388,7 +10932,7 @@ fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
         ],
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -10439,7 +10983,7 @@ fn the_overview_pass_fans_out_under_parallel_and_matches_the_sequential_run() {
     let args = |extra: Vec<&'static str>| {
         let mut all = vec![
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
             "--chunk-context",
@@ -10607,7 +11151,12 @@ fn a_sigint_during_the_overview_pass_stops_it_between_chunks() {
         .arg("extract")
         .env("TAGURU_EXTRACT_URL", &url)
         .env("TAGURU_EXTRACT_MODEL", "stub-model")
-        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        ])
         .args(["--chunk-context", "overview"])
         // One paragraph per chunk, so the pass has eight more chunks
         // ahead of it when the interrupt lands — the gap between
@@ -10683,7 +11232,11 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
         ],
-        &["--context", "c", doc.to_str().unwrap()],
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(requests.join().unwrap().len(), 1);
@@ -10844,7 +11397,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
             &env,
             &[
                 "--context",
-                "c",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
                 "--chunk-bytes",
                 "512",
                 doc.to_str().unwrap(),
@@ -10937,14 +11490,14 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
     let out = batch_dir("extract-anchoring-failed");
     std::fs::write(
         out.join("good.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"good.md\"}\n\
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"good.md\"}\n\
          {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
          {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"ラーメン\",\"weight\":1.0,\"paragraph\":0}\n",
     )
     .unwrap();
     std::fs::write(
         out.join("broken.jsonl"),
-        "{\"type\": \"source\",\"context\":\"c\"}\n",
+        "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\"}\n",
     )
     .unwrap();
     let report_path = out.join("anchoring.json");
@@ -11021,7 +11574,11 @@ fn a_second_extract_on_the_same_out_is_refused_while_the_first_holds_it() {
         ("TAGURU_EXTRACT_URL", url.as_str()),
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
-    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "sake", doc_src]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--context", "cef2e28b-43f0-4b6c-8201-abab0785399f", doc_src],
+    );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stderr.contains(&format!(
@@ -11038,12 +11595,21 @@ fn a_second_extract_on_the_same_out_is_refused_while_the_first_holds_it() {
     let (code, stdout, stderr) = run_extract(
         &out,
         &provider,
-        &["--dry-run", "--context", "sake", doc_src],
+        &[
+            "--dry-run",
+            "--context",
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            doc_src,
+        ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
     drop(held);
-    let (code, stdout, stderr) = run_extract(&out, &provider, &["--context", "sake", doc_src]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &["--context", "cef2e28b-43f0-4b6c-8201-abab0785399f", doc_src],
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(out.join(".extract-manifest.json").is_file());
     let requests = requests.join().unwrap();

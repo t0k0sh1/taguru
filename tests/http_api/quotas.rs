@@ -22,10 +22,9 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     );
 
     // Creation is never gated — the declaration waits for the name.
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "capped", "description": "quota'd tenant"})),
+    server.create_with_id(
+        "5a194219-907f-4bed-a835-23b4776c9948",
+        json!({"name": "capped", "description": "quota'd tenant"}),
     );
     // The first write lands (nothing on disk yet); its WAL append
     // alone carries the family past the one-byte ceiling, so the
@@ -74,10 +73,9 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     );
 
     // An uncapped sibling writes freely through all of it.
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "free", "description": "no quota"})),
+    server.create_with_id(
+        "ad95d5fa-651b-486d-8923-fe1238d24a4f",
+        json!({"name": "free", "description": "no quota"}),
     );
     server.ok(
         "POST",
@@ -133,10 +131,9 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     );
 
     // Put the capped context at its ceiling before the import.
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "capped", "description": "quota'd tenant"})),
+    server.create_with_id(
+        "5a194219-907f-4bed-a835-23b4776c9948",
+        json!({"name": "capped", "description": "quota'd tenant"}),
     );
     server.ok(
         "POST",
@@ -148,10 +145,10 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     );
 
     let stream = concat!(
-        "{\"type\": \"source\", \"context\": \"free\", \"id\": \"a.md\", ",
-        "\"create\": {\"description\": \"uncapped\"}}\n",
+        "{\"type\": \"source\", \"context_id\": \"ad95d5fa-651b-486d-8923-fe1238d24a4f\", \"id\": \"a.md\", ",
+        "\"create\": {\"name\": \"free\", \"description\": \"uncapped\"}}\n",
         "{\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
-        "{\"type\": \"source\", \"context\": \"capped\", \"id\": \"b.md\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"5a194219-907f-4bed-a835-23b4776c9948\", \"id\": \"b.md\"}\n",
         "{\"subject\": \"蔵\", \"label\": \"産地\", \"object\": \"灘\", \"weight\": 1.0}\n",
     );
     let (status, previewed) = post_import_dry_run(&server, stream, None);
@@ -194,7 +191,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     // A header-only batch is a pure source retraction — the
     // import-shaped way down in size — so it passes the pre-check at
     // the very ceiling that refused the growth batch above.
-    let retract_stream = "{\"type\": \"source\", \"context\": \"capped\", \"id\": \"keep.md\"}\n";
+    let retract_stream = "{\"type\": \"source\", \"context_id\": \"5a194219-907f-4bed-a835-23b4776c9948\", \"id\": \"keep.md\"}\n";
     let (status, retracted) = post_import(&server, retract_stream, None);
     assert_eq!(status, 200, "{retracted}");
 }

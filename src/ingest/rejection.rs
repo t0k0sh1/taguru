@@ -282,7 +282,7 @@ fn predicted_alias_rejection(
     // can interleave contexts, and a name an earlier batch interned
     // into a sibling context proves nothing about this one — the real
     // apply would still refuse `UnknownCanonical` here.
-    let seeded = seeds.and_then(|seeds| seeds.interned_in(&batch.context));
+    let seeded = seeds.and_then(|seeds| seeds.interned_in(&batch.context_id));
     let concepts = batch
         .associations
         .iter()
@@ -319,17 +319,18 @@ fn predicted_alias_rejection(
         None
     };
 
-    let Some(context_id) = state.context_id_of(&batch.context) else {
+    if !state.context_id_exists(&batch.context_id) {
         // An earlier previewed batch reaching this context stands in
         // for the create block the real stream's first batch carries.
-        return if batch.create.is_some() || seeds.is_some_and(|seeds| seeds.reaches(&batch.context))
+        return if batch.create.is_some()
+            || seeds.is_some_and(|seeds| seeds.reaches(&batch.context_id))
         {
             check(&Context::default())
         } else {
             None
         };
-    };
-    state.read_context(&context_id, check).ok().flatten()
+    }
+    state.read_context(&batch.context_id, check).ok().flatten()
 }
 
 /// What earlier batches of the SAME previewed stream would intern —
@@ -366,7 +367,7 @@ impl PreviewSeeds {
     /// Records what `batch` would intern once applied — call after the
     /// batch previews clean, before the next batch previews.
     pub(crate) fn absorb(&mut self, batch: &Batch) {
-        let seeds = self.contexts.entry(batch.context.clone()).or_default();
+        let seeds = self.contexts.entry(batch.context_id.clone()).or_default();
         seeds.concepts.extend(batch.concept_vocabulary());
         seeds.labels.extend(batch.label_vocabulary());
     }
@@ -484,27 +485,23 @@ fn predicted_schema_rejection(
     ops: &[AssocOp],
     purpose: CheckPurpose,
 ) -> Result<SchemaWarnings, ApplyRefusal> {
-    // The header still names the context (until #965); the id-keyed
-    // reads below want its id. A missing OR ambiguous name means no
-    // resolvable schema — the same "nothing to check" a fresh create
-    // has (an ambiguous target refuses later, at the create/apply
-    // boundary, where it can be reported properly).
-    let Some(context_id) = state.context_id_of(&batch.context) else {
-        return Ok(SchemaWarnings::none());
-    };
-    let schema = match state.schema_of(&context_id) {
+    // The header carries the id the reads below want. A context that
+    // does not exist yet (no schema to read) is the same "nothing to
+    // check" a fresh create has.
+    let context_id = batch.context_id.as_str();
+    let schema = match state.schema_of(context_id) {
         None | Some(Ok(None)) => return Ok(SchemaWarnings::none()),
         Some(Ok(Some(schema))) => schema,
         Some(Err(message)) => {
             return Err(ApplyRefusal::Io(format!(
                 "schema for context '{}' could not be read: {message}",
-                batch.context
+                batch.display_name(state)
             )));
         }
     };
 
     let check = state
-        .read_context(&context_id, |context| {
+        .read_context(context_id, |context| {
             let env = crate::schema::SchemaEnv::build(
                 context,
                 crate::schema::SchemaCheckInput {
@@ -530,7 +527,7 @@ fn predicted_schema_rejection(
 
     let mode = schema.document().mode;
     if purpose == CheckPurpose::Apply {
-        state.note_schema_check(&context_id, check.outcome(mode), check.violations.len());
+        state.note_schema_check(context_id, check.outcome(mode), check.violations.len());
     }
 
     // Complete lists, never truncated here (#863): the offline CLI
@@ -607,53 +604,41 @@ pub(crate) fn apply_batch(
         predicted_schema_rejection(state, batch, &corrected, CheckPurpose::Apply)?;
 
     let mut created = false;
-    if state.directory_entry(&batch.context).is_none() {
-        let Some(meta) = &batch.create else {
-            return Err(ApplyRefusal::NoContext(batch.context.clone()));
+    if !state.context_id_exists(&batch.context_id) {
+        let Some(spec) = &batch.create else {
+            return Err(ApplyRefusal::NoContext(batch.context_id.clone()));
         };
-        // At-most-one-per-name, however many batches of however many
+        // At-most-one-per-id, however many batches of however many
         // concurrent streams race this header: `create_if_absent`
-        // serializes on the name and hands `None` to every loser —
-        // the context exists (or is about to), which is all the batch
+        // serializes on the id and hands `false` to every loser — the
+        // context exists (or is about to), which is all the batch
         // needed.
-        match state.create_if_absent(&batch.context, meta.clone()) {
-            Ok(minted) => created = minted.is_some(),
-            // Several contexts already share this display name — the
-            // header cannot say which one it means (ids reach the
-            // import header at #965), and minting another would
-            // deepen the collision.
-            Err(CreateError::AmbiguousName(count)) => {
-                return Err(ApplyRefusal::Io(format!(
-                    "context name '{}' is ambiguous: {count} contexts share it; import by a \
-                     unique name (ids reach the import header in a later release)",
-                    batch.context
-                )));
-            }
+        match state.create_if_absent(&batch.context_id, &spec.name, spec.meta.clone()) {
+            Ok(minted) => created = minted,
             // Unreachable in practice — `parse_header` already refused an
-            // empty context name — but the registry guards it too, so the
+            // empty create name — but the registry guards it too, so the
             // match must speak for it.
             Err(CreateError::InvalidName) => {
                 return Err(ApplyRefusal::Io(format!(
                     "context name '{}' is not usable (empty)",
-                    batch.context
+                    spec.name
                 )));
             }
             Err(CreateError::Io(io_error)) => {
                 return Err(ApplyRefusal::Io(format!(
-                    "creating context '{}': {io_error}",
-                    batch.context
+                    "creating context '{}' ({}): {io_error}",
+                    spec.name, batch.context_id
                 )));
             }
         }
     }
-    // Everything below runs on the id-keyed data paths; the header's
-    // name resolves exactly once. `None` here means a delete (or an
-    // ambiguity introduced by a racing same-name create) won the race
-    // since the block above — the same "context vanished mid-batch"
-    // any pre-id import could hit.
-    let Some(context_id) = state.context_id_of(&batch.context) else {
-        return Err(ApplyRefusal::NoContext(batch.context.clone()));
-    };
+    // Everything below runs on the id-keyed data paths. `false` here
+    // means a delete won the race since the block above — the same
+    // "context vanished mid-batch" any pre-id import could hit.
+    if !state.context_id_exists(&batch.context_id) {
+        return Err(ApplyRefusal::NoContext(batch.context_id.clone()));
+    }
+    let context_id = batch.context_id.clone();
 
     // The marker precedes the first mutation or the batch does not
     // run: starting untracked would silently reopen the exact
@@ -853,15 +838,15 @@ pub(crate) fn preview_batch(
     let schema_warnings =
         predicted_schema_rejection(state, batch, &predicted_ops, CheckPurpose::Preview)?;
 
-    let context_id = state.context_id_of(&batch.context);
-    let exists = context_id.is_some();
+    let exists = state.context_id_exists(&batch.context_id);
+    let context_id = exists.then(|| batch.context_id.clone());
     // An earlier batch of this previewed stream reaching the context
     // stands in for its create — the real stream's first batch will
     // have created it by the time this one applies.
-    let seeded = !exists && seeds.reaches(&batch.context);
+    let seeded = !exists && seeds.reaches(&batch.context_id);
     let created = !exists && !seeded;
     if created && batch.create.is_none() {
-        return Err(ApplyRefusal::NoContext(batch.context.clone()));
+        return Err(ApplyRefusal::NoContext(batch.context_id.clone()));
     }
 
     // A context about to be created — by this batch or an earlier one

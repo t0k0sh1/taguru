@@ -2,11 +2,11 @@
   "contract": "http_contract",
   "method": "POST",
   "operation": "import_refusal_durable_prefix",
-  "request": "{\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-1\", \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"type\": \"source\", \"context\": \"corpus-h\", \"id\": \"doc-2\"}\n{\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
+  "request": "{\"type\": \"source\", \"context_id\": \"2eed3710-ffe1-45c6-879f-f4efcbb46b36\", \"id\": \"doc-1\", \"create\": {\"name\": \"corpus-h\", \"description\": \"wire-contract refusal corpus\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"type\": \"source\", \"context_id\": \"2eed3710-ffe1-45c6-879f-f4efcbb46b36\", \"id\": \"doc-2\"}\n{\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
   "response": {
     "code": "conflict",
     "durable_batches": 1,
-    "error": "source file 2 of 2 (context 'corpus-h', source 'doc-2') refused — the 1 source file(s) before it landed durably; fixing the stream and re-POSTing it whole is exact (each source file replaces its predecessor): concept alias 'Alpha' → '存在しない': the canonical spelling is not interned; nothing was applied",
+    "error": "source file 2 of 2 (context '2eed3710-ffe1-45c6-879f-f4efcbb46b36', source 'doc-2') refused — the 1 source file(s) before it landed durably; fixing the stream and re-POSTing it whole is exact (each source file replaces its predecessor): concept alias 'Alpha' → '存在しない': the canonical spelling is not interned; nothing was applied",
     "integrity": "durable_prefix",
     "issues": [
       {

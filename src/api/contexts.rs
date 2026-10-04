@@ -380,10 +380,6 @@ pub async fn create_context(
             "the context name must not be empty".to_string(),
             started_at,
         ),
-        // `create` never resolves names, so it cannot find them
-        // ambiguous; the variant belongs to `create_if_absent` (the
-        // import header).
-        Err(CreateError::AmbiguousName(_)) => unreachable!("create does not resolve names"),
         Err(CreateError::Io(io_error)) => {
             state.metrics().record_error(ErrorKind::Io);
             error(

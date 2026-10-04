@@ -18,6 +18,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -498,6 +499,12 @@ class TaguruIngester:
         if vocabulary_cap < 0:
             raise ValueError("vocabulary_cap must be a non-negative integer")
         self.context = context
+        # The id a first ingest registers the context under (#965): a
+        # source header names its context by id, so a context that does
+        # not exist yet needs one chosen client-side — once per ingester,
+        # so every batch of the run (and a dry run's NDJSON, applied
+        # later) agrees on it.
+        self._minted_context_id: str | None = None
         self.llm = llm
         self._owns_clients = client is None and async_client is None
         if self._owns_clients:
@@ -577,6 +584,7 @@ class TaguruIngester:
 
     def _build_batch(
         self,
+        context_id: str,
         source: str,
         text: str,
         outputs: list[ModelOutput],
@@ -590,7 +598,8 @@ class TaguruIngester:
         outcome.invalid_dropped = extraction.dropped
         description = self.context_description if self.create_context else None
         ndjson = render_batch(
-            self.context,
+            context_id,
+            self.context if self.create_context else None,
             source,
             description,
             extraction,
@@ -1012,6 +1021,7 @@ class TaguruIngester:
             )
 
         ndjson = self._build_batch(
+            self._header_context_id(dry_run=dry_run),
             source,
             text,
             [record.output for record in records],
@@ -1105,21 +1115,38 @@ class TaguruIngester:
                 break
         return outcomes
 
-    def _context_id(self) -> str | None:
+    def _context_id(self, *, strict: bool = False) -> str | None:
         """The id behind the ingester's context NAME, read off the directory —
         ``None`` when nothing carries the name yet (first ingest) or when a
         listing fails; several contexts sharing it raise, since writing into
-        "one of them" would be a coin flip."""
+        "one of them" would be a coin flip. ``strict`` lets a failed listing
+        propagate instead: the batch header must not mint a second id for a
+        context the directory merely failed to show."""
         assert self.client is not None
         try:
             matches = [row.id for row in self.client.contexts.iter() if row.name == self.context]
         except Exception:
+            if strict:
+                raise
             return None
         if len(matches) > 1:
             raise ValueError(
                 f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
             )
         return matches[0] if matches else None
+
+    def _header_context_id(self, *, dry_run: bool) -> str:
+        """The id every batch header names: the existing context's, or — on a
+        first ingest — one minted here, stable for this ingester's lifetime.
+        A real import refuses to guess when the directory cannot be listed
+        (a minted id would create a duplicate of a context that exists); a
+        dry run only renders NDJSON, so it keeps the offline-tolerant read."""
+        existing = self._context_id(strict=not dry_run)
+        if existing is not None:
+            return existing
+        if self._minted_context_id is None:
+            self._minted_context_id = str(uuid.uuid4())
+        return self._minted_context_id
 
     def _fetch_vocabulary(self) -> list[str]:
         """The ``context``'s live relation vocabulary — an advantage the offline
@@ -1429,6 +1456,7 @@ class TaguruIngester:
             )
 
         ndjson = self._build_batch(
+            await self._aheader_context_id(dry_run=dry_run),
             source,
             text,
             [record.output for record in records],
@@ -1595,7 +1623,16 @@ class TaguruIngester:
         except Exception:
             pass
 
-    async def _acontext_id(self) -> str | None:
+    async def _aheader_context_id(self, *, dry_run: bool) -> str:
+        """Async twin of ``_header_context_id``."""
+        existing = await self._acontext_id(strict=not dry_run)
+        if existing is not None:
+            return existing
+        if self._minted_context_id is None:
+            self._minted_context_id = str(uuid.uuid4())
+        return self._minted_context_id
+
+    async def _acontext_id(self, *, strict: bool = False) -> str | None:
         """Async twin of ``_context_id``."""
         assert self.async_client is not None
         try:
@@ -1605,6 +1642,8 @@ class TaguruIngester:
                 if row.name == self.context
             ]
         except Exception:
+            if strict:
+                raise
             return None
         if len(matches) > 1:
             raise ValueError(

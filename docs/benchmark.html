@@ -89,10 +89,12 @@
 
   <section id="cli">
     <h2>The CLI shape</h2>
-    <pre><code>taguru benchmark extract --models models.json --context bench \
+    <pre><code>taguru benchmark extract --models models.json --context cef2e28b-43f0-4b6c-8201-abab0785399f --name bench \
   --out results/ --runs 3 corpus/</code></pre>
     <pre><code>--models FILE        model matrix (schema below)
---context NAME       the context every cell's source files target
+--context ID         the context every cell's source files target, by id (a
+                    UUID: the id of an existing context, or a fresh one with --name)
+--name NAME          create block name, used only when no context carries --context
 --out DIR            results directory; re-running the same --out resumes —
                     a cell already recorded complete or failed is never re-run
 --runs N             runs per model, 1-99 (default 1)
@@ -378,7 +380,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     <p class="section-sub">measurements.json</p>
     <pre><code>{
   "type": "benchmark_measurements",
-  "version": "2026-09-17",
+  "version": "2026-10-01",
   "run_id": "...",
   "generated_at": "2026-07-26T10:05:12Z",
   "percentile_method": "nearest-rank",
@@ -557,7 +559,7 @@ segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</c
       <code>b</code>, bound to a <code>model_id</code> — never <code>baseline</code>/
       <code>candidate</code> — and an absent side serializes <code>null</code>, never a count.
     </p>
-    <pre><code>{"type":"benchmark_differences","version":"2026-09-17","run_id":"...",
+    <pre><code>{"type":"benchmark_differences","version":"2026-10-01","run_id":"...",
  "pairs":[{"pair_id":"hosted-120b__qwen25-7b-q4","a":"hosted-120b","b":"qwen25-7b-q4"}],
  "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
    "alias_expansion":"batch-local","weight_tolerance":0.0},
@@ -717,7 +719,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     <p class="section-sub">retrieval.json</p>
     <pre><code>{
   "type": "benchmark_retrieval",
-  "version": "2026-09-17",
+  "version": "2026-10-01",
   "run_id": "...", "generated_at": "2026-07-26T10:05:12Z",
   "matching": { "module": "benchmark::identity", "case_fold": true,
       "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },

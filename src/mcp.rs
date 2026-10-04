@@ -1480,7 +1480,7 @@ mod tests {
     /// quoted JSON string.
     #[test]
     fn import_routes_the_stream_as_a_raw_string_body() {
-        let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s\"}\n";
+        let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s\"}\n";
         let (method, path, body) = route_tool("import", &json!({"stream": stream})).unwrap();
         assert_eq!(method, "POST");
         assert_eq!(path, "/import");

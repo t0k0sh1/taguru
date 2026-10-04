@@ -92,7 +92,14 @@ pub(super) struct Args {
     /// rejects both): `--resume-from` already selects a `ReplayMode`
     /// via [`resume_from_fold`] (#822).
     pub(super) resume_from: Option<String>,
+    /// The context every source file targets, by id (#965): a lowercase
+    /// hyphenated UUID — the id column of `GET /contexts`, or a fresh
+    /// one (`uuidgen`) alongside `--name`.
     pub(super) context: String,
+    /// `--name`: the display name the header's create block carries,
+    /// used only when no context carries `context` yet. The create
+    /// block exists exactly when this does.
+    pub(super) create_name: Option<String>,
     pub(super) description: Option<String>,
     /// #466 S1 (ADR 0017): the promotion runbook's `session:{agent}:{id}`
     /// source id, replacing the segment path in the written batch
@@ -135,6 +142,7 @@ impl Args {
         let mut resume_from: Option<String> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
+        let mut create_name: Option<String> = None;
         let mut source_id: Option<String> = None;
         let mut date: Option<u64> = None;
         let mut tags: Vec<String> = Vec::new();
@@ -454,6 +462,21 @@ impl Args {
                         ));
                     }
                 },
+                "--name" => match rest.next() {
+                    Some(name) if create_name.is_none() => create_name = Some(name.clone()),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--name given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--name needs a name",
+                        ));
+                    }
+                },
                 "--description" => match rest.next() {
                     Some(text) if description.is_none() => description = Some(text.clone()),
                     Some(_) => {
@@ -580,7 +603,7 @@ impl Args {
         let Some(context) = context else {
             return Err(crate::config::subcommand_usage_error(
                 "extract",
-                "--context NAME is required",
+                "--context ID is required",
             ));
         };
         let Some(out) = out else {
@@ -589,13 +612,34 @@ impl Args {
                 "--out DIR is required",
             ));
         };
-        if context.len() > MAX_CONTEXT_NAME_BYTES {
+        if !crate::registry::is_context_id(&context) {
             return Err(crate::config::subcommand_usage_error(
                 "extract",
                 &format!(
-                    "context name of {} bytes exceeds the {MAX_CONTEXT_NAME_BYTES}-byte cap",
-                    context.len()
+                    "--context '{}' is not a context id: it takes a lowercase hyphenated \
+                     UUID — the id column of GET /contexts, or a fresh one (e.g. from \
+                     uuidgen) alongside --name — not the context's name",
+                    context
+                        .chars()
+                        .take(MAX_CONTEXT_NAME_BYTES)
+                        .collect::<String>()
                 ),
+            ));
+        }
+        if let Some(name) = &create_name {
+            if name.is_empty() || name.len() > MAX_CONTEXT_NAME_BYTES {
+                return Err(crate::config::subcommand_usage_error(
+                    "extract",
+                    &format!(
+                        "--name of {} bytes must be 1..={MAX_CONTEXT_NAME_BYTES} bytes",
+                        name.len()
+                    ),
+                ));
+            }
+        } else if description.is_some() {
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                "--description needs --name: the create block names the context it would create",
             ));
         }
         if let Some(text) = &description
@@ -680,6 +724,7 @@ impl Args {
             replay_from,
             resume_from,
             context,
+            create_name,
             description,
             source_id,
             date,

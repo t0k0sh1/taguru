@@ -20,6 +20,7 @@ pub(super) struct ResolvedSystem {
 /// claimed. One run targets one `context` on purpose (docs/extract.html).
 pub(super) struct Run {
     pub(super) context: String,
+    pub(super) create_name: Option<String>,
     pub(super) description: Option<String>,
     /// `--source-id` (#466 S1, ADR 0017): the promotion runbook's
     /// session source id, written into the batch header in place of
@@ -412,6 +413,30 @@ impl Run {
         }
     }
 
+    /// The header's create block, present exactly when `--name` was
+    /// given (#965): the display name plus `--description`.
+    fn header_create(&self) -> Option<crate::format::HeaderCreate<'_>> {
+        self.create_name
+            .as_deref()
+            .map(|name| crate::format::HeaderCreate {
+                name,
+                description: self.description.as_deref().unwrap_or(""),
+            })
+    }
+
+    /// What the manifest and checkpoint fingerprints record under their
+    /// `description` column: the whole create block, since all of it is
+    /// baked into the emitted header — a changed `--name` or
+    /// `--description` must re-extract rather than skip and leave the
+    /// old header in place. Empty when no create block is written, as
+    /// the column always was.
+    fn header_create_key(&self) -> String {
+        match self.header_create() {
+            Some(create) => format!("{}\u{1f}{}", create.name, create.description),
+            None => String::new(),
+        }
+    }
+
     /// The checkpoint compatibility fingerprint for one segment — the
     /// same fields [`Manifest::matches`]/[`Manifest::record`] already
     /// carry, minus `output`. Any mismatch against a loaded file's own
@@ -424,7 +449,7 @@ impl Run {
             context: self.context.clone(),
             questions_n: self.questions,
             no_passage: self.no_passage,
-            description: self.description.as_deref().unwrap_or("").to_string(),
+            description: self.header_create_key(),
             fact_budget: self.fact_budget,
             structured_output: self.structured_output.manifest_value().to_string(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
@@ -565,7 +590,7 @@ impl Run {
             context: &self.context,
             questions_n: self.questions,
             no_passage: self.no_passage,
-            description: self.description.as_deref().unwrap_or(""),
+            description: &self.header_create_key(),
             fact_budget: self.fact_budget,
             structured_output: self.structured_output.manifest_value(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
@@ -927,7 +952,7 @@ impl Run {
         let body = render_batch(
             &self.context,
             &written_source,
-            self.description.as_deref(),
+            self.header_create(),
             &extraction,
             (!self.no_passage).then_some(text.as_str()),
             self.date,

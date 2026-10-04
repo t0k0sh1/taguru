@@ -37,7 +37,7 @@ export const PROMPT_VERSION = 6;
 // The file-format revision every record this module writes is stamped
 // with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
 // record's `version` column beside its `type`.
-export const FORMAT_VERSION = "2026-09-17";
+export const FORMAT_VERSION = "2026-10-01";
 export const CHUNK_BYTES = 24 * 1024;
 export const VOCABULARY_CAP = 200;
 export const MAX_NAME_BYTES = 1024;
@@ -1847,7 +1847,8 @@ function byAliasThenCanonical(a: [string, string], b: [string, string]): number 
  * pointers a few lines below.
  */
 export function renderBatch(
-  context: string,
+  contextId: string,
+  createName: string | null,
   source: string,
   description: string | null,
   extraction: Extraction,
@@ -1859,10 +1860,12 @@ export function renderBatch(
     type: "source",
     version: FORMAT_VERSION,
     id: source,
-    context,
+    context_id: contextId,
   };
-  if (description !== null) {
-    header["create"] = { description };
+  // A create block exists exactly when the writer names the context it
+  // would create (#965): the name is what the server registers it under.
+  if (createName !== null) {
+    header["create"] = { name: createName, description: description ?? "" };
   }
   const lines = [JSON.stringify(header)];
   if (passage !== null) {

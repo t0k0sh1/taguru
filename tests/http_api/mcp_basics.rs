@@ -464,7 +464,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
 
     let document = json!({
         "type": "schema",
-        "version": "2026-09-17",
+        "version": "2026-10-01",
         "mode": "warn",
         "closed_labels": false,
         "types": {"Brewery": {"is_a": []}},
@@ -567,10 +567,10 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
 #[test]
 fn mcp_import_tool_reports_durable_prefix_on_a_mid_stream_rejection() {
     let server = Server::start("mcp-import-durable-prefix");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}\n\
-                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, reply) = server.call(
         "POST",

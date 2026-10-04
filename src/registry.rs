@@ -122,11 +122,14 @@ use meta_io::{MetaFile, read_meta_file, save_files, write_meta};
 pub(crate) use meta_io::{ScannedMeta, read_scanned_meta};
 pub(crate) use meta_io::{context_files, schema_digest_of};
 use paths::wal_lane_bytes;
+// Consumed by taguru-code's sync only; the server binaries never derive an id.
+#[allow(unused_imports)]
+pub(crate) use paths::derived_context_id;
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
-    file_stem, image_path, import_marker_path, import_marker_paths, meta_path, mint_context_id,
-    name_from_stem, passages_path, passages_wal_path, pvectors_path, resume_rename_markers,
-    schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
+    file_stem, image_path, import_marker_path, import_marker_paths, is_context_id, meta_path,
+    mint_context_id, name_from_stem, passages_path, passages_wal_path, pvectors_path,
+    resume_rename_markers, schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
 };
 // Still used by the `group` rename path (groups keep name-derived
 // stems and durable rename markers until #965).
@@ -1000,11 +1003,6 @@ pub enum CreateError {
     /// endangers the files; it is refused because a blank display name
     /// renders every listing row and log line unreadable.
     InvalidName,
-    /// Several `contexts` already share the name —
-    /// [`AppState::create_if_absent`] only (the import header's
-    /// create): it cannot say which existing `context` the header
-    /// meant, and minting another would deepen the collision.
-    AmbiguousName(usize),
     Io(io::Error),
 }
 

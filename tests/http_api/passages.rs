@@ -228,8 +228,8 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
 #[test]
 fn citation_resolves_the_section_governing_its_paragraph() {
     let server = Server::start("citation-section");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-sections\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-sections\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
                  {\"paragraph\": 1, \"section\": \"沿革\"}\n";
     let (status, result) = post_import(&server, batch, None);

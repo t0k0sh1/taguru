@@ -9,6 +9,42 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (file format + wire) — import, export, promote and
+  `extract` address a `context` by id** (#965, ADR 0045 §2.7; rides the
+  same unreleased `http_contract` 2): a source header's `context` is
+  now `context_id` (a lowercase hyphenated UUID — a non-UUID is
+  refused by name, like a non-UUID path segment), and its `create`
+  block gains a required `name`. `create` means "if no `context`
+  carries this `context_id`, create it under this `name`", so a file
+  that creates a `context` picks its id itself (a fresh UUID) and every
+  later file repeats it; an existing id is used as is and `create` is
+  ignored. A schema record's `context` is `context_id` too, and an
+  export stream writes the id (with `create.name`) — a restore into
+  another data directory reproduces the same id, a restore under a new
+  id is an explicit rewrite. The import response's
+  `batches[i].context` / `schemas[i].context` became `context_id`, and
+  promote's `into` is the destination's id (a name is a 400). There is
+  no compatibility with the old column: a file or response still
+  carrying `context` fails with "unknown field `context`". The file
+  format revision (`version`) moves to `"2026-10-01"` with it — every
+  record family, since one date names the whole family — and a file
+  stamped with any other date is refused by name.
+  `taguru extract --context` and `taguru benchmark extract --context`
+  take an id; the new `--name` (with `--description`) adds the create
+  block. A router in front of shards sends a header whose id no shard
+  carries to `create.name`'s shard, and to the first shard when there
+  is no create block (which then refuses in the single-instance words).
+  Grants and quotas are still keyed on display names (#966), and group
+  records and cross-search bodies still name their members (a later
+  #965 step). The Python/TypeScript SDKs rename `ImportOutcome.context`
+  and `SchemaImportOutcome.context` to `context_id`, and the LangChain
+  ingesters write the new header (client-minting the id on a first
+  ingest). Two output changes ride along: `taguru anchoring --json`'s
+  `segments` entries carry `context_id` (the id) instead of `context`
+  (the display name), and the import `taguru::audit` event keeps its
+  `context` field name but now emits the context id, not the display
+  name — so an audit-log consumer that aggregates by name must map ids
+  through `GET /contexts`.
 - **Breaking (wire) — `/contexts/{…}` paths take the context ID, and
   the directory row carries `id` and `name` as separate columns**
   (#964, ADR 0045; rides the same unreleased `http_contract` 2 as
@@ -23,12 +59,11 @@ Entries that change an on-disk format or a response shape say so.
   id)` (`after` + new `after_id`), and rename changes only the `name`
   column — the id, and so every path and cursor, never moves. Name
   boundaries that stay until #965/#966 keep working on display names:
-  cross-search `contexts` bodies, import-stream headers, group member
-  lists, and grant allow-lists (an ambiguous name is its own 409/403,
+  cross-search `contexts` bodies, group member lists, and grant
+  allow-lists (an ambiguous name is its own 409/403,
   never silently resolved). MCP `context` tool arguments now take ids
   (`create_context` takes `name`; argument renames are #967), CLI
-  `--context`/CONTEXT arguments take ids (`taguru extract --context`
-  stays a name — it writes the stream header), and the SDKs follow:
+  `--context`/CONTEXT arguments take ids, and the SDKs follow:
   `client.context(id)` / `contexts.create(name=…) -> row`,
   `DirectoryEntry.name`, and `after_id` paging. Single-context search
   responses report `plan.contexts` by display name, matching hits and
@@ -129,7 +164,7 @@ Entries that change an on-disk format or a response shape say so.
   of `PUT /contexts/{name}/schema`, MCP's `put_schema` /
   `validate_schema` arguments, and `{stem}.schema.json` at rest — opens
   with `"type": "schema"` and carries the shared format `version`:
-  `{"type": "schema", "version": "2026-09-17", "mode": …}`. `version`
+  `{"type": "schema", "version": "2026-10-01", "mode": …}`. `version`
   may be left off (it then means the running server's own) and whatever
   installs is stored and served with it stated; `"schema": 1` is no
   longer read anywhere. No conversion exists. To carry an installed
@@ -145,7 +180,7 @@ Entries that change an on-disk format or a response shape say so.
   derivation records stored inside those contexts, and the header line
   of `GET /contexts/{name}/communities`, name their `type` and the
   format `version` like every other record: `{"type": "communities",
-  "version": "2026-09-17", "context": …}` opens the analysis stream
+  "version": "2026-10-01", "context": …}` opens the analysis stream
   (`taguru_communities` is gone — the `type` column is what frees the
   name its own `communities` count already held), the stored manifests
   are `{"type": "communities_manifest", …}` and `{"type":
@@ -164,7 +199,7 @@ Entries that change an on-disk format or a response shape say so.
   left out), and `benchmark_manifest`, `benchmark_runs`,
   `benchmark_measurements`, `benchmark_differences`,
   `benchmark_retrieval`, each always written with `"version":
-  "2026-09-17"`. The integer stamps (1–3) and `manifest.json`'s `1..=N`
+  "2026-10-01"`. The integer stamps (1–3) and `manifest.json`'s `1..=N`
   range acceptance are gone: only this build's revision is read. The
   header line of `runs/*.jsonl` and of `differences.jsonl` no longer
   carries `kind: "header"` — it names its `type` instead. With old
@@ -177,7 +212,7 @@ Entries that change an on-disk format or a response shape say so.
   revision in an optional `version` date, as the import stream's records
   do: `{"type": "eval", "name": …}` on line 1 of `eval.jsonl`,
   `{"type": "evaluate_thresholds", "aggregate": …}`, `{"type":
-  "evaluation", "version": "2026-09-17", …}` for `evaluation.json`, and
+  "evaluation", "version": "2026-10-01", …}` for `evaluation.json`, and
   `{"type": "evaluation_changes", "version": …}` as `changes.jsonl`'s
   header (which no longer carries `kind: "header"`). The two files a
   person writes may leave `version` out. `taguru evaluate compare`
@@ -190,10 +225,11 @@ Entries that change an on-disk format or a response shape say so.
   record now states three facts in three columns: `type` (what it is),
   `version` (the file format's revision, as a date), and `id` (which
   one). The source file header is `{"type": "source", "version":
-  "2026-09-17", "id": "docs/a.md", "context": "sake"}` — `taguru_batch`
-  is gone and the header's `source` is `id`; a `group` record is
-  `{"type": "group", "id": "kura", …}` (`name` is `id`); a `schema`
-  record is `{"type": "schema", "context": "sake", …}`. `version` may
+  "2026-10-01", "id": "docs/a.md", "context_id": "<uuid>"}` —
+  `taguru_batch` is gone and the header's `source` is `id`; a `group`
+  record is `{"type": "group", "id": "kura", …}` (`name` is `id`); a
+  `schema` record is `{"type": "schema", "context_id": "<uuid>", …}`
+  (the `context_id` column is #965's). `version` may
   be omitted, and then means the running build's own revision;
   everything taguru writes carries it, and any other date is refused
   by name. There is no transition alias: re-extract, or export again

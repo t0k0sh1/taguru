@@ -3,7 +3,7 @@
   "method": "POST",
   "operation": "promote",
   "request": {
-    "into": "corpus-p",
+    "into": "00000000-0000-4000-8000-000000000002",
     "sources": [
       "session:w:a"
     ]
@@ -33,7 +33,7 @@
           "aliases": 1,
           "association_paragraphs_dropped": 0,
           "associations": 1,
-          "context": "corpus-p",
+          "context_id": "00000000-0000-4000-8000-000000000002",
           "created": false,
           "locators_dropped": 0,
           "locators_stored": 0,

@@ -13,29 +13,34 @@ fn parse(text: &str) -> Result<Batch, String> {
     parse_batch(std::io::Cursor::new(text))
 }
 
-const HEADER: &str = r#"{"type": "source", "context": "sake", "id": "doc-1"}"#;
+const HEADER: &str =
+    r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-1"}"#;
 
 #[test]
 fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
     let body = concat!(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n",
         "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
         "\n",
         "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"sake\"]}\n",
-        "{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"s2\"}\n",
         "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
     )
     .as_bytes();
     let ranges = split_batches(body);
     assert_eq!(ranges.len(), 2);
     let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
-    assert!(first.starts_with("{\"type\": \"source\", \"context\": \"sake\""));
+    assert!(first.starts_with(
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\""
+    ));
     // The batch's ops (and the blank line) ride along; the group
     // record between the batches belongs to neither.
     assert!(first.contains("likes"));
     assert!(!first.contains("\"group\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
-    assert!(second.starts_with("{\"type\": \"source\", \"context\": \"beer\""));
+    assert!(second.starts_with(
+        "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\""
+    ));
     assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
 }
 
@@ -45,10 +50,10 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
 #[test]
 fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     let body = format!(
-        "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}}\n\
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}}\n\
          {{\"assoc\": [\"a\", \"likes\", \"b\"]}}\n\
          {SCHEMA_LINE}\n\
-         {{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}}\n\
+         {{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"s2\"}}\n\
          {{\"assoc\": [\"c\", \"likes\", \"d\"]}}"
     );
     let body = body.as_bytes();
@@ -58,7 +63,9 @@ fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     assert!(first.contains("likes"));
     assert!(!first.contains("\"schema\""));
     let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
-    assert!(second.starts_with("{\"type\": \"source\", \"context\": \"beer\""));
+    assert!(second.starts_with(
+        "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\""
+    ));
 }
 
 #[test]
@@ -72,7 +79,7 @@ fn a_batch_parses_and_the_header_source_stamps_every_association() {
          {{\"passage\": \"青嶺酒造は1907年創業。\"}}\n"
     ))
     .unwrap();
-    assert_eq!(batch.context, "sake");
+    assert_eq!(batch.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
     assert_eq!(batch.associations.len(), 1);
     assert_eq!(batch.associations[0].source.as_deref(), Some("doc-1"));
     assert_eq!(batch.concepts.len(), 1);
@@ -101,7 +108,7 @@ fn the_first_line_must_be_a_header_of_a_readable_version() {
     assert!(error.contains("not a source file header"), "{error}");
 
     let error = parse(
-        "{\"type\": \"source\", \"version\": \"2008-10-17\", \"context\": \"c\", \"id\": \"s\"}\n",
+        "{\"type\": \"source\", \"version\": \"2008-10-17\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\"}\n",
     )
     .unwrap_err();
     assert!(
@@ -110,11 +117,11 @@ fn the_first_line_must_be_a_header_of_a_readable_version() {
     );
     // The current date, and no date at all, both read.
     parse(&format!(
-        "{{\"type\": \"source\", \"version\": \"{}\", \"context\": \"c\", \"id\": \"s\"}}\n",
+        "{{\"type\": \"source\", \"version\": \"{}\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\"}}\n",
         crate::format::FORMAT_VERSION
     ))
     .unwrap();
-    parse("{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\"}\n").unwrap();
+    parse("{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\"}\n").unwrap();
 
     assert!(parse("\n\n").unwrap_err().contains("empty file"));
 }
@@ -126,7 +133,7 @@ fn the_first_line_must_be_a_header_of_a_readable_version() {
 #[test]
 fn a_leading_bom_does_not_break_the_first_line() {
     let batch = parse(&format!("\u{FEFF}{HEADER}\n")).unwrap();
-    assert_eq!(batch.context, "sake");
+    assert_eq!(batch.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
     assert_eq!(batch.source, "doc-1");
 }
 
@@ -136,7 +143,7 @@ fn a_stream_of_batches_parses_with_per_batch_state() {
         "{HEADER}\n\
          {{\"passage\": \"第1段落。\"}}\n\
          {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
-         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n\
+         {{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
     )))
     .unwrap()
@@ -174,7 +181,7 @@ fn a_batch_boundary_runs_the_finish_validations() {
     let error = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
          {{\"paragraph\": 0, \"question\": \"何?\"}}\n\
-         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n\
+         {{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}}\n\
          {{\"passage\": \"本文。\"}}\n"
     )))
     .unwrap_err();
@@ -185,7 +192,7 @@ fn a_batch_boundary_runs_the_finish_validations() {
 fn parse_batch_refuses_a_multi_batch_stream() {
     let error = parse(&format!(
         "{HEADER}\n\
-         {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}}\n"
+         {{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}}\n"
     ))
     .unwrap_err();
     assert!(error.contains("exactly one"), "{error}");
@@ -249,15 +256,26 @@ fn empty_question_and_section_text_is_refused() {
     }
 }
 
-/// An empty `context` name would `file_stem` to a bare `.ctx` the
-/// server's directory scan never rediscovers; an empty source `id`
-/// has no identity to retract a re-import against. Both are refused
-/// at the header, each naming its own field.
+/// An empty source `id` has no identity to retract a re-import
+/// against, and an empty create name would render every listing row
+/// blank: both are refused at the header, each naming its own field.
 #[test]
-fn an_empty_context_or_source_name_in_the_header_is_refused() {
+fn an_empty_source_id_or_create_name_in_the_header_is_refused() {
     for (field, header) in [
-        ("context", r#"{"type": "source", "context": "", "id": "s"}"#),
-        ("id", r#"{"type": "source", "context": "c", "id": ""}"#),
+        (
+            "id",
+            r#"{"type": "source", "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", "id": ""}"#,
+        ),
+        (
+            "create.name",
+            r#"{"type": "source", "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", "id": "s", "create": {"name": ""}}"#,
+        ),
+        // A create block without a name is the same refusal: the name
+        // is what the context would be created under.
+        (
+            "create.name",
+            r#"{"type": "source", "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", "id": "s", "create": {}}"#,
+        ),
     ] {
         let error = parse(header).unwrap_err();
         assert!(
@@ -265,6 +283,49 @@ fn an_empty_context_or_source_name_in_the_header_is_refused() {
             "{field}: {error}"
         );
     }
+}
+
+/// `context_id` takes a canonical UUID and nothing else (#965
+/// decision 2): a name, an empty string, and every alternate spelling
+/// of a UUID (`uuid` parses them all) are refused with the same
+/// message, naming the line and echoing the offending value — and the
+/// schema record's column is judged by the same rule.
+#[test]
+fn a_context_id_that_is_not_a_canonical_uuid_is_refused() {
+    for value in [
+        "sake",
+        "",
+        "CEF2E28B-43F0-4B6C-8201-ABAB0785399F",
+        "cef2e28b43f04b6c8201abab0785399f",
+        "{cef2e28b-43f0-4b6c-8201-abab0785399f}",
+        "urn:uuid:cef2e28b-43f0-4b6c-8201-abab0785399f",
+    ] {
+        let header = format!(r#"{{"type": "source", "context_id": "{value}", "id": "s"}}"#);
+        let error = parse(&header).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "line 1: '{value}' is not a context id: context_id takes a lowercase \
+                 hyphenated UUID — the id column of GET /contexts, or a fresh one (e.g. from \
+                 uuidgen) alongside create — not the context's name"
+            )
+        );
+        let schema = format!(
+            r#"{{"type": "schema", "context_id": "{value}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+        );
+        let error = parse_stream(std::io::Cursor::new(schema)).unwrap_err();
+        assert!(error.contains("is not a context id"), "{value}: {error}");
+    }
+    // The pre-#965 column is refused by name rather than half-read.
+    let error = parse(r#"{"type": "source", "context": "sake", "id": "s"}"#).unwrap_err();
+    assert!(error.contains("unknown field `context`"), "{error}");
+    // An absurd value is refused by size, not echoed back whole.
+    let long = "x".repeat(MAX_CONTEXT_NAME_BYTES + 1);
+    let error = parse(&format!(
+        r#"{{"type": "source", "context_id": "{long}", "id": "s"}}"#
+    ))
+    .unwrap_err();
+    assert!(error.contains("exceeds the"), "{error}");
 }
 
 #[test]
@@ -361,14 +422,14 @@ fn group_records_validate_their_shape_with_line_numbers() {
 #[test]
 fn parse_batch_refuses_group_records() {
     let error = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
          {\"type\": \"group\", \"id\": \"kura\"}\n",
     )
     .unwrap_err();
     assert!(error.contains("exactly one source was expected"), "{error}");
 }
 
-const SCHEMA_LINE: &str = r#"{"type": "schema", "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
+const SCHEMA_LINE: &str = r#"{"type": "schema", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
 
 /// `schema` records ride a stream and stand alone — the
 /// schema twin of [`group_records_ride_a_stream_and_stand_alone`]
@@ -389,7 +450,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
     assert_eq!(stream.schemas.len(), 1);
     assert_eq!(stream.groups.len(), 1);
     let (context, installed) = &stream.schemas[0];
-    assert_eq!(context, "sake");
+    assert_eq!(context, "cef2e28b-43f0-4b6c-8201-abab0785399f");
     assert_eq!(installed.document().mode, crate::schema::SchemaMode::Warn);
 
     // A schema record closes the batch before it: an op line after
@@ -427,25 +488,25 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // parse_group's exact wording shape (ADR 0009 §13 bullet 4).
     assert!(
         case(
-            r#"{"type": "schema", "version": "2008-10-17", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"type": "schema", "version": "2008-10-17", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
         .contains("schema record: version '2008-10-17' is not a format")
     );
 
     assert!(
         case(
-            r#"{"type": "schema", "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            r#"{"type": "schema", "context_id": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
         )
-        .contains("must not be empty")
+        .contains("is not a context id")
     );
 
-    // The context name's own byte cap — mirrors
+    // The id column's own byte cap — mirrors
     // `group_records_validate_their_shape_with_line_numbers`'s
     // `long` case for a group's `name`.
     let long = "x".repeat(65);
     assert!(
         case(&format!(
-            r#"{{"type": "schema", "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+            r#"{{"type": "schema", "context_id": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
         ))
         .contains("65 bytes")
     );
@@ -453,12 +514,12 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // Every field is required — no struct-level default, matching
     // SchemaDocument's own at-rest posture.
     assert!(
-        case(r#"{"type": "schema", "context": "sake", "mode": "off"}"#).contains("missing field")
+        case(r#"{"type": "schema", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "mode": "off"}"#).contains("missing field")
     );
 
     assert!(
         case(
-            r#"{"type": "schema", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
+            r#"{"type": "schema", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
         )
         .contains("unknown field")
     );
@@ -467,7 +528,7 @@ fn schema_records_validate_their_shape_with_line_numbers() {
     // (here: the relation named the reserved type label) surfaces
     // with the line number, not just the bare violation text.
     let error = case(
-        r#"{"type": "schema", "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
+        r#"{"type": "schema", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
     );
     assert!(
         error.contains("line 1") && error.contains("reserved"),
@@ -492,7 +553,7 @@ fn schema_records_validate_their_shape_with_line_numbers() {
 fn parse_batch_refuses_schema_records() {
     let error = parse(&format!("{HEADER}\n{SCHEMA_LINE}\n")).unwrap_err();
     assert!(
-        error.contains("schema record for context 'sake'")
+        error.contains("schema record for context 'cef2e28b-43f0-4b6c-8201-abab0785399f'")
             && error.contains("exactly one source was expected"),
         "{error}"
     );
@@ -565,9 +626,9 @@ fn a_line_exactly_at_the_byte_cap_is_accepted() {
 #[test]
 fn split_batches_keeps_unparseable_lines_inside_the_enclosing_range() {
     let body = concat!(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s1\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n",
         "not json at all\n",
-        "{\"type\": \"source\", \"context\": \"beer\", \"id\": \"s2\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"s2\"}\n",
         "{\"assoc\": 1\n",
     )
     .as_bytes();
@@ -598,7 +659,7 @@ fn apply_batch_threads_the_deadline_into_association_writes() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
     let batch = parse(&format!(
         "{}\n{}\n",
-        r#"{"type": "source", "context": "sake", "id": "doc-1", "create": {"description": "d"}}"#,
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-1", "create": {"name": "sake", "description": "d"}}"#,
         r#"{"subject": "a", "label": "b", "object": "c", "weight": 1.0}"#,
     ))
     .unwrap();
@@ -1045,7 +1106,7 @@ fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let mut batch = parse(
-        "{\"type\": \"source\", \"context\": \"perm\", \"id\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"017a80b6-80ac-4531-b4ca-a82c4659f007\", \"id\": \"doc-1\", \"create\": {\"name\": \"perm\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1053,7 +1114,7 @@ fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
     assert!(batch.create.is_none());
     let refusal = apply_batch(&state, &batch, Deadline::unbounded()).unwrap_err();
     assert!(
-        matches!(refusal, ApplyRefusal::NoContext(ref context) if context == "perm"),
+        matches!(refusal, ApplyRefusal::NoContext(ref context) if context == "017a80b6-80ac-4531-b4ca-a82c4659f007"),
         "{refusal:?}"
     );
 
@@ -1085,7 +1146,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
 
     // A completed batch leaves no marker: its truth is fully on disk.
     let happy = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \"create\": {\"name\": \"sake\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1101,7 +1162,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     // alias to a canonical nothing interned — the same rejection
     // `add_alias` would raise for real, just caught here first.)
     let torn = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
     .unwrap();
@@ -1117,7 +1178,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     // there was never a tear to repair, just a rejected batch
     // that nothing depended on.
     let fixed = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
     )
@@ -1161,7 +1222,11 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
     // same file family an earlier marker-enabled run of this same
     // context would have written into.
     state
-        .create("sake", crate::registry::ContextMeta::default())
+        .create_if_absent(
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            "sake",
+            crate::registry::ContextMeta::default(),
+        )
         .map_err(|_| "create")
         .unwrap();
     let stem = state.stem_of("sake").unwrap();
@@ -1180,7 +1245,7 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
     let stale = crate::registry::import_marker_path(&dir, &stem, "doc-1");
     fs::write(&stale, "{\"context\": \"sake\", \"source\": \"doc-1\"}").unwrap();
     let batch = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \"create\": {\"name\": \"sake\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -1214,7 +1279,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
         let seeded = parse(
-            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
+            "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \"create\": {\"name\": \"sake\"}}\n\
              {\"passage\": \"杜氏は高瀬。\"}\n\
              {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
         )
@@ -1222,7 +1287,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
         let reimport = parse(
-            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+            "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
              {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬2\", \"weight\": 1.0}\n",
         )
         .unwrap();
@@ -1276,6 +1341,50 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
 /// AND, so a routine re-import that supplies a replacement passage
 /// must report `passage_dropped: false` from both entrances alike.
 #[test]
+fn a_preview_lets_a_later_batch_ride_the_create_of_an_earlier_one_in_the_stream() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-ingest-preview-seeded-create-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+    let first = parse(
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \"create\": {\"name\": \"sake\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    let later = parse(
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n\
+         {\"subject\": \"蔵\", \"label\": \"産地\", \"object\": \"灘\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+
+    // Alone, the later batch names a context that does not exist and
+    // carries no create block: refused.
+    assert!(matches!(
+        preview_batch(&state, &later, &PreviewSeeds::default()),
+        Err(ApplyRefusal::NoContext(_))
+    ));
+
+    // After the first batch previews clean and is absorbed, the real
+    // import's first batch would have created the context — the later
+    // one previews clean, and the context itself is still never made.
+    let mut seeds = PreviewSeeds::default();
+    let created = preview_batch(&state, &first, &seeds).unwrap();
+    assert!(created.created);
+    seeds.absorb(&first);
+    let followed = preview_batch(&state, &later, &seeds).unwrap();
+    assert!(!followed.created, "the earlier batch's create stands in");
+    assert!(
+        !state.context_id_exists("cef2e28b-43f0-4b6c-8201-abab0785399f"),
+        "a preview creates nothing"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
     let dir = std::env::temp_dir().join(format!(
         "taguru-ingest-passage-replace-parity-{}",
@@ -1285,14 +1394,14 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let seeded = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \"create\": {\"name\": \"sake\"}}\n\
          {\"passage\": \"杜氏は高瀬。\"}\n",
     )
     .unwrap();
     apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
     let reimport = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
          {\"passage\": \"杜氏は高瀬二代目。\"}\n",
     )
     .unwrap();
@@ -1330,7 +1439,7 @@ fn a_predicted_alias_rejection_creates_nothing_and_applies_nothing() {
     let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
 
     let torn = parse(
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \"create\": {\"name\": \"sake\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
@@ -1398,9 +1507,15 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
         ));
         let _ = fs::remove_dir_all(&dir);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .create_if_absent(
+                "cef2e28b-43f0-4b6c-8201-abab0785399f",
+                "sake",
+                ContextMeta::default(),
+            )
+            .unwrap();
         let batch = parse(
-            "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+            "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
              {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
              {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
              {\"alias\": \"青嶺\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
@@ -1611,7 +1726,7 @@ fn chunk_body_guarantees_a_trailing_newline_per_unit() {
 #[test]
 fn a_leading_bom_is_stripped_before_split_batches_runs() {
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
-    bytes.extend_from_slice(b"{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\"}\n");
+    bytes.extend_from_slice(b"{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\"}\n");
     assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
     bytes.drain(0..3);
     let ranges = split_batches(&bytes);
@@ -1779,17 +1894,17 @@ fn in_stream_duplicates_name_the_earlier_line() {
     .unwrap_err();
     assert!(
         batches.starts_with(
-            "line 3: source 'doc-1' in context 'sake' is already stated by an \
+            "line 3: source 'doc-1' in context 'cef2e28b-43f0-4b6c-8201-abab0785399f' is already stated by an \
                              earlier source of this stream, at line 1"
         ),
         "{batches}"
     );
-    let schema = "{\"type\": \"schema\", \"context\": \"sake\", \"mode\": \"warn\", \
+    let schema = "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
                   \"closed_labels\": false, \"types\": {}, \"relations\": {}}";
     let schemas = parse_stream(format!("{schema}\n{schema}\n").as_bytes()).unwrap_err();
     assert!(
         schemas.starts_with(
-            "line 2: context 'sake' schema is already stated by an earlier \
+            "line 2: context 'cef2e28b-43f0-4b6c-8201-abab0785399f' schema is already stated by an earlier \
                              record of this stream, at line 1"
         ),
         "{schemas}"
@@ -2048,7 +2163,7 @@ fn the_pre_adr_0042_spellings_are_refused_not_read() {
     // A header that names its type but keeps the old identity column is
     // refused by the unknown column, not quietly read.
     let error = parse_stream(std::io::Cursor::new(
-        "{\"type\": \"source\", \"context\": \"c\", \"source\": \"s\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"source\": \"s\"}\n",
     ))
     .unwrap_err();
     assert!(error.contains("unknown field `source`"), "{error}");
@@ -2066,10 +2181,10 @@ fn the_pre_adr_0042_spellings_are_refused_not_read() {
 fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
     let version = crate::format::FORMAT_VERSION;
     let stream = parse_stream(std::io::Cursor::new(format!(
-        "{{\"type\": \"schema\", \"version\": \"{version}\", \"context\": \"sake\", \"mode\": \"warn\", \
+        "{{\"type\": \"schema\", \"version\": \"{version}\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
            \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {{\"type\": \"source\", \"version\": \"{version}\", \"id\": \"a.md\", \"context\": \"sake\"}}\n\
-         {{\"type\": \"source\", \"id\": \"b.md\", \"context\": \"sake\"}}\n\
+         {{\"type\": \"source\", \"version\": \"{version}\", \"id\": \"a.md\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\"}}\n\
+         {{\"type\": \"source\", \"id\": \"b.md\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\"}}\n\
          {{\"type\": \"group\", \"version\": \"{version}\", \"id\": \"kura\"}}\n\
          {{\"type\": \"group\", \"id\": \"kid\"}}\n"
     )))
@@ -2087,9 +2202,9 @@ fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
 #[test]
 fn an_explicit_null_version_is_refused_not_read_as_absent() {
     for line in [
-        r#"{"type": "source", "version": null, "id": "s", "context": "c"}"#,
+        r#"{"type": "source", "version": null, "id": "s", "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"}"#,
         r#"{"type": "group", "version": null, "id": "kura"}"#,
-        r#"{"type": "schema", "version": null, "context": "c", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
+        r#"{"type": "schema", "version": null, "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
     ] {
         let error = parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
         assert!(

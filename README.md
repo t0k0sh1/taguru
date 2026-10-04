@@ -242,7 +242,7 @@ source, then applies its file — so re-importing is idempotent and a
 revised file replaces cleanly instead of double-counting weights.
 
 ```jsonl
-{"type": "source", "id": "docs/aomine.md", "context": "sake", "create": {"description": "酒蔵の知識"}}
+{"type": "source", "id": "docs/aomine.md", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "create": {"name": "sake", "description": "酒蔵の知識"}}
 {"passage": "青嶺酒造は1907年創業。杜氏は高瀬。"}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
 {"alias": "Aomine Brewery", "canonical": "青嶺酒造", "kind": "concept"}
@@ -278,7 +278,8 @@ file, ready for either import entrance:
 ```sh
 TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
 TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
-taguru extract --context sake --description "酒蔵の知識" --out sources/ docs/
+taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --name sake \
+  --description "酒蔵の知識" --out sources/ docs/
 taguru import sources/
 ```
 

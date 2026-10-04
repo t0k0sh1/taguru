@@ -248,8 +248,8 @@
     <pre><code><span class="c"># 45m and the -k grace period are timeout(1)'s — taguru extract has no time flag of its own.
 # -s INT sends the same signal Ctrl+C would (taguru's cooperative first-stage stop);
 # -k 30 sends SIGKILL 30s later only if the process is still stuck on the graceful path.</span>
-timeout -k 30 -s INT 45m taguru extract --context sake --description "酒蔵の知識" \
-  --out sources/ docs/                <span class="c"># --description is ignored once the context already exists</span>
+timeout -k 30 -s INT 45m taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --name sake --description "酒蔵の知識" \
+  --out sources/ docs/                <span class="c"># --name/--description are ignored once the context already exists</span>
 rc=$?
 taguru import sources/            <span class="c"># apply whatever this window finished — safe even if extract above was cut short</span>
 

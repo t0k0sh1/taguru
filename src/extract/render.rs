@@ -9,17 +9,13 @@ use super::*;
 pub(super) fn render_batch(
     context: &str,
     source: &str,
-    description: Option<&str>,
+    create: Option<crate::format::HeaderCreate<'_>>,
     extraction: &Extraction,
     passage: Option<&str>,
     date: Option<u64>,
     tags: &[String],
 ) -> String {
-    let mut lines = vec![crate::format::source_header_line(
-        source,
-        context,
-        description,
-    )];
+    let mut lines = vec![crate::format::source_header_line(source, context, create)];
     if let Some(text) = passage {
         // #466 S1 (ADR 0017): the runbook's source metadata rides the
         // passage line, exactly where the import wire format carries it

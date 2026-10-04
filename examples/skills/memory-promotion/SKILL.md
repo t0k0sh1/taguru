@@ -49,8 +49,8 @@ re-asserting within one note inflates weight — don't.
    (ADR 0018): when the keepers are the scratch's own structured
    associations (you wrote them during the session; there is no prose
    left to extract), call the `promote` MCP tool with
-   `{context: scratch-{agent}, into: PERMANENT, sources: [the session
-   ids]}`. Each source moves whole — passage, `date`, tags, only its
+   `{context: SCRATCH_ID, into: PERMANENT_ID, sources: [the session
+   ids]}` (both are context ids — the `id` column of `list_contexts` — not names). Each source moves whole — passage, `date`, tags, only its
    own share of every edge — source ids survive (citations still name
    the session), re-promotion is idempotent, and the landing-zone
    audit comes back in the same response: jump straight to step 5's

@@ -1094,17 +1094,22 @@ mod tests {
         );
 
         // The id-addressed data paths reach each claimant fine; the
-        // NAME boundaries that remain (cross-search resolution, the
-        // import header) refuse the ambiguity explicitly.
+        // NAME boundary that remains (cross-search resolution) refuses
+        // the ambiguity explicitly. The import header names an id, so
+        // it never meets the ambiguity at all: an id that is registered
+        // is the answer, whatever its name is shared with.
         assert!(matches!(
             state.resolve_wire_name("sake"),
             Err(AccessError::AmbiguousName(2))
         ));
         assert!(state.context_id_of("sake").is_none());
-        assert!(matches!(
-            state.create_if_absent("sake", ContextMeta::default()),
-            Err(CreateError::AmbiguousName(2))
-        ));
+        let claimant = state.directory()[0].id.clone();
+        assert!(
+            !state
+                .create_if_absent(&claimant, "sake", ContextMeta::default())
+                .unwrap(),
+            "a registered id is never recreated"
+        );
         // A plain create never resolves names: a third "sake" is a
         // third, distinct context (issue #961 decision 1).
         state.create("sake", ContextMeta::default()).unwrap();

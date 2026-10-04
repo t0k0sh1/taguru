@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 import pytest
@@ -210,7 +211,7 @@ def test_ingest_text_builds_the_batch_and_imports(
     assert len(fake_server.imported) == 1
     lines = [json.loads(line) for line in fake_server.imported[0].strip().split("\n")]
     assert lines[0]["type"] == "source"
-    assert lines[0]["context"] == "sake"
+    assert lines[0]["context_id"] == "id-sake"
     assert lines[0]["id"] == "docs/aomine.md"
     assert "create" not in lines[0]
     assert lines[1] == {"passage": DOC_TEXT}  # verbatim, unchunked, unlabeled
@@ -269,7 +270,7 @@ def test_ingest_text_propagates_section_and_locator_counts_from_the_server(
     sections_stored``/``sections_dropped``/``locators_stored``/
     ``locators_dropped`` onto ``IngestOutcome`` (issue #347)."""
     fake_server.import_result_override = {
-        "context": "sake",
+        "context_id": "sake",
         "source": "docs/aomine.md",
         "created": False,
         "retracted": 0,
@@ -379,7 +380,89 @@ def test_create_context_stamps_the_header(
     )
     ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     header = json.loads(fake_server.imported[0].split("\n", 1)[0])
-    assert header["create"] == {"description": "酒蔵の知識"}
+    assert header["create"] == {"name": "sake", "description": "酒蔵の知識"}
+
+
+def _new_context_ingester(
+    sync_client: Taguru, async_client: AsyncTaguru, responses: list[str], **kwargs: Any
+) -> TaguruIngester:
+    """An ingester whose context ("brand-new") the fake directory does not list."""
+    return TaguruIngester(
+        context="brand-new",
+        llm=RecordingFakeChatModel(responses=responses, seen_prompts=[]),
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        create_context=True,
+        context_description="新しい文脈",
+        refresh_embeddings=False,  # the fake directory never lists the new context
+        **kwargs,
+    )
+
+
+def test_a_first_ingest_mints_one_id_and_names_the_context_in_create(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """The header names a context by id (#965), so a context the directory
+    does not list yet gets a client-minted UUID — the SAME one for every
+    batch of this ingester — and ``create.name`` is what the server
+    registers it under."""
+    ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
+    ingester.ingest_text(DOC_TEXT, source="docs/a.md")
+    ingester.ingest_text(DOC_TEXT, source="docs/b.md")
+    headers = [json.loads(batch.split("\n", 1)[0]) for batch in fake_server.imported]
+    assert len(headers) == 2
+    minted = headers[0]["context_id"]
+    assert str(uuid.UUID(minted)) == minted  # canonical lowercase hyphenated
+    assert headers[1]["context_id"] == minted
+    for header in headers:
+        assert header["create"] == {"name": "brand-new", "description": "新しい文脈"}
+
+
+async def test_the_async_path_mints_the_same_way(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
+    await ingester.aingest_text(DOC_TEXT, source="docs/a.md")
+    await ingester.aingest_text(DOC_TEXT, source="docs/b.md")
+    headers = [json.loads(batch.split("\n", 1)[0]) for batch in fake_server.imported]
+    minted = headers[0]["context_id"]
+    assert str(uuid.UUID(minted)) == minted
+    assert headers[1]["context_id"] == minted
+    assert headers[0]["create"]["name"] == "brand-new"
+
+
+def test_a_dry_run_and_the_import_it_precedes_agree_on_the_minted_id(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
+    dry = ingester.ingest_text(DOC_TEXT, source="docs/a.md", dry_run=True)
+    assert dry.ndjson is not None
+    dry_id = json.loads(dry.ndjson.split("\n", 1)[0])["context_id"]
+    ingester.ingest_text(DOC_TEXT, source="docs/a.md")
+    assert json.loads(fake_server.imported[0].split("\n", 1)[0])["context_id"] == dry_id
+
+
+def test_a_failed_directory_listing_does_not_mint_a_duplicate_on_a_real_import(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient listing failure must not turn "the context exists but I
+    cannot see it" into "mint a fresh id and create a second one": a real
+    import raises; a dry run, which only renders NDJSON, still works."""
+
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("directory unavailable")
+
+    monkeypatch.setattr(type(sync_client.contexts), "iter", broken)
+    ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
+    dry = ingester.ingest_text(DOC_TEXT, source="docs/a.md", dry_run=True)
+    assert dry.ok
+    with pytest.raises(RuntimeError, match="directory unavailable"):
+        ingester.ingest_text(DOC_TEXT, source="docs/a.md")
+    assert fake_server.imported == []
 
 
 def test_documents_require_a_source_id(sync_client: Taguru, async_client: AsyncTaguru) -> None:
@@ -595,7 +678,7 @@ def test_a_fetched_schema_is_folded_into_the_system_prompt(
     _fetch_vocabulary — here the schema-present case."""
     fake_server.schema_document = {
         "type": "schema",
-        "version": "2026-09-17",
+        "version": "2026-10-01",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
@@ -615,7 +698,7 @@ async def test_a_fetched_schema_is_folded_into_the_system_prompt_async(
     """Async twin: same best-effort schema fetch on the aingest_text path."""
     fake_server.schema_document = {
         "type": "schema",
-        "version": "2026-09-17",
+        "version": "2026-10-01",
         "mode": "warn",
         "closed_labels": False,
         "types": {"Brewery": {"is_a": []}},

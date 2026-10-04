@@ -275,7 +275,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--diagnostics-out FILE] [--schema FILE]
                       [--replay MODE] [--replay-from DIR] [--resume-from STEP]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
-                      --context NAME [--description TEXT] --out DIR FILE|DIR...
+                      --context ID [--name NAME [--description TEXT]] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
 name) and writes one source file per input into --out, ready for
@@ -451,8 +451,13 @@ chat endpoint:
                       written on the passage line; how a later session finds
                       its trail via passage search's tags filter. Needs the
                       passage
-  --context NAME      the context every source file targets
-  --description TEXT  add a create block (used only if the context is absent)
+  --context ID        the context every source file targets, by id: a
+                      lowercase hyphenated UUID — the id column of
+                      GET /contexts, or a fresh one (e.g. from uuidgen)
+                      alongside --name
+  --name NAME         add a create block naming the context (used only if
+                      no context carries --context's id yet)
+  --description TEXT  the create block's description (needs --name)
   --schema FILE       the target context's schema document (same shape as
                       {stem}.schema.json / GET /contexts/{id}/schema):
                       folds allowed entity types and constrained relations
@@ -1199,6 +1204,7 @@ pub fn run(args: &[String]) -> i32 {
         .unwrap_or_else(|| args.out.join(TRACE_DIR_NAME));
     let mut run = Run {
         context: args.context,
+        create_name: args.create_name,
         description: args.description,
         force: args.force,
         dry_run: args.dry_run,

@@ -172,7 +172,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         corpus.to_str().unwrap(),
@@ -182,7 +182,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["type"], "benchmark_manifest");
-    assert_eq!(manifest["version"], "2026-09-17");
+    assert_eq!(manifest["version"], "2026-10-01");
     assert_eq!(manifest["harness"]["execution"], "subprocess");
     assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
@@ -210,7 +210,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     // version (ADR 0042). Every line after it says what it is in the
     // same `type` column, and none carries a `kind` (ADR 0042 §3.4).
     assert_eq!(lines[0]["type"], "benchmark_runs", "{}", lines[0]);
-    assert_eq!(lines[0]["version"], "2026-09-17", "{}", lines[0]);
+    assert_eq!(lines[0]["version"], "2026-10-01", "{}", lines[0]);
     assert!(
         lines.iter().all(|line| line.get("kind").is_none()),
         "{lines:?}"
@@ -253,7 +253,7 @@ fn resuming_a_complete_matrix_makes_no_further_calls() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         corpus.to_str().unwrap(),
@@ -293,7 +293,7 @@ fn resuming_with_a_wider_runs_count_adds_cells_and_widens_the_recorded_count() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         "--runs",
@@ -313,7 +313,7 @@ fn resuming_with_a_wider_runs_count_adds_cells_and_widens_the_recorded_count() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         "--runs",
@@ -348,7 +348,7 @@ fn a_models_json_edited_after_the_fact_refuses_to_resume() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         corpus.to_str().unwrap(),
@@ -402,7 +402,7 @@ fn a_cell_that_fails_every_segment_is_recorded_failed_with_a_synthesized_end() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         corpus.to_str().unwrap(),
@@ -453,7 +453,7 @@ fn redact_is_forwarded_to_every_cell_and_never_inherited_from_the_shell() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         "--redact",
@@ -487,7 +487,7 @@ fn redact_is_forwarded_to_every_cell_and_never_inherited_from_the_shell() {
         "--models",
         models.to_str().unwrap(),
         "--context",
-        "bench",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
         "--out",
         out.to_str().unwrap(),
         corpus.to_str().unwrap(),

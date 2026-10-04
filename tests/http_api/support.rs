@@ -113,6 +113,25 @@ impl Server {
         self.context_stem(name)
     }
 
+    /// Creates a context under a CHOSEN id: a header-only import batch
+    /// whose create block is `create` (`name` plus any of `description`,
+    /// `pinned`, `dice_floor`, `semantic_floor`). For tests whose
+    /// import streams are written as literals — a source header names
+    /// its context by id (#965), so the context has to exist under the
+    /// id the literal carries. Returns the import response.
+    #[allow(dead_code)]
+    pub fn create_with_id(&self, id: &str, create: Value) -> Value {
+        let header = json!({
+            "type": "source",
+            "context_id": id,
+            "id": "seed:create",
+            "create": create,
+        });
+        let (status, body) = post_import(self, &format!("{header}\n"), None);
+        assert_eq!(status, 200, "create_with_id {id}: {body}");
+        body
+    }
+
     /// [`Server::cx`] for a name that may not resolve — `None` where
     /// `cx` panics. For asserting absence, or for paths that must 404.
     #[allow(dead_code)]

@@ -203,19 +203,22 @@ fn ownership_marker_differs_across_run_index_for_the_same_run_id_and_model() {
 // ============================== Batch header rewriting ==============================
 
 #[test]
-fn rewrite_batch_header_replaces_context_and_stamps_the_marker() {
-    let original = "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"docs/a.md\"}\n\
+fn rewrite_batch_header_replaces_the_context_id_and_stamps_name_and_marker() {
+    let original = "{\"type\": \"source\",\"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"docs/a.md\"}\n\
                      {\"subject\":\"s\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n";
     let rewritten = rewrite_batch_header(
         original,
+        "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
         "sake::gpt-4o",
         "taguru benchmark search corpus: run r, model m",
     )
     .unwrap();
     let mut lines = rewritten.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-    assert_eq!(header["context"], "sake::gpt-4o");
+    assert_eq!(header["context_id"], "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20");
+    assert!(header.get("context").is_none(), "{header}");
     assert_eq!(header["id"], "docs/a.md", "the id is left untouched");
+    assert_eq!(header["create"]["name"], "sake::gpt-4o");
     assert_eq!(
         header["create"]["description"],
         "taguru benchmark search corpus: run r, model m"
@@ -230,27 +233,43 @@ fn rewrite_batch_header_replaces_context_and_stamps_the_marker() {
 
 #[test]
 fn rewrite_batch_header_overwrites_any_existing_create_block() {
-    let original = "{\"type\": \"source\",\"context\":\"sake\",\"id\":\"docs/a.md\",\"create\":{\"description\":\"whatever the cell wrote\"}}\n";
-    let rewritten = rewrite_batch_header(original, "sake::gpt-4o", "owner-marker").unwrap();
+    let original = "{\"type\": \"source\",\"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"id\":\"docs/a.md\",\"create\": {\"name\": \"sake\", \"description\":\"whatever the cell wrote\"}}\n";
+    let rewritten = rewrite_batch_header(
+        original,
+        "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
+        "sake::gpt-4o",
+        "owner-marker",
+    )
+    .unwrap();
     let header: Value = serde_json::from_str(rewritten.lines().next().unwrap()).unwrap();
     assert_eq!(header["create"]["description"], "owner-marker");
 }
 
 #[test]
 fn rewrite_batch_header_refuses_an_empty_file() {
-    assert!(rewrite_batch_header("", "ctx", "marker").is_err());
+    assert!(
+        rewrite_batch_header("", "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20", "ctx", "marker").is_err()
+    );
 }
 
 #[test]
 fn rewrite_batch_header_refuses_a_non_json_header() {
-    assert!(rewrite_batch_header("not json\n", "ctx", "marker").is_err());
+    assert!(
+        rewrite_batch_header(
+            "not json\n",
+            "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
+            "ctx",
+            "marker"
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn rewrite_batch_header_drops_blank_lines() {
-    let original =
-        "{\"type\": \"source\",\"context\":\"c\",\"id\":\"s\"}\n\n{\"passage\":\"x\"}\n\n";
-    let rewritten = rewrite_batch_header(original, "c2", "m").unwrap();
+    let original = "{\"type\": \"source\",\"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\",\"id\":\"s\"}\n\n{\"passage\":\"x\"}\n\n";
+    let rewritten =
+        rewrite_batch_header(original, "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20", "c2", "m").unwrap();
     assert_eq!(rewritten.lines().count(), 2);
 }
 

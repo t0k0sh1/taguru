@@ -1013,7 +1013,7 @@ export interface Issue {
  * itself from a no-op PUT of the identical document (ADR 0009 §13).
  */
 export interface SchemaImportOutcome {
-  context: string;
+  context_id: string;
   mode: string;
   types: number;
   relations: number;
@@ -1034,7 +1034,7 @@ export interface AddAssociationsResult {
 
 /** Outcome of one applied source (retract-then-apply). */
 export interface ImportOutcome {
-  context: string;
+  context_id: string;
   source: string;
   created: boolean;
   retracted: number;

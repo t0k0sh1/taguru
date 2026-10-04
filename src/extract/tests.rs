@@ -1725,7 +1725,7 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
     from_extraction.absorb_extraction(&written);
 
     let batch = crate::ingest::parse_batch(Cursor::new(concat!(
-        r#"{"type": "source","context":"sake","id":"a"}"#,
+        r#"{"type": "source","context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f","id":"a"}"#,
         "\n",
         r#"{"subject":"青嶺酒造","label":"杜氏","object":"高瀬","weight":1.0}"#,
         "\n",
@@ -2249,7 +2249,12 @@ fn redact_flag_takes_an_optional_group_and_rejects_a_duplicate() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
-    let base = ["--context", "c", "--out", "o"];
+    let base = [
+        "--context",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        "--out",
+        "o",
+    ];
     let with = |tail: &[&str]| parse(&[&base[..], tail].concat());
     let parsed = with(&["--redact", "doc.md"]).unwrap();
     assert_eq!(parsed.redact, Some(crate::sensitive::Groups::BOTH));
@@ -2298,7 +2303,13 @@ fn redact_rules_flag_parses_once_and_rejects_a_duplicate() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
-    let base = ["--context", "c", "--out", "o", "doc.md"];
+    let base = [
+        "--context",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        "--out",
+        "o",
+        "doc.md",
+    ];
     let with = |tail: &[&str]| parse(&[&base[..], tail].concat());
     assert_eq!(
         with(&["--redact-rules", "rules.tsv"]).unwrap().redact_rules,
@@ -2408,7 +2419,7 @@ fn vocabulary_flag_parses_once_and_rejects_a_duplicate() {
     }
     let parsed = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--vocabulary",
@@ -2423,7 +2434,7 @@ fn vocabulary_flag_parses_once_and_rejects_a_duplicate() {
     );
     let duplicate = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--vocabulary",
@@ -2450,7 +2461,7 @@ fn load_vocabulary_accepts_one_sided_streams() {
     fs::write(
         dir.join("concepts-only.jsonl"),
         concat!(
-            r#"{"type": "source","context":"ops","id":"s1"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s1"}"#,
             "\n",
             r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
             "\n",
@@ -2464,7 +2475,7 @@ fn load_vocabulary_accepts_one_sided_streams() {
     fs::write(
         dir.join("labels-only.jsonl"),
         concat!(
-            r#"{"type": "source","context":"ops","id":"s2"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s2"}"#,
             "\n",
             r#"{"alias":"担当","canonical":"管理者","kind":"label"}"#,
             "\n",
@@ -2491,7 +2502,7 @@ fn load_vocabulary_reads_only_jsonl_files_from_a_directory() {
     fs::write(
         dir.join("a.md-0123.jsonl"),
         concat!(
-            r#"{"type": "source","context":"ops","id":"a.md"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"a.md"}"#,
             "\n",
             r#"{"subject":"CI","label":"runner","object":"nextest","weight":1.0}"#,
             "\n",
@@ -2536,7 +2547,7 @@ fn vocabulary_digest_matches_the_load_and_tracks_content() {
     fs::write(
         &path,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s1"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"使用","object":"nextest","weight":1.0}"#,
             "\n",
@@ -2548,7 +2559,7 @@ fn vocabulary_digest_matches_the_load_and_tracks_content() {
     fs::write(
         &path,
         concat!(
-            r#"{"type": "source","context":"ops","id":"s1"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"使用","object":"cargo-nextest","weight":1.0}"#,
             "\n",
@@ -2572,13 +2583,13 @@ fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"type": "source","context":"ops","id":"s1"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s1"}"#,
             "\n",
             r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
             "\n",
             r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
             "\n",
-            r#"{"type": "source","context":"ops","id":"s2"}"#,
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s2"}"#,
             "\n",
             r#"{"subject":"リリース署名鍵","label":"管理者","object":"山科","weight":1.0}"#,
             "\n",
@@ -2624,7 +2635,10 @@ fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     // No names at all is a hard error — the --schema posture.
     fs::write(
         dir.join("empty.jsonl"),
-        concat!(r#"{"type": "source","context":"ops","id":"s3"}"#, "\n"),
+        concat!(
+            r#"{"type": "source","context_id": "a92c36e6-6a25-4e99-bf86-2faa8e87987b","id":"s3"}"#,
+            "\n"
+        ),
     )
     .unwrap();
     assert!(load_vocabulary(&dir.join("empty.jsonl")).is_err());
@@ -3039,7 +3053,7 @@ fn schema_digests_are_stable_across_key_order_and_whitespace() {
         "types": {"Brewery": {"is_a": ["Organization"]}, "Organization": {"is_a": []}},
         "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Organization"]}}
     }"#;
-    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"version":"2026-09-17","type":"schema"}"#;
+    let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"version":"2026-10-01","type":"schema"}"#;
 
     let a: crate::schema::SchemaDocument = serde_json::from_str(ordered).unwrap();
     let b: crate::schema::SchemaDocument = serde_json::from_str(reordered_and_compact).unwrap();
@@ -3385,9 +3399,12 @@ fn rendered_batches_pass_the_import_parser() {
         2,
     );
     let body = render_batch(
-        "sake",
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
         "docs/aomine.md",
-        Some("酒蔵の記憶"),
+        Some(crate::format::HeaderCreate {
+            name: "sake",
+            description: "酒蔵の記憶",
+        }),
         &extraction,
         Some("一段落目。\n\n二段落目。"),
         None,
@@ -3398,7 +3415,7 @@ fn rendered_batches_pass_the_import_parser() {
     assert_eq!(body.lines().count(), 5);
     let batch = crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
         .expect("extract must never emit what import refuses");
-    assert_eq!(batch.context, "sake");
+    assert_eq!(batch.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
     assert_eq!(batch.source, "docs/aomine.md");
     assert!(batch.label_vocabulary().contains("杜氏"));
     assert_eq!(
@@ -3429,7 +3446,7 @@ fn batch_label_usage_counts_excludes_the_reserved_schema_type_label() {
         2,
     );
     let body = render_batch(
-        "sake",
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
         "docs/aomine.md",
         None,
         &extraction,
@@ -3467,7 +3484,15 @@ fn a_stripped_passage_strips_the_paragraph_locators_too() {
         0,
         2,
     );
-    let body = render_batch("sake", "docs/aomine.md", None, &extraction, None, None, &[]);
+    let body = render_batch(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        "docs/aomine.md",
+        None,
+        &extraction,
+        None,
+        None,
+        &[],
+    );
     assert!(
         !body.contains("\"paragraph\""),
         "no passage line, no locators: {body}"
@@ -3491,9 +3516,12 @@ fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
         2,
     );
     let body = render_batch(
-        "e2e",
+        "6a5f0c7e-3b21-4d98-8e14-7c2a9b0d5f43",
         "docs/e2e.md",
-        Some("配線テスト"),
+        Some(crate::format::HeaderCreate {
+            name: "e2e",
+            description: "配線テスト",
+        }),
         &extraction,
         Some("一段落目。\n\n二段落目。"),
         None,
@@ -4706,7 +4734,12 @@ fn runbook_flags_parse_and_their_contradictions_are_usage_errors() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
-    let base = ["--context", "c", "--out", "o"];
+    let base = [
+        "--context",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        "--out",
+        "o",
+    ];
     let mut ok = base.to_vec();
     ok.extend([
         "--source-id",
@@ -4762,13 +4795,21 @@ fn the_passage_line_carries_date_and_tags_exactly_when_given() {
         0,
         1,
     );
-    let plain = render_batch("c", "s", None, &extraction, Some("本文。"), None, &[]);
+    let plain = render_batch(
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        "s",
+        None,
+        &extraction,
+        Some("本文。"),
+        None,
+        &[],
+    );
     let passage_line = plain.lines().nth(1).expect("header then passage");
     // No flags → the passage line stays byte-for-byte pre-S1.
     assert_eq!(passage_line, r#"{"passage":"本文。"}"#);
 
     let tagged = render_batch(
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "session:claude:abc",
         None,
         &extraction,
@@ -4848,10 +4889,15 @@ fn runbook_flag_boundaries_hold_exactly() {
         Args::parse(&words)
     }
     fn base() -> Vec<String> {
-        ["--context", "c", "--out", "o"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
     // A duplicate --date is a usage error, never last-wins.
     let mut dated = base();
@@ -5683,7 +5729,12 @@ fn chunk_bytes_flag_parses_validates_and_rejects_a_duplicate() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
-    let base = ["--context", "c", "--out", "o"];
+    let base = [
+        "--context",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        "--out",
+        "o",
+    ];
     let with = |extra: &[&str]| {
         let mut words: Vec<&str> = base.to_vec();
         words.extend_from_slice(extra);
@@ -7359,13 +7410,43 @@ fn references_skip_the_title_the_path_and_minutes_labels_even_when_quoted() {
 }
 
 #[test]
+fn name_flag_parses_once_and_is_bounded() {
+    fn parse(extra: &[&str]) -> Result<Args, i32> {
+        let mut words = vec![
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+        ];
+        words.extend(extra);
+        words.push("d.md");
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let longest = "n".repeat(crate::api::MAX_CONTEXT_NAME_BYTES);
+    let too_long = "n".repeat(crate::api::MAX_CONTEXT_NAME_BYTES + 1);
+    assert_eq!(
+        parse(&["--name", "sake"]).unwrap().create_name.as_deref(),
+        Some("sake")
+    );
+    assert_eq!(
+        parse(&["--name", &longest]).unwrap().create_name.as_deref(),
+        Some(longest.as_str()),
+        "a name of exactly the limit is accepted"
+    );
+    assert!(matches!(parse(&["--name", &too_long]), Err(2)));
+    assert!(matches!(parse(&["--name", ""]), Err(2)));
+    assert!(matches!(parse(&["--name", "a", "--name", "b"]), Err(2)));
+    assert!(matches!(parse(&["--name"]), Err(2)));
+}
+
+#[test]
 fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
     let parsed = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--chunk-context",
@@ -7375,14 +7456,20 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
     .unwrap();
     assert_eq!(parsed.chunk_context, Some(ChunkContextMode::Structure));
     assert_eq!(
-        parse(&["--context", "c", "--out", "o", "d.md"])
-            .unwrap()
-            .chunk_context,
+        parse(&[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+            "d.md"
+        ])
+        .unwrap()
+        .chunk_context,
         None
     );
     let twice = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--chunk-context",
@@ -7395,7 +7482,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
     assert!(matches!(
         parse(&[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--chunk-context",
@@ -7405,7 +7492,13 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
         Err(2)
     ));
     assert!(matches!(
-        parse(&["--context", "c", "--out", "o", "--chunk-context"]),
+        parse(&[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            "--out",
+            "o",
+            "--chunk-context"
+        ]),
         Err(2)
     ));
 }
@@ -7977,7 +8070,7 @@ fn load_vocabulary_harvests_each_names_strongest_relations() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"type": "source","context":"law","id":"s1"}"#,
+            r#"{"type": "source","context_id": "8f1f74ad-f658-44c8-ad3d-471ea8ca9e32","id":"s1"}"#,
             "\n",
             r#"{"subject":"電子署名法","label":"定める","object":"電子署名","weight":1.0}"#,
             "\n",
@@ -8030,7 +8123,7 @@ fn load_vocabulary_harvests_each_names_strongest_relations() {
     fs::write(
         dir.join("export.jsonl"),
         concat!(
-            r#"{"type": "source","context":"law","id":"s1"}"#,
+            r#"{"type": "source","context_id": "8f1f74ad-f658-44c8-ad3d-471ea8ca9e32","id":"s1"}"#,
             "\n",
             r#"{"subject":"電子署名法","label":"廃止","object":"電子署名","weight":1.0}"#,
             "\n",
@@ -9205,7 +9298,7 @@ fn replay_from_flag_parses_once_and_rejects_a_duplicate() {
     }
     let parsed = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--replay-from",
@@ -9216,7 +9309,7 @@ fn replay_from_flag_parses_once_and_rejects_a_duplicate() {
     assert_eq!(parsed.replay_from.as_deref(), Some(Path::new("trace-dir")));
     let duplicate = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--replay-from",
@@ -9242,7 +9335,7 @@ fn resume_from_flag_accepts_every_step_name_and_rejects_an_unknown_one() {
     for step in STEP_NAMES {
         let parsed = parse(&[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--resume-from",
@@ -9254,7 +9347,7 @@ fn resume_from_flag_accepts_every_step_name_and_rejects_an_unknown_one() {
     }
     let unknown = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--resume-from",
@@ -9267,7 +9360,7 @@ fn resume_from_flag_accepts_every_step_name_and_rejects_an_unknown_one() {
     );
     let duplicate = parse(&[
         "--context",
-        "c",
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
         "--resume-from",
@@ -9287,7 +9380,7 @@ fn resume_from_and_replay_cannot_both_be_given() {
     let parsed = Args::parse(
         &[
             "--context",
-            "c",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
             "--resume-from",

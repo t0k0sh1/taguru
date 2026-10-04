@@ -21,17 +21,29 @@ pub(super) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Stream {
     pub(crate) batches: Vec<Batch>,
+    /// (`context` id, installed schema) — the id column of the record.
     pub(crate) schemas: Vec<(String, schema::InstalledSchema)>,
     pub(crate) groups: Vec<(String, GroupRecord)>,
+}
+
+/// The header's create block, parsed: the display name the `context`
+/// gets when its `context_id` is absent from the registry, and the
+/// config it starts with (#965 decision 2).
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct CreateSpec {
+    pub(crate) name: String,
+    pub(crate) meta: ContextMeta,
 }
 
 /// One parsed batch file: the header's claims plus the accumulated op
 /// lines, every association already stamped with the header's source.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Batch {
-    pub(crate) context: String,
+    /// The header's `context_id` — a canonical UUID, never a name.
+    pub(crate) context_id: String,
     pub(crate) source: String,
-    pub(super) create: Option<ContextMeta>,
+    pub(crate) create: Option<CreateSpec>,
     pub(super) passage: Option<String>,
     /// doc2query questions, (paragraph index, question). Structure is
     /// validated here (caps, a passage to attach to); whether each
@@ -69,6 +81,32 @@ pub(crate) struct Batch {
 impl Batch {
     pub(crate) fn op_count(&self) -> usize {
         self.associations.len() + self.concepts.len() + self.labels.len()
+    }
+
+    /// What an operator-facing line calls this batch's `context` when
+    /// no server state is at hand (the offline and remote CLI reports):
+    /// the create block's name when the header carries one, the bare id
+    /// otherwise. Never used for a lookup — [`Self::context_id`] is the
+    /// key.
+    pub(crate) fn label(&self) -> &str {
+        self.create
+            .as_ref()
+            .map_or(self.context_id.as_str(), |spec| spec.name.as_str())
+    }
+
+    /// The name a message, a grant check, or a quota lookup should
+    /// call this batch's `context`: the registered display name when
+    /// the id exists, the create block's name when this batch is about
+    /// to mint it, and the bare id when neither holds (a refused
+    /// header naming an unknown context).
+    pub(crate) fn display_name(&self, state: &AppState) -> String {
+        if state.context_id_exists(&self.context_id) {
+            state.name_of_stem(&self.context_id)
+        } else if let Some(spec) = &self.create {
+            spec.name.clone()
+        } else {
+            self.context_id.clone()
+        }
     }
 
     /// Drops the header's create block. The promote verb (ADR 0018)
@@ -185,7 +223,7 @@ impl Batch {
     pub(super) fn describe(&self) -> String {
         format!(
             "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}{}",
-            self.context,
+            self.context_id,
             self.source,
             self.associations.len(),
             self.concepts.len() + self.labels.len(),
@@ -243,16 +281,18 @@ struct Header {
     #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     id: String,
-    context: String,
+    context_id: String,
     #[serde(default)]
     create: Option<CreateBlock>,
 }
 
-/// The header's optional create block — the same fields as
-/// PUT /contexts/{id}, applied only when the `context` does not exist.
+/// The header's optional create block — the `name` plus the same
+/// config fields as the `POST /contexts` body, applied only when no
+/// `context` carries the header's `context_id`.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct CreateBlock {
+    name: String,
     description: String,
     pinned: bool,
     dice_floor: Option<f64>,
@@ -332,7 +372,7 @@ struct SchemaLine {
     _record_type: SchemaTag,
     #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
-    context: String,
+    context_id: String,
     mode: schema::SchemaMode,
     closed_labels: bool,
     types: BTreeMap<String, schema::TypeDef>,
@@ -355,8 +395,7 @@ fn parse_schema(
         .map_err(|error| format!("line {number}: not a schema record: {error}"))?;
     crate::format::check_version(line.version.as_deref())
         .map_err(|error| format!("line {number}: schema record: {error}"))?;
-    check_size(number, "context", &line.context, MAX_CONTEXT_NAME_BYTES)?;
-    check_nonempty(number, "context", &line.context)?;
+    check_context_id(number, &line.context_id)?;
     let document = schema::SchemaDocument {
         record_type: schema::SchemaType::Schema,
         version: Some(crate::format::FORMAT_VERSION.to_string()),
@@ -367,7 +406,7 @@ fn parse_schema(
     };
     let installed =
         schema::install(document).map_err(|violation| format!("line {number}: {violation}"))?;
-    Ok((line.context, installed))
+    Ok((line.context_id, installed))
 }
 
 #[derive(Deserialize)]
@@ -548,15 +587,15 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         }
         if is_header {
             let batch = parse_header(value, number)?;
-            if let Some(earlier) = owners.get(&(batch.context.clone(), batch.source.clone())) {
+            if let Some(earlier) = owners.get(&(batch.context_id.clone(), batch.source.clone())) {
                 return Err(format!(
                     "line {number}: source '{}' in context '{}' is already stated by \
                      an earlier source of this stream, at line {earlier} — a source's truth is \
                      stated once, by one file",
-                    batch.source, batch.context
+                    batch.source, batch.context_id
                 ));
             }
-            owners.insert((batch.context.clone(), batch.source.clone()), number);
+            owners.insert((batch.context_id.clone(), batch.source.clone()), number);
             current = Some(batch);
         } else if is_schema {
             let (context, installed) = parse_schema(value, number)?;
@@ -722,11 +761,12 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
         .map_err(|error| format!("line {number}: not a source file header: {error}"))?;
     crate::format::check_version(header.version.as_deref())
         .map_err(|error| format!("line {number}: source file header: {error}"))?;
-    check_size(number, "context", &header.context, MAX_CONTEXT_NAME_BYTES)?;
-    check_nonempty(number, "context", &header.context)?;
+    check_context_id(number, &header.context_id)?;
     check_size(number, "id", &header.id, MAX_NAME_BYTES)?;
     check_nonempty(number, "id", &header.id)?;
     if let Some(create) = &header.create {
+        check_size(number, "create.name", &create.name, MAX_CONTEXT_NAME_BYTES)?;
+        check_nonempty(number, "create.name", &create.name)?;
         check_size(
             number,
             "create.description",
@@ -735,13 +775,16 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
         )?;
     }
     Ok(Batch {
-        context: header.context,
+        context_id: header.context_id,
         source: header.id,
-        create: header.create.map(|block| ContextMeta {
-            description: block.description,
-            pinned: block.pinned,
-            dice_floor: block.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
-            semantic_floor: block.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
+        create: header.create.map(|block| CreateSpec {
+            name: block.name,
+            meta: ContextMeta {
+                description: block.description,
+                pinned: block.pinned,
+                dice_floor: block.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
+                semantic_floor: block.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
+            },
         }),
         passage: None,
         questions: Vec::new(),
@@ -929,6 +972,22 @@ fn check_size(number: usize, field: &str, text: &str, cap: usize) -> Result<(), 
         return Err(format!(
             "line {number}: {field} of {} bytes exceeds the {cap}-byte cap",
             text.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal for a `context_id` column (source header, schema
+/// record) that is not a context id — #965 decision 2. The cap check
+/// runs first so an absurd value is refused by size instead of being
+/// echoed back whole.
+fn check_context_id(number: usize, value: &str) -> Result<(), String> {
+    check_size(number, "context_id", value, MAX_CONTEXT_NAME_BYTES)?;
+    if !crate::registry::is_context_id(value) {
+        return Err(format!(
+            "line {number}: '{value}' is not a context id: context_id takes a lowercase \
+             hyphenated UUID — the id column of GET /contexts, or a fresh one (e.g. from \
+             uuidgen) alongside create — not the context's name"
         ));
     }
     Ok(())

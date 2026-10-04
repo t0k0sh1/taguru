@@ -348,7 +348,7 @@ class FakeServer:
                 )
             self.imported.append(body if isinstance(body, str) else "")
             batch_result = self.import_result_override or {
-                "context": "sake",
+                "context_id": "sake",
                 "source": "docs/aomine.md",
                 "created": False,
                 "retracted": 0,

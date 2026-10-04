@@ -37,14 +37,14 @@ fn seed_dead_edge(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("b.jsonl"),
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
          {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
     )
     .expect("fixture must be writable");
@@ -411,24 +411,24 @@ fn remote_parallel_output_matches_the_sequential_remote_run() {
         // that actually sorts it.
         std::fs::write(
             dir.join("a.jsonl"),
-            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+            "{\"type\": \"source\", \"context_id\": \"b9dd960c-1753-459a-b811-5d3cb845a57d\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"charlie\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+             {\"type\": \"source\", \"context_id\": \"8ed3f6ad-685b-459e-ad70-22518e1af76c\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"alpha\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\", \
-             \"create\": {\"description\": \"d\"}}\n\
+             {\"type\": \"source\", \"context_id\": \"f144a690-7dc4-484d-9f9f-e6a7d9b9ff53\", \"id\": \"a.md\", \
+             \"create\": {\"name\": \"bravo\", \"description\": \"d\"}}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o1\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");
         std::fs::write(
             dir.join("b.jsonl"),
-            "{\"type\": \"source\", \"context\": \"charlie\", \"id\": \"a.md\"}\n\
+            "{\"type\": \"source\", \"context_id\": \"b9dd960c-1753-459a-b811-5d3cb845a57d\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"alpha\", \"id\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context_id\": \"8ed3f6ad-685b-459e-ad70-22518e1af76c\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n\
-             {\"type\": \"source\", \"context\": \"bravo\", \"id\": \"a.md\"}\n\
+             {\"type\": \"source\", \"context_id\": \"f144a690-7dc4-484d-9f9f-e6a7d9b9ff53\", \"id\": \"a.md\"}\n\
              {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o2\", \"weight\": 1.0}\n",
         )
         .expect("fixture must be writable");

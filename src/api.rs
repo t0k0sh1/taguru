@@ -1208,9 +1208,10 @@ where
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let AppPath(id) = AppPath::<String>::from_request_parts(parts, state).await?;
-        match uuid::Uuid::try_parse(&id) {
-            Ok(parsed) if parsed.to_string() == id => Ok(Self(id)),
-            _ => Err(coded(
+        if crate::registry::is_context_id(&id) {
+            Ok(Self(id))
+        } else {
+            Err(coded(
                 axum::http::StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidArgument,
                 format!(
@@ -1218,7 +1219,7 @@ where
                      (a lowercase hyphenated UUID), not the context's name"
                 ),
                 Instant::now(),
-            )),
+            ))
         }
     }
 }
@@ -3121,9 +3122,9 @@ mod tests {
     async fn import_budget_refusal_carries_the_durable_prefix_fields() {
         let stream = crate::ingest::parse_stream(
             concat!(
-                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", ",
-                "\"create\": {\"description\": \"d\"}}\n",
-                "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\n",
+                "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", ",
+                "\"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n",
+                "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\n",
             )
             .as_bytes(),
         )

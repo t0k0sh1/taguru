@@ -2,7 +2,7 @@
   "contract": "http_contract",
   "method": "POST",
   "operation": "import",
-  "request": "{\"type\": \"source\", \"context\": \"corpus-f\", \"id\": \"doc.md\", \"create\": {\"description\": \"wire-contract import corpus\"}}\n{\"passage\": \"導入。\\n\\n本編。\"}\n{\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n",
+  "request": "{\"type\": \"source\", \"context_id\": \"685ce7fe-340e-4e5e-a292-df7f89b60283\", \"id\": \"doc.md\", \"create\": {\"name\": \"corpus-f\", \"description\": \"wire-contract import corpus\"}}\n{\"passage\": \"導入。\\n\\n本編。\"}\n{\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n",
   "response": {
     "result": {
       "batches": [
@@ -10,7 +10,7 @@
           "aliases": 0,
           "association_paragraphs_dropped": 0,
           "associations": 1,
-          "context": "corpus-f",
+          "context_id": "685ce7fe-340e-4e5e-a292-df7f89b60283",
           "created": true,
           "locators_dropped": 0,
           "locators_stored": 1,

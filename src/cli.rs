@@ -100,11 +100,11 @@ USAGE:
                                         --help); URL defaults to
                                         TAGURU_REPLICATE_URL — verify the
                                         result with taguru inspect
-  taguru extract --context NAME --out DIR FILE|DIR...
+  taguru extract --context ID --out DIR FILE|DIR...
                                         turn each segment into an import-ready
                                         JSONL file through an OpenAI-compatible
                                         chat model (see: taguru extract --help)
-  taguru benchmark extract --models FILE --context NAME --out DIR CORPUS_DIR
+  taguru benchmark extract --models FILE --context ID --out DIR CORPUS_DIR
                                         run taguru extract across a model
                                         matrix, one subprocess per (model,
                                         run) cell, and assemble manifest.json/

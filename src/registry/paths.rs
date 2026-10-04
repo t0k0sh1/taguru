@@ -30,6 +30,39 @@ pub(crate) fn mint_context_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A `context` id derived from `seed` instead of minted: the same seed
+/// always yields the same canonical id. For the offline flows that must
+/// name their one context in a header BEFORE any server state exists
+/// (`taguru-code sync` renders its batches ahead of booting the data
+/// directory) and need a re-run to find the context it made last time.
+/// Shaped like a v4 UUID (the random-bytes layout, fed SHA-256 bytes
+/// instead), so every reader of a context id accepts it unchanged.
+#[allow(dead_code)] // consumed by taguru-code's sync; the server binaries never derive an id
+pub(crate) fn derived_context_id(seed: &str) -> String {
+    let hex = crate::sha256::sha256_hex(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .expect("sha256_hex is lowercase hex");
+    }
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// Whether `value` is a `context` id in the one spelling the server
+/// accepts — a UUID in its canonical hyphenated lowercase form, exactly
+/// what [`mint_context_id`] produces. `Uuid::try_parse` alone also
+/// takes uppercase, braces, URNs, and hyphen-less digits; two spellings
+/// of one id would be two different map keys and two different file
+/// stems, so the round trip through `to_string` must reproduce `value`.
+/// Shared by the `/contexts/{id}` path extractor and the import
+/// stream's `context_id` columns, so every entrance refuses the same
+/// set of strings.
+pub(crate) fn is_context_id(value: &str) -> bool {
+    uuid::Uuid::try_parse(value).is_ok_and(|parsed| parsed.to_string() == value)
+}
+
 /// Encodes a `group` name as a file stem: bytes outside [A-Za-z0-9_-]
 /// become %XX. Group names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data
@@ -431,6 +464,43 @@ pub(super) fn rename_markers_targeting(dir: &Path, context: &str, extension: &st
 mod tests {
     use super::*;
     use crate::registry::test_support::scratch_dir;
+
+    /// `derived_context_id` is consumed only by taguru-code's sync (a
+    /// module cargo-mutants does not cover), so its bytes are pinned here
+    /// against the layout written out by hand: the first 16 SHA-256 bytes
+    /// with the v4 version nibble and the RFC 4122 variant bits forced.
+    /// A re-run of `taguru-code sync` finds last run's context only while
+    /// these literals hold.
+    #[test]
+    fn derived_context_ids_are_pinned_deterministic_v4_shaped_and_distinct() {
+        assert_eq!(
+            derived_context_id("sake"),
+            "cef2e28b-43f0-4b6c-8201-abab0785399f"
+        );
+        assert_eq!(
+            derived_context_id("code"),
+            "5694d08a-2e53-4fca-a0c3-103e5ad6f607"
+        );
+        assert_eq!(derived_context_id("sake"), derived_context_id("sake"));
+        for seed in ["", "sake", "code", "酒蔵"] {
+            assert!(is_context_id(&derived_context_id(seed)), "{seed:?}");
+        }
+    }
+
+    /// One spelling per id: everything `Uuid::try_parse` accepts beyond
+    /// the canonical lowercase hyphenated form is refused, as is a name.
+    #[test]
+    fn only_the_canonical_lowercase_hyphenated_uuid_is_a_context_id() {
+        assert!(is_context_id("cef2e28b-43f0-4b6c-8201-abab0785399f"));
+        assert!(!is_context_id("CEF2E28B-43F0-4B6C-8201-ABAB0785399F"));
+        assert!(!is_context_id("cef2e28b43f04b6c8201abab0785399f"));
+        assert!(!is_context_id("{cef2e28b-43f0-4b6c-8201-abab0785399f}"));
+        assert!(!is_context_id(
+            "urn:uuid:cef2e28b-43f0-4b6c-8201-abab0785399f"
+        ));
+        assert!(!is_context_id("sake"));
+        assert!(!is_context_id(""));
+    }
 
     /// The half-done-move contract `boot_with` leans on. `landed` and
     /// `complete` must move independently: a failed move is never

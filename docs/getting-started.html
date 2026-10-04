@@ -232,7 +232,7 @@ taguru import --dry-run sources/  <span class="c"># validate and report only; wr
       <li><b>Retryable</b>: a file that failed midway is fixed and re-imported — the retraction is what makes the retry exact.</li>
     </ul>
     <pre><code><span class="c"># a source file: header first, then one operation per line</span>
-{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
+{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"context_id"</span>: <span class="s">"cef2e28b-43f0-4b6c-8201-abab0785399f"</span>, <span class="k">"create"</span>: {<span class="k">"name"</span>: <span class="s">"sake"</span>, <span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
@@ -262,7 +262,8 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer &lt;key&gt;' \
     </p>
     <pre><code>TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
 TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
-taguru extract --context sake --description "酒蔵の知識" --out sources/ docs/
+taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --name sake --description "酒蔵の知識" \
+  --out sources/ docs/
 taguru import sources/</code></pre>
     <ul>
       <li>The manifest in <code>--out</code> records "content × model × prompt version × <code>context</code>" and skips unchanged segments (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>

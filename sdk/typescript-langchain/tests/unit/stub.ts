@@ -269,7 +269,7 @@ export class FakeServer {
       return ok({
         batches: [
           this.importResultOverride ?? {
-            context: "sake",
+            context_id: "sake-id",
             source: "docs/aomine.md",
             created: false,
             retracted: 0,

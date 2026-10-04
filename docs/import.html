@@ -220,7 +220,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
   <section id="format">
     <h2>The file format</h2>
     <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>schema</code> and <code>group</code> records — see below.)</p>
-    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
+    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"context_id"</span>: <span class="s">"cef2e28b-43f0-4b6c-8201-abab0785399f"</span>, <span class="k">"create"</span>: {<span class="k">"name"</span>: <span class="s">"sake"</span>, <span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>, <span class="k">"date"</span>: <span class="nu">1700000000</span>, <span class="k">"tags"</span>: [<span class="s">"会社概要"</span>]}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"locator"</span>: {<span class="k">"kind"</span>: <span class="s">"page"</span>, <span class="k">"value"</span>: <span class="s">"12"</span>}}
@@ -233,15 +233,23 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
     <h3>Header</h3>
     <p>
       <code>type</code> must be <code>"source"</code> — it is how a line says it opens a source
-      file. <code>id</code> (the source's id) and <code>context</code> are required.
+      file. <code>id</code> (the source's id) and <code>context_id</code> are required.
+      <code>context_id</code> names the target <code>context</code> <b>by its id</b> — the
+      <code>id</code> column of <code>GET /contexts</code>, a lowercase hyphenated UUID — never by
+      its name: names are display labels, free-form and not unique, so a name cannot address
+      anything. A value that is not a UUID is refused by name.
       <code>version</code> is optional: it names the file format's revision as a date
-      (<code>"2026-09-17"</code> is the one this build reads and writes), a file that omits it is
+      (<code>"2026-10-01"</code> is the one this build reads and writes), a file that omits it is
       read as the running build's own revision, and any other date is refused by name. Everything
       taguru writes carries it; a hand-written file may leave it out. <code>create</code> is optional
-      and carries the same fields as the <code>POST /contexts</code> body (<code>description</code>,
-      <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
-      the <code>context</code> <b>does not exist yet</b>. Importing into an absent <code>context</code> without a create
-      block is refused.
+      and carries the same fields as the <code>POST /contexts</code> body (<code>name</code>,
+      <code>description</code>, <code>pinned</code>, <code>dice_floor</code>,
+      <code>semantic_floor</code>) with <code>name</code> required — used only when
+      <b>no <code>context</code> carries <code>context_id</code> yet</b>, in which case the
+      <code>context</code> is created under that id and that name. So a file that creates
+      a <code>context</code> picks its id itself (a fresh UUID, e.g. from <code>uuidgen</code>) and
+      every later file for the same <code>context</code> repeats it. Importing into an absent id
+      without a create block is refused.
     </p>
 
     <h3>Association lines</h3>
@@ -340,7 +348,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <a href="schema.html">The <code>context</code> schema</a>.
     </p>
     <p>
-      <code>{"type": "schema", "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
+      <code>{"type": "schema", "context_id": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
       — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13): the <code>mode</code>,
       <code>closed_labels</code>, <code>types</code>, and <code>relations</code>
       <code>PUT /contexts/{id}/schema</code> installs, under the record's own <code>type</code> and
@@ -471,7 +479,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 curl -X POST localhost:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' \
   --data-binary @docs-aomine.jsonl
-<span class="c"># → {"result": {"context": "sake", "source": "docs/aomine.md",</span>
+<span class="c"># → {"result": {"context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "source": "docs/aomine.md",</span>
 <span class="c">#    "created": false, "retracted": 12, "associations": 14,</span>
 <span class="c">#    "aliases": 2, "passage_stored": true}, "status": "ok", …}</span></code></pre>
     <ul>

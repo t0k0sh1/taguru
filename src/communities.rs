@@ -286,10 +286,13 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     let stream = api.get_raw(&["contexts", id, "communities"])?;
     let analysis = parse_analysis(&stream)?;
 
-    // The derived artifact is addressed by NAME on the import wire
-    // (its header creates it) but by id on every read — resolved
-    // once here; `None` is a first run.
+    // The derived artifact is found by NAME but written and read by
+    // id (#965) — resolved once here; `None` is a first run, whose
+    // header then registers a freshly minted id under the name.
     let derived_id = api.context_id_by_name(derived)?;
+    let artifact_id = derived_id
+        .clone()
+        .unwrap_or_else(crate::registry::mint_context_id);
     // The previous manifest, if an artifact exists: the fingerprint
     // ledger this run diffs against. An algorithm change invalidates
     // every fingerprint — incomparable digests must not "match".
@@ -432,7 +435,14 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
             })
             .collect(),
     };
-    let batches = render_batches(name, derived, &analysis, &summaries, &manifest)?;
+    let batches = render_batches(
+        name,
+        derived,
+        &artifact_id,
+        &analysis,
+        &summaries,
+        &manifest,
+    )?;
     for chunk in crate::remote::pack_import_chunks(&batches) {
         api.import(&chunk)?;
     }
@@ -442,16 +452,10 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     // for them. Retraction reads the artifact's id fresh — the import
     // above may have just created it.
     if !vanished.is_empty() {
-        let derived_id = match derived_id {
-            Some(derived_id) => derived_id,
-            None => api
-                .context_id_by_name(derived)?
-                .ok_or_else(|| format!("derived context '{derived}' vanished after import"))?,
-        };
         for community in &vanished {
             retract_source(
                 api,
-                &derived_id,
+                &artifact_id,
                 &format!("{COMMUNITY_SOURCE_PREFIX}{community}"),
             )?;
         }
@@ -545,6 +549,7 @@ fn summarize(
 fn render_batches(
     name: &str,
     derived: &str,
+    derived_id: &str,
     analysis: &Analysis,
     summaries: &BTreeMap<&str, String>,
     manifest: &CommunitiesManifest,
@@ -562,8 +567,13 @@ fn render_batches(
         first = false;
         let mut lines = vec![crate::format::source_header_line(
             &source,
-            derived,
-            description.as_deref(),
+            derived_id,
+            description
+                .as_deref()
+                .map(|description| crate::format::HeaderCreate {
+                    name: derived,
+                    description,
+                }),
         )];
         let summary = summaries
             .get(community.id.as_str())
@@ -596,7 +606,7 @@ fn render_batches(
         serde_json::to_string(manifest).map_err(|error| format!("manifest: {error}"))?;
     batches.push(
         [
-            crate::format::source_header_line(MANIFEST_SOURCE, derived, None),
+            crate::format::source_header_line(MANIFEST_SOURCE, derived_id, None),
             render(&json!({"passage": manifest_text}))?,
         ]
         .join("\n"),
@@ -859,7 +869,7 @@ mod tests {
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
-        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}"#;
 
         let parsed = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
@@ -871,7 +881,7 @@ mod tests {
         // earlier servers sent, and a null version are all refused: the
         // server and this CLI must be the same release.
         let other_version =
-            header.replace("\"version\":\"2026-09-17\"", "\"version\":\"2008-10-17\"");
+            header.replace("\"version\":\"2026-10-01\"", "\"version\":\"2008-10-17\"");
         let error = parse_analysis(&format!("{other_version}\n{line}\n"))
             .err()
             .expect("another format revision must be refused");
@@ -885,10 +895,10 @@ mod tests {
                 "\"type\":\"communities_manifest\"",
             ),
             header.replace(
-                "\"type\":\"communities\",\"version\":\"2026-09-17\"",
+                "\"type\":\"communities\",\"version\":\"2026-10-01\"",
                 "\"taguru_communities\":1",
             ),
-            header.replace("\"version\":\"2026-09-17\"", "\"version\":null"),
+            header.replace("\"version\":\"2026-10-01\"", "\"version\":null"),
         ] {
             assert!(
                 parse_analysis(&format!("{broken}\n{line}\n")).is_err(),
@@ -896,7 +906,7 @@ mod tests {
             );
         }
         // The version column is optional on read: absent is this build's own.
-        let unversioned = header.replace(",\"version\":\"2026-09-17\"", "");
+        let unversioned = header.replace(",\"version\":\"2026-10-01\"", "");
         parse_analysis(&format!("{unversioned}\n{line}\n")).expect("an absent version reads");
     }
 
@@ -930,7 +940,7 @@ mod tests {
     /// runaway positive strength is capped at 1e6.
     #[test]
     fn a_zero_strength_member_lands_at_the_singleton_weight() {
-        let header = r#"{"type":"communities","version":"2026-09-17","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
         let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
         let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);
@@ -944,8 +954,15 @@ mod tests {
             levels: 1,
             communities: Vec::new(),
         };
-        let batches = render_batches("c", "c::communities", &analysis, &summaries, &manifest)
-            .expect("render");
+        let batches = render_batches(
+            "c",
+            "c::communities",
+            "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20",
+            &analysis,
+            &summaries,
+            &manifest,
+        )
+        .expect("render");
         let community_batch = &batches[0];
         let weights: Vec<(String, f64)> = community_batch
             .lines()

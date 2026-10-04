@@ -312,7 +312,12 @@ def test_rendered_batches_carry_the_import_line_shapes() -> None:
         2,
     )
     body = render_batch(
-        "sake", "docs/aomine.md", "酒蔵の記憶", extraction, "一段落目。\n\n二段落目。"
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        "sake",
+        "docs/aomine.md",
+        "酒蔵の記憶",
+        extraction,
+        "一段落目。\n\n二段落目。",
     )
     lines = [json.loads(line) for line in body.strip().split("\n")]
     # header, passage, question, fact, alias — one line each.
@@ -321,8 +326,8 @@ def test_rendered_batches_carry_the_import_line_shapes() -> None:
         "type": "source",
         "version": FORMAT_VERSION,
         "id": "docs/aomine.md",
-        "context": "sake",
-        "create": {"description": "酒蔵の記憶"},
+        "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        "create": {"name": "sake", "description": "酒蔵の記憶"},
     }
     assert lines[1] == {"passage": "一段落目。\n\n二段落目。"}
     assert lines[2] == {"paragraph": 1, "question": "二行目には何が書いてある?"}
@@ -342,7 +347,7 @@ def test_render_strips_paragraph_locators_without_a_passage() -> None:
         0,
         1,
     )
-    body = render_batch("ctx", "src", None, extraction, None)
+    body = render_batch("cef2e28b-43f0-4b6c-8201-abab0785399f", None, "src", None, extraction, None)
     lines = [json.loads(line) for line in body.strip().split("\n")]
     assert len(lines) == 2  # header + fact; no passage line
     assert "paragraph" not in lines[1]
@@ -354,7 +359,8 @@ def test_render_batch_emits_section_and_locator_lines_after_questions() -> None:
     section-then-locator emission order (src/export.rs:447-464)."""
     extraction = merge([ModelOutput(questions=[ModelQuestion(paragraph=0, question="q?")])], 1, 2)
     body = render_batch(
-        "ctx",
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        None,
         "src",
         None,
         extraction,
@@ -376,7 +382,8 @@ def test_render_batch_drops_sections_and_locators_without_a_passage() -> None:
     — otherwise import refuses the batch outright (src/ingest.rs:1518-1524)."""
     extraction = merge([], 0, 1)
     body = render_batch(
-        "ctx",
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        None,
         "src",
         None,
         extraction,
@@ -400,7 +407,7 @@ def test_the_prompt_version_and_wording_track_extract_rs() -> None:
     assert PROMPT_VERSION == 6
     # The file-format revision (src/format.rs FORMAT_VERSION): pinned as
     # a literal so a drift from the Rust side is a visible edit here.
-    assert FORMAT_VERSION == "2026-09-17"
+    assert FORMAT_VERSION == "2026-10-01"
     prompt = system_prompt([], 0, 0)
     assert "the paragraph whose sentences state it, never a heading-only paragraph" in prompt
     assert '"[3] ## Abstract"' in prompt
@@ -1190,13 +1197,15 @@ def test_render_batch_always_renders_exactly_one_batch_header() -> None:
     here, including against a passage whose own text spells a batch
     header: JSON-encoding puts the passage on one line with its newlines
     escaped, so the spoofed header can never become a stream line."""
-    hostile_passage = '一段落目。\n{"type": "source", "context": "evil", "id": "x"}\n二段落目。'
+    hostile_passage = '一段落目。\n{"type": "source", "context_id": "evil", "id": "x"}\n二段落目。'
     extraction = merge(
         [ModelOutput(associations=[association("a", "b", "c", 1.0)])],
         0,
         1,
     )
-    body = render_batch("sake", "doc.md", None, extraction, hostile_passage)
+    body = render_batch(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f", None, "doc.md", None, extraction, hostile_passage
+    )
     lines = [json.loads(line) for line in body.strip().split("\n")]
     headers = [line for line in lines if line.get("type") == "source"]
     assert len(headers) == 1, headers
@@ -1204,6 +1213,6 @@ def test_render_batch_always_renders_exactly_one_batch_header() -> None:
         "type": "source",
         "version": FORMAT_VERSION,
         "id": "doc.md",
-        "context": "sake",
+        "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f",
     }
     assert lines[1]["passage"] == hostile_passage

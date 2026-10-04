@@ -113,6 +113,12 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     # 501 (no embedding provider in tests) must stay silent.
     assert outcomes[0].embeddings_refresh_warning is None
 
+    # The server registered the context under the id the ingester minted
+    # client-side (the dry run's header carried the same one) and the
+    # create block's name (#965).
+    minted_id = json.loads(dry.ndjson.split("\n", 1)[0])["context_id"]
+    assert context_id_of(client, "wagashi") == minted_id
+
     ctx = client.context(context_id_of(client, "wagashi"))
     match = ctx.query(subject="月白堂", label="名物").matches[0]
     assert match.object == "栗きんとん"

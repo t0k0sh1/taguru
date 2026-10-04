@@ -17,10 +17,9 @@ use crate::support::*;
 /// structure, a dated supersession under a functional-tendency label,
 /// a sign-contested edge, and an undatable associations-only source.
 fn seed(server: &Server) {
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "整理"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "整理"}),
     );
     server.ok(
         "POST",
@@ -335,7 +334,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     )
     .unwrap();
     assert_eq!(manifest["type"], json!("consolidation_manifest"));
-    assert_eq!(manifest["version"], json!("2026-09-17"));
+    assert_eq!(manifest["version"], json!("2026-10-01"));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
 
     // Second run over the unchanged graph: zero LLM calls.
@@ -497,7 +496,7 @@ fn stub_dismiss(calls: Arc<Mutex<usize>>) -> String {
 fn overwrite_manifest(server: &Server, manifest_text: &str) {
     let batch = format!(
         "{}\n{}\n",
-        json!({"type": "source", "context": "sake::consolidation",
+        json!({"type": "source", "context_id": server.cx("sake::consolidation"),
                "id": "consolidation:manifest"}),
         json!({"passage": manifest_text}),
     );

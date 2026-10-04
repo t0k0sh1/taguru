@@ -10,7 +10,7 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0}
 {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
 {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"}
@@ -61,10 +61,10 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     std::fs::write(
         &file,
         format!(
-            "{{\"type\": \"source\", \"context\": \"sake\", \"id\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"clean.md\", \"create\": {{\"name\": \"sake\", \"description\": \"酒蔵\"}}}}\n\
              {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
              {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
-             {{\"type\": \"source\", \"context\": \"sake\", \"id\": \"leaky.md\"}}\n\
+             {{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"leaky.md\"}}\n\
              {{\"subject\": \"高瀬\", \"label\": \"鍵\", \"object\": \"{key}\", \"weight\": 1.0}}\n\
              {{\"passage\": \"高瀬の鍵。\\n\\n鍵は {key} である。\"}}\n"
         ),
@@ -163,7 +163,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let broken = batches.join("broken.jsonl");
     std::fs::write(
         &broken,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"b.md\"}\nnot json\n",
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"b.md\"}\nnot json\n",
     )
     .unwrap();
     let (code, stdout, _) = run_import(
@@ -233,14 +233,14 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
 #[test]
 fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let batches = batch_dir("import-exit-code-per-failure");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \"create\": {\"description\": \"酒蔵\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \"create\": {\"name\": \"sake\", \"description\": \"酒蔵\"}}\n\
                  {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
     // A schema record for a context no batch creates.
     let schema = batches.join("schema.jsonl");
     std::fs::write(
         &schema,
         format!(
-            "{batch}{{\"type\": \"schema\", \"context\": \"nowhere\", \"mode\": \"warn\", \
+            "{batch}{{\"type\": \"schema\", \"context_id\": \"20aeff04-94e8-48d1-88c7-04e1f488a589\", \"mode\": \"warn\", \
              \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
         ),
     )
@@ -256,7 +256,10 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
         stdout.contains("import: 0 of 1 schema record(s) installed"),
         "{stdout}"
     );
-    assert!(stderr.contains("context 'nowhere'"), "{stderr}");
+    assert!(
+        stderr.contains("context '20aeff04-94e8-48d1-88c7-04e1f488a589'"),
+        "{stderr}"
+    );
 
     // A group naming a member that does not exist.
     let group = batches.join("group.jsonl");
@@ -282,10 +285,10 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let conflict = batches.join("conflict.jsonl");
     std::fs::write(
         &conflict,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s1\", \"create\": {\"name\": \"c\"}}\n\
          {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n\
-         {\"type\": \"source\", \"context\": \"c\", \"id\": \"s2\"}\n\
+         {\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s2\"}\n\
          {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n",
     )
@@ -335,7 +338,7 @@ fn an_offline_import_refuses_by_a_user_rule_and_needs_the_gate_for_it() {
     let file = batches.join("ids.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"ids.md\", \"create\": {\"description\": \"酒蔵\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"ids.md\", \"create\": {\"name\": \"sake\", \"description\": \"酒蔵\"}}\n\
          {\"subject\": \"高瀬\", \"label\": \"社員番号\", \"object\": \"EMP-123456\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -414,8 +417,8 @@ fn an_offline_import_refuses_by_a_user_rule_and_needs_the_gate_for_it() {
 fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
     let batches = batch_dir("import-json-parity");
     let file = batches.join("guide.jsonl");
-    let body = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-guide\", \
-                \"create\": {\"description\": \"d\"}}\n\
+    let body = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-guide\", \
+                \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                 {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
                 {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
     std::fs::write(&file, body).unwrap();
@@ -427,7 +430,10 @@ fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(local["dry_run"], json!(false));
     let local_outcome = &local["batches"][0];
-    assert_eq!(local_outcome["context"], json!("sake"));
+    assert_eq!(
+        local_outcome["context_id"],
+        json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(local_outcome["source"], json!("doc-guide"));
     assert_eq!(local_outcome["created"], json!(true));
     assert_eq!(local_outcome["associations"], json!(1));
@@ -459,13 +465,13 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     let file = batches.join("seed.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"a\", \"id\": \"a.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"a\", \"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"missing\", \"id\": \"bad.md\"}\n\
+         {\"type\": \"source\", \"context_id\": \"ffa63583-dfa6-406b-87d2-84b86b0d693a\", \"id\": \"bad.md\"}\n\
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
-         {\"type\": \"source\", \"context\": \"c\", \"id\": \"c.md\", \
-         \"create\": {\"description\": \"d\"}}\n\
+         {\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"c.md\", \
+         \"create\": {\"name\": \"c\", \"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
     .unwrap();
@@ -485,11 +491,17 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     // human-readable path does; only the middle one is missing.
     let landed = report["batches"].as_array().unwrap();
     assert_eq!(landed.len(), 2, "{report}");
-    assert_eq!(landed[0]["context"], "a");
-    assert_eq!(landed[1]["context"], "c");
+    assert_eq!(
+        landed[0]["context_id"],
+        "ca978112-ca1b-4dca-bac2-31b39a23dc4d"
+    );
+    assert_eq!(
+        landed[1]["context_id"],
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"
+    );
 
     let failed = &report["failed_batches"][0];
-    assert_eq!(failed["context"], "missing");
+    assert_eq!(failed["context_id"], "ffa63583-dfa6-406b-87d2-84b86b0d693a");
     assert_eq!(failed["source"], "bad.md");
     assert!(
         failed["error"]
@@ -523,8 +535,8 @@ fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-guide\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-guide\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n\
          {\"type\": \"group\", \"id\": \"brewers\", \"contexts\": [\"sake\"]}\n",
@@ -543,7 +555,10 @@ fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
     assert_eq!(report["dry_run"], json!(true));
     let outcome = &report["batches"][0];
-    assert_eq!(outcome["context"], json!("sake"));
+    assert_eq!(
+        outcome["context_id"],
+        json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
+    );
     assert_eq!(outcome["associations"], json!(1));
     assert_eq!(outcome["aliases"], json!(1));
     assert_eq!(
@@ -578,7 +593,7 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
 {"question": "杜氏は誰?", "paragraph": 1}
 {"question": "存在しない段落への質問?", "paragraph": 9}
@@ -623,7 +638,7 @@ fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
 {"paragraph": 1, "section": "杜氏"}
 {"paragraph": 9, "section": "存在しない段落"}
@@ -654,7 +669,7 @@ fn an_offline_import_carries_locators_through_and_drops_out_of_range_ones() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
 {"paragraph": 1, "locator": {"kind": "page", "value": "12"}}
 {"paragraph": 9, "locator": {"kind": "page", "value": "存在しない段落"}}
@@ -701,7 +716,7 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 9}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
@@ -761,10 +776,9 @@ fn an_offline_import_drops_an_out_of_range_association_paragraph_but_keeps_the_f
 #[test]
 fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() {
     let server = Server::start("http-assoc-paragraph");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の記憶"}),
     );
     server.ok(
         "POST",
@@ -828,7 +842,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
     let file = batches.join("guide.jsonl");
     std::fs::write(
         &file,
-        r#"{"type": "source", "context": "sake", "id": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-guide", "create": {"name": "sake", "description": "酒蔵の記憶"}}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。\n\n仕込み水は雲居山の伏流水である。"}
 {"paragraph": 1, "section": "杜氏"}
 {"paragraph": 1, "locator": {"kind": "page", "value": "12"}}
@@ -993,8 +1007,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
 fn reimporting_a_source_replaces_it_instead_of_doubling() {
     let batches = batch_dir("import-idem");
     let file = batches.join("facts.jsonl");
-    let header =
-        r#"{"type": "source", "context": "sake", "id": "doc-1", "create": {"description": "d"}}"#;
+    let header = r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-1", "create": {"name": "sake", "description": "d"}}"#;
     std::fs::write(
         &file,
         format!(
@@ -1057,7 +1070,7 @@ fn a_predicted_alias_rejection_touches_no_context_for_the_refresh_pass() {
     let setup = batches.join("setup.jsonl");
     std::fs::write(
         &setup,
-        r#"{"type": "source", "context": "sake", "id": "doc-1", "create": {"description": "d"}}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-1", "create": {"name": "sake", "description": "d"}}
 {"subject": "青嶺酒造", "label": "所在地", "object": "京都酒造", "weight": 1.0}
 {"alias": "kyo", "canonical": "京都酒造", "kind": "concept"}
 "#,
@@ -1078,7 +1091,7 @@ fn a_predicted_alias_rejection_touches_no_context_for_the_refresh_pass() {
     let partial = batches.join("partial.jsonl");
     std::fs::write(
         &partial,
-        r#"{"type": "source", "context": "sake", "id": "doc-2"}
+        r#"{"type": "source", "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "id": "doc-2"}
 {"subject": "新蔵", "label": "特徴", "object": "辛口", "weight": 1.0}
 {"alias": "aomine", "canonical": "青嶺酒造", "kind": "concept"}
 {"alias": "kyo", "canonical": "青嶺酒造", "kind": "concept"}
@@ -1119,8 +1132,8 @@ fn a_batch_with_one_valid_and_one_conflicting_alias_registers_neither() {
     let server = Server::start("http-import-mixed-aliases");
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"所在地\", \"object\": \"京都酒造\", \"weight\": 1.0}\n\
          {\"alias\": \"kyo\", \"canonical\": \"京都酒造\", \"kind\": \"concept\"}\n",
         None,
@@ -1133,7 +1146,7 @@ fn a_batch_with_one_valid_and_one_conflicting_alias_registers_neither() {
     // must refuse the first entry too.
     let (status, body) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
          {\"alias\": \"avalid\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n\
          {\"alias\": \"kyo\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
         None,
@@ -1159,7 +1172,7 @@ fn import_refuses_a_data_directory_a_live_server_holds() {
     let file = batches.join("late.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\", \"create\": {\"name\": \"c\"}}\n",
     )
     .unwrap();
     let (code, _, stderr) = run_import(&server.data_dir, &[file.to_str().unwrap()]);
@@ -1178,13 +1191,13 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
     let good = batches.join("good.jsonl");
     std::fs::write(
         &good,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\", \"create\": {}}\n",
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\", \"create\": {\"name\": \"c\"}}\n",
     )
     .unwrap();
     let bad = batches.join("bad.jsonl");
     std::fs::write(
         &bad,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"t\"}\n\n{\"foo\": 1}\n",
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"t\"}\n\n{\"foo\": 1}\n",
     )
     .unwrap();
 
@@ -1208,8 +1221,8 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
 #[test]
 fn the_import_endpoint_applies_batches_to_a_live_server() {
     let server = Server::start_with_env("http-import", &[("TAGURU_API_TOKEN", "opskey")]);
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-live\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-live\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
 
@@ -1249,8 +1262,8 @@ fn the_import_endpoint_applies_batches_to_a_live_server() {
 #[test]
 fn import_dry_run_previews_without_writing_anything() {
     let server = Server::start("http-import-dry-run");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-preview\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-preview\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
 
@@ -1313,15 +1326,15 @@ fn dry_run_and_a_real_import_reach_the_same_predicted_alias_rejection() {
     let server = Server::start("http-import-dry-run-parity");
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"青嶺酒造\", \"label\": \"所在地\", \"object\": \"京都酒造\", \"weight\": 1.0}\n\
          {\"alias\": \"kyo\", \"canonical\": \"京都酒造\", \"kind\": \"concept\"}\n",
         None,
     );
     assert_eq!(status, 200);
 
-    let conflicting = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+    let conflicting = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
                         {\"alias\": \"kyo\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n";
     let (dry_status, dry_body) = post_import_dry_run(&server, conflicting, None);
     assert_eq!(dry_status, 409, "{dry_body}");
@@ -1341,8 +1354,8 @@ fn dry_run_and_a_real_import_reach_the_same_predicted_alias_rejection() {
 fn import_dry_run_skips_group_records() {
     let server = Server::start("http-import-dry-run-groups");
     let stream = "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n\
-                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-                   \"create\": {\"description\": \"d\"}}\n";
+                  {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n";
     let (status, preview) = post_import_dry_run(&server, stream, None);
     assert_eq!(status, 200, "{preview}");
     assert_eq!(
@@ -1375,8 +1388,8 @@ fn a_predicted_alias_rejection_leaves_no_marker_on_a_live_import() {
     let server = Server::start("http-import-marker");
     // An alias whose canonical nothing interned is caught by
     // predicting the alias step's outcome before anything runs.
-    let torn = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-torn\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let torn = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-torn\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, torn, None);
     assert_eq!(
@@ -1412,8 +1425,8 @@ fn a_rejected_new_source_import_never_appears_in_list_sources() {
     let server = Server::start("http-import-reject-list-sources");
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-old\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-old\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"passage\": \"蔵の杜氏は高瀬。\"}\n",
         None,
     );
@@ -1421,7 +1434,7 @@ fn a_rejected_new_source_import_never_appears_in_list_sources() {
 
     let (status, body) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-new\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-new\"}\n\
          {\"subject\": \"新蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
          {\"passage\": \"新しい文章。\"}\n\
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
@@ -1448,11 +1461,11 @@ fn a_rejected_new_source_import_never_appears_in_list_sources() {
 #[test]
 fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_source_absent() {
     let server = Server::start("http-import-stream-prefix");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
                   {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
-                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
@@ -1490,8 +1503,8 @@ fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_sou
 #[test]
 fn a_single_batch_predicted_alias_rejection_reports_nothing_written() {
     let server = Server::start("http-import-nothing-written");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
@@ -1516,11 +1529,11 @@ fn a_single_batch_predicted_alias_rejection_reports_nothing_written() {
 #[test]
 fn a_multi_batch_rejection_reports_its_durable_prefix() {
     let server = Server::start("http-import-durable-prefix");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
                   {\"passage\": \"青嶺酒造の杜氏は高瀬。\"}\n\
-                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-2\"}\n\
+                  {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-2\"}\n\
                   {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
     let (status, body) = post_import(&server, stream, None);
     assert_eq!(status, 409, "{body}");
@@ -1550,8 +1563,8 @@ fn a_multi_batch_rejection_reports_its_durable_prefix() {
 #[test]
 fn the_import_endpoint_reports_section_bookkeeping() {
     let server = Server::start("http-import-sections");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-sections\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-sections\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
                  {\"paragraph\": 1, \"section\": \"沿革\"}\n\
                  {\"paragraph\": 9, \"section\": \"存在しない段落\"}\n";
@@ -1573,8 +1586,8 @@ fn the_import_endpoint_reports_section_bookkeeping() {
 #[test]
 fn the_import_endpoint_reports_locator_bookkeeping() {
     let server = Server::start("http-import-locators");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-locators\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-locators\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
                  {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
                  {\"paragraph\": 9, \"locator\": {\"kind\": \"page\", \"value\": \"存在しない段落\"}}\n";
@@ -1600,8 +1613,8 @@ fn the_import_endpoint_reports_locator_bookkeeping() {
 #[test]
 fn the_import_endpoint_reports_dropped_association_paragraphs() {
     let server = Server::start("http-import-assoc-drop");
-    let batch = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-guide\", \
-                 \"create\": {\"description\": \"d\"}}\n\
+    let batch = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-guide\", \
+                 \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                  {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
                  {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0, \"paragraph\": 9}\n";
 
@@ -1627,10 +1640,9 @@ fn the_import_endpoint_reports_dropped_association_paragraphs() {
 #[test]
 fn a_context_round_trips_through_the_export_endpoint_and_import() {
     let server = Server::start("http-export-roundtrip");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.25})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "酒蔵の知識", "dice_floor": 0.25}),
     );
     server.ok(
         "POST",
@@ -1772,11 +1784,11 @@ fn import_restores_group_records_after_the_batches() {
     let stream = "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
                    \"contexts\": [\"sake\", \"bunko\"], \"groups\": [\"kid\"]}\n\
                   {\"type\": \"group\", \"id\": \"kid\", \"contexts\": [\"bunko\"]}\n\
-                  {\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+                  {\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
-                  {\"type\": \"source\", \"context\": \"bunko\", \"id\": \"b.md\", \
-                   \"create\": {\"description\": \"d\"}}\n";
+                  {\"type\": \"source\", \"context_id\": \"98a4dbfd-92a8-4c44-be61-6b69e8c34c26\", \"id\": \"b.md\", \
+                   \"create\": {\"name\": \"bunko\", \"description\": \"d\"}}\n";
     let (status, first) = post_import(&server, stream, None);
     assert_eq!(status, 200, "{first}");
     assert_eq!(first["result"]["batches"].as_array().map(Vec::len), Some(2));
@@ -1804,7 +1816,7 @@ fn import_restores_group_records_after_the_batches() {
 
     // A stream with no group records keeps the pre-group shape: no
     // `groups` field at all.
-    let batches_only = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"c.md\"}\n";
+    let batches_only = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"c.md\"}\n";
     let (status, plain) = post_import(&server, batches_only, None);
     assert_eq!(status, 200, "{plain}");
     assert!(plain["result"].get("groups").is_none(), "{plain}");
@@ -1835,8 +1847,8 @@ fn import_restores_group_records_after_the_batches() {
 #[test]
 fn import_refuses_group_records_that_would_dangle_or_misshape() {
     let server = Server::start("http-import-group-refuse");
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\", \
-                   \"create\": {\"description\": \"d\"}}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+                   \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
                   {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n";
     let (status, refusal) = post_import(&server, stream, None);
     assert_eq!(status, 404, "{refusal}");
@@ -1900,30 +1912,25 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
+    let create = |id: &str, name: &str| {
+        let header = json!({
+            "type": "source", "context_id": id, "id": "seed:create",
+            "create": {"name": name, "description": "d"},
+        });
+        post_import(&server, &format!("{header}\n"), Some("atok"))
+    };
     assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "sake", "description": "d"})),
-            "atok"
-        )
-        .0,
+        create("cef2e28b-43f0-4b6c-8201-abab0785399f", "sake").0,
         200
     );
     assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "bunko", "description": "d"})),
-            "atok"
-        )
-        .0,
+        create("98a4dbfd-92a8-4c44-be61-6b69e8c34c26", "bunko").0,
         200
     );
 
     // Out of grant through the record's own members: the whole request
     // refuses — the in-grant batch beside it included.
-    let stream = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"s.md\"}\n\
+    let stream = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s.md\"}\n\
                   {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"bunko\"]}\n";
     let (status, refusal) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
@@ -2104,7 +2111,7 @@ fn a_group_exports_as_one_import_record() {
     assert_eq!(status, 200, "{exported}");
     assert_eq!(
         exported,
-        json!({"type": "group", "version": "2026-09-17", "id": "kura", "description": "蔵まとめ",
+        json!({"type": "group", "version": "2026-10-01", "id": "kura", "description": "蔵まとめ",
                "contexts": ["bunko", "sake"], "groups": ["kid"]})
     );
 
@@ -2139,7 +2146,7 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     // Malformed op line: 400, named by line number.
     let (status, refusal) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s\"}\n\n{\"foo\": 1}\n",
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s\"}\n\n{\"foo\": 1}\n",
         None,
     );
     assert_eq!(status, 400);
@@ -2160,7 +2167,7 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     // Absent context, no create block: 404.
     let (status, refusal) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"ghost\", \"id\": \"s\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"id\": \"s\"}\n",
         None,
     );
     assert_eq!(status, 404);
@@ -2174,7 +2181,7 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     // never lands either.
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s1\", \"create\": {\"name\": \"c\"}}\n\
          {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n",
         None,
@@ -2182,7 +2189,7 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
     assert_eq!(status, 200);
     let (status, refusal) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s2\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s2\"}\n\
          {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n",
         None,
@@ -2200,10 +2207,9 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
 #[test]
 fn aliases_withdraw_and_the_spelling_is_reusable() {
     let server = Server::start("alias-remove");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "c", "description": "d"})),
+    server.create_with_id(
+        "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+        json!({"name": "c", "description": "d"}),
     );
     server.ok(
         "POST",
@@ -2272,13 +2278,13 @@ fn an_import_alias_conflict_heals_with_a_withdrawal_then_reimport() {
     let server = Server::start("alias-heal");
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s1\", \"create\": {}}\n\
+        "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s1\", \"create\": {\"name\": \"c\"}}\n\
          {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n",
         None,
     );
     assert_eq!(status, 200);
-    let revised = "{\"type\": \"source\", \"context\": \"c\", \"id\": \"s2\"}\n\
+    let revised = "{\"type\": \"source\", \"context_id\": \"2e7d2c03-a950-4ae2-a5ec-f5b5356885a5\", \"id\": \"s2\"}\n\
          {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
          {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n";
     let (status, _) = post_import(&server, revised, None);
@@ -2312,8 +2318,8 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     let server = Server::start("http-import-reject-replacement");
     let (status, _) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\", \
-         \"create\": {\"description\": \"d\"}}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
          {\"passage\": \"元の文章。\"}\n\
          {\"alias\": \"kyo\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n",
@@ -2327,7 +2333,7 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     // retraction that would otherwise clear the old passage/association.
     let (status, body) = post_import(
         &server,
-        "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"doc-1\"}\n\
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
          {\"subject\": \"新蔵\", \"label\": \"特徴\", \"object\": \"辛口\", \"weight\": 1.0}\n\
          {\"passage\": \"新しい文章。\"}\n\
          {\"alias\": \"kyo\", \"canonical\": \"新蔵\", \"kind\": \"concept\"}\n",
@@ -2376,7 +2382,7 @@ fn importing_into_an_absent_context_needs_a_create_block() {
     let file = batches.join("orphan.jsonl");
     std::fs::write(
         &file,
-        "{\"type\": \"source\", \"context\": \"ghost\", \"id\": \"s\"}\n",
+        "{\"type\": \"source\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"id\": \"s\"}\n",
     )
     .unwrap();
     let data_dir = std::env::temp_dir().join(format!(
@@ -2413,7 +2419,7 @@ fn schema_document(mode: &str) -> Value {
 /// A domain violation: `田中` typed `Person`, disjoint from `杜氏`'s
 /// declared `domain: [Brewery]` — the offline-import twin of
 /// `schema_import.rs::domain_violation_batch`.
-const DOMAIN_VIOLATION_BATCH: &str = "{\"type\": \"source\", \"context\": \"sake\", \"id\": \"a.md\"}\n\
+const DOMAIN_VIOLATION_BATCH: &str = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\"}\n\
      {\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
      {\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": 1.0}\n";
 
@@ -2423,10 +2429,9 @@ const DOMAIN_VIOLATION_BATCH: &str = "{\"type\": \"source\", \"context\": \"sake
 #[test]
 fn import_report_line_names_schema_warnings_in_warn_mode() {
     let server = Server::start("schema-import-cli-warn");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     server.ok(
         "PUT",
@@ -2453,10 +2458,9 @@ fn import_report_line_names_schema_warnings_in_warn_mode() {
 #[test]
 fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
     let server = Server::start("schema-import-cli-strict");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
+    server.create_with_id(
+        "cef2e28b-43f0-4b6c-8201-abab0785399f",
+        json!({"name": "sake", "description": "d"}),
     );
     server.ok(
         "PUT",

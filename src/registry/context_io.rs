@@ -109,20 +109,20 @@ impl AppState {
     }
 
     /// One directory row by display name, or `None` for an unknown OR
-    /// ambiguous name — the name-boundary read (grant allow-lists,
-    /// the import header) until #965 retires those surfaces.
+    /// ambiguous name. No production caller addresses a context by name
+    /// any more (#965 retired the import header's); the test suites
+    /// still look contexts up this way because their fixtures name them.
+    #[cfg(test)]
     pub fn directory_entry(&self, name: &str) -> Option<DirectoryEntry> {
         let entry = self.lookup_named(name)?;
         describe_entry(name.to_string(), &entry)
     }
 
-    /// Whether a `context` exists, by registry membership. The
-    /// cross-`context` search entrances vet their whole target list up
-    /// front, so a mistyped name refuses before any `context` is
-    /// searched; a `context` deleted between this check and its read is
-    /// still caught by the read itself.
-    pub fn context_exists(&self, name: &str) -> bool {
-        self.lookup_named(name).is_some()
+    /// Whether a `context` is registered under `id` — the import
+    /// header's existence test (#965): an exact id lookup, so unlike a
+    /// name lookup it has no ambiguous case.
+    pub fn context_id_exists(&self, id: &str) -> bool {
+        self.lookup_id(id).is_some()
     }
 }
 
@@ -156,14 +156,7 @@ impl AppState {
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
-                    let snapshot = self.export_snapshot(
-                        &entry,
-                        &stem,
-                        &inner.meta,
-                        context,
-                        inner.schema.as_deref(),
-                        deadline,
-                    );
+                    let snapshot = self.export_snapshot(&entry, &stem, &inner, context, deadline);
                     drop(inner);
                     // The `?` skips touch/enforce_budget on a failure
                     // (an expired deadline, or the passage store's own
@@ -195,14 +188,7 @@ impl AppState {
             )
             .map_err(AccessError::Load)?;
             self.recount_entry(&mut inner);
-            self.export_snapshot(
-                &entry,
-                &stem,
-                &inner.meta,
-                hot_context(&inner),
-                inner.schema.as_deref(),
-                deadline,
-            )
+            self.export_snapshot(&entry, &stem, &inner, hot_context(&inner), deadline)
         })?;
         self.touch(&entry);
         self.enforce_budget(&entry.id);
@@ -223,9 +209,8 @@ impl AppState {
         &self,
         entry: &Entry,
         stem: &str,
-        meta: &ContextMeta,
+        inner: &EntryInner,
         context: &Context,
-        schema: Option<&crate::schema::InstalledSchema>,
         deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
         if deadline.expired() {
@@ -242,11 +227,15 @@ impl AppState {
                 .collect()
         };
         Ok(crate::export::ExportSnapshot {
-            meta: meta.clone(),
+            name: inner.name.clone(),
+            meta: inner.meta.clone(),
             associations: context.query_any(&[], &[], &[]),
             concept_aliases: owned(context.concept_aliases()),
             label_aliases: owned(context.label_aliases()),
-            schema: schema.map(|installed| installed.document().clone()),
+            schema: inner
+                .schema
+                .as_deref()
+                .map(|installed| installed.document().clone()),
             passages,
         })
     }

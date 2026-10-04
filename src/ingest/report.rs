@@ -8,7 +8,7 @@ pub(super) fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
          association(s), +{} alias(es){}{}{}{}{}{}",
-        batch.context,
+        batch.label(),
         if applied.created { " (created)" } else { "" },
         batch.source,
         applied.retracted,
