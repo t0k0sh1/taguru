@@ -26,7 +26,9 @@ from .conftest import FakeServer
 def make_retriever(
     sync_client: Taguru, async_client: AsyncTaguru, **kwargs: Any
 ) -> TaguruRetriever:
-    return TaguruRetriever(context="sake", client=sync_client, async_client=async_client, **kwargs)
+    return TaguruRetriever(
+        context_id="sake", client=sync_client, async_client=async_client, **kwargs
+    )
 
 
 def test_both_lanes_merge_and_dedup(sync_client: Taguru, async_client: AsyncTaguru) -> None:
@@ -115,7 +117,7 @@ def test_cross_contexts_tag_documents_and_share_one_text_call(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
     retriever = TaguruRetriever(
-        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
@@ -184,7 +186,7 @@ def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_erro
     # The graph lane addresses tea by its id (#964).
     fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
-        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
@@ -204,7 +206,7 @@ async def test_async_keeps_a_healthy_targets_graph_docs_when_another_targets_gra
     # The graph lane addresses tea by its id (#964).
     fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
-        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = await retriever.ainvoke("青嶺酒造")
 
@@ -219,7 +221,7 @@ def test_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
 ) -> None:
     fake_server.fail_text_search = True
     retriever = TaguruRetriever(
-        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
@@ -236,7 +238,7 @@ async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
 ) -> None:
     fake_server.fail_text_search = True
     retriever = TaguruRetriever(
-        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = await retriever.ainvoke("青嶺酒造")
 
@@ -245,10 +247,10 @@ async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
-# -- single-context (bare `context=...`) lane isolation ------------------------
+# -- single-context (bare `context_id=...`) lane isolation ------------------------
 # The multi-context branch above already isolates one target's graph lane
 # from another's, and the text lane from the graph lane; a bare
-# `context=...` retriever used to have NO such isolation at all — either
+# `context_id=...` retriever used to have NO such isolation at all — either
 # lane raising took the whole call down with it.
 
 
@@ -388,7 +390,7 @@ async def test_agraph_lane_fetches_citations_concurrently_not_sequentially(
     probe = _ConcurrencyProbeContext()
     monkeypatch.setattr(async_client, "context", lambda name: probe)
     retriever = TaguruRetriever(
-        context="sake", client=sync_client, async_client=async_client, include_text=False
+        context_id="sake", client=sync_client, async_client=async_client, include_text=False
     )
 
     documents = await retriever.ainvoke("青嶺酒造")
@@ -431,7 +433,7 @@ async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
     probe = _FailingCiteContext()
     monkeypatch.setattr(async_client, "context", lambda name: probe)
     retriever = TaguruRetriever(
-        context="sake", client=sync_client, async_client=async_client, include_text=False
+        context_id="sake", client=sync_client, async_client=async_client, include_text=False
     )
 
     # Driven at the lane directly: `_aget_relevant_documents`'s bare-context
@@ -449,7 +451,7 @@ async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
 
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     retriever = TaguruRetriever(
-        contexts=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
+        context_ids=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
     )
     sync_documents = retriever.invoke("青嶺酒造")
     async_documents = await retriever.ainvoke("青嶺酒造")
@@ -477,7 +479,7 @@ async def test_aclose_leaves_caller_supplied_clients_open(
 
 
 def test_close_closes_a_self_built_client() -> None:
-    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    retriever = TaguruRetriever(context_id="sake", base_url="http://test")
     client = retriever.client
     assert client is not None
     retriever.close()
@@ -487,7 +489,7 @@ def test_close_closes_a_self_built_client() -> None:
 def test_close_also_closes_the_self_built_async_client() -> None:
     """close() has no event loop to await aclose() with, but must not leak
     the async client's connections when ainvoke was ever used before it."""
-    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    retriever = TaguruRetriever(context_id="sake", base_url="http://test")
     async_client_ = retriever.async_client
     assert async_client_ is not None
     retriever.close()
@@ -495,7 +497,7 @@ def test_close_also_closes_the_self_built_async_client() -> None:
 
 
 async def test_aclose_closes_both_self_built_clients() -> None:
-    retriever = TaguruRetriever(context="sake", base_url="http://test")
+    retriever = TaguruRetriever(context_id="sake", base_url="http://test")
     client, async_client_ = retriever.client, retriever.async_client
     assert client is not None
     assert async_client_ is not None
@@ -505,7 +507,7 @@ async def test_aclose_closes_both_self_built_clients() -> None:
 
 
 def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
-    with TaguruRetriever(context="sake", base_url="http://test") as retriever:
+    with TaguruRetriever(context_id="sake", base_url="http://test") as retriever:
         client, async_client_ = retriever.client, retriever.async_client
         assert client is not None
         assert async_client_ is not None
@@ -515,7 +517,7 @@ def test_sync_context_manager_closes_the_self_built_client_on_exit() -> None:
 
 
 async def test_async_context_manager_closes_self_built_clients_on_exit() -> None:
-    async with TaguruRetriever(context="sake", base_url="http://test") as retriever:
+    async with TaguruRetriever(context_id="sake", base_url="http://test") as retriever:
         client, async_client_ = retriever.client, retriever.async_client
         assert client is not None
         assert async_client_ is not None

@@ -18,6 +18,7 @@ const client = new Taguru(); // defaults: $TAGURU_URL / $TAGURU_API_TOKEN, else 
 const row = await client.contexts.create("sake", { description: "青嶺酒造という架空の酒蔵の知識" });
 
 const ctx = client.context(row.id); // contexts are addressed by the minted id
+// only know the name? names are not unique, so iterate `client.contexts.iter()` and keep the rows whose `name` matches
 await ctx.addAssociations([
   { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md" },
 ]);

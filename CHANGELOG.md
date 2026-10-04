@@ -7,7 +7,40 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- **`taguru contexts` — find a context's id by its name** (#967, ADR 0045
+  §2.4): lists a running server's contexts as `ID<TAB>NAME` lines (or
+  `--json`), and with `--name NAME` keeps only the rows whose name is
+  exactly `NAME` — names are not unique, so several lines can come back
+  and you pick by id; no match exits 1. The id it prints is what every
+  other verb's `--context` takes. It is a client-side filter over the
+  paged `GET /contexts`, so the wire is unchanged.
+
 ### Changed
+
+- **Breaking (MCP + LangChain) — the single-context argument is
+  `context_id`** (#967, final child of #961; rides the same unreleased
+  `http_contract` 2): every MCP tool that addressed one context took
+  `context`; it now takes `context_id` (a UUID — the `id` column of
+  `list_contexts`, which is also how a name is looked up), mirroring the
+  wire's `context_id` / `context_ids`. A call still passing `context` is
+  refused with `missing required argument 'context_id'`; the search tools'
+  "one of `context_id` / `context_ids` / `groups`" rule and its
+  "not both" refusal follow the rename. `taguru-langchain`'s
+  `TaguruRetriever` renames its `context` / `contexts` fields to
+  `context_id` / `context_ids` (Python and TypeScript; a name was already
+  refused since #965), and `TaguruIngester` keeps taking the context's
+  display name — it resolves the id itself and refuses an ambiguous name.
+  The CLI's `--context` usage text says `ID` throughout (`evaluate`,
+  `calibrate`, `communities`, `consolidation`; `export` / `compact` take
+  ids as well), the `extract` / `benchmark extract` refusal of a name
+  points at `taguru contexts --name`, and the docs, READMEs, SDK
+  quick-starts and examples show the create → `id` → find-by-name flow
+  and the `context_id` argument. `TAGURU_KEY_GRANTS` keeps its `contexts`
+  key (a grant lists the contexts a key reaches, values are ids, beside
+  `groups` — which stay names); a Document's `context` metadata key in
+  `taguru-langchain` is unchanged.
 
 - **Breaking (configuration + wire) — grants and quotas are keyed by
   context id, and a derived context carries its parent's id** (#966,

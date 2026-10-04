@@ -6,7 +6,7 @@ import { TaguruRetriever } from "../../src/retrievers.js";
 import { FakeServer } from "./stub.js";
 
 const make = (server: FakeServer, fields: Record<string, unknown> = {}) =>
-  new TaguruRetriever({ context: "sake", client: server.client(), ...fields });
+  new TaguruRetriever({ context_id: "sake", client: server.client(), ...fields });
 
 describe("TaguruRetriever", () => {
   it("merges both lanes and dedups on (source, paragraph)", async () => {
@@ -120,7 +120,7 @@ describe("TaguruRetriever cross-context", () => {
   it("tags documents and rides one cross-context text call", async () => {
     const server = new FakeServer();
     const retriever = new TaguruRetriever({
-      contexts: ["id-sake", "id-tea"],
+      context_ids: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");
@@ -173,7 +173,7 @@ describe("TaguruRetriever cross-context", () => {
     const server = new FakeServer();
     server.failContexts.add("id-tea");
     const retriever = new TaguruRetriever({
-      contexts: ["id-sake", "id-tea"],
+      context_ids: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");
@@ -193,7 +193,7 @@ describe("TaguruRetriever cross-context", () => {
     const server = new FakeServer();
     server.failTextSearch = true;
     const retriever = new TaguruRetriever({
-      contexts: ["id-sake", "id-tea"],
+      context_ids: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");

@@ -364,7 +364,7 @@ retriever = TaguruRetriever(
       Each returned <code>Document</code>'s metadata carries <code>context</code>, <code>source</code>,
       <code>paragraph</code>, <code>section</code>, and <code>lane</code> — which paper section
       answered is never a guess, whether the hit came from the graph, the text lane, or both.
-      Reaching for <code>TaguruRetriever(context=...)</code> per paper in a loop instead would
+      Reaching for <code>TaguruRetriever(context_id=...)</code> per paper in a loop instead would
       undo the split this pipeline just built; naming both <code>groups</code> in one retriever is the point.
     </p>
   </section>

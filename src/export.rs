@@ -66,7 +66,7 @@ use crate::registry::{AccessError, AppState, ContextMeta};
 use crate::remote::Api;
 
 const USAGE: &str = "\
-usage: taguru export [--config FILE] [--url URL] --out DIR [CONTEXT...]
+usage: taguru export [--config FILE] [--url URL] --out DIR [ID...]
 
 Writes each context back out as a JSONL source stream —
 {out}/{context}.jsonl, the exact format `taguru import` and POST

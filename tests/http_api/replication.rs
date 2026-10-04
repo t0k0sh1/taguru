@@ -1160,13 +1160,13 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     let read_tool = replica.call_tool(
         1,
         "recall",
-        json!({"context": replica.cx("sake"), "cue": "青嶺酒造"}),
+        json!({"context_id": replica.cx("sake"), "cue": "青嶺酒造"}),
     );
     assert_ne!(read_tool["isError"], json!(true), "{read_tool}");
     let write_tool = replica.call_tool(
         2,
         "add_associations",
-        json!({"context": replica.cx("sake"), "associations": [
+        json!({"context_id": replica.cx("sake"), "associations": [
             {"subject": "a", "label": "l", "object": "o", "weight": 1.0}
         ]}),
     );

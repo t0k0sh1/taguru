@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_routes_to_a_request() {
         let arguments = json!({
-            "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
@@ -112,7 +112,7 @@ mod tests {
 
     /// The search tools target one `context` or several: `contexts`
     /// and/or `groups` route to the cross-`context` path with the arrays
-    /// in the body; `context` keeps the historical per-`context` route,
+    /// in the body; `context_id` keeps the historical per-`context` route,
     /// body unchanged.
     #[test]
     fn search_tools_route_to_the_cross_context_paths_on_contexts() {
@@ -158,7 +158,8 @@ mod tests {
 
         // The single-context form is untouched, and the body never
         // carries the path-bound name.
-        let (_, path, body) = route_tool("recall", &json!({"context": "a", "cue": "x"})).unwrap();
+        let (_, path, body) =
+            route_tool("recall", &json!({"context_id": "a", "cue": "x"})).unwrap();
         assert_eq!(path, "/contexts/a/recall");
         assert_eq!(body.unwrap(), json!({"cue": "x"}));
     }
@@ -169,22 +170,22 @@ mod tests {
     /// `pick` rule).
     #[test]
     fn search_tools_refuse_an_ambiguous_or_absent_target() {
-        let ambiguous = "pass either 'context' or 'context_ids'/'groups', not both";
+        let ambiguous = "pass either 'context_id' or 'context_ids'/'groups', not both";
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context": "a", "context_ids": ["b"], "cue": "x"})
+                &json!({"context_id": "a", "context_ids": ["b"], "cue": "x"})
             ),
             Err(ambiguous.to_string())
         );
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context": "a", "groups": ["g"], "cue": "x"})
+                &json!({"context_id": "a", "groups": ["g"], "cue": "x"})
             ),
             Err(ambiguous.to_string())
         );
-        let missing = "missing required argument 'context' (or 'context_ids'/'groups', to search several at once)";
+        let missing = "missing required argument 'context_id' (or 'context_ids'/'groups', to search several at once)";
         assert_eq!(
             route_tool("search_passages", &json!({"query": "q"})),
             Err(missing.to_string())
@@ -192,7 +193,7 @@ mod tests {
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context": null, "context_ids": null, "cue": "x"})
+                &json!({"context_id": null, "context_ids": null, "cue": "x"})
             ),
             Err(missing.to_string())
         );
@@ -206,7 +207,7 @@ mod tests {
         let (method, path, body) = route_tool(
             "promote",
             &json!({
-                "context": "scratch-claude",
+                "context_id": "scratch-claude",
                 "into": "perm",
                 "sources": ["session:claude:a"],
                 "audit": false,
@@ -223,13 +224,13 @@ mod tests {
         assert!(body.get("dry_run").is_none(), "{body}");
 
         assert_eq!(
-            route_tool("promote", &json!({"context": "s", "sources": ["a"]})),
+            route_tool("promote", &json!({"context_id": "s", "sources": ["a"]})),
             Err("missing required argument 'into'".to_string())
         );
         assert_eq!(
             route_tool(
                 "promote",
-                &json!({"context": "s", "into": "p", "sources": null})
+                &json!({"context_id": "s", "into": "p", "sources": null})
             ),
             Err("missing required argument 'sources'".to_string())
         );
@@ -358,7 +359,7 @@ mod tests {
         // is missing instead of building a broken path.
         assert_eq!(
             route_tool("describe", &json!({"concept": "x"})),
-            Err("missing required argument 'context'".to_string())
+            Err("missing required argument 'context_id'".to_string())
         );
     }
 
@@ -370,14 +371,14 @@ mod tests {
     #[test]
     fn add_associations_without_the_associations_argument_is_refused() {
         assert_eq!(
-            route_tool("add_associations", &json!({"context": "ctx"})),
+            route_tool("add_associations", &json!({"context_id": "ctx"})),
             Err("missing required argument 'associations'".to_string())
         );
         // Explicit null is the same omission, not a value.
         assert_eq!(
             route_tool(
                 "add_associations",
-                &json!({"context": "ctx", "associations": null})
+                &json!({"context_id": "ctx", "associations": null})
             ),
             Err("missing required argument 'associations'".to_string())
         );
@@ -386,7 +387,7 @@ mod tests {
         assert!(
             route_tool(
                 "add_associations",
-                &json!({"context": "ctx", "associations": []})
+                &json!({"context_id": "ctx", "associations": []})
             )
             .is_ok()
         );
@@ -398,8 +399,8 @@ mod tests {
     #[test]
     fn a_required_argument_of_the_wrong_type_names_the_type_error() {
         assert_eq!(
-            route_tool("describe", &json!({"context": 7, "concept": "x"})),
-            Err("argument 'context' must be a string".to_string())
+            route_tool("describe", &json!({"context_id": 7, "concept": "x"})),
+            Err("argument 'context_id' must be a string".to_string())
         );
     }
 
@@ -410,7 +411,7 @@ mod tests {
     fn add_associations_reports_the_missing_context_before_the_missing_payload() {
         assert_eq!(
             route_tool("add_associations", &json!({})),
-            Err("missing required argument 'context'".to_string())
+            Err("missing required argument 'context_id'".to_string())
         );
     }
 
@@ -423,7 +424,7 @@ mod tests {
     #[test]
     fn schema_required_body_arguments_are_refused_when_omitted() {
         let base = json!({
-            "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
@@ -492,8 +493,8 @@ mod tests {
         for tool in ["audit_consolidation", "validate_schema"] {
             let err = route_tool(tool, &json!({})).unwrap_err();
             assert!(
-                err.contains("'context'"),
-                "tool '{tool}' with nothing at all should name 'context' first, got: {err}"
+                err.contains("'context_id'"),
+                "tool '{tool}' with nothing at all should name 'context_id' first, got: {err}"
             );
         }
     }
@@ -505,7 +506,7 @@ mod tests {
     fn cite_passage_without_paragraph_or_index_is_refused() {
         let routed = route_tool(
             "cite_passage",
-            &json!({"context": "sake", "source": "docs/aomine.md"}),
+            &json!({"context_id": "sake", "source": "docs/aomine.md"}),
         );
         assert_eq!(
             routed,
@@ -520,7 +521,7 @@ mod tests {
     /// unreserved set must be percent-encoded, byte by byte.
     #[test]
     fn context_names_are_percent_encoded_into_one_segment() {
-        let (_, path, _) = route_tool("list_labels", &json!({"context": "日本 語/酒"})).unwrap();
+        let (_, path, _) = route_tool("list_labels", &json!({"context_id": "日本 語/酒"})).unwrap();
         let segment = path
             .strip_prefix("/contexts/")
             .and_then(|rest| rest.strip_suffix("/labels"))
@@ -669,7 +670,7 @@ mod tests {
     fn list_sources_routes_prefix_onto_the_query_string() {
         let (_, path, _) = route_tool(
             "list_sources",
-            &json!({"context": "sake", "prefix": "doc-"}),
+            &json!({"context_id": "sake", "prefix": "doc-"}),
         )
         .unwrap();
         assert_eq!(path, "/contexts/sake/sources?prefix=doc-");
@@ -687,8 +688,11 @@ mod tests {
 
     #[test]
     fn list_labels_routes_prefix_onto_the_query_string() {
-        let (_, path, _) =
-            route_tool("list_labels", &json!({"context": "sake", "prefix": "産地"})).unwrap();
+        let (_, path, _) = route_tool(
+            "list_labels",
+            &json!({"context_id": "sake", "prefix": "産地"}),
+        )
+        .unwrap();
         assert_eq!(path, "/contexts/sake/labels?prefix=%E7%94%A3%E5%9C%B0");
     }
 
@@ -705,7 +709,7 @@ mod tests {
     #[test]
     fn get_aliases_routes_prefix_onto_the_query_string() {
         let (_, path, _) =
-            route_tool("get_aliases", &json!({"context": "sake", "prefix": "a"})).unwrap();
+            route_tool("get_aliases", &json!({"context_id": "sake", "prefix": "a"})).unwrap();
         assert_eq!(path, "/contexts/sake/aliases?prefix=a");
     }
 
@@ -726,7 +730,7 @@ mod tests {
     fn audit_coverage_routes_limit_into_the_request_body() {
         let (method, path, body) = route_tool(
             "audit_coverage",
-            &json!({"context": "sake", "origins": ["x"], "limit": 500}),
+            &json!({"context_id": "sake", "origins": ["x"], "limit": 500}),
         )
         .unwrap();
         assert_eq!(method, "POST");
@@ -749,7 +753,7 @@ mod tests {
         let (method, path, body) = route_tool(
             "audit_drift",
             &json!({
-                "context": "sake",
+                "context_id": "sake",
                 "unsourced_floor": 0.5,
                 "limit": 25,
                 "include_twins": true,
@@ -823,7 +827,7 @@ mod tests {
         let cursor = json!({"weight": 0.5, "subject": "a", "label": "b", "object": "c"});
         let (_, _, body) = route_tool(
             "recall",
-            &json!({"context": "sake", "cue": "x", "after": cursor}),
+            &json!({"context_id": "sake", "cue": "x", "after": cursor}),
         )
         .unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
@@ -841,24 +845,30 @@ mod tests {
         let explore_cursor = json!({"distance": 2, "subject": "a", "label": "b", "object": "c"});
         let (_, _, body) = route_tool(
             "explore",
-            &json!({"context": "sake", "origins": ["a"], "after": explore_cursor}),
+            &json!({"context_id": "sake", "origins": ["a"], "after": explore_cursor}),
         )
         .unwrap();
         assert_eq!(body.unwrap()["after"], explore_cursor);
 
         let (_, _, body) = route_tool(
             "audit_coverage",
-            &json!({"context": "sake", "origins": ["a"], "after": cursor}),
+            &json!({"context_id": "sake", "origins": ["a"], "after": cursor}),
         )
         .unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
 
-        let (_, _, body) =
-            route_tool("audit_drift", &json!({"context": "sake", "after": cursor})).unwrap();
+        let (_, _, body) = route_tool(
+            "audit_drift",
+            &json!({"context_id": "sake", "after": cursor}),
+        )
+        .unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
 
-        let (_, _, body) =
-            route_tool("audit_schema", &json!({"context": "sake", "after": cursor})).unwrap();
+        let (_, _, body) = route_tool(
+            "audit_schema",
+            &json!({"context_id": "sake", "after": cursor}),
+        )
+        .unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
 
         let document = json!({
@@ -867,7 +877,7 @@ mod tests {
         });
         let (_, _, body) = route_tool(
             "validate_schema",
-            &json!({"context": "sake", "document": document, "after": cursor}),
+            &json!({"context_id": "sake", "document": document, "after": cursor}),
         )
         .unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
@@ -895,7 +905,7 @@ mod tests {
     fn cite_passage_routes_to_the_citations_endpoint() {
         let (method, path, body) = route_tool(
             "cite_passage",
-            &json!({"context": "sake", "source": "docs/aomine.md", "paragraph": 1}),
+            &json!({"context_id": "sake", "source": "docs/aomine.md", "paragraph": 1}),
         )
         .unwrap();
         assert_eq!(method, "POST");
@@ -913,7 +923,7 @@ mod tests {
     fn explain_tools_route_beside_their_parents() {
         let (method, path, body) = route_tool(
             "explain_search",
-            &json!({"context": "sake", "query": "酒造", "source": "docs/kura.md",
+            &json!({"context_id": "sake", "query": "酒造", "source": "docs/kura.md",
                     "paragraph": 1, "limit": 5, "semantic_floor": 0.2}),
         )
         .unwrap();
@@ -929,7 +939,7 @@ mod tests {
 
         let (method, path, body) = route_tool(
             "explain_resolve",
-            &json!({"context": "sake", "cue": "青嶺", "expected": "青嶺酒造", "dice_floor": 0.2}),
+            &json!({"context_id": "sake", "cue": "青嶺", "expected": "青嶺酒造", "dice_floor": 0.2}),
         )
         .unwrap();
         assert_eq!(method, "POST");
@@ -941,7 +951,7 @@ mod tests {
 
         let (method, path, body) = route_tool(
             "explain_resolve_label",
-            &json!({"context": "sake", "cue": "醸す", "expected": "杜氏"}),
+            &json!({"context_id": "sake", "cue": "醸す", "expected": "杜氏"}),
         )
         .unwrap();
         assert_eq!(method, "POST");
@@ -956,7 +966,7 @@ mod tests {
     fn cite_passage_accepts_the_pre_35_index_argument_name() {
         let (_, _, body) = route_tool(
             "cite_passage",
-            &json!({"context": "sake", "source": "docs/aomine.md", "index": 1}),
+            &json!({"context_id": "sake", "source": "docs/aomine.md", "index": 1}),
         )
         .unwrap();
         assert_eq!(
@@ -980,7 +990,7 @@ mod tests {
             schema["properties"]["index"]["type"] == "integer",
             "schema should advertise `index` as an integer: {schema}"
         );
-        assert_eq!(schema["required"], json!(["context", "source"]));
+        assert_eq!(schema["required"], json!(["context_id", "source"]));
         assert_eq!(
             schema["anyOf"],
             json!([{ "required": ["paragraph"] }, { "required": ["index"] }])
@@ -1006,7 +1016,7 @@ mod tests {
             json!([
                 {
                     "anyOf": [
-                        { "required": ["context"] },
+                        { "required": ["context_id"] },
                         { "required": ["context_ids"] },
                         { "required": ["groups"] },
                     ]
@@ -1521,7 +1531,7 @@ mod tests {
 
     #[test]
     fn run_retrieve_resolves_describes_activates_and_cites_in_one_call() {
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"] });
+        let arguments = json!({ "context_id": "sake", "origins": ["tokyo"] });
         let result = run_retrieve(&arguments, |_method, path, _body| {
             if path.ends_with("/resolve") {
                 Ok(envelope(
@@ -1579,7 +1589,7 @@ mod tests {
     #[test]
     fn run_retrieve_resolves_each_distinct_origin_cue_once() {
         let arguments = json!({
-            "context": "sake",
+            "context_id": "sake",
             "origins": ["tokyo", "tokyo", "edo", "tokyo"],
             "describe_first": false,
             "fetch_citations": false,
@@ -1630,7 +1640,8 @@ mod tests {
         // citation's response is what tips the scale, not a fourth call.
         let budget = resolve_body.len() + activate_body.len() + citation_body.len() - 1;
 
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let arguments =
+            json!({ "context_id": "sake", "origins": ["tokyo"], "describe_first": false });
         let mut citation_calls = 0usize;
         let result = run_retrieve_bounded(
             &arguments,
@@ -1667,7 +1678,8 @@ mod tests {
     /// through untouched.
     #[test]
     fn run_retrieve_passes_no_budget_to_run_retrieve_bounded() {
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let arguments =
+            json!({ "context_id": "sake", "origins": ["tokyo"], "describe_first": false });
         let result = run_retrieve(&arguments, |_method, path, _body| {
             if path.ends_with("/resolve") {
                 Ok(envelope(json!([{"name": "Tokyo"}])))
@@ -1686,7 +1698,7 @@ mod tests {
     #[test]
     fn run_retrieve_dedupes_associations_across_query_and_activate() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "context_id": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
             "describe_first": false, "fetch_citations": false
         });
         let association = json!({
@@ -1725,7 +1737,7 @@ mod tests {
     #[test]
     fn run_retrieve_keeps_an_association_triple_of_cannot_parse() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "context_id": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
             "describe_first": false, "fetch_citations": false
         });
         let malformed_from_query = json!({
@@ -1766,7 +1778,8 @@ mod tests {
     /// that one locator is skipped, not the whole retrieval.
     #[test]
     fn run_retrieve_skips_a_404_citation_without_failing() {
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let arguments =
+            json!({ "context_id": "sake", "origins": ["tokyo"], "describe_first": false });
         let result = run_retrieve(&arguments, |_method, path, _body| {
             if path.ends_with("/resolve") {
                 Ok(envelope(json!([{"name": "Tokyo"}])))
@@ -1801,7 +1814,8 @@ mod tests {
     /// case above.
     #[test]
     fn run_retrieve_fails_outright_on_a_non_404_citation_error() {
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
+        let arguments =
+            json!({ "context_id": "sake", "origins": ["tokyo"], "describe_first": false });
         let result = run_retrieve(&arguments, |_method, path, _body| {
             if path.ends_with("/resolve") {
                 Ok(envelope(json!([{"name": "Tokyo"}])))
@@ -1843,7 +1857,7 @@ mod tests {
             "fetch_citations",
             "text_fallback_only_if_empty",
         ] {
-            let mut arguments = json!({ "context": "sake", "origins": ["tokyo"] });
+            let mut arguments = json!({ "context_id": "sake", "origins": ["tokyo"] });
             arguments[key] = json!("false");
             let result = run_retrieve(&arguments, |_method, path, _body| {
                 panic!("unexpected call: {path}");
@@ -1862,7 +1876,7 @@ mod tests {
     #[test]
     fn run_retrieve_with_auto_pick_off_anchors_on_the_cue_itself() {
         let arguments = json!({
-            "context": "sake", "origins": ["Tokyo"], "auto_pick": false,
+            "context_id": "sake", "origins": ["Tokyo"], "auto_pick": false,
             "describe_first": false, "fetch_citations": false
         });
         let result = run_retrieve(&arguments, |_method, path, _body| {
@@ -1887,7 +1901,7 @@ mod tests {
     #[test]
     fn run_retrieve_runs_the_text_fallback_when_associations_are_empty() {
         let arguments = json!({
-            "context": "sake", "origins": ["nonexistent"],
+            "context_id": "sake", "origins": ["nonexistent"],
             "text_fallback_query": "some declarative fact"
         });
         let result = run_retrieve(&arguments, |_method, path, _body| {
@@ -1923,7 +1937,7 @@ mod tests {
     #[test]
     fn run_retrieve_refuses_a_pre_plan_search_shape() {
         let arguments = json!({
-            "context": "sake", "origins": ["nonexistent"],
+            "context_id": "sake", "origins": ["nonexistent"],
             "text_fallback_query": "some declarative fact"
         });
         let outcome = run_retrieve(&arguments, |_method, path, _body| {
@@ -1946,7 +1960,7 @@ mod tests {
     #[test]
     fn run_retrieve_runs_the_text_fallback_unconditionally_when_the_empty_gate_is_off() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"], "describe_first": false,
+            "context_id": "sake", "origins": ["tokyo"], "describe_first": false,
             "fetch_citations": false, "text_fallback_query": "some declarative fact",
             "text_fallback_only_if_empty": false
         });
@@ -1986,10 +2000,10 @@ mod tests {
     fn run_retrieve_requires_context_and_origins() {
         assert_eq!(
             run_retrieve(&json!({"origins": ["x"]}), |_, _, _| unreachable!()),
-            Err("missing required argument 'context'".to_string())
+            Err("missing required argument 'context_id'".to_string())
         );
         assert_eq!(
-            run_retrieve(&json!({"context": "sake"}), |_, _, _| unreachable!()),
+            run_retrieve(&json!({"context_id": "sake"}), |_, _, _| unreachable!()),
             Err("missing required argument 'origins'".to_string())
         );
     }
@@ -2001,7 +2015,7 @@ mod tests {
         // way the direct endpoints refuse an overlong `origins` batch.
         let origins: Vec<String> = (0..=MAX_ORIGIN_CUES).map(|i| format!("cue{i}")).collect();
         let result = run_retrieve(
-            &json!({ "context": "sake", "origins": origins }),
+            &json!({ "context_id": "sake", "origins": origins }),
             |_, _, _| unreachable!("no request may fire once the list is refused"),
         );
         assert!(
@@ -2020,7 +2034,7 @@ mod tests {
         assert_eq!(origins.len(), MAX_ORIGIN_CUES);
         let mut calls = 0usize;
         let result = run_retrieve(
-            &json!({ "context": "sake", "origins": origins }),
+            &json!({ "context_id": "sake", "origins": origins }),
             |_, path, _| {
                 calls += 1;
                 assert!(
@@ -2044,7 +2058,7 @@ mod tests {
     /// resolve returns nothing, so no anchor forms and it is the only call.
     #[test]
     fn run_retrieve_forwards_resolve_limit_to_each_resolve_call() {
-        let arguments = json!({ "context": "sake", "origins": ["tokyo"], "resolve_limit": 7 });
+        let arguments = json!({ "context_id": "sake", "origins": ["tokyo"], "resolve_limit": 7 });
         let mut saw_resolve = false;
         run_retrieve(&arguments, |_method, path, body| {
             assert!(
@@ -2069,7 +2083,7 @@ mod tests {
     #[test]
     fn run_retrieve_forwards_labels_to_the_query_round_trip() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
+            "context_id": "sake", "origins": ["tokyo"], "labels": ["capital_of"],
             "describe_first": false, "fetch_citations": false
         });
         let mut saw_query = false;
@@ -2101,7 +2115,7 @@ mod tests {
     #[test]
     fn run_retrieve_forwards_activate_decay_and_limit_to_the_activate_call() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"],
+            "context_id": "sake", "origins": ["tokyo"],
             "activate_decay": 0.5, "activate_limit": 9,
             "describe_first": false, "fetch_citations": false
         });
@@ -2135,7 +2149,7 @@ mod tests {
     #[test]
     fn run_retrieve_forwards_search_limit_to_the_text_fallback() {
         let arguments = json!({
-            "context": "sake", "origins": ["tokyo"], "describe_first": false,
+            "context_id": "sake", "origins": ["tokyo"], "describe_first": false,
             "fetch_citations": false, "text_fallback_query": "some declarative fact",
             "search_limit": 4
         });
@@ -2169,7 +2183,7 @@ mod tests {
             .expect("retrieve is defined");
         assert_eq!(
             tool["inputSchema"]["required"],
-            json!(["context", "origins"])
+            json!(["context_id", "origins"])
         );
     }
 }

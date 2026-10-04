@@ -112,7 +112,7 @@
     <h2 id="procedure">The promotion procedure</h2>
     <ol>
       <li><b>Review</b> the scratch <code>context</code>: <code>recall</code>/<code>query</code>, or
-        <code>taguru communities --context scratch-…</code> for a themed overview once the
+        <code>taguru communities --context ID</code> for a themed overview once the
         scratch has grown (<code>--into ID</code> aims the artifact at a chosen context id —
         by default its id derives from the scratch's own, named <code>NAME::communities</code>; <code>--group NAME</code> summarizes a whole
         <code>group</code> instead; <code>--dry-run</code>/<code>--json</code> preview and machine
@@ -152,7 +152,7 @@
         sentence by sentence — the mechanical floor under the review this step owes.</li>
       <li><b>Import</b> via <code>POST /import</code> / <code>taguru import</code> —
         retract-then-apply per source makes re-promoting the same session idempotent.</li>
-      <li><b>Audit the landing zone</b>: <code>taguru consolidation --context NAME</code>
+      <li><b>Audit the landing zone</b>: <code>taguru consolidation --context ID</code>
         (or the <code>audit_consolidation</code> MCP tool) — <code>--checks LIST</code>
         narrows the sections (comma-separated <code>merge,contradiction,staleness</code>;
         default all three), <code>--into ID</code> aims the judgment <code>context</code> at a chosen id (default: derived

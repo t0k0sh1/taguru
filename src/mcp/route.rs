@@ -41,35 +41,39 @@ pub fn route_tool(
     let group_path = |key: &str| -> Result<String, String> {
         Ok(format!("/groups/{}", segment(need(arguments, key)?)))
     };
-    // The search tools target one context or several: `context`
+    // The search tools target one context or several: `context_id`
     // prefixes the per-context path; `context_ids` and/or `groups`
     // (arrays, riding the body) mean the cross-context route — no
-    // prefix. `context` beside either is ambiguous, and none at all
+    // prefix. `context_id` beside either is ambiguous, and none at all
     // names no target.
     let search_base = || -> Result<String, String> {
         let given = |key: &str| arguments.get(key).is_some_and(|value| !value.is_null());
-        match (given("context"), given("context_ids") || given("groups")) {
+        match (given("context_id"), given("context_ids") || given("groups")) {
             (true, true) => {
-                Err("pass either 'context' or 'context_ids'/'groups', not both".to_string())
+                Err("pass either 'context_id' or 'context_ids'/'groups', not both".to_string())
             }
             (false, false) => Err(
-                "missing required argument 'context' (or 'context_ids'/'groups', to search several at once)"
+                "missing required argument 'context_id' (or 'context_ids'/'groups', to search several at once)"
                     .to_string(),
             ),
-            (true, false) => context_path("context"),
+            (true, false) => context_path("context_id"),
             (false, true) => Ok(String::new()),
         }
     };
     Ok(match name {
         "get_protocol" => ("GET", "/protocol".to_string(), None),
         "flush" => ("POST", "/flush".to_string(), None),
-        "export_context" => ("GET", format!("{}/export", context_path("context")?), None),
+        "export_context" => (
+            "GET",
+            format!("{}/export", context_path("context_id")?),
+            None,
+        ),
         "export_group" => ("GET", format!("{}/export", group_path("name")?), None),
-        "get_context" => ("GET", context_path("context")?, None),
+        "get_context" => ("GET", context_path("context_id")?, None),
         "get_group" => ("GET", group_path("name")?, None),
         "compact" => (
             "POST",
-            format!("{}/compact", context_path("context")?),
+            format!("{}/compact", context_path("context_id")?),
             None,
         ),
         "import" => {
@@ -118,15 +122,15 @@ pub fn route_tool(
         }
         "update_context" => (
             "PATCH",
-            context_path("context")?,
+            context_path("context_id")?,
             Some(pick(
                 arguments,
                 &["description", "pinned", "dice_floor", "semantic_floor"],
             )),
         ),
-        "delete_context" => ("DELETE", context_path("context")?, None),
+        "delete_context" => ("DELETE", context_path("context_id")?, None),
         "rename_context" => {
-            let path = format!("{}/rename", context_path("context")?);
+            let path = format!("{}/rename", context_path("context_id")?);
             need(arguments, "to")?;
             ("POST", path, Some(pick(arguments, &["to"])))
         }
@@ -164,7 +168,7 @@ pub fn route_tool(
             // Resolve `context` first so a caller who omitted BOTH hears
             // about the primary argument, not the secondary one, in the
             // order the schema lists them.
-            let path = format!("{}/associations", context_path("context")?);
+            let path = format!("{}/associations", context_path("context_id")?);
             // Schema-required: an omitted (or null) argument must
             // refuse, not fall back to an empty batch — that would
             // route a caller's mistake into a silent, do-nothing 200.
@@ -176,7 +180,7 @@ pub fn route_tool(
             ("POST", path, Some(associations))
         }
         "store_passages" => {
-            let path = format!("{}/sources", context_path("context")?);
+            let path = format!("{}/sources", context_path("context_id")?);
             need_present(arguments, "passages")?;
             (
                 "POST",
@@ -195,7 +199,7 @@ pub fn route_tool(
             )
         }
         "lookup_passages" => {
-            let path = format!("{}/sources/lookup", context_path("context")?);
+            let path = format!("{}/sources/lookup", context_path("context_id")?);
             need_present(arguments, "sources")?;
             ("POST", path, Some(pick(arguments, &["sources"])))
         }
@@ -203,13 +207,13 @@ pub fn route_tool(
             "GET",
             format!(
                 "{}/sources{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
         ),
         "resolve" => {
-            let path = format!("{}/resolve", context_path("context")?);
+            let path = format!("{}/resolve", context_path("context_id")?);
             need(arguments, "cue")?;
             (
                 "POST",
@@ -221,7 +225,7 @@ pub fn route_tool(
             )
         }
         "resolve_label" => {
-            let path = format!("{}/resolve_label", context_path("context")?);
+            let path = format!("{}/resolve_label", context_path("context_id")?);
             need(arguments, "cue")?;
             (
                 "POST",
@@ -233,7 +237,7 @@ pub fn route_tool(
             )
         }
         "explain_resolve" => {
-            let path = format!("{}/resolve/explain", context_path("context")?);
+            let path = format!("{}/resolve/explain", context_path("context_id")?);
             need(arguments, "cue")?;
             need(arguments, "expected")?;
             (
@@ -246,7 +250,7 @@ pub fn route_tool(
             )
         }
         "explain_resolve_label" => {
-            let path = format!("{}/resolve_label/explain", context_path("context")?);
+            let path = format!("{}/resolve_label/explain", context_path("context_id")?);
             need(arguments, "cue")?;
             need(arguments, "expected")?;
             (
@@ -259,7 +263,7 @@ pub fn route_tool(
             )
         }
         "describe" => {
-            let path = format!("{}/describe", context_path("context")?);
+            let path = format!("{}/describe", context_path("context_id")?);
             need(arguments, "concept")?;
             ("POST", path, Some(pick(arguments, &["concept"])))
         }
@@ -304,7 +308,7 @@ pub fn route_tool(
             )
         }
         "activate" => {
-            let path = format!("{}/activate", context_path("context")?);
+            let path = format!("{}/activate", context_path("context_id")?);
             need_present(arguments, "origins")?;
             (
                 "POST",
@@ -316,7 +320,7 @@ pub fn route_tool(
             )
         }
         "explore" => {
-            let path = format!("{}/explore", context_path("context")?);
+            let path = format!("{}/explore", context_path("context_id")?);
             need_present(arguments, "origins")?;
             (
                 "POST",
@@ -328,7 +332,7 @@ pub fn route_tool(
             )
         }
         "paths" => {
-            let path = format!("{}/paths", context_path("context")?);
+            let path = format!("{}/paths", context_path("context_id")?);
             need_present(arguments, "origins")?;
             need_present(arguments, "targets")?;
             (
@@ -344,7 +348,7 @@ pub fn route_tool(
             "GET",
             format!(
                 "{}/changes{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["since", "limit"])?
             ),
             None,
@@ -353,7 +357,7 @@ pub fn route_tool(
             "GET",
             format!(
                 "{}/labels{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
@@ -362,24 +366,28 @@ pub fn route_tool(
             "GET",
             format!(
                 "{}/aliases{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["limit", "after", "prefix"])?
             ),
             None,
         ),
         "add_aliases" => (
             "POST",
-            format!("{}/aliases", context_path("context")?),
+            format!("{}/aliases", context_path("context_id")?),
             Some(pick(arguments, &["concepts", "labels"])),
         ),
         "remove_aliases" => (
             "DELETE",
-            format!("{}/aliases", context_path("context")?),
+            format!("{}/aliases", context_path("context_id")?),
             Some(pick(arguments, &["concepts", "labels"])),
         ),
-        "get_schema" => ("GET", format!("{}/schema", context_path("context")?), None),
+        "get_schema" => (
+            "GET",
+            format!("{}/schema", context_path("context_id")?),
+            None,
+        ),
         "put_schema" => {
-            let path = format!("{}/schema", context_path("context")?);
+            let path = format!("{}/schema", context_path("context_id")?);
             // Schema-required (ADR 0009 §5): `version` is the
             // document's one optional top-level field (ADR 0043 — absent
             // means the running server's own), so an omission of any
@@ -408,7 +416,7 @@ pub fn route_tool(
         "promote" => {
             let path = format!(
                 "{}/promote{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["dry_run"])?
             );
             need(arguments, "into")?;
@@ -422,14 +430,14 @@ pub fn route_tool(
         "retract_source" => {
             let path = format!(
                 "{}/sources/retract{}",
-                context_path("context")?,
+                context_path("context_id")?,
                 query_string(arguments, &["dry_run"])?
             );
             need(arguments, "source")?;
             ("POST", path, Some(pick(arguments, &["source"])))
         }
         "retract_association" => {
-            let path = format!("{}/associations/retract", context_path("context")?);
+            let path = format!("{}/associations/retract", context_path("context_id")?);
             need(arguments, "subject")?;
             need(arguments, "label")?;
             need(arguments, "object")?;
@@ -461,7 +469,7 @@ pub fn route_tool(
             )
         }
         "search_communities" => {
-            let path = format!("{}/communities/search", context_path("context")?);
+            let path = format!("{}/communities/search", context_path("context_id")?);
             need(arguments, "query")?;
             (
                 "POST",
@@ -473,7 +481,7 @@ pub fn route_tool(
             )
         }
         "assemble_evidence" => {
-            let path = format!("{}/evidence", context_path("context")?);
+            let path = format!("{}/evidence", context_path("context_id")?);
             need_present(arguments, "origins")?;
             (
                 "POST",
@@ -498,7 +506,7 @@ pub fn route_tool(
             )
         }
         "explain_search" => {
-            let path = format!("{}/sources/search/explain", context_path("context")?);
+            let path = format!("{}/sources/search/explain", context_path("context_id")?);
             need(arguments, "query")?;
             need(arguments, "source")?;
             (
@@ -520,7 +528,7 @@ pub fn route_tool(
             )
         }
         "cite_passage" => {
-            let path = format!("{}/citations", context_path("context")?);
+            let path = format!("{}/citations", context_path("context_id")?);
             need(arguments, "source")?;
             let has_paragraph = arguments
                 .get("paragraph")
@@ -545,19 +553,19 @@ pub fn route_tool(
         }
         "refresh_embeddings" => (
             "POST",
-            format!("{}/embeddings/refresh", context_path("context")?),
+            format!("{}/embeddings/refresh", context_path("context_id")?),
             Some(json!({})),
         ),
         "audit_vocabulary" => (
             "POST",
-            format!("{}/vocabulary/audit", context_path("context")?),
+            format!("{}/vocabulary/audit", context_path("context_id")?),
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
         "audit_consolidation" => {
             // Context first, like every sibling: a caller who omitted
             // BOTH hears about the primary argument (see
             // `add_associations`).
-            let path = format!("{}/consolidation/audit", context_path("context")?);
+            let path = format!("{}/consolidation/audit", context_path("context_id")?);
             need_present(arguments, "checks")?;
             (
                 "POST",
@@ -576,7 +584,7 @@ pub fn route_tool(
             )
         }
         "audit_coverage" => {
-            let path = format!("{}/unreachable_from", context_path("context")?);
+            let path = format!("{}/unreachable_from", context_path("context_id")?);
             need_present(arguments, "origins")?;
             (
                 "POST",
@@ -586,7 +594,7 @@ pub fn route_tool(
         }
         "audit_drift" => (
             "POST",
-            format!("{}/drift/audit", context_path("context")?),
+            format!("{}/drift/audit", context_path("context_id")?),
             Some(pick(
                 arguments,
                 &[
@@ -601,14 +609,14 @@ pub fn route_tool(
         ),
         "audit_schema" => (
             "POST",
-            format!("{}/schema/audit", context_path("context")?),
+            format!("{}/schema/audit", context_path("context_id")?),
             Some(pick(arguments, &["limit", "after"])),
         ),
         "validate_schema" => {
             // Context first, like every sibling: a caller who omitted
             // BOTH hears about the primary argument (see
             // `add_associations`).
-            let path = format!("{}/schema/validate", context_path("context")?);
+            let path = format!("{}/schema/validate", context_path("context_id")?);
             need_present(arguments, "document")?;
             (
                 "POST",

@@ -17,6 +17,7 @@ client = Taguru()  # defaults: $TAGURU_URL / $TAGURU_API_TOKEN, else http://127.
 row = client.contexts.create("sake", description="青嶺酒造という架空の酒蔵の知識")
 
 ctx = client.context(row.id)  # contexts are addressed by the minted id; "sake" is a display name
+# only know the name? names are not unique, so list and pick: [r.id for r in client.contexts.iter() if r.name == "sake"]
 ctx.add_associations([
     {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "docs/aomine.md"},
 ])

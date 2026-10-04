@@ -80,7 +80,7 @@ USAGE:
                                         the directory lock refuses to run
                                         beside a live server, or point
                                         import itself at one with --url
-  taguru export --out DIR [CONTEXT...]  write contexts — and, on a full
+  taguru export --out DIR [ID...]       write contexts — and, on a full
                                         export, groups — back out of the data
                                         directory as source streams,
                                         the portable backup (see: taguru
@@ -89,7 +89,7 @@ USAGE:
                                         GET /contexts/{id}/export and
                                         GET /groups/{name}/export, or point
                                         export itself at one with --url
-  taguru compact [CONTEXT...]           rewrite context images without the
+  taguru compact [ID...]                rewrite context images without the
                                         dead weight the append-only format
                                         accumulates (see: taguru compact
                                         --help); live servers use
@@ -124,7 +124,7 @@ USAGE:
                                         compare their search results (ADR
                                         0003 §11; see: taguru benchmark
                                         search --help)
-  taguru evaluate --eval FILE --context NAME [--url URL] [--config FILE]
+  taguru evaluate --eval FILE --context ID [--url URL] [--config FILE]
                   [--thresholds FILE] [--assembly] [--max-items N]
                   [--max-bytes N] [--max-tokens N] [--rerank MODEL]
                                         run eval.jsonl's cases against one
@@ -154,7 +154,7 @@ USAGE:
                                         strict and alias-group variants) and
                                         locator validity — offline, no server
                                         (see: taguru anchoring --help)
-  taguru calibrate --context NAME --probes FILE [--json] [--url URL] [URL]
+  taguru calibrate --context ID --probes FILE [--json] [--url URL] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
                                         (cue, expected) probe pairs and print
@@ -165,7 +165,7 @@ USAGE:
                                         are aliases, name the target either
                                         way; unnamed, it defaults to
                                         TAGURU_ADDR
-  taguru communities --context NAME [--into NAME] [--dry-run] [--json]
+  taguru communities --context ID [--into ID] [--dry-run] [--json]
                      [--url URL] [URL]
   taguru communities --group NAME [--dry-run] [--json] [--url URL] [URL]
                                         derive (or refresh) a community-
@@ -185,7 +185,7 @@ USAGE:
                                         the positional URL are aliases, name
                                         the target either way; unnamed, it
                                         defaults to TAGURU_ADDR
-  taguru consolidation --context NAME [--checks LIST] [--into NAME]
+  taguru consolidation --context ID [--checks LIST] [--into ID]
                        [--dry-run] [--url URL] [URL]
                                         judge a running server's
                                         consolidation-audit candidates
@@ -200,6 +200,12 @@ USAGE:
                                         proposals only, applied by the
                                         operator through ordinary writes
                                         (see: taguru consolidation --help)
+  taguru contexts [--name NAME] [--json] [--url URL] [URL]
+                                        list a running server's contexts as
+                                        ID<TAB>NAME — the id every --context
+                                        takes — or with --name only those
+                                        named exactly NAME (names are not
+                                        unique; see: taguru contexts --help)
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -470,6 +476,7 @@ pub fn dispatch() -> Command {
         Some("benchmark") => exit(crate::benchmark::run(&args[1..])),
         Some("evaluate") => exit(crate::evaluate::run(&args[1..])),
         Some("health") => exit(health(&args[1..])),
+        Some("contexts") => exit(crate::lookup::run(&args[1..])),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some("import") => exit(crate::ingest::run(&args[1..])),

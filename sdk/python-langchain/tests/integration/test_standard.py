@@ -16,7 +16,7 @@ class TestTaguruRetrieverStandard(RetrieversIntegrationTests):
 
     @pytest.fixture(autouse=True)
     def _seeded_id(self, seeded: str) -> None:
-        # The retriever's `context` field takes the id (#964); the
+        # The retriever's `context_id` field takes the id (#964); the
         # session-scoped fixture returns the seeded context's.
         self._context_id = seeded
 
@@ -26,7 +26,7 @@ class TestTaguruRetrieverStandard(RetrieversIntegrationTests):
 
     @property
     def retriever_constructor_params(self) -> dict[str, object]:
-        return {"context": self._context_id}
+        return {"context_id": self._context_id}
 
     @property
     def retriever_query_example(self) -> str:

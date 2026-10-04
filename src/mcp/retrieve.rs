@@ -190,7 +190,7 @@ fn retrieve_inner(
             .map_err(|error| format!("tool '{name}' returned invalid JSON: {error}"))
     };
 
-    let context = need(arguments, "context")?.to_string();
+    let context = need(arguments, "context_id")?.to_string();
     let mut origins: Vec<String> = match arguments.get("origins") {
         Some(Value::String(text)) => vec![text.clone()],
         Some(Value::Array(items)) => {
@@ -270,7 +270,7 @@ fn retrieve_inner(
         let _guard = resolve_span.enter();
         for cue in &origins {
             let mut resolve_args = pick(arguments, &["dice_floor", "semantic_floor"]);
-            resolve_args["context"] = json!(context);
+            resolve_args["context_id"] = json!(context);
             resolve_args["cue"] = json!(cue);
             if let Some(limit) = arguments.get("resolve_limit").filter(|v| !v.is_null()) {
                 resolve_args["limit"] = limit.clone();
@@ -311,11 +311,13 @@ fn retrieve_inner(
         );
         let _guard = describe_span.enter();
         for anchor in &anchors {
-            let described =
-                call_tool("describe", json!({ "context": context, "concept": anchor }))?
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(Value::Null);
+            let described = call_tool(
+                "describe",
+                json!({ "context_id": context, "concept": anchor }),
+            )?
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Null);
             outline.insert(anchor.clone(), described);
         }
     } else {
@@ -343,7 +345,7 @@ fn retrieve_inner(
             let _guard = query_span.enter();
             let matched = call_tool(
                 "query",
-                json!({ "context": context, "subject": anchors, "label": labels }),
+                json!({ "context_id": context, "subject": anchors, "label": labels }),
             )?;
             for entry in matched
                 .get("result")
@@ -373,7 +375,7 @@ fn retrieve_inner(
             taguru.activation.count = tracing::field::Empty,
         );
         let _guard = activate_span.enter();
-        let mut activate_args = json!({ "context": context, "origins": anchors });
+        let mut activate_args = json!({ "context_id": context, "origins": anchors });
         if let Some(decay) = arguments.get("activate_decay").filter(|v| !v.is_null()) {
             activate_args["decay"] = decay.clone();
         }
@@ -450,7 +452,7 @@ fn retrieve_inner(
         for (source, paragraph) in wanted {
             match call_tool(
                 "cite_passage",
-                json!({ "context": context, "source": source, "paragraph": paragraph }),
+                json!({ "context_id": context, "source": source, "paragraph": paragraph }),
             ) {
                 Ok(response) => citations.push(json!({
                     "source": source,
@@ -517,7 +519,7 @@ fn retrieve_inner(
             taguru.passage.hit_count = tracing::field::Empty,
         );
         let _guard = fallback_span.enter();
-        let mut search_args = json!({ "context": context, "query": text_fallback_query });
+        let mut search_args = json!({ "context_id": context, "query": text_fallback_query });
         if let Some(limit) = arguments.get("search_limit").filter(|v| !v.is_null()) {
             search_args["limit"] = limit.clone();
         }

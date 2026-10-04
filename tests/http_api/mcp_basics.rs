@@ -69,7 +69,7 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                     "params": {"name": "describe",
-                               "arguments": {"context": "00000000-0000-4000-8000-00000000dead", "concept": "x"}}})),
+                               "arguments": {"context_id": "00000000-0000-4000-8000-00000000dead", "concept": "x"}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -87,7 +87,7 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 60, "method": "tools/call",
                     "params": {"name": "store_passages",
-                               "arguments": {"context": server.cx("remote"),
+                               "arguments": {"context_id": server.cx("remote"),
                                              "passages": {"big.md": big}}}})),
     );
     assert_eq!(status, 200);
@@ -134,7 +134,7 @@ fn paths_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": "paths",
-                               "arguments": {"context": server.cx("sake"),
+                               "arguments": {"context_id": server.cx("sake"),
                                              "origins": ["青嶺酒造"],
                                              "targets": ["南部杜氏"]}}})),
     );
@@ -155,7 +155,7 @@ fn paths_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "paths",
-                               "arguments": {"context": server.cx("sake"), "origins": ["青嶺酒造"]}}})),
+                               "arguments": {"context_id": server.cx("sake"), "origins": ["青嶺酒造"]}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
@@ -260,7 +260,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         .expect("tools/list must advertise cite_passage");
     assert_eq!(
         manifest["inputSchema"]["required"],
-        json!(["context", "source"])
+        json!(["context_id", "source"])
     );
     assert!(manifest["inputSchema"]["properties"]["source"].is_object());
     assert!(manifest["inputSchema"]["properties"]["paragraph"].is_object());
@@ -278,7 +278,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": server.cx("sake"), "source": "docs/aomine.md", "paragraph": 1}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source": "docs/aomine.md", "paragraph": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(reply["result"].get("isError").is_none(), "{reply}");
@@ -293,7 +293,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": server.cx("sake"), "source": "docs/ghost.md", "paragraph": 0}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source": "docs/ghost.md", "paragraph": 0}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -307,7 +307,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context": server.cx("sake"), "source": "docs/aomine.md", "index": 1}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source": "docs/aomine.md", "index": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(via_index["result"].get("isError").is_none(), "{via_index}");
@@ -330,7 +330,7 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": server.cx("sake"), "associations": [
+                   "arguments": {"context_id": server.cx("sake"), "associations": [
                        {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
                    ]}}})),
     );
@@ -370,7 +370,7 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": server.cx("sake"), "associations": [
+                   "arguments": {"context_id": server.cx("sake"), "associations": [
                        {"subject": "s", "label": "l", "object": "o", "weight": 1.0}
                    ]}}})),
     );
@@ -388,7 +388,7 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         "POST",
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": {"name": "add_associations", "arguments": {"context": server.cx("sake")}}})),
+                    "params": {"name": "add_associations", "arguments": {"context_id": server.cx("sake")}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(route_error["result"]["isError"], true, "{route_error}");
@@ -430,7 +430,7 @@ fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "add_associations",
-                   "arguments": {"context": server.cx("sake"), "associations": [
+                   "arguments": {"context_id": server.cx("sake"), "associations": [
                        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
                        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}
                    ]}}})),
@@ -476,7 +476,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
         0,
         "put_schema",
         json!({
-            "context": server.cx("sake"),
+            "context_id": server.cx("sake"),
             "type": "schema",
             "version": "2099-01-01",
             "mode": "warn",
@@ -493,7 +493,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
         1,
         "put_schema",
         json!({
-            "context": server.cx("sake"),
+            "context_id": server.cx("sake"),
             "type": "schema",
             "mode": "warn",
             "closed_labels": false,
@@ -503,7 +503,7 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
     );
     assert!(put_reply.get("isError").is_none(), "{put_reply}");
 
-    let get_reply = server.call_tool(2, "get_schema", json!({"context": server.cx("sake")}));
+    let get_reply = server.call_tool(2, "get_schema", json!({"context_id": server.cx("sake")}));
     assert!(get_reply.get("isError").is_none(), "{get_reply}");
     // A success carries no `structuredContent` (`tool_response`'s `Ok`
     // arm) — the tool's `content[0].text` is the raw HTTP response
@@ -542,7 +542,7 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
     let validate_reply = server.call_tool(
         1,
         "validate_schema",
-        json!({"context": server.cx("sake"), "document": document}),
+        json!({"context_id": server.cx("sake"), "document": document}),
     );
     assert!(validate_reply.get("isError").is_none(), "{validate_reply}");
     let text = validate_reply["content"][0]["text"].as_str().unwrap();
@@ -554,7 +554,7 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
         &format!("/contexts/{}/schema", server.cx("sake")),
         Some(document),
     );
-    let audit_reply = server.call_tool(2, "audit_schema", json!({"context": server.cx("sake")}));
+    let audit_reply = server.call_tool(2, "audit_schema", json!({"context_id": server.cx("sake")}));
     assert!(audit_reply.get("isError").is_none(), "{audit_reply}");
     let text = audit_reply["content"][0]["text"].as_str().unwrap();
     let body: Value = serde_json::from_str(text).unwrap();

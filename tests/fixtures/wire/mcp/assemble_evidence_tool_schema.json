@@ -38,8 +38,8 @@
               },
               "type": "object"
             },
-            "context": {
-              "description": "Context id (the id column of list_contexts, a UUID)",
+            "context_id": {
+              "description": "Context id: a UUID — the id column of list_contexts (look a name up there)",
               "type": "string"
             },
             "dice_floor": {
@@ -100,7 +100,7 @@
             }
           },
           "required": [
-            "context",
+            "context_id",
             "origins"
           ],
           "type": "object"

@@ -392,7 +392,7 @@ fn mcp_query_tool_forwards_type_filters() {
     let reply = server.call_tool(
         1,
         "query",
-        json!({"context": server.cx("sake"), "label": ["杜氏", "所在"], "subject_types": "Brewery"}),
+        json!({"context_id": server.cx("sake"), "label": ["杜氏", "所在"], "subject_types": "Brewery"}),
     );
     assert!(reply.get("isError").is_none(), "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();

@@ -803,7 +803,7 @@ fn the_mcp_promote_tool_reaches_the_endpoint() {
         7,
         "promote",
         json!({
-            "context": server.cx("scratch-claude"),
+            "context_id": server.cx("scratch-claude"),
             "into": server.cx("perm"),
             "sources": ["session:claude:a/note"],
             "audit": false,

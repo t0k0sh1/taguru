@@ -173,7 +173,7 @@ def main() -> int:
         # The retriever and the core SDK address a context by its id (#964);
         # the ingester created it by name, so read the id off the directory.
         context_id = next(row.id for row in client.contexts.iter() if row.name == "assistant-memory")
-        retriever = TaguruRetriever(context=context_id, client=client, k=4)
+        retriever = TaguruRetriever(context_id=context_id, client=client, k=4)
 
         print("\n== session 2 (2026-07-12): every turn first recalls, then answers ==")
         for turn in TURNS:

@@ -39,7 +39,7 @@ use crate::remote::Api;
 use crate::remote::default_base_url;
 
 const CALIBRATE_USAGE: &str =
-    "usage: taguru calibrate --context NAME --probes FILE [--json] [--config FILE]
+    "usage: taguru calibrate --context ID --probes FILE [--json] [--config FILE]
                          [--url URL] [URL]
 
 Measures the semantic-floor bands of a RUNNING server's embedding
@@ -207,7 +207,7 @@ pub fn run(args: &[String]) -> i32 {
             "--context" => match rest.next() {
                 Some(name) if context.is_none() => context = Some(name.clone()),
                 Some(_) => return usage("--context given twice"),
-                None => return usage("--context needs a name"),
+                None => return usage("--context needs a context id"),
             },
             "--probes" => match rest.next() {
                 Some(path) if probes_path.is_none() => probes_path = Some(PathBuf::from(path)),
@@ -246,7 +246,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let Some(context) = context else {
-        return usage("--context NAME is required");
+        return usage("--context ID is required");
     };
     let Some(probes_path) = probes_path else {
         return usage("--probes FILE is required");

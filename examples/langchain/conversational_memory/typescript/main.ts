@@ -161,7 +161,7 @@ async function main(): Promise<void> {
     if (contextId === null) {
       throw new Error("the memory context was not created");
     }
-    const retriever = new TaguruRetriever({ context: contextId, client, k: 4 });
+    const retriever = new TaguruRetriever({ context_id: contextId, client, k: 4 });
 
     console.log("\n== session 2 (2026-07-12): every turn first recalls, then answers ==");
     for (const turn of TURNS) {
