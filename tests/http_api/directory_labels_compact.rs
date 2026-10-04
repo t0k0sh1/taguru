@@ -284,23 +284,19 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
 /// outright for a non-admin role.
 #[test]
 fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only() {
+    let grants = format!(
+        r#"{{"scribe": "write", "curator": {{"role": "admin", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
     let server = Server::start_with_env(
         "http-maint-compact",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,scribe:wtok,curator:ctok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"scribe": "write", "curator": {"role": "admin", "contexts": ["sake"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let admin = Some("atok");
-    server.call_with_token(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake", "description": "d"})),
-        admin,
-    );
+    server.create_fixed_as("sake", "d", admin);
     server.call_with_token(
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),

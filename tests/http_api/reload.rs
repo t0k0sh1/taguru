@@ -810,3 +810,134 @@ fn a_reload_never_drops_or_mixes_answers_for_racing_requests() {
     );
     assert!(after.last() == Some(&200), "{after:?}");
 }
+
+/// A grant that lists a display name instead of a context id (#966)
+/// is a refused reload like any other malformed table: it would match
+/// no context ever, silently locking the key out. The previous table
+/// stays armed.
+#[test]
+fn a_reload_whose_grant_names_a_display_name_keeps_the_previous_table_armed() {
+    let dir = scratch("grant-by-name");
+    let config = dir.join("taguru.env");
+    let stderr = dir.join("stderr.log");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit-keep\n").unwrap();
+    let server = Server::start_with_config(
+        "reload-grant-by-name",
+        &config,
+        &stderr,
+        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+    );
+    let refusals = || {
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .matches("keyring reload refused")
+            .count()
+    };
+
+    std::fs::write(
+        &config,
+        "TAGURU_API_TOKENS=ci:sekrit-keep\n\
+         TAGURU_KEY_GRANTS={\"ci\": {\"role\": \"read\", \"contexts\": [\"sake\"]}}\n",
+    )
+    .unwrap();
+    server.signal("-HUP");
+    eventually(Duration::from_secs(10), "the by-name grant refusal", || {
+        refusals() >= 1
+    });
+    assert!(
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .contains("'sake' is not a context id"),
+        "the refusal says what is wrong"
+    );
+    // The previous table (no grant: admin everywhere) still answers:
+    // a write the refused read-only grant would have blocked.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(serde_json::json!({"name": "still-admin"})),
+        Some("sekrit-keep"),
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// Runs the server binary with `env` over a fresh data directory and
+/// returns its exit code and stderr — for boot refusals, which must
+/// exit rather than listen. A server that boots anyway would listen
+/// forever, so it is killed after a bounded wait and reported as a
+/// failure to refuse.
+fn boot_refusal(tag: &str, env: &[(&str, &str)], wait: Duration) -> (Option<i32>, String) {
+    use std::process::{Command, Stdio};
+    let dir = scratch(tag);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    crate::support::common::scrub_taguru_env(&mut command)
+        .env("TAGURU_ADDR", "127.0.0.1:0")
+        .env("TAGURU_DATA_DIR", dir.join("data"));
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("server binary must spawn");
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut text).unwrap();
+            return (status.code(), text);
+        }
+        if started.elapsed() > wait {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (None, "the server booted instead of refusing".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Boot refuses a grant or a quota keyed by a display name (#966): both
+/// would silently match nothing — a locked-out key, an uncapped
+/// context — so the declared setting must not be allowed to run.
+#[test]
+fn boot_refuses_a_grant_or_a_quota_keyed_by_a_display_name() {
+    let (code, stderr) = boot_refusal(
+        "boot-grant-name",
+        &[
+            ("TAGURU_API_TOKENS", "ci:sekrit"),
+            (
+                "TAGURU_KEY_GRANTS",
+                r#"{"ci": {"role": "read", "contexts": ["sake"]}}"#,
+            ),
+        ],
+        Duration::from_secs(20),
+    );
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(code.is_some(), "{stderr}");
+    assert!(stderr.contains("'sake' is not a context id"), "{stderr}");
+
+    let (code, stderr) = boot_refusal(
+        "boot-quota-name",
+        &[(
+            "TAGURU_CONTEXT_QUOTAS",
+            r#"{"sake": {"storage_bytes": 1024}}"#,
+        )],
+        Duration::from_secs(20),
+    );
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(code.is_some(), "{stderr}");
+    assert!(stderr.contains("'sake' is not a context id"), "{stderr}");
+
+    // An id boots (and the process is then stopped by the helper's
+    // bounded wait — the point is only that it did not refuse).
+    let (code, _) = boot_refusal(
+        "boot-quota-id",
+        &[(
+            "TAGURU_CONTEXT_QUOTAS",
+            r#"{"cef2e28b-43f0-4b6c-8201-abab0785399f": {"storage_bytes": 1024}}"#,
+        )],
+        Duration::from_secs(3),
+    );
+    assert_eq!(code, None, "a well-formed id must not refuse boot");
+}

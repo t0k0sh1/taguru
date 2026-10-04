@@ -133,7 +133,8 @@ multi-object facts ranked by how one-object their label usually is
 sources, and facts trailing their own subject's newest assertion.
 `taguru consolidation` is the judging half, communities-patterned:
 each candidate carries a fingerprint over its own evidence, judgments
-(dismissals included) are stored in a derived `context` keyed by that
+(dismissals included) are stored in a derived `context` (its id derived
+from the source's, so a rename never detaches it) keyed by that
 fingerprint, and a re-run over an unchanged graph makes zero LLM
 calls. Applying an accepted proposal is always an ordinary write — an
 alias, a retraction, a negative-weight assertion, or a re-import —
@@ -334,7 +335,7 @@ load-bearing ones:
 | `TAGURU_DATA_DIR` | `./data` | Data directory |
 | `TAGURU_API_TOKEN` | — | Bearer token (everything but `/health`, `/live`, `/metrics`). Unset = unauthenticated, localhost only |
 | `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation |
-| `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named `contexts`. These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
+| `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to `contexts` listed by context **id** (the `id` column of `GET /contexts`; a display name refuses boot — a rename never moves a grant). These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
@@ -356,7 +357,7 @@ load-bearing ones:
 | `TAGURU_RERANK_TIMEOUT_SECS` | 5 | Per-attempt ceiling for one reranker round trip; a request's remaining budget bounds an attempt further, and one transient failure retries with backoff — any failure degrades to the deterministic order rather than erroring |
 | `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and `context` compactions; excess calls get 503 + `Retry-After` (`0` disables) |
 | `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst `context` whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
-| `TAGURU_CONTEXT_QUOTAS` | — | Per-`context` ceilings as one JSON object (`{"sake": {"storage_bytes": …, "cache_bytes": …}}`): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the `context`'s resident share — under cache pressure the over-share `context` is evicted first, so one hot `context` cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
+| `TAGURU_CONTEXT_QUOTAS` | — | Per-`context` ceilings as one JSON object (`{"<context id>": {"storage_bytes": …, "cache_bytes": …}}`, keyed by id like grants): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the `context`'s resident share — under cache pressure the over-share `context` is evicted first, so one hot `context` cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
 
 The full table — durability ceilings, observability (`RUST_LOG`,
 `TAGURU_LOG_FORMAT=json`, `OTEL_EXPORTER_OTLP_ENDPOINT`,

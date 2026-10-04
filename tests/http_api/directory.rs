@@ -121,24 +121,21 @@ fn the_directory_filters_by_pinned_and_counts_total_after_filtering() {
 /// case above.
 #[test]
 fn a_context_scoped_keys_directory_pages_its_allow_list_not_the_full_registry() {
+    let grants = format!(
+        r#"{{"curator": {{"role": "read", "contexts": ["{}", "{}", "{}"]}}}}"#,
+        fixed_id("date"),
+        fixed_id("apple"),
+        fixed_id("cherry")
+    );
     let server = Server::start_with_env(
         "http-scoped-dirpage",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"curator": {"role": "read", "contexts": ["date", "apple", "cherry"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     for name in ["apple", "banana", "cherry", "date"] {
-        let (status, _) = server.call_with_token(
-            "POST",
-            "/contexts",
-            Some(json!({"name": name, "description": name})),
-            Some("atok"),
-        );
-        assert_eq!(status, 200);
+        server.create_fixed_as(name, name, Some("atok"));
     }
 
     // The admin key with no grant entry sees everything.

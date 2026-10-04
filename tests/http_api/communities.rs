@@ -29,6 +29,15 @@ fn get_ndjson(server: &Server, path: &str) -> (u16, String) {
     (status, body)
 }
 
+/// Creates the default communities artifact of the source context named
+/// `source_name`: under the id the server derives from the source's id
+/// (#966), named `{source_name}::communities`. Returns the artifact's id.
+fn create_artifact(server: &Server, source_name: &str) -> String {
+    let id = communities_artifact_id(&server.cx(source_name));
+    server.create_with_id(&id, json!({"name": format!("{source_name}::communities")}));
+    id
+}
+
 /// Two 4-cliques with NO bridge: exactly two leaf communities and —
 /// with nothing to merge above them — exactly one level, so every
 /// LLM-call count below is deterministic.
@@ -76,6 +85,9 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
     let header = &lines[0];
     assert_eq!(header["type"], "communities");
     assert_eq!(header["version"], "2026-10-01");
+    // The header names the analyzed context by id (#966).
+    assert_eq!(header["context_id"], json!(server.cx("corpus")));
+    assert!(header.get("context").is_none(), "{header}");
     assert_eq!(header["algorithm"], "louvain-cc/1");
     assert_eq!(header["revision"]["graph"].as_u64(), Some(revision));
     assert_eq!(header["concept_count"], 8);
@@ -126,19 +138,26 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
             .contains("taguru communities"),
         "{refusal}"
     );
+    // The missing artifact is named by the id the server looked it up
+    // under — and only by that id: no context carries it, so there is no
+    // display name to put beside it.
+    let missing_id = communities_artifact_id(&server.cx("sci"));
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("context '{missing_id}' does not exist")),
+        "{refusal}"
+    );
 
     // Build the artifact by hand through the same API the CLI uses.
     let revision =
         server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sci::communities"})),
-    );
+    create_artifact(&server, "sci");
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sci",
+        "source_context_id": server.cx("sci"),
         "revision": revision,
         "levels": 1,
         "communities": [
@@ -167,7 +186,11 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
         &format!("/contexts/{}/communities/search", server.cx("sci")),
         Some(json!({"query": "夏目漱石"})),
     );
-    assert_eq!(page["derived"], "sci::communities");
+    assert_eq!(
+        page["derived_id"],
+        json!(communities_artifact_id(&server.cx("sci")))
+    );
+    assert_eq!(page["derived_name"], "sci::communities");
     assert_eq!(page["stale"], false, "{page}");
     assert_eq!(page["algorithm"], "louvain-cc/1");
     let hit = &page["hits"][0];
@@ -199,14 +222,17 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     let current = page["revision"]["current_graph"].as_u64().unwrap();
     assert!(current > recorded, "{page}");
 
-    // A `derived` override pointing nowhere is the same honest refusal.
+    // A `derived_id` override pointing nowhere is the same honest refusal.
     let (status, refusal) = server.call(
         "POST",
         &format!("/contexts/{}/communities/search", server.cx("sci")),
-        Some(json!({"query": "夏目漱石", "derived": "elsewhere"})),
+        Some(json!({"query": "夏目漱石", "derived_id": GHOST_ID})),
     );
     assert_eq!(status, 404, "{refusal}");
-    assert!(refusal["error"].as_str().unwrap().contains("elsewhere"));
+    assert!(
+        refusal["error"].as_str().unwrap().contains(GHOST_ID),
+        "{refusal}"
+    );
 }
 
 /// #562 item 7: one `search_communities` call must bump the aggregate
@@ -220,15 +246,11 @@ fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
 
     let revision =
         server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sci::communities"})),
-    );
+    create_artifact(&server, "sci");
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sci",
+        "source_context_id": server.cx("sci"),
         "revision": revision,
         "levels": 1,
         "communities": [
@@ -515,7 +537,10 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
 /// the branches below can each mutate one field of an otherwise valid
 /// artifact.
 fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
-    server.ok("POST", "/contexts", Some(json!({"name": derived})));
+    let source_name = derived
+        .strip_suffix("::communities")
+        .expect("a default artifact name");
+    create_artifact(server, source_name);
     server.ok(
         "POST",
         &format!("/contexts/{}/sources", server.cx(derived)),
@@ -541,11 +566,7 @@ fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
 fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
     let server = Server::start("communities-manifest-corrupt");
     seed_two_cliques(&server, "sci");
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sci::communities"})),
-    );
+    create_artifact(&server, "sci");
     server.ok(
         "POST",
         &format!("/contexts/{}/sources", server.cx("sci::communities")),
@@ -568,6 +589,16 @@ fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
             .contains("does not parse"),
         "{refused}"
     );
+    // The artifact exists, so the message names it the way an operator
+    // reads it: display name, then the id in parentheses.
+    let artifact_id = communities_artifact_id(&server.cx("sci"));
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("'sci::communities ({artifact_id})'")),
+        "{refused}"
+    );
 }
 
 /// A manifest that parses but is not one this build reads (ADR 0042):
@@ -584,7 +615,7 @@ fn search_reports_conflict_when_the_manifest_is_not_this_builds_format() {
     let body = |stamp: Value| {
         let mut manifest = json!({
             "algorithm": "louvain-cc/1",
-            "source_context": "sci",
+            "source_context_id": server.cx("sci"),
             "revision": revision,
             "levels": 1,
             "communities": [
@@ -680,7 +711,7 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "elsewhere",
+        "source_context_id": GHOST_ID,
         "revision": revision,
         "levels": 1,
         "communities": [
@@ -697,7 +728,7 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
     assert_eq!(status, 409, "{refused}");
     assert_eq!(refused["code"], json!("conflict"), "{refused}");
     let message = refused["error"].as_str().unwrap();
-    assert!(message.contains("elsewhere"), "{message}");
+    assert!(message.contains(GHOST_ID), "{message}");
     assert!(message.contains("sci"), "{message}");
 }
 
@@ -709,20 +740,21 @@ fn search_reports_conflict_when_the_manifest_names_a_different_source_context() 
 /// could read any context by aiming a search's `derived` field at it.
 #[test]
 fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_context() {
+    let grants = format!(
+        r#"{{"reader": {{"role": "read", "contexts": ["{}"]}}}}"#,
+        fixed_id("sci")
+    );
     let server = Server::start_with_env(
         "communities-derived-scope",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"reader": {"role": "read", "contexts": ["sci"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let admin = |method: &str, path: &str, body: Option<Value>| {
         server.call_with_token(method, path, body, Some("atok"))
     };
-    admin("POST", "/contexts", Some(json!({"name": "sci"})));
+    server.create_fixed_as("sci", "", Some("atok"));
     // The same 4-clique graph `seed_two_cliques` seeds, over an
     // authenticated admin token so the derived-scope grant below can
     // be scoped to a real, non-empty source graph.
@@ -743,21 +775,22 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sci",
+        "source_context_id": server.cx("sci"),
         "revision": revision,
         "levels": 1,
         "communities": [
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
         ],
     });
-    admin(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sci::communities"})),
+    let artifact_id = communities_artifact_id(&fixed_id("sci"));
+    server.create_with_id_as(
+        &artifact_id,
+        json!({"name": "sci::communities"}),
+        Some("atok"),
     );
     admin(
         "POST",
-        &format!("/contexts/{}/sources", server.cx("sci::communities")),
+        &format!("/contexts/{artifact_id}/sources"),
         Some(json!({"passages": {
             "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
             "communities:manifest": manifest.to_string(),
@@ -765,7 +798,7 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     );
     admin(
         "POST",
-        "/contexts/sci::communities/associations",
+        &format!("/contexts/{artifact_id}/associations"),
         Some(json!([
             {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
         ])),
@@ -780,7 +813,10 @@ fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_cont
     assert_eq!(status, 403, "{refused}");
     assert_eq!(refused["code"], json!("forbidden"), "{refused}");
     let message = refused["error"].as_str().unwrap();
-    assert!(message.contains("sci::communities"), "{message}");
+    // The refusal names the artifact by id — the id the grant needs —
+    // and nothing else the registry knows about it.
+    assert!(message.contains(&artifact_id), "{message}");
+    assert!(!message.contains("sci::communities"), "{message}");
 }
 
 /// `MEMBERS_PER_HIT` (12): a community's `contains` membership beyond
@@ -797,18 +833,14 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sci",
+        "source_context_id": server.cx("sci"),
         "revision": revision,
         "levels": 1,
         "communities": [
             {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 13},
         ],
     });
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sci::communities"})),
-    );
+    create_artifact(&server, "sci");
     server.ok(
         "POST",
         &format!("/contexts/{}/sources", server.cx("sci::communities")),
@@ -869,7 +901,7 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sci",
+        "source_context_id": server.cx("sci"),
         "revision": revision,
         "levels": 1,
         "communities": [],
@@ -1077,7 +1109,7 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
         &server,
         "corp::communities",
         &json!({
-            "taguru_communities": 1, "algorithm": "louvain-cc/1", "source_context": "corp",
+            "taguru_communities": 1, "algorithm": "louvain-cc/1", "source_context_id": server.cx("corp"),
             "revision": {"graph": 1, "passages": 0, "config": 0}, "levels": 1, "communities": [],
         })
         .to_string(),
@@ -1210,7 +1242,7 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
 
 /// `--group` derives one artifact per member context, child groups
 /// included transitively; a group reaching no contexts refuses by
-/// name; `--into` renames a single-context artifact.
+/// name; `--into` aims a single-context artifact at a chosen id.
 #[test]
 fn group_traversal_derives_each_member_and_into_renames() {
     let server = Server::start("communities-group");
@@ -1252,8 +1284,10 @@ fn group_traversal_derives_each_member_and_into_renames() {
         assert_eq!(status, 200, "the member artifact '{derived}' must exist");
     }
 
-    // --into aims one context's artifact at a chosen name.
-    let (code, stdout, stderr) = run_communities(
+    // --into aims one context's artifact at a chosen id (a name is a
+    // usage error: it would match no context).
+    let into = "7a3c9e10-5b2d-4f68-9c41-0d8e2b6a1f35";
+    let (code, _stdout, stderr) = run_communities(
         &[
             "--context",
             &server.cx("m1"),
@@ -1263,10 +1297,20 @@ fn group_traversal_derives_each_member_and_into_renames() {
         ],
         &extract_env,
     );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("'renamed' is not a context id"), "{stderr}");
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("m1"), "--into", into, &server.base],
+        &extract_env,
+    );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stdout.contains("artifact 'renamed'"), "{stdout}");
-    let (status, _) = server.call("GET", &format!("/contexts/{}", server.cx("renamed")), None);
-    assert_eq!(status, 200);
+    assert!(stdout.contains(into), "{stdout}");
+    let row = server.ok("GET", &format!("/contexts/{into}"), None);
+    assert_eq!(
+        row["name"],
+        json!("m1::communities"),
+        "the create block names it by default: {row}"
+    );
 }
 
 /// `--json` serializes the reports themselves — one object per
@@ -1290,7 +1334,16 @@ fn json_mode_emits_the_report_structs() {
     let reports: Value = serde_json::from_str(&stdout).expect("stdout must be the JSON reports");
     let report = &reports[0];
     assert_eq!(report["context"], json!("corp"), "{report}");
-    assert_eq!(report["derived"], json!("corp::communities"), "{report}");
+    assert_eq!(
+        report["derived_id"],
+        json!(communities_artifact_id(&server.cx("corp"))),
+        "{report}"
+    );
+    assert_eq!(
+        report["derived_name"],
+        json!("corp::communities"),
+        "{report}"
+    );
     assert_eq!(report["summaries_generated"], json!(2), "{report}");
     assert_eq!(report["summaries_reused"], json!(0), "{report}");
     assert_eq!(report["dry_run"], json!(false), "{report}");
@@ -1317,16 +1370,12 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
     );
     let revision = server.ok("GET", &format!("/contexts/{source_id}"), None)["revision"].clone();
 
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "酒造りの記録::communities"})),
-    );
+    create_artifact(&server, "酒造りの記録");
     let derived_id = server.cx("酒造りの記録::communities");
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "酒造りの記録",
+        "source_context_id": server.cx("酒造りの記録"),
         "revision": revision,
         "levels": 1,
         "communities": [
@@ -1372,5 +1421,119 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         vec!["L0-0"],
         "the community must fill the page — the manifest's higher rank is \
          absorbed by the extra slot, never at the community's expense: {page}"
+    );
+}
+
+/// Builds a one-community artifact for the source context `source_id`
+/// by hand, under the default artifact id the server derives from it
+/// (#966), and returns that id.
+fn seed_artifact_by_id(server: &Server, source_id: &str, summary: &str) -> String {
+    let revision = server.ok("GET", &format!("/contexts/{source_id}"), None)["revision"].clone();
+    let artifact_id = communities_artifact_id(source_id);
+    server.create_with_id(&artifact_id, json!({"name": "twin::communities"}));
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context_id": source_id,
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+        ],
+    });
+    server.ok(
+        "POST",
+        &format!("/contexts/{artifact_id}/sources"),
+        Some(json!({"passages": {
+            "community:L0-0": summary,
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{artifact_id}/associations"),
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
+        ])),
+    );
+    artifact_id
+}
+
+/// The derived artifact is tied to its source by ID (#966): two
+/// contexts sharing a display name each find their own artifact, a
+/// rename of the source detaches nothing, an artifact whose manifest
+/// names a different source is refused, and a `derived_id` that is not
+/// an id is a 400 rather than a lookup by name.
+#[test]
+fn a_rename_or_a_twin_name_never_detaches_the_artifact_from_its_source() {
+    let server = Server::start("communities-by-id");
+    let a = server.create_context("twin");
+    let b = server.create_context("twin");
+    for id in [&a, &b] {
+        server.ok(
+            "POST",
+            &format!("/contexts/{id}/associations"),
+            Some(json!([{"subject": "a1", "label": "近い", "object": "a2", "weight": 2.0}])),
+        );
+    }
+    let art_a = seed_artifact_by_id(&server, &a, "甲の共同体: 夏目漱石の交流。");
+    let art_b = seed_artifact_by_id(&server, &b, "乙の共同体: 夏目漱石の交流。");
+    assert_ne!(art_a, art_b, "two sources, two artifacts");
+
+    let search = |source: &str, body: Value| {
+        server.call(
+            "POST",
+            &format!("/contexts/{source}/communities/search"),
+            Some(body),
+        )
+    };
+    for (source, artifact, marker) in [(&a, &art_a, "甲"), (&b, &art_b, "乙")] {
+        let (status, page) = search(source, json!({"query": "夏目漱石"}));
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["result"]["derived_id"], json!(artifact), "{page}");
+        assert!(
+            page["result"]["hits"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(marker),
+            "each source reads ITS artifact: {page}"
+        );
+    }
+
+    // Renaming the source moves no id, so the artifact still answers.
+    server.ok(
+        "POST",
+        &format!("/contexts/{a}/rename"),
+        Some(json!({"to": "renamed"})),
+    );
+    let (status, page) = search(&a, json!({"query": "夏目漱石"}));
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["result"]["derived_id"], json!(art_a), "{page}");
+    assert_eq!(
+        page["result"]["plan"]["contexts"][0]["context_name"],
+        "renamed"
+    );
+
+    // An override aimed at the OTHER source's artifact: its manifest
+    // names that source's id, so it is refused, not served.
+    let (status, refused) = search(&a, json!({"query": "夏目漱石", "derived_id": art_b}));
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains(&b),
+        "the refusal names the id the manifest recorded: {refused}"
+    );
+
+    // A name where an id belongs is a 400, never a lookup by name.
+    let (status, refused) = search(
+        &a,
+        json!({"query": "夏目漱石", "derived_id": "twin::communities"}),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("'twin::communities' is not a context id"),
+        "{refused}"
     );
 }

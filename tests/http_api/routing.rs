@@ -543,12 +543,13 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     // Two keys on every shard: one with no grant entry for the test's
     // own driving, and one granted `sake` only — the scoped-import case
     // below needs it.
+    let grants = format!(
+        r#"{{"limited": {{"role": "write", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
     let keyed = &[
         ("TAGURU_API_TOKENS", "ops:sesame,limited:hush"),
-        (
-            "TAGURU_KEY_GRANTS",
-            r#"{"limited": {"role": "write", "contexts": ["sake"]}}"#,
-        ),
+        ("TAGURU_KEY_GRANTS", grants.as_str()),
     ][..];
     let shard_a = Server::start_with_env("router-down-a", keyed);
     let shard_b = Server::start_with_env("router-down-b", keyed);
@@ -560,8 +561,13 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let token = Some("sesame");
 
     for (name, shard) in [("sake", &shard_a), ("glossary", &shard_b)] {
-        let (status, body) =
-            router.call_with_token("POST", "/contexts", Some(json!({"name": name})), token);
+        // Created under a fixed id (through the router, which places the
+        // header by `create.name`), so the shards' grant can name it.
+        let header = json!({
+            "type": "source", "context_id": fixed_id(name), "id": "seed:create",
+            "create": {"name": name},
+        });
+        let (status, body) = post_import(&router, &format!("{header}\n"), token);
         assert_eq!(status, 200, "{body}");
         let (status, body) = router.call_with_token(
             "POST",

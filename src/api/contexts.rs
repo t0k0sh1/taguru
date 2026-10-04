@@ -10,7 +10,6 @@ use taguru::deadline::Deadline;
 use crate::metrics::ErrorKind;
 use crate::registry::{AppState, ContextMeta, CreateError, DeleteError, RenameContextError};
 
-use super::groups::scope_refusal;
 use super::{
     AppBytes, AppJson, AppQuery, ContextIdPath, ErrorCode, MAX_CONTEXT_NAME_BYTES,
     MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, key_name,
@@ -99,13 +98,12 @@ pub async fn list_contexts(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
-        // Grant allow-lists hold display names until #966, and names
-        // are no longer unique — so the allow-list path walks the full
-        // directory and keeps every row whose name the grant lists,
-        // instead of resolving each listed name to at most one row.
+        // Grant allow-lists hold context ids (#966): the allow-list path
+        // walks the directory and keeps the rows whose id the grant
+        // lists, then sorts and pages them like the unscoped path.
         let mut directory: Vec<_> = tokio::task::block_in_place(|| state.directory());
         if let Some(allowed) = &allowed {
-            directory.retain(|entry| allowed.contains(&entry.name));
+            directory.retain(|entry| allowed.contains(&entry.id));
         }
         directory.retain(|entry| query.pinned.is_none_or(|pinned| entry.pinned == pinned));
         directory.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
@@ -505,15 +503,11 @@ pub struct RenameRequest {
 /// [`crate::auth::required_role`], so it fails closed there); `{id}`
 /// is covered by the authorization middleware's per-`context` grant
 /// check like every other `/contexts/{id}...` route. The DESTINATION
-/// name lives in the body, out of that middleware's reach — same
-/// discipline as `import_batch` — so this handler gates it with
-/// [`scope_refusal`] before renaming: grants hold names until #966,
-/// and without this a `context`-scoped key could move a context to a
-/// name outside its grant.
+/// name needs no gate of its own: grants list ids (#966), so a new
+/// display name can move no context in or out of any grant.
 pub async fn rename_context(
     State(state): State<AppState>,
     ContextIdPath(id): ContextIdPath,
-    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppJson(request): AppJson<RenameRequest>,
@@ -527,15 +521,12 @@ pub async fn rename_context(
     ) {
         return refusal;
     }
-    if let Some(refusal) = scope_refusal(&grant, &key, [&request.to], started_at) {
-        return refusal;
-    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    // Persists the sidecar under the unchanged stem and rewrites group
-    // membership; keep it off the async worker like every other
-    // mutating endpoint.
+    // Persists the sidecar under the unchanged stem — groups and grants
+    // name the id, so nothing else moves; keep it off the async worker
+    // like every other mutating endpoint.
     match tokio::task::block_in_place(|| state.rename_context(&id, &request.to)) {
         Ok(()) => {
             tracing::info!(

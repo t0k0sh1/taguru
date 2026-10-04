@@ -328,15 +328,17 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
 /// middleware already vetted both.
 #[test]
 fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
+    let grants = format!(
+        r#"{{"narrow": {{"role": "read", "contexts": ["{x}"]}},
+            "wide": {{"role": "read", "contexts": ["{x}", "{y}"]}}}}"#,
+        x = fixed_id("x"),
+        y = fixed_id("y"),
+    );
     let server = Server::start_with_env(
         "rcache-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,narrow:ntok,wide:wtok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"narrow": {"role": "read", "contexts": ["x"]},
-                    "wide": {"role": "read", "contexts": ["x", "y"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
@@ -345,12 +347,7 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
         parsed["result"].clone()
     };
     for context in ["x", "y"] {
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": context, "description": "d"})),
-            "atok",
-        );
+        server.create_fixed_as(context, "d", Some("atok"));
         call(
             "POST",
             &format!("/contexts/{}/associations", server.cx(context)),

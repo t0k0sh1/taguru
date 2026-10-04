@@ -37,7 +37,6 @@ pub(crate) fn mint_context_id() -> String {
 /// directory) and need a re-run to find the context it made last time.
 /// Shaped like a v4 UUID (the random-bytes layout, fed SHA-256 bytes
 /// instead), so every reader of a context id accepts it unchanged.
-#[allow(dead_code)] // consumed by taguru-code's sync; the server binaries never derive an id
 pub(crate) fn derived_context_id(seed: &str) -> String {
     let hex = crate::sha256::sha256_hex(seed.as_bytes());
     let mut bytes = [0u8; 16];

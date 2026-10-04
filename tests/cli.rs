@@ -499,7 +499,7 @@ fn communities_argument_parse_guards_answer_each_misuse_by_name() {
         ),
         (
             vec!["communities"],
-            "--context NAME (or --group NAME) is required",
+            "--context ID (or --group NAME) is required",
         ),
         (
             vec!["communities", "--context", "a", "--group", "b"],
@@ -532,7 +532,7 @@ fn communities_argument_parse_guards_answer_each_misuse_by_name() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("--context NAME (or --group NAME) is required"),
+            .contains("--context ID (or --group NAME) is required"),
         "{output:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -545,11 +545,15 @@ fn communities_argument_parse_guards_answer_each_misuse_by_name() {
         "--context",
         "a",
         "--into",
-        "b",
+        "7a3c9e10-5b2d-4f68-9c41-0d8e2b6a1f35",
         "--url",
         "http://127.0.0.1:9",
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    // A name for --into is a usage error: it would match no context.
+    let output = run(&["communities", "--context", "a", "--into", "b"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 /// The `consolidation` twin of the guard battery above — plus
@@ -564,9 +568,12 @@ fn consolidation_argument_parse_guards_answer_each_misuse_by_name() {
         ),
         (
             vec!["consolidation", "--context", "--into"],
-            "--context needs a name",
+            "--context needs a context id",
         ),
-        (vec!["consolidation", "--context"], "--context needs a name"),
+        (
+            vec!["consolidation", "--context"],
+            "--context needs a context id",
+        ),
         (
             vec![
                 "consolidation",
@@ -581,11 +588,11 @@ fn consolidation_argument_parse_guards_answer_each_misuse_by_name() {
         ),
         (
             vec!["consolidation", "--context", "a", "--into", "--x"],
-            "--into needs a name",
+            "--into needs a context id",
         ),
         (
             vec!["consolidation", "--context", "a", "--into"],
-            "--into needs a name",
+            "--into needs a context id",
         ),
         (
             vec!["consolidation", "--context", "a", "--checks", "--x"],

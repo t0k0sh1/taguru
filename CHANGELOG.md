@@ -9,6 +9,45 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (configuration + wire) — grants and quotas are keyed by
+  context id, and a derived context carries its parent's id** (#966,
+  ADR 0045 §2.2, ADR 0048; same unreleased `http_contract` 2):
+  `TAGURU_KEY_GRANTS`' `contexts` lists and `TAGURU_CONTEXT_QUOTAS`' keys
+  are context ids (the `id` column of `GET /contexts`), never display
+  names. An entry that is not a canonical id refuses boot — and a
+  SIGHUP/`--config` reload carrying one is refused with the previous
+  table kept — because a name would match no context ever, silently
+  locking a key out or leaving a context uncapped. A rename therefore
+  moves no grant and no quota, and `POST /contexts/{id}/rename` no
+  longer needs the destination name in a scoped key's grant (a name is a
+  label, not an address). Grant refusals echo the id as given and never
+  the display name, so a scoped key can no longer learn that an
+  out-of-grant id is live (or what it is called) from the message; the
+  quota refusal names the context's id beside its name, the key the
+  operator edits. Derived contexts: the default `taguru communities` /
+  `taguru consolidation` artifact lives under an id derived from the
+  source's id (still named `NAME::communities` / `NAME::consolidation`),
+  so a rename or a twin display name never detaches it; the manifests
+  record the source's id (`source_context_id` for communities,
+  `context_id` for consolidation) instead of its name. An artifact
+  built before this change is not found by default (the id it lives
+  under is not the derived one, so a search answers the usual "run
+  `taguru communities` to build it" and the next run builds a fresh
+  one — the old context can be deleted; pointing `derived_id` at it
+  fails its manifest's parse). `--into` takes an id on both commands
+  (`taguru communities --json`'s report names `derived_id` +
+  `derived_name`), and the wire field `derived` of `POST
+  /contexts/{id}/communities/search` is `derived_id` (response:
+  `derived_id` + `derived_name`; MCP `search_communities` follows); a
+  scoped key needs the artifact's id in its grant too. A search whose
+  override points at another source's artifact is a 409 naming the id the
+  manifest recorded. The analysis stream header of `GET
+  /contexts/{id}/communities` names the analyzed context as `context_id`
+  (the column #965 left). The Python/TypeScript SDKs rename the
+  `search_communities` option and `CommunityPage` fields to match.
+  Nothing on the wire resolves a display name any more, so the
+  ambiguous-name conflict (`AmbiguousName`) is gone with its last
+  caller.
 - **Breaking (file format + wire) — groups and cross-context search
   name their members by id** (#965, ADR 0045 §2.7/ADR 0046; same
   unreleased `http_contract` 2 and `"2026-10-01"` file format): a

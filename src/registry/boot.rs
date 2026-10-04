@@ -1093,15 +1093,12 @@ mod tests {
             "the listing shows both, in (name, id) order"
         );
 
-        // The id-addressed data paths reach each claimant fine; the
-        // NAME boundary that remains (cross-search resolution) refuses
-        // the ambiguity explicitly. The import header names an id, so
-        // it never meets the ambiguity at all: an id that is registered
-        // is the answer, whatever its name is shared with.
-        assert!(matches!(
-            state.resolve_wire_name("sake"),
-            Err(AccessError::AmbiguousName(2))
-        ));
+        // The id-addressed data paths reach each claimant fine; no wire
+        // boundary resolves a name any more (#966), and the offline
+        // name lookup that remains declines an ambiguous name. The
+        // import header names an id, so it never meets the ambiguity
+        // at all: an id that is registered is the answer, whatever its
+        // name is shared with.
         assert!(state.context_id_of("sake").is_none());
         let claimant = state.directory()[0].id.clone();
         assert!(

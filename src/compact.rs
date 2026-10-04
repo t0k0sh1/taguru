@@ -359,11 +359,6 @@ fn report_outcome(
         Err(failure) => {
             let message = match failure {
                 AccessError::NotFound => "no such context".to_string(),
-                AccessError::AmbiguousName(count) => {
-                    format!(
-                        "context name is ambiguous ({count} contexts share it); rename them apart"
-                    )
-                }
                 AccessError::Load(error) => error.clone(),
                 AccessError::Unpersisted(error) => error.clone(),
                 // The CLI runs with Deadline::unbounded(), which never

@@ -15,7 +15,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
         &[
             (
                 "TAGURU_CONTEXT_QUOTAS",
-                r#"{"capped": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
+                r#"{"5a194219-907f-4bed-a835-23b4776c9948": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
             ),
             ("TAGURU_METRICS_PER_CONTEXT", "1"),
         ],
@@ -126,7 +126,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         "import-quota",
         &[(
             "TAGURU_CONTEXT_QUOTAS",
-            r#"{"capped": {"storage_bytes": 1}}"#,
+            r#"{"5a194219-907f-4bed-a835-23b4776c9948": {"storage_bytes": 1}}"#,
         )],
     );
 
@@ -194,4 +194,66 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     let retract_stream = "{\"type\": \"source\", \"context_id\": \"5a194219-907f-4bed-a835-23b4776c9948\", \"id\": \"keep.md\"}\n";
     let (status, retracted) = post_import(&server, retract_stream, None);
     assert_eq!(status, 200, "{retracted}");
+}
+
+/// A quota is keyed by the context's id (#966), so a rename moves it
+/// nowhere: the renamed context keeps its ceiling, and an uncapped
+/// sibling renamed to the old name inherits nothing.
+#[test]
+fn a_quota_follows_the_id_through_a_rename() {
+    let server = Server::start_with_env(
+        "quota-rename",
+        &[(
+            "TAGURU_CONTEXT_QUOTAS",
+            r#"{"5a194219-907f-4bed-a835-23b4776c9948": {"storage_bytes": 1}}"#,
+        )],
+    );
+    server.create_with_id(
+        "5a194219-907f-4bed-a835-23b4776c9948",
+        json!({"name": "capped"}),
+    );
+    server.create_with_id(
+        "ad95d5fa-651b-486d-8923-fe1238d24a4f",
+        json!({"name": "free"}),
+    );
+    let capped = "5a194219-907f-4bed-a835-23b4776c9948";
+    let free = "ad95d5fa-651b-486d-8923-fe1238d24a4f";
+    let write = |id: &str, object: &str| {
+        server.call(
+            "POST",
+            &format!("/contexts/{id}/associations"),
+            Some(json!([{
+                "subject": "蔵", "label": "杜氏", "object": object,
+                "weight": 1.0, "source": "keep.md"
+            }])),
+        )
+    };
+    // The first write lands; its WAL bytes carry the family past the
+    // one-byte ceiling, so the second refuses.
+    assert_eq!(write(capped, "高瀬").0, 200);
+
+    // Swap the display names: the ceiling stays with the id.
+    server.ok(
+        "POST",
+        &format!("/contexts/{capped}/rename"),
+        Some(json!({"to": "free"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{free}/rename"),
+        Some(json!({"to": "capped"})),
+    );
+    let (status, refused) = write(capped, "青嶺");
+    assert_eq!(status, 507, "{refused}");
+    assert_eq!(refused["code"], json!("storage_full"), "{refused}");
+    // The id is in the message, beside the name — the key the operator
+    // edits TAGURU_CONTEXT_QUOTAS by.
+    assert!(
+        refused["error"].as_str().unwrap().contains(capped),
+        "{refused}"
+    );
+    // The sibling now NAMED "capped" is still uncapped.
+    for object in ["一", "二", "三"] {
+        assert_eq!(write(free, object).0, 200);
+    }
 }

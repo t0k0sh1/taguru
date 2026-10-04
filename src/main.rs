@@ -116,7 +116,8 @@ use tracing::{error, info, warn};
 ///   ceiling above. `0`/`false` restores manual-only compaction for
 ///   operators who prefer scheduled quiet-window sweeps.
 /// - `TAGURU_CONTEXT_QUOTAS`: per-`context` ceilings, one JSON object in
-///   the `TAGURU_KEY_GRANTS` mold — `{"name": {"storage_bytes": N,
+///   the `TAGURU_KEY_GRANTS` mold, keyed by context ID (a display name
+///   refuses boot) — `{"<context id>": {"storage_bytes": N,
 ///   "cache_bytes": M}}`, each field optional but never both absent.
 ///   `storage_bytes` refuses growth writes (507 `storage_full`) once
 ///   the `context`'s on-disk family reaches it; retract/compact/delete
@@ -556,10 +557,7 @@ async fn serve(
     let mcp_dispatch = app
         .clone()
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::enforce_authorization,
-        ));
+        .layer(axum::middleware::from_fn(auth::enforce_authorization));
     let app = app.route(
         "/mcp",
         post(
@@ -629,10 +627,7 @@ async fn serve(
     // Keyring-free: it judges the grant the bearer gate resolves and
     // stamps, so both layers see one table per request even across a
     // hot reload.
-    let app = app.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth::enforce_authorization,
-    ));
+    let app = app.layer(axum::middleware::from_fn(auth::enforce_authorization));
     let gate = Arc::new(auth::Gate {
         keyring: keyring.clone(),
         oauth: oauth.clone(),

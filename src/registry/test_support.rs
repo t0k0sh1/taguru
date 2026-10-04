@@ -171,3 +171,11 @@ impl EmbeddingProvider for SlowEmbeddings {
         Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
     }
 }
+
+/// A fixed context id for `name` — for tests that must declare an
+/// id-keyed setting (`TAGURU_CONTEXT_QUOTAS`) at boot, before the
+/// context exists, and then create the context under that id with
+/// `create_if_absent`.
+pub(crate) fn test_id(name: &str) -> String {
+    crate::registry::derived_context_id(name)
+}

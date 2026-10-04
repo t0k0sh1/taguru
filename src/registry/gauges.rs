@@ -302,7 +302,7 @@ impl AppState {
                 // Declared ceilings ride the row (issue #136) so
                 // usage-vs-quota is one division against the sibling
                 // series, under the same knob and Top-N cut.
-                let quota = self.0.context_quotas.get(&name);
+                let quota = self.0.context_quotas.get(entry.id.as_str());
                 per_context.push(ContextGaugeRow {
                     name,
                     pinned,
@@ -375,7 +375,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_support::{assoc_op, plain, rendered, scratch_dir, stem_on_disk};
+    use crate::registry::test_support::{
+        assoc_op, plain, rendered, scratch_dir, stem_on_disk, test_id,
+    };
 
     #[test]
     fn usage_notes_accumulate_and_survive_a_reboot_via_the_shutdown_sweep() {
@@ -641,7 +643,7 @@ mod tests {
             BootOptions {
                 per_context_metrics: PerContextMetrics::Off,
                 context_quotas: HashMap::from([(
-                    "sake".to_string(),
+                    test_id("sake"),
                     ContextQuota {
                         storage_bytes: Some(u64::MAX),
                         cache_bytes: None,
@@ -652,7 +654,7 @@ mod tests {
         )
         .unwrap();
         state
-            .create("sake", ContextMeta::default())
+            .create_if_absent(&test_id("sake"), "sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
         state
@@ -1156,7 +1158,7 @@ mod tests {
             )
             .unwrap();
             state
-                .create("sake", ContextMeta::default())
+                .create_if_absent(&test_id("sake"), "sake", ContextMeta::default())
                 .map_err(|_| "create")
                 .unwrap();
             state
@@ -1204,7 +1206,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "sake".to_string(),
+                    test_id("sake"),
                     ContextQuota {
                         storage_bytes: Some(ceiling),
                         cache_bytes: None,
@@ -1215,7 +1217,7 @@ mod tests {
         )
         .unwrap();
         state
-            .create("sake", ContextMeta::default())
+            .create_if_absent(&test_id("sake"), "sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
         state

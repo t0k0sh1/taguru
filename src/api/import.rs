@@ -14,7 +14,7 @@ use crate::ingest::AliasRejection;
 use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
 
-use super::groups::{scope_refusal_ids, scoped_member_contexts};
+use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
     access_error_noted, collected_validation_message, deadline_exceeded, error, group_not_found,
@@ -857,7 +857,7 @@ pub async fn import_batch(
         && let Some(refused) = stream
             .batches
             .iter()
-            .find(|batch| !grant.allows_context(&batch.display_name(&state)))
+            .find(|batch| !grant.allows_context(&batch.context_id))
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -865,7 +865,7 @@ pub async fn import_batch(
                 "key '{}' has no grant on context '{}' (source '{}'); nothing \
                  was applied",
                 key_name(&key),
-                refused.display_name(&state),
+                refused.context_id,
                 refused.source
             ),
             RefusalDetail {
@@ -883,7 +883,7 @@ pub async fn import_batch(
         && let Some((context_id, _)) = stream
             .schemas
             .iter()
-            .find(|(context_id, _)| !grant.allows_context(&state.name_of_stem(context_id)))
+            .find(|(context_id, _)| !grant.allows_context(context_id))
     {
         return validation_error(
             ErrorCode::Forbidden,
@@ -891,7 +891,7 @@ pub async fn import_batch(
                 "key '{}' has no grant on context '{}' (a schema record); nothing \
                  was applied",
                 key_name(&key),
-                state.name_of_stem(context_id)
+                context_id
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),
@@ -907,8 +907,7 @@ pub async fn import_batch(
     // pays for the closure read.
     if grant.is_some()
         && !stream.groups.is_empty()
-        && let Some(refusal) = scope_refusal_ids(
-            &state,
+        && let Some(refusal) = scope_refusal(
             &grant,
             &key,
             &state.group_restore_involves(&stream.groups),
@@ -984,6 +983,7 @@ pub async fn import_batch(
                     ErrorCode::StorageFull,
                     crate::registry::storage_quota_message(
                         &batch.display_name(&state),
+                        &batch.context_id,
                         used,
                         ceiling,
                     ),
@@ -1330,7 +1330,7 @@ pub async fn export_group(
     };
     let filtered = GroupRecord {
         description: record.description,
-        context_ids: scoped_member_contexts(&state, record.context_ids, &grant),
+        context_ids: scoped_member_contexts(record.context_ids, &grant),
         // Child names stay whole, as on the row: labels, not content.
         groups: record.groups,
     };

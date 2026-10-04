@@ -12,15 +12,15 @@ use crate::support::*;
 /// that stays behind, corroboration crossing the boundary, and one
 /// alias per fate (carried / left behind).
 fn seed(server: &Server) {
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "scratch-claude", "description": "session notes"})),
+    // Fixed ids, so a test can declare a grant or quota on them in the
+    // environment before the server boots (#966).
+    server.create_with_id(
+        &fixed_id("scratch-claude"),
+        json!({"name": "scratch-claude", "description": "session notes"}),
     );
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "perm", "description": "permanent"})),
+    server.create_with_id(
+        &fixed_id("perm"),
+        json!({"name": "perm", "description": "permanent"}),
     );
     server.ok(
         "POST",
@@ -438,27 +438,28 @@ fn the_destination_schema_judges_the_promoted_batches() {
 /// covering both contexts clears the gate.
 #[test]
 fn a_context_scoped_key_needs_the_destination_in_its_grant() {
+    let grants = format!(
+        r#"{{"pair": {{"role": "write", "contexts": ["{scratch}", "{perm}"]}},
+            "half": {{"role": "write", "contexts": ["{scratch}"]}}}}"#,
+        scratch = fixed_id("scratch-claude"),
+        perm = fixed_id("perm"),
+    );
     let server = Server::start_with_env(
         "promote-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,pair:ptok,half:htok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"pair": {"role": "write", "contexts": ["scratch-claude", "perm"]},
-                    "half": {"role": "write", "contexts": ["scratch-claude"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<serde_json::Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
     for (context, description) in [("scratch-claude", "notes"), ("perm", "permanent")] {
-        let (status, body) = call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": context, "description": description})),
-            "atok",
-        );
+        let header = json!({
+            "type": "source", "context_id": fixed_id(context), "id": "seed:create",
+            "create": {"name": context, "description": description},
+        });
+        let (status, body) = post_import(&server, &format!("{header}\n"), Some("atok"));
         assert_eq!(status, 200, "{body}");
     }
     let (status, body) = call(
@@ -505,12 +506,13 @@ fn a_context_scoped_key_needs_the_destination_in_its_grant() {
 /// gate — its capacity answers are advisory by documented contract).
 #[test]
 fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
+    let quotas = format!(
+        r#"{{"{}": {{"storage_bytes": 1, "cache_bytes": 1048576}}}}"#,
+        fixed_id("perm")
+    );
     let server = Server::start_with_env(
         "promote-quota",
-        &[(
-            "TAGURU_CONTEXT_QUOTAS",
-            r#"{"perm": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
-        )],
+        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str())],
     );
     seed(&server);
     // Put the destination at its ceiling before the promotion — the
@@ -604,7 +606,10 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
         "the landed batch must have grown the destination"
     );
 
-    let quotas = format!(r#"{{"perm": {{"storage_bytes": {ceiling}, "cache_bytes": 1048576}}}}"#);
+    let quotas = format!(
+        r#"{{"{}": {{"storage_bytes": {ceiling}, "cache_bytes": 1048576}}}}"#,
+        fixed_id("perm")
+    );
     let server = Server::start_with_env(
         "promote-quota-durable",
         &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str())],

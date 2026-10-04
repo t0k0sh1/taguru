@@ -468,7 +468,7 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["query", "limit", "semantic_floor", "derived"],
+                    &["query", "limit", "semantic_floor", "derived_id"],
                 )),
             )
         }

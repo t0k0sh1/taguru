@@ -33,14 +33,14 @@ use serde_json::{Value, json};
 
 use crate::api::communities::{
     ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest, INCLUDES_LABEL,
-    MANIFEST_SOURCE, ManifestCommunity, derived_context_name,
+    MANIFEST_SOURCE, ManifestCommunity, derived_context_id_of, derived_context_name,
 };
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
 use crate::remote::default_base_url;
 use crate::remote::{Api, ApiFailure};
 
-const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--into NAME] [--dry-run]
+const COMMUNITIES_USAGE: &str = "usage: taguru communities --context ID [--into ID] [--dry-run]
                            [--json] [--config FILE] [--url URL] [URL]
        taguru communities --group NAME [--dry-run] [--json] [--config FILE]
                            [--url URL] [URL]
@@ -48,10 +48,12 @@ const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--int
 Derives (or refreshes) a community-summaries artifact from a RUNNING
 server's context: the server detects communities on the association
 graph, this command summarizes each one with the extract LLM and
-writes the result back as an ordinary context (default
-'NAME::communities') — membership and hierarchy as associations,
-summaries as passages, and a manifest recording the source revision
-the artifact was derived from. `POST /contexts/{id}/communities/search`
+writes the result back as an ordinary context — membership and
+hierarchy as associations, summaries as passages, and a manifest
+recording the source context's id and revision the artifact was derived
+from. The artifact's id is derived from the source's id (so a rename of
+the source never detaches it) and its display name defaults to
+'NAME::communities'; --into ID names a different artifact by id. `POST /contexts/{id}/communities/search`
 then serves ranked summaries with an honest staleness verdict.
 
 Incremental: a community whose content fingerprint is unchanged reuses
@@ -105,7 +107,7 @@ pub fn run(args: &[String]) -> i32 {
             "--context" => match rest.next() {
                 Some(name) if context.is_none() => context = Some(name.clone()),
                 Some(_) => return usage("--context given twice"),
-                None => return usage("--context needs a name"),
+                None => return usage("--context needs a context id"),
             },
             "--group" => match rest.next() {
                 Some(name) if group.is_none() => group = Some(name.clone()),
@@ -115,7 +117,7 @@ pub fn run(args: &[String]) -> i32 {
             "--into" => match rest.next() {
                 Some(name) if into.is_none() => into = Some(name.clone()),
                 Some(_) => return usage("--into given twice"),
-                None => return usage("--into needs a context name"),
+                None => return usage("--into needs a context id"),
             },
             "--config" => match rest.next() {
                 Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
@@ -151,11 +153,19 @@ pub fn run(args: &[String]) -> i32 {
     }
     match (&context, &group) {
         (Some(_), Some(_)) => return usage("--context and --group are mutually exclusive"),
-        (None, None) => return usage("--context NAME (or --group NAME) is required"),
+        (None, None) => return usage("--context ID (or --group NAME) is required"),
         _ => {}
     }
     if into.is_some() && group.is_some() {
         return usage("--into names one artifact; with --group each member gets its own");
+    }
+    if let Some(into) = &into
+        && !crate::registry::is_context_id(into)
+    {
+        return usage(&format!(
+            "--into '{into}' is not a context id: it takes a lowercase hyphenated UUID, \
+             the id column of GET /contexts"
+        ));
     }
 
     // The config file first, then the URL default off the (possibly
@@ -249,8 +259,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut failed = false;
     let mut reports = Vec::new();
     for (id, name) in &contexts {
-        let derived = into.clone().unwrap_or_else(|| derived_context_name(name));
-        match derive(&api, id, name, &derived, dry_run) {
+        match derive(&api, id, name, into.as_deref(), dry_run) {
             Ok(report) => {
                 if !as_json {
                     print!("{}", report.render());
@@ -279,28 +288,35 @@ pub fn run(args: &[String]) -> i32 {
 
 /// One `context`'s derivation, start to finish. `id` addresses the
 /// source (paths take ids, #964); `name` is its display name, which
-/// the manifest and the report carry.
-fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Result<Report, String> {
+/// the report and the artifact's default name carry. `into` is an
+/// explicit artifact id; without it the artifact's id derives from the
+/// source's (#966).
+fn derive(
+    api: &Api,
+    id: &str,
+    name: &str,
+    into: Option<&str>,
+    dry_run: bool,
+) -> Result<Report, String> {
     // The analysis stream carries the revision snapshot the server cut
     // it at — that, not a separately-read revision, is what the
     // manifest records.
     let stream = api.get_raw(&["contexts", id, "communities"])?;
     let analysis = parse_analysis(&stream)?;
 
-    // The derived artifact is found by NAME but written and read by
-    // id (#965) — resolved once here; `None` is a first run, whose
-    // header then registers a freshly minted id under the name.
-    let derived_id = api.context_id_by_name(derived)?;
-    let artifact_id = derived_id
-        .clone()
-        .unwrap_or_else(crate::registry::mint_context_id);
+    // The artifact is addressed by id alone: `--into`'s, or the one
+    // derived from the source's id — no name lookup, so a rename of
+    // either context, or a second context with the same display name,
+    // cannot redirect the run. A first run registers it through the
+    // create block under `derived_name`.
+    let artifact_id = into
+        .map(str::to_string)
+        .unwrap_or_else(|| derived_context_id_of(id));
+    let derived_name = derived_context_name(name);
     // The previous manifest, if an artifact exists: the fingerprint
     // ledger this run diffs against. An algorithm change invalidates
     // every fingerprint — incomparable digests must not "match".
-    let previous = match &derived_id {
-        Some(derived_id) => read_manifest(api, derived_id, derived)?,
-        None => None,
-    };
+    let previous = read_manifest(api, &artifact_id)?;
     let comparable = previous
         .as_ref()
         .is_some_and(|manifest| manifest.algorithm == analysis.header.algorithm);
@@ -345,7 +361,8 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
 
     let mut report = Report {
         context: name.to_string(),
-        derived: derived.to_string(),
+        derived_id: artifact_id.clone(),
+        derived_name: derived_name.clone(),
         dry_run,
         algorithm: analysis.header.algorithm.clone(),
         revision_graph: analysis.header.revision.graph,
@@ -368,12 +385,7 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     // exactly like fresh communities do.
     let mut old_texts: BTreeMap<String, String> = BTreeMap::new();
     if !reused_sources.is_empty() {
-        // A nonempty reuse set implies a manifest was read, which
-        // implies the artifact resolved above.
-        let derived_id = derived_id
-            .as_deref()
-            .ok_or_else(|| format!("derived context '{derived}' vanished mid-run"))?;
-        old_texts = lookup_passages(api, derived_id, &reused_sources)?;
+        old_texts = lookup_passages(api, &artifact_id, &reused_sources)?;
     }
     let torn = reused_sources
         .iter()
@@ -421,7 +433,7 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
         record_type,
         version,
         algorithm: analysis.header.algorithm.clone(),
-        source_context: name.to_string(),
+        source_context_id: id.to_string(),
         revision: analysis.header.revision,
         levels: analysis.header.levels,
         communities: analysis
@@ -438,7 +450,7 @@ fn derive(api: &Api, id: &str, name: &str, derived: &str, dry_run: bool) -> Resu
     };
     let batches = render_batches(
         name,
-        derived,
+        &derived_name,
         &artifact_id,
         &analysis,
         &summaries,
@@ -619,11 +631,7 @@ fn render_batches(
 /// or its manifest record does not exist yet (a first run), an error
 /// only for a manifest that exists but does not parse — that needs a
 /// human, not a silent full rebuild.
-fn read_manifest(
-    api: &Api,
-    derived_id: &str,
-    derived: &str,
-) -> Result<Option<CommunitiesManifest>, String> {
+fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManifest>, String> {
     let body = json!({"sources": [MANIFEST_SOURCE]});
     let result = match api.post_envelope(&["contexts", derived_id, "sources", "lookup"], &body) {
         Ok(result) => result,
@@ -635,14 +643,14 @@ fn read_manifest(
     };
     let manifest: CommunitiesManifest = serde_json::from_str(text).map_err(|error| {
         format!(
-            "the previous '{MANIFEST_SOURCE}' record in '{derived}' does not parse \
+            "the previous '{MANIFEST_SOURCE}' record in context {derived_id} does not parse \
                  ({error}) — delete the artifact context to rebuild from scratch"
         )
     })?;
     manifest.judge().map_err(|error| {
         format!(
-            "the previous '{MANIFEST_SOURCE}' record in '{derived}' is not a manifest this \
-             build reads ({error}) — delete the artifact context to rebuild from scratch"
+            "the previous '{MANIFEST_SOURCE}' record in context {derived_id} is not a manifest \
+             this build reads ({error}) — delete the artifact context to rebuild from scratch"
         )
     })?;
     Ok(Some(manifest))
@@ -681,7 +689,8 @@ fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
 #[derive(Serialize)]
 struct Report {
     context: String,
-    derived: String,
+    derived_id: String,
+    derived_name: String,
     dry_run: bool,
     algorithm: String,
     revision_graph: u64,
@@ -731,8 +740,9 @@ impl Report {
             text.push_str(" · algorithm changed: previous fingerprints incomparable");
         }
         text.push_str(&format!(
-            "\n  artifact '{}' {} at graph revision {}\n",
-            self.derived,
+            "\n  artifact '{}' ({}) {} at graph revision {}\n",
+            self.derived_name,
+            self.derived_id,
             if self.dry_run {
                 "would update"
             } else {
@@ -870,7 +880,7 @@ mod tests {
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
-        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}"#;
 
         let parsed = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
@@ -915,7 +925,8 @@ mod tests {
     fn reports_render_the_dry_run_conditionals() {
         let report = Report {
             context: "sake".to_string(),
-            derived: "sake::communities".to_string(),
+            derived_id: "9f1d6a52-2b74-4c0e-a1c3-5e8b7d4f6a20".to_string(),
+            derived_name: "sake::communities".to_string(),
             dry_run: true,
             algorithm: "louvain-cc/1".to_string(),
             revision_graph: 7,
@@ -941,7 +952,7 @@ mod tests {
     /// runaway positive strength is capped at 1e6.
     #[test]
     fn a_zero_strength_member_lands_at_the_singleton_weight() {
-        let header = r#"{"type":"communities","version":"2026-10-01","context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-10-01","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
         let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
         let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);
@@ -950,7 +961,7 @@ mod tests {
             record_type,
             version,
             algorithm: "louvain-cc/1".to_string(),
-            source_context: "c".to_string(),
+            source_context_id: "c".to_string(),
             revision: ContextRevision::default(),
             levels: 1,
             communities: Vec::new(),

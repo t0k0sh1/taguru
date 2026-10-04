@@ -32,6 +32,30 @@ fn read_listen_line_and_drain(label: &str, stdout: ChildStdout) -> String {
 #[allow(dead_code)]
 pub const GHOST_ID: &str = "00000000-0000-4000-8000-00000000dead";
 
+/// A fixed canonical context id derived from `seed` — the same
+/// construction the server's `derived_context_id` uses (SHA-256's first
+/// sixteen bytes in a v4 UUID layout), so a test can also compute the
+/// default artifact id of a source context. For tests that declare an
+/// id-keyed setting (`TAGURU_KEY_GRANTS`, `TAGURU_CONTEXT_QUOTAS`, #966)
+/// in the environment BEFORE the server boots: they name `fixed_id(name)`
+/// there and create the context under it with [`Server::create_fixed`].
+#[allow(dead_code)]
+pub fn fixed_id(seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// The id a source context's default communities artifact lives under.
+#[allow(dead_code)]
+pub fn communities_artifact_id(source_id: &str) -> String {
+    fixed_id(&format!("{source_id}::communities"))
+}
+
 /// One running server on its own port and data directory, killed and
 /// cleaned up on drop.
 pub struct Server {
@@ -147,6 +171,46 @@ impl Server {
         let (status, body) = post_import(self, &format!("{header}\n"), None);
         assert_eq!(status, 200, "create_with_id {id}: {body}");
         body
+    }
+
+    /// Creates the context `name` under [`fixed_id`]`(name)` — the id an
+    /// environment-declared grant or quota already names — and returns
+    /// it.
+    #[allow(dead_code)]
+    pub fn create_fixed(&self, name: &str) -> String {
+        let id = fixed_id(name);
+        self.create_with_id(&id, json!({ "name": name }));
+        id
+    }
+
+    /// [`Server::create_with_id`] as the key behind `token`.
+    #[allow(dead_code)]
+    pub fn create_with_id_as(&self, id: &str, create: Value, token: Option<&str>) -> Value {
+        let header = json!({
+            "type": "source",
+            "context_id": id,
+            "id": "seed:create",
+            "create": create,
+        });
+        let (status, body) = post_import(self, &format!("{header}\n"), token);
+        assert_eq!(status, 200, "create_with_id_as {id}: {body}");
+        body
+    }
+
+    /// [`Server::create_fixed`] with a description, as the key behind
+    /// `token` — for servers whose auth is on (a grant test).
+    #[allow(dead_code)]
+    pub fn create_fixed_as(&self, name: &str, description: &str, token: Option<&str>) -> String {
+        let id = fixed_id(name);
+        let header = json!({
+            "type": "source",
+            "context_id": id,
+            "id": "seed:create",
+            "create": {"name": name, "description": description},
+        });
+        let (status, body) = post_import(self, &format!("{header}\n"), token);
+        assert_eq!(status, 200, "create_fixed_as {name}: {body}");
+        id
     }
 
     /// [`Server::cx`] for a name that may not resolve — `None` where

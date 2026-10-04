@@ -8,7 +8,8 @@
   "response": {
     "result": {
       "algorithm": "louvain-cc/1",
-      "derived": "corpus-d::communities",
+      "derived_id": "72641c54-ea2f-4dd5-9330-81da8707108d",
+      "derived_name": "corpus-d::communities",
       "hits": [
         {
           "community": "L0-0",
@@ -25,7 +26,7 @@
             }
           ],
           "paragraph": 0,
-          "score": 3.9352872,
+          "score": 4.0374765,
           "text": "この共同体のテーマは酒造りの歴史です。"
         }
       ],

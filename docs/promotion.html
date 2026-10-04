@@ -113,8 +113,8 @@
     <ol>
       <li><b>Review</b> the scratch <code>context</code>: <code>recall</code>/<code>query</code>, or
         <code>taguru communities --context scratch-…</code> for a themed overview once the
-        scratch has grown (<code>--into NAME</code> names the derived <code>context</code> —
-        default <code>NAME::communities</code>; <code>--group NAME</code> summarizes a whole
+        scratch has grown (<code>--into ID</code> aims the artifact at a chosen context id —
+        by default its id derives from the scratch's own, named <code>NAME::communities</code>; <code>--group NAME</code> summarizes a whole
         <code>group</code> instead; <code>--dry-run</code>/<code>--json</code> preview and machine
         output).</li>
       <li><b>Graph path — one call when the structure is already right</b> (ADR 0018):
@@ -155,8 +155,8 @@
       <li><b>Audit the landing zone</b>: <code>taguru consolidation --context NAME</code>
         (or the <code>audit_consolidation</code> MCP tool) — <code>--checks LIST</code>
         narrows the sections (comma-separated <code>merge,contradiction,staleness</code>;
-        default all three), <code>--into NAME</code> names the judgment <code>context</code> (default
-        <code>NAME::consolidation</code>), <code>--dry-run</code> previews. Promotion is exactly when merge
+        default all three), <code>--into ID</code> aims the judgment <code>context</code> at a chosen id (default: derived
+        from the audited <code>context</code>'s id, named <code>NAME::consolidation</code>), <code>--dry-run</code> previews. Promotion is exactly when merge
         twins and contradictions appear; judgments are proposals keyed by evidence
         fingerprint (re-runs over an unchanged graph cost zero LLM calls), and applying an
         accepted one is always an ordinary write — an alias, a retraction, a negative-weight

@@ -371,24 +371,22 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
 /// answer the same 403 whether or not they exist (no existence oracle).
 #[test]
 fn key_grants_filter_group_members_and_gate_group_writes() {
+    let grants = format!(
+        r#"{{"reader": "read", "potter": {{"role": "write", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
     let server = Server::start_with_env(
         "groups-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok,potter:stok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"reader": "read", "potter": {"role": "write", "contexts": ["sake"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
     for context in ["sake", "bunko"] {
-        assert_eq!(
-            call("POST", "/contexts", Some(json!({"name": context})), "atok").0,
-            200
-        );
+        server.create_fixed_as(context, "", Some("atok"));
     }
     assert_eq!(
         call(
@@ -455,7 +453,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("no grant on context 'bunko'"),
+            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
         "{refused}"
     );
 
@@ -549,7 +547,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("no grant on context 'bunko'"),
+            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
         "{refused}"
     );
     // Naming such a child in a delta refuses the same way — a

@@ -501,9 +501,6 @@ impl AppState {
                     // only found by grepping this warn line.
                     let message = match &error {
                         AccessError::NotFound => "no such context".to_string(),
-                        AccessError::AmbiguousName(count) => {
-                            format!("context name is ambiguous ({count} contexts share it)")
-                        }
                         AccessError::Load(message) => message.clone(),
                         AccessError::Unpersisted(message) => message.clone(),
                         AccessError::QuotaExceeded(message) => message.clone(),

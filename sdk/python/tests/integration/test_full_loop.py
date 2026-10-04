@@ -479,7 +479,7 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     manifest = {
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": fresh_name,
+        "source_context_id": context_id,
         "revision": {
             "graph": revision.graph,
             "passages": revision.passages,
@@ -504,8 +504,11 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
         ]
     )
 
-    page = ctx.search_communities("青嶺酒造")
-    assert page.derived == derived
+    # The default artifact id derives from the source's id server-side,
+    # so a hand-minted artifact is addressed with `derived_id`.
+    page = ctx.search_communities("青嶺酒造", derived_id=derived_id)
+    assert page.derived_id == derived_id
+    assert page.derived_name == derived
     assert page.stale is False
     hit = page.hits[0]
     assert hit.community == "L0-0"
@@ -516,7 +519,7 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     ctx.add_associations(
         [{"subject": "青嶺酒造", "label": "所在地", "object": "山あい", "weight": 1.0}]
     )
-    page = ctx.search_communities("青嶺酒造")
+    page = ctx.search_communities("青嶺酒造", derived_id=derived_id)
     assert page.stale is True
     assert page.revision.current_graph > page.revision.recorded_graph
 
@@ -536,7 +539,7 @@ def test_analyze_communities_returns_ndjson_with_a_header_line(
     header = json.loads(lines[0])
     assert header["type"] == "communities"
     assert header["version"] == "2026-10-01"
-    assert header["context"] == fresh_name
+    assert header["context_id"] == context_id
 
     client.contexts.delete(context_id)
 

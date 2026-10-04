@@ -336,6 +336,13 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     assert_eq!(manifest["type"], json!("consolidation_manifest"));
     assert_eq!(manifest["version"], json!("2026-10-01"));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
+    // The manifest names the source by id, and the artifact lives under
+    // the id derived from the source's (#966) — no name is a key.
+    assert_eq!(manifest["context_id"], json!(server.cx("sake")));
+    assert_eq!(
+        server.cx("sake::consolidation"),
+        fixed_id(&format!("{}::consolidation", server.cx("sake")))
+    );
 
     // Second run over the unchanged graph: zero LLM calls.
     let (code, stdout, _) = run_consolidation(
@@ -367,6 +374,51 @@ fn the_cli_judges_incrementally_by_fingerprint() {
         "{stdout}"
     );
     assert_eq!(*calls.lock().unwrap(), 6);
+}
+
+/// A rename of the source detaches nothing (#966): the artifact is
+/// addressed by the id derived from the source's, so the next run finds
+/// the stored judgments and reuses every one — zero LLM calls — and
+/// `--into` takes an id (a name is a usage error).
+#[test]
+fn a_source_rename_keeps_its_judgments_and_into_takes_an_id() {
+    let server = Server::start("consolidation-rename");
+    seed(&server);
+    let calls = Arc::new(Mutex::new(0usize));
+    let chat_url = stub_judge(Arc::clone(&calls));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let sake = server.cx("sake");
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", &sake, &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(*calls.lock().unwrap(), 5);
+
+    server.ok(
+        "POST",
+        &format!("/contexts/{sake}/rename"),
+        Some(json!({"to": "kura"})),
+    );
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", &sake, &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 5, "no judgment was redone");
+
+    let (code, _stdout, stderr) = run_consolidation(
+        &["--context", &sake, "--into", "elsewhere", &server.base],
+        &extract_env,
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("'elsewhere' is not a context id"),
+        "{stderr}"
+    );
 }
 
 /// A chat stub that never answers the required JSON shape.

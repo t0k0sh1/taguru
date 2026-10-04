@@ -1406,14 +1406,15 @@ export class Context {
    * search answers poorly. Hits are ranked LLM summaries of densely
    * connected concept clusters, each with its hierarchy level, member
    * concepts, and sizes; the page's `stale` flag means the source graph
-   * moved since derivation. `derived` names the artifact `context` when it
-   * was built with `--into` (default `{name}::communities`). A missing
+   * moved since derivation. `derived_id` is the artifact `context`'s id when it
+   * was built with `--into` (default: the id derived from this `context`'s
+   * own). A missing
    * artifact throws with the build command in the message — it is not an
    * empty result.
    */
   async searchCommunities(
     query: string,
-    options: { limit?: number; semantic_floor?: number; derived?: string } = {},
+    options: { limit?: number; semantic_floor?: number; derived_id?: string } = {},
   ): Promise<CommunityPage> {
     const result = await this.post(
       "/communities/search",
@@ -1421,7 +1422,7 @@ export class Context {
         query,
         limit: options.limit,
         semantic_floor: options.semantic_floor,
-        derived: options.derived,
+        derived_id: options.derived_id,
       }),
     );
     return result as CommunityPage;

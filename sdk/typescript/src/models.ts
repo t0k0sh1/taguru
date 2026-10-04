@@ -804,7 +804,8 @@ export interface CommunityRevisions {
  * `taguru communities` to refresh).
  */
 export interface CommunityPage {
-  derived: string;
+  derived_id: string;
+  derived_name: string;
   algorithm: string;
   stale: boolean;
   revision: CommunityRevisions;
