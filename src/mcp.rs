@@ -117,24 +117,27 @@ mod tests {
     #[test]
     fn search_tools_route_to_the_cross_context_paths_on_contexts() {
         let (method, path, body) =
-            route_tool("recall", &json!({"contexts": ["a", "b"], "cue": "x"})).unwrap();
+            route_tool("recall", &json!({"context_ids": ["a", "b"], "cue": "x"})).unwrap();
         assert_eq!((method, path.as_str()), ("POST", "/recall"));
-        assert_eq!(body.unwrap(), json!({"contexts": ["a", "b"], "cue": "x"}));
+        assert_eq!(
+            body.unwrap(),
+            json!({"context_ids": ["a", "b"], "cue": "x"})
+        );
 
         let (_, path, body) =
-            route_tool("query", &json!({"contexts": ["a"], "subject": "s"})).unwrap();
+            route_tool("query", &json!({"context_ids": ["a"], "subject": "s"})).unwrap();
         assert_eq!(path, "/query");
-        assert_eq!(body.unwrap(), json!({"contexts": ["a"], "subject": "s"}));
+        assert_eq!(body.unwrap(), json!({"context_ids": ["a"], "subject": "s"}));
 
         let (_, path, body) = route_tool(
             "search_passages",
-            &json!({"contexts": ["a"], "query": "q", "semantic_floor": 0.5}),
+            &json!({"context_ids": ["a"], "query": "q", "semantic_floor": 0.5}),
         )
         .unwrap();
         assert_eq!(path, "/sources/search");
         assert_eq!(
             body.unwrap(),
-            json!({"contexts": ["a"], "query": "q", "semantic_floor": 0.5})
+            json!({"context_ids": ["a"], "query": "q", "semantic_floor": 0.5})
         );
 
         // `groups` alone reaches the same route, and beside `contexts`
@@ -144,13 +147,13 @@ mod tests {
         assert_eq!(body.unwrap(), json!({"groups": ["g"], "cue": "x"}));
         let (_, path, body) = route_tool(
             "search_passages",
-            &json!({"contexts": ["a"], "groups": ["g"], "query": "q"}),
+            &json!({"context_ids": ["a"], "groups": ["g"], "query": "q"}),
         )
         .unwrap();
         assert_eq!(path, "/sources/search");
         assert_eq!(
             body.unwrap(),
-            json!({"contexts": ["a"], "groups": ["g"], "query": "q"})
+            json!({"context_ids": ["a"], "groups": ["g"], "query": "q"})
         );
 
         // The single-context form is untouched, and the body never
@@ -166,11 +169,11 @@ mod tests {
     /// `pick` rule).
     #[test]
     fn search_tools_refuse_an_ambiguous_or_absent_target() {
-        let ambiguous = "pass either 'context' or 'contexts'/'groups', not both";
+        let ambiguous = "pass either 'context' or 'context_ids'/'groups', not both";
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context": "a", "contexts": ["b"], "cue": "x"})
+                &json!({"context": "a", "context_ids": ["b"], "cue": "x"})
             ),
             Err(ambiguous.to_string())
         );
@@ -181,7 +184,7 @@ mod tests {
             ),
             Err(ambiguous.to_string())
         );
-        let missing = "missing required argument 'context' (or 'contexts'/'groups', to search several at once)";
+        let missing = "missing required argument 'context' (or 'context_ids'/'groups', to search several at once)";
         assert_eq!(
             route_tool("search_passages", &json!({"query": "q"})),
             Err(missing.to_string())
@@ -189,7 +192,7 @@ mod tests {
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context": null, "contexts": null, "cue": "x"})
+                &json!({"context": null, "context_ids": null, "cue": "x"})
             ),
             Err(missing.to_string())
         );
@@ -826,11 +829,11 @@ mod tests {
         assert_eq!(body.unwrap()["after"], cursor);
 
         let cross_cursor = json!({
-            "weight": 0.5, "context": "sake", "subject": "a", "label": "b", "object": "c"
+            "weight": 0.5, "context_id": "sake", "subject": "a", "label": "b", "object": "c"
         });
         let (_, _, body) = route_tool(
             "query",
-            &json!({"contexts": ["sake"], "subject": "s", "after": cross_cursor}),
+            &json!({"context_ids": ["sake"], "subject": "s", "after": cross_cursor}),
         )
         .unwrap();
         assert_eq!(body.unwrap()["after"], cross_cursor);
@@ -1004,7 +1007,7 @@ mod tests {
                 {
                     "anyOf": [
                         { "required": ["context"] },
-                        { "required": ["contexts"] },
+                        { "required": ["context_ids"] },
                         { "required": ["groups"] },
                     ]
                 },
@@ -1892,7 +1895,7 @@ mod tests {
                 Ok(envelope(json!([])))
             } else if path.ends_with("/sources/search") {
                 Ok(envelope(json!({
-                    "plan": {"contexts": [{"context": "sake", "lanes": {
+                    "plan": {"contexts": [{"context_id": "id-sake", "context_name": "sake", "lanes": {
                         "bm25": {"ran": true},
                         "vector": {"ran": false, "reason": "no embedding provider is configured"}
                     }}]},
@@ -1908,7 +1911,7 @@ mod tests {
 
         assert_eq!(result["passage_hits"].as_array().unwrap().len(), 1);
         assert_eq!(
-            result["search_plan"]["contexts"][0]["context"], "sake",
+            result["search_plan"]["contexts"][0]["context_name"], "sake",
             "the fallback search's plan rides beside its hits"
         );
     }

@@ -355,7 +355,7 @@ impl GroupRow {
             name,
             status: "ok",
             error: None,
-            contexts: record.contexts.len(),
+            contexts: record.context_ids.len(),
             groups: record.groups.len(),
             notes: Vec::new(),
         }
@@ -448,7 +448,7 @@ fn inspect_group_file(path: &Path, as_json: bool) -> i32 {
                 println!(
                     "{}: ok  {} member context(s) · {} child group(s)",
                     path.display(),
-                    record.contexts.len(),
+                    record.context_ids.len(),
                     record.groups.len()
                 );
             }
@@ -998,7 +998,7 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
     }
 
     let (group_count, group_failures, group_rows, group_notices) =
-        inspect_groups(&entries, &context_names, as_json);
+        inspect_groups(&entries, &stems.iter().cloned().collect(), as_json);
     failures += group_failures;
     notices.extend(group_notices);
 
@@ -1074,7 +1074,7 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
 /// to any one `group`).
 fn inspect_groups(
     entries: &[std::path::PathBuf],
-    context_names: &BTreeSet<String>,
+    context_ids: &BTreeSet<String>,
     as_json: bool,
 ) -> (usize, usize, Vec<GroupRow>, Vec<Notice>) {
     let mut failures = 0usize;
@@ -1173,9 +1173,9 @@ fn inspect_groups(
     // The healing preview: what boot's reconciliation would drop.
     for (name, record) in &records {
         let dangling_contexts = record
-            .contexts
+            .context_ids
             .iter()
-            .filter(|context| !context_names.contains(*context))
+            .filter(|context| !context_ids.contains(*context))
             .count();
         let dangling_children = record
             .groups
@@ -1207,7 +1207,7 @@ fn inspect_groups(
             ));
         }
         for (field, len) in [
-            ("member contexts", record.contexts.len()),
+            ("member contexts", record.context_ids.len()),
             ("child groups", record.groups.len()),
         ] {
             if len > MAX_GROUP_MEMBERS {
@@ -1235,7 +1235,7 @@ fn inspect_groups(
         } else {
             println!(
                 "{name}: ok  {} member context(s) · {} child group(s){}",
-                record.contexts.len(),
+                record.context_ids.len(),
                 record.groups.len(),
                 if group_notes.is_empty() {
                     String::new()

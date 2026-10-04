@@ -137,9 +137,9 @@
     <h2><code>groups</code> bundle <code>contexts</code> — and searches cross them</h2>
     <p class="section-sub">A <code>group</code> is an organizational label over <code>contexts</code>, not <code>context</code> content.</p>
     <p>
-      <code>/groups</code> bundles <code>contexts</code> many-to-many (a <code>context</code> may sit in several <code>groups</code>) and
+      <code>/groups</code> bundles <code>contexts</code> (by id — a rename touches no <code>group</code>) many-to-many (a <code>context</code> may sit in several <code>groups</code>) and
       may nest child <code>groups</code> — a shallow DAG, at most 3 <code>groups</code> tall, never cyclic. Membership
-      updates are deltas (<code>add_contexts</code> / <code>remove_contexts</code>,
+      updates are deltas (<code>add_context_ids</code> / <code>remove_context_ids</code>,
       <code>add_groups</code> / <code>remove_groups</code>), referential integrity is strict
       (members must exist; deleting a <code>context</code> or <code>group</code> drops it from every <code>group</code>), and each
       <code>group</code> persists as one <code>{name}.group</code> file beside the <code>context</code> files.
@@ -147,9 +147,9 @@
     <p>
       <code>groups</code> are the addressing unit of <b>cross-<code>context</code> search</b>: <code>POST /recall</code>,
       <code>POST /query</code>, and <code>POST /sources/search</code> take
-      <code>contexts</code> and/or <code>groups</code> lists and run one search across every
+      <code>context_ids</code> and/or <code>groups</code> lists and run one search across every
       <code>context</code> reached — nested children included, overlaps deduped, every match tagged with the
-      <code>context</code> it came from. Graph matches merge on |weight| (weights share one
+      <code>context_id</code> (and display <code>context_name</code>) it came from. Graph matches merge on |weight| (weights share one
       scale — evidence mass); passage hits interleave by per-<code>context</code> rank, because passage
       scores are corpus-local. Deep dives (<code>activate</code>, <code>explore</code>,
       <code>paths</code>, <code>resolve</code>) stay per-<code>context</code> by design: search across, then

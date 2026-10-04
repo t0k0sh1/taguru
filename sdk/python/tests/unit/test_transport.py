@@ -508,18 +508,18 @@ def test_after_cursor_rides_the_request_body_verbatim() -> None:
 
     client.recall(
         "cue",
-        contexts=["sake"],
+        context_ids=["sake"],
         after={
             "weight": 0.5,
-            "context": "sake",
+            "context_id": "sake",
             "subject": "a",
             "label": "b",
             "object": "c",
         },
     )
     assert bodies[-1] == (
-        b'{"contexts":["sake"],"cue":"cue","after":'
-        b'{"weight":0.5,"context":"sake","subject":"a","label":"b","object":"c"}}'
+        b'{"context_ids":["sake"],"cue":"cue","after":'
+        b'{"weight":0.5,"context_id":"sake","subject":"a","label":"b","object":"c"}}'
     )
 
 

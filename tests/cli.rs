@@ -2207,7 +2207,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     std::fs::write(
         dir.join("batches/kura.jsonl"),
         "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
-          \"contexts\": [\"sake\"]}\n",
+          \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -2389,9 +2389,9 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
          \"create\": {\"name\": \"old\", \"description\": \"o\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
          {\"type\": \"group\", \"id\": \"kura\", \"description\": \"k\", \
-         \"contexts\": [\"sake\"]}\n\
+         \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n\
          {\"type\": \"group\", \"id\": \"dead\", \"description\": \"x\", \
-         \"contexts\": [\"sake\"]}\n",
+         \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let data = dir.join("data");
@@ -2545,7 +2545,7 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     std::fs::write(
         dir.join("kura.jsonl"),
         "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
-          \"contexts\": [\"sake\"]}\n",
+          \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let data = dir.join("data");
@@ -2659,7 +2659,7 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
     std::fs::write(
         dir.join("kura.group"),
-        "{\"description\": \"\", \"contexts\": [\"sake\", \"ghost\"], \"groups\": []}",
+        "{\"description\": \"\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"], \"groups\": []}",
     )
     .unwrap();
 
@@ -2770,7 +2770,7 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
     std::fs::write(
         dir.join("kura.group"),
-        "{\"description\": \"\", \"contexts\": [\"sake\", \"ghost\"], \"groups\": []}",
+        "{\"description\": \"\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"], \"groups\": []}",
     )
     .unwrap();
 
@@ -2890,7 +2890,7 @@ fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("parent.group"),
-        "{\"description\": \"\", \"contexts\": [], \"groups\": [\"child\"]}",
+        "{\"description\": \"\", \"context_ids\": [], \"groups\": [\"child\"]}",
     )
     .unwrap();
     std::fs::write(dir.join("child.group"), b"{not json").unwrap();
@@ -4119,8 +4119,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     // judging the set would be exactly the defect this pins.
     std::fs::write(
         &group,
-        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
-         {\"type\": \"group\", \"id\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n\
+         {\"type\": \"group\", \"id\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4140,7 +4140,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: group 'kura' names member context 'ghost'",
+            "taguru: import: {}: group 'kura' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
             group.display()
         )),
         "{stderr}"
@@ -4150,7 +4150,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     assert!(
         report["error"]
             .as_str()
-            .is_some_and(|error| error.contains("ghost")),
+            .is_some_and(|error| error.contains("ead6ef03-d61e-460c-933d-6d450c50a1e5")),
         "the whole-set refusal must name the missing member: {report}"
     );
     assert_eq!(
@@ -4329,7 +4329,7 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let first = dir.join("first.jsonl");
     let records = "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
                    \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-                   {\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\"]}\n";
+                   {\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
     std::fs::write(&first, records).expect("fixture must be writable");
     let second = dir.join("second.jsonl");
     std::fs::write(&second, records).expect("fixture must be writable");
@@ -4384,13 +4384,13 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let valid = dir.join("valid.jsonl");
     std::fs::write(
         &valid,
-        "{\"type\": \"group\", \"id\": \"valid\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"group\", \"id\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4408,7 +4408,7 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: group 'kura' names member context 'ghost'",
+            "taguru: import: {}: group 'kura' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
             ghost.display()
         )),
         "{stderr}"

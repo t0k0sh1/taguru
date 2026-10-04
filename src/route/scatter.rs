@@ -5,54 +5,75 @@
 use super::*;
 
 /// The shared front half of every fan-out search: the single-instance
-/// pre-checks (byte for byte), the direct-name dedup, and the
+/// pre-checks (byte for byte), the direct-id dedup, and the
 /// shard-set/per-shard-body computation. `direct` preserves first-
 /// appearance order — the same order `cross_targets` seats direct
-/// names in.
+/// ids in.
 pub(super) struct Scatter {
     pub(super) direct: Vec<String>,
-    /// direct `contexts` per shard, order preserved within each shard.
+    /// direct `context_ids` per shard, order preserved within each
+    /// shard.
     pub(super) per_shard: BTreeMap<usize, Vec<String>>,
     pub(super) shards: Vec<usize>,
 }
 
-pub(super) fn plan_scatter(
+/// Plans the fan-out. Targets are context ids (#965) and the route map
+/// speaks names, so each distinct direct id's owner is asked of the
+/// shards themselves ([`locate_owner`]; a single-shard map pays
+/// nothing); an id no shard holds is the single-instance first-missing
+/// refusal, in the same list order.
+pub(super) async fn plan_scatter(
+    state: &RouterState,
     map: &RouteMap,
-    contexts: &[String],
+    context_ids: &[String],
     groups: &[String],
+    headers: &HeaderMap,
+    deadline: Deadline,
     started_at: Instant,
 ) -> Result<Scatter, Box<Response>> {
-    if contexts.is_empty() && groups.is_empty() {
+    if context_ids.is_empty() && groups.is_empty() {
         return Err(Box::new(api::error(
             ErrorCode::InvalidArgument,
-            "'contexts' or 'groups' must name at least one target",
+            "'context_ids' or 'groups' must name at least one target",
             started_at,
         )));
     }
-    for (field, count) in [("contexts", contexts.len()), ("groups", groups.len())] {
+    for (field, count) in [("context_ids", context_ids.len()), ("groups", groups.len())] {
         if let Some(refusal) = api::overlong(field, count, started_at) {
             return Err(Box::new(refusal));
         }
     }
+    if let Some(refusal) = api::invalid_context_ids("context_ids", context_ids, started_at) {
+        return Err(Box::new(refusal));
+    }
     let mut seen = BTreeSet::new();
-    let direct: Vec<String> = contexts
+    let direct: Vec<String> = context_ids
         .iter()
-        .filter(|name| seen.insert((*name).clone()))
+        .filter(|id| seen.insert((*id).clone()))
         .cloned()
         .collect();
     let mut per_shard: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for name in &direct {
-        let Some(shard) = map.shard_of(name) else {
-            // Unmapped with no fallback cannot exist anywhere the
-            // router reaches — the same first-missing-name refusal a
-            // single instance gives, in the same list order.
-            return Err(Box::new(api::error(
-                ErrorCode::NoContext,
-                format!("context '{name}' not found"),
-                started_at,
-            )));
-        };
-        per_shard.entry(shard).or_default().push(name.clone());
+    for id in &direct {
+        match locate_owner(state, map, id, headers, deadline, started_at).await {
+            Located::Shard(shard) => per_shard.entry(shard).or_default().push(id.clone()),
+            Located::Missing => {
+                return Err(Box::new(api::error(
+                    ErrorCode::NoContext,
+                    format!("context '{id}' not found"),
+                    started_at,
+                )));
+            }
+            Located::Answered(response) => return Err(Box::new(response)),
+            // No reachable shard holds it, but some could not be asked:
+            // send the id to them, where it surfaces as the labeled
+            // `unreached` partial (the shard that can answer for it is
+            // down) instead of refusing every other target's results.
+            Located::Unreached { shards, .. } => {
+                for shard in shards {
+                    per_shard.entry(shard).or_default().push(id.clone());
+                }
+            }
+        }
     }
     let shards: Vec<usize> = if groups.is_empty() {
         per_shard.keys().copied().collect()
@@ -137,11 +158,11 @@ pub(super) fn gather(
 }
 
 /// Builds each shard's request body: the caller's own body with the
-/// `contexts` list cut down to what that shard owns. Everything else —
+/// `context_ids` list cut down to what that shard owns. Everything else —
 /// `groups`, cue, limit, the verbatim `after` cursor — is forwarded
 /// untouched.
 pub(super) fn shard_body(base: &Value, targets: Option<&Vec<String>>) -> Bytes {
     let mut body = base.clone();
-    body["contexts"] = json!(targets.cloned().unwrap_or_default());
+    body["context_ids"] = json!(targets.cloned().unwrap_or_default());
     Bytes::from(body.to_string())
 }

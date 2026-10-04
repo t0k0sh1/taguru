@@ -22,7 +22,7 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
         "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n",
         "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
         "\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"sake\"]}\n",
+        "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
         "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"s2\"}\n",
         "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
     )
@@ -334,7 +334,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵\", \
-           \"contexts\": [\"sake\", \"sake\"], \"groups\": [\"kid\"]}}\n\
+           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"cef2e28b-43f0-4b6c-8201-abab0785399f\"], \"groups\": [\"kid\"]}}\n\
          {{\"type\": \"group\", \"id\": \"kid\"}}\n"
     )))
     .unwrap();
@@ -345,7 +345,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
     assert_eq!(record.description, "蔵");
     // List duplicates fold into the set — membership IS a set,
     // exactly as over the API.
-    assert_eq!(record.contexts.len(), 1);
+    assert_eq!(record.context_ids.len(), 1);
     assert_eq!(record.groups.len(), 1);
     // Absent fields read as empty, the shape export omits.
     assert_eq!(stream.groups[1].1, GroupRecord::default());
@@ -387,11 +387,27 @@ fn group_records_validate_their_shape_with_line_numbers() {
     );
     assert!(case("{\"type\": \"group\", \"id\": \"\"}").contains("must not be empty"));
     assert!(case("{\"type\": \"group\", \"id\": \"g\", \"nope\": 1}").contains("unknown field"));
+    // The member list names contexts by id (#965): a name, a spelling
+    // `Uuid` parses but the server never mints, and the retired
+    // `contexts` column are each refused by name.
+    let named = case("{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"sake\"]}");
+    assert!(
+        named.contains("line 1: 'sake' is not a context id: context_ids takes"),
+        "{named}"
+    );
+    let upper = case(&format!(
+        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{}\"]}}",
+        "CEF2E28B-43F0-4B6C-8201-ABAB0785399F"
+    ));
+    assert!(upper.contains("is not a context id"), "{upper}");
+    assert!(
+        case("{\"type\": \"group\", \"id\": \"g\", \"contexts\": []}").contains("unknown field")
+    );
     let long = "x".repeat(65);
     assert!(case(&format!("{{\"type\": \"group\", \"id\": \"{long}\"}}")).contains("65 bytes"));
     assert!(
         case(&format!(
-            "{{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"{long}\"]}}"
+            "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{long}\"]}}"
         ))
         .contains("65 bytes")
     );
@@ -408,11 +424,11 @@ fn group_records_validate_their_shape_with_line_numbers() {
 
     // The member cap judges the SET: one name past it refuses.
     let over_set: String = (0..=MAX_GROUP_MEMBERS)
-        .map(|i| format!("\"c{i:04}\""))
+        .map(|i| format!("\"00000000-0000-4000-8000-{i:012x}\""))
         .collect::<Vec<_>>()
         .join(", ");
     let error = case(&format!(
-        "{{\"type\": \"group\", \"id\": \"g\", \"contexts\": [{over_set}]}}"
+        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [{over_set}]}}"
     ));
     assert!(error.contains("split into nested child groups"), "{error}");
 }
@@ -1909,7 +1925,7 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{schemas}"
     );
-    let group = "{\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"sake\"]}";
+    let group = "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}";
     let groups = parse_stream(format!("{group}\n{group}\n").as_bytes()).unwrap_err();
     assert!(
         groups.starts_with(

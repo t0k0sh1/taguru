@@ -18,8 +18,9 @@ per-``context`` rank — the posture the server itself takes for passage scores 
 and the text lane rides the server's own cross-``context`` search.
 
 ``context``/``contexts`` take context IDS — the ``id`` column of
-``client.contexts.list()`` (#964). ``groups`` take group names; each member
-resolves to its id through the directory before the lanes run.
+``client.contexts.list()`` (#964, #965). ``groups`` take group names; a
+group's members are ids already, so nothing is resolved through the
+directory. Every Document's ``context`` metadata is that id.
 """
 
 from __future__ import annotations
@@ -60,12 +61,9 @@ class TaguruRetriever(BaseRetriever):
     ``include_graph_only_facts`` is on, so pure-graph deployments retrieve too.
 
     Name at least one target: ``context`` (one context id — the ``id``
-    column of ``contexts.list()``), ``contexts`` (several context display
-    NAMES — the cross-search body is name-addressed until #965; a name
-    several ``contexts`` share is the server's own ambiguity refusal), or
+    column of ``contexts.list()``), ``contexts`` (several context ids), or
     ``groups`` (``group`` names — each searches every ``context`` it
-    reaches). The cross graph lane resolves each name to its id (paths
-    are id-addressed, #964) and skips a name it cannot resolve uniquely.
+    reaches). Display names are not accepted anywhere (#965).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -120,20 +118,20 @@ class TaguruRetriever(BaseRetriever):
         targets: list[str] = []
         if self.context is not None:
             targets.append(self.context)
-        for name in self.contexts or []:
-            if name not in targets:
-                targets.append(name)
+        for context_id in self.contexts or []:
+            if context_id not in targets:
+                targets.append(context_id)
         return targets
 
     @staticmethod
     def _with_members(targets: list[str], members: set[str]) -> list[str]:
         """Direct ``contexts`` lead in declaration order; ``group``-resolved members
-        follow in name order, overlaps deduped — the server's own
+        follow in id order, overlaps deduped — the server's own
         cross-search tie order."""
         merged = list(targets)
-        for name in sorted(members):
-            if name not in merged:
-                merged.append(name)
+        for context_id in sorted(members):
+            if context_id not in merged:
+                merged.append(context_id)
         return merged
 
     # -- sync lane ---------------------------------------------------------
@@ -154,29 +152,13 @@ class TaguruRetriever(BaseRetriever):
                 entry = client.groups.get(group)
             except Exception:
                 continue
-            members.update(entry.contexts)
+            members.update(entry.context_ids)
             stack.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
 
-    def _ids_by_name(self, client: Taguru) -> dict[str, str]:
-        """The cross graph lane's name→id bridge (#964): one directory walk,
-        keeping only names exactly one ``context`` carries. Best-effort —
-        a name that no longer resolves, or that several ``contexts``
-        share, is skipped by the caller rather than failing retrieval."""
-        counted: dict[str, list[str]] = {}
-        try:
-            for row in client.contexts.iter():
-                counted.setdefault(row.name, []).append(row.id)
-        except Exception:
-            return {}
-        return {name: ids[0] for name, ids in counted.items() if len(ids) == 1}
-
-    def _graph_lane(
-        self, client: Taguru, target: str, query: str, label: str | None = None
-    ) -> list[Document]:
-        """``target`` is the context ID; ``label`` is what the Documents'
-        metadata names it (the display name on the cross path, matching
-        the text lane's own tags)."""
+    def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
+        """``target`` is the context ID, which the Documents' metadata carries
+        too (matching the text lane's own ``context_id`` tags)."""
         ctx = client.context(target)
         candidates = ctx.resolve(
             query,
@@ -197,9 +179,7 @@ class TaguruRetriever(BaseRetriever):
                 citations[wanted] = ctx.cite_passage(*wanted)
             except NotFoundError:
                 citations[wanted] = None
-        return _graph_documents(
-            page.matches, citations, self.include_graph_only_facts, label or target
-        )
+        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
 
     def _get_relevant_documents(
         self,
@@ -259,18 +239,12 @@ class TaguruRetriever(BaseRetriever):
         if self.include_graph:
             # One target erroring (a deleted context, a transient
             # failure) should not blank out the graph docs every other
-            # target already found. Targets are names; the lane runs on
-            # ids (#964) — an unresolvable name keeps its slot with no
-            # docs, so the interleave order holds.
-            ids = self._ids_by_name(self.client)
+            # target already found — it keeps its slot with no docs, so
+            # the interleave order holds.
             per_target: list[list[Document]] = []
             for target in targets:
-                target_id = ids.get(target)
-                if target_id is None:
-                    per_target.append([])
-                    continue
                 try:
-                    per_target.append(self._graph_lane(self.client, target_id, query, target))
+                    per_target.append(self._graph_lane(self.client, target, query))
                 except Exception:
                     per_target.append([])
             graph_docs = _interleave(per_target)
@@ -283,7 +257,9 @@ class TaguruRetriever(BaseRetriever):
             # isolation just above).
             try:
                 text_hits = list(
-                    self.client.search_passages(query, contexts=targets, limit=self.text_limit).hits
+                    self.client.search_passages(
+                        query, context_ids=targets, limit=self.text_limit
+                    ).hits
                 )
             except Exception:
                 text_hits = []
@@ -318,25 +294,12 @@ class TaguruRetriever(BaseRetriever):
                     if not isinstance(entry, Exception):
                         raise entry
                     continue
-                members.update(entry.contexts)
+                members.update(entry.context_ids)
                 frontier.extend(entry.groups)
         return self._with_members(self._direct_targets(), members)
 
-    async def _aids_by_name(self, client: AsyncTaguru) -> dict[str, str]:
-        """:meth:`_ids_by_name`'s async twin — see there."""
-        counted: dict[str, list[str]] = {}
-        try:
-            async for row in client.contexts.iter():
-                counted.setdefault(row.name, []).append(row.id)
-        except Exception:
-            return {}
-        return {name: ids[0] for name, ids in counted.items() if len(ids) == 1}
-
-    async def _agraph_lane(
-        self, client: AsyncTaguru, target: str, query: str, label: str | None = None
-    ) -> list[Document]:
-        """:meth:`_graph_lane`'s async twin: ``target`` is the id, ``label``
-        the metadata name."""
+    async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
+        """:meth:`_graph_lane`'s async twin."""
         ctx = client.context(target)
         candidates = await ctx.resolve(
             query,
@@ -379,9 +342,7 @@ class TaguruRetriever(BaseRetriever):
         citations: dict[tuple[str, int], Citation | None] = dict(
             zip(wanted_pairs, fetched, strict=True)
         )
-        return _graph_documents(
-            page.matches, citations, self.include_graph_only_facts, label or target
-        )
+        return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
 
     async def _aget_relevant_documents(
         self,
@@ -441,20 +402,9 @@ class TaguruRetriever(BaseRetriever):
             # return_exceptions=True: one target erroring (a deleted
             # context, a transient failure) should not blank out the
             # graph docs every other target already found.
-            # Targets are names; the lane runs on ids (#964) — an
-            # unresolvable name keeps its slot with no docs, so the
-            # interleave order holds.
             client = self.async_client
-            ids = await self._aids_by_name(client)
-
-            async def _lane_for(name: str) -> list[Document]:
-                target_id = ids.get(name)
-                if target_id is None:
-                    return []
-                return await self._agraph_lane(client, target_id, query, name)
-
             per_target = await asyncio.gather(
-                *(_lane_for(target) for target in targets),
+                *(self._agraph_lane(client, target, query) for target in targets),
                 return_exceptions=True,
             )
             lanes: list[list[Document]] = []
@@ -475,7 +425,7 @@ class TaguruRetriever(BaseRetriever):
             # not blank out the graph lane's already-fetched results.
             try:
                 crossed = await self.async_client.search_passages(
-                    query, contexts=targets, limit=self.text_limit
+                    query, context_ids=targets, limit=self.text_limit
                 )
                 text_hits = list(crossed.hits)
             except Exception:
@@ -628,9 +578,9 @@ def _interleave(per_target: list[list[Document]]) -> list[Document]:
 
 
 def _hit_context(hit: PassageHit, fallback: str | None) -> str | None:
-    """A cross-``context`` hit names its ``context``; a per-``context`` hit inherits the
-    retriever's own target."""
-    return getattr(hit, "context", None) or fallback
+    """A cross-``context`` hit names its ``context_id``; a per-``context`` hit
+    inherits the retriever's own target."""
+    return getattr(hit, "context_id", None) or fallback
 
 
 def _text_document(hit: PassageHit, context: str | None) -> Document:

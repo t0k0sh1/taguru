@@ -65,7 +65,7 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
           \"create\": {\"name\": \"酒蔵\", \"description\": \"蔵元台帳\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
          {\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
-          \"contexts\": [\"sake\", \"酒蔵\"]}\n",
+          \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"e13aa81d-4ce5-4637-818f-e3b241d28629\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -141,7 +141,7 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
     server.ok(
         "PUT",
         "/groups/kura",
-        Some(json!({"contexts": ["sake", "bunko"]})),
+        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
     );
 
     let out = std::env::temp_dir().join(format!(
@@ -481,7 +481,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // group.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"type": "group", "id":"h","description":"x","contexts":["sake"]}"#.to_string(),
+                r#"{"type": "group", "id":"h","description":"x","context_ids":["cef2e28b-43f0-4b6c-8201-abab0785399f"]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -768,7 +768,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups/h/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"type": "group", "id":"h","description":"x","contexts":[]}"#.to_string(),
+                r#"{"type": "group", "id":"h","description":"x","context_ids":[]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {

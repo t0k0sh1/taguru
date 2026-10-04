@@ -656,7 +656,9 @@ pub struct SearchPlan {
 /// diagnosable from the response alone.
 #[derive(Serialize, Deserialize)]
 pub struct SearchContextPlan {
-    pub context: String,
+    /// The searched `context`'s id (#965), beside its display name.
+    pub context_id: String,
+    pub context_name: String,
     pub lanes: SearchLanesPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter: Option<FilterPlan>,
@@ -731,7 +733,8 @@ impl SearchContextPlan {
     /// (it passes no filter — its sources are synthetic `community:`
     /// rows that carry no user metadata).
     pub(crate) fn of(
-        context: &str,
+        context_id: &str,
+        context_name: &str,
         lanes: &crate::registry::PassageSearchLanes,
         filter: Option<FilterPlan>,
     ) -> Self {
@@ -768,7 +771,8 @@ impl SearchContextPlan {
             },
         };
         Self {
-            context: context.to_string(),
+            context_id: context_id.to_string(),
+            context_name: context_name.to_string(),
             lanes,
             filter,
         }
@@ -1127,6 +1131,7 @@ pub async fn search_passages(
             let payload = PassagePage {
                 plan: SearchPlan {
                     contexts: vec![SearchContextPlan::of(
+                        &id,
                         &state.name_of_stem(&id),
                         &found.lanes,
                         FilterPlan::of(found.filter),
@@ -1597,9 +1602,10 @@ pub async fn explain_search_passages(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossSearchPassagesRequest {
-    /// Full `context` names — no patterns.
+    /// `context` ids (the id column of `GET /contexts`, #965) — no
+    /// names, no patterns.
     #[serde(default)]
-    pub contexts: Vec<String>,
+    pub context_ids: Vec<String>,
     /// `group` names, resolved and deduped as in
     /// [`super::CrossRecallRequest`].
     #[serde(default)]
@@ -1652,7 +1658,7 @@ pub async fn cross_search_passages(
         &state,
         &grant,
         &key,
-        request.contexts,
+        request.context_ids,
         request.groups,
         started_at,
     ) {
@@ -1913,6 +1919,7 @@ pub async fn cross_search_passages(
                 );
                 target_empty.push(found.hits.is_empty());
                 plans.push(SearchContextPlan::of(
+                    &targets.ids[index],
                     name,
                     &found.lanes,
                     FilterPlan::of(found.filter),
@@ -1969,7 +1976,8 @@ pub async fn cross_search_passages(
         hits: pool
             .into_iter()
             .map(|(index, _, hit)| CrossMatch {
-                context: targets.names[index].clone(),
+                context_id: targets.ids[index].clone(),
+                context_name: targets.names[index].clone(),
                 inner: PassageHit::from(hit),
             })
             .collect(),
@@ -2801,7 +2809,7 @@ mod tests {
         corrupt_passages_snapshot(&state, &dir, "sake");
 
         let request = CrossSearchPassagesRequest {
-            contexts: vec!["sake".to_string()],
+            context_ids: vec![state.id_of("sake")],
             groups: Vec::new(),
             query: "AAA".to_string(),
             limit: None,
@@ -2837,7 +2845,7 @@ mod tests {
         crate::api::expire_deadline_race();
 
         let request = CrossSearchPassagesRequest {
-            contexts: vec!["sake".to_string()],
+            context_ids: vec![state.id_of("sake")],
             groups: Vec::new(),
             query: "AAA".to_string(),
             limit: None,

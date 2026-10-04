@@ -395,14 +395,15 @@ class AsyncTaguru:
         self,
         cue: str,
         *,
-        contexts: Sequence[str] | None = None,
+        context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
         limit: int | None = None,
         after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
         """Recall across several ``contexts`` at once, every match tagged.
 
-        ``contexts`` takes full names; each ``groups`` entry searches every
+        ``context_ids`` takes context ids (the ``id`` column of the directory,
+        never names — #965); each ``groups`` entry searches every
         ``context`` the ``group`` reaches (nested children included), overlaps
         deduped. At least one of the two must name something. Weights share
         one scale, so past the limit the strongest |weight| survives exactly
@@ -411,7 +412,7 @@ class AsyncTaguru:
         """
         body = drop_none(
             {
-                "contexts": list(contexts) if contexts is not None else None,
+                "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
                 "cue": cue,
                 "limit": limit,
@@ -424,7 +425,7 @@ class AsyncTaguru:
     async def query(
         self,
         *,
-        contexts: Sequence[str] | None = None,
+        context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
         subject: str | Sequence[str] | None = None,
         label: str | Sequence[str] | None = None,
@@ -441,7 +442,7 @@ class AsyncTaguru:
         target answers empty for a non-empty filter."""
         body = drop_none(
             {
-                "contexts": list(contexts) if contexts is not None else None,
+                "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
                 "subject": subject,
                 "label": label,
@@ -459,7 +460,7 @@ class AsyncTaguru:
         self,
         query: str,
         *,
-        contexts: Sequence[str] | None = None,
+        context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
         limit: int | None = None,
         semantic_floor: float | None = None,
@@ -483,7 +484,7 @@ class AsyncTaguru:
         """
         body = drop_none(
             {
-                "contexts": list(contexts) if contexts is not None else None,
+                "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
                 "query": query,
                 "limit": limit,
@@ -689,18 +690,19 @@ class AsyncGroups:
         name: str,
         *,
         description: str = "",
-        contexts: Sequence[str] | None = None,
+        context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
     ) -> bool:
         """Create a ``group`` (409 ``ConflictError`` if it already exists).
 
-        Every listed member — ``context`` or child ``group`` — must already exist;
-        a ``group`` and a ``context`` may share the same name without conflict.
+        Every listed member — a ``context`` (by id) or a child ``group`` (by name) —
+        must already exist; a ``group`` and a ``context`` may share the same name
+        without conflict.
         """
         body = drop_none(
             {
                 "description": description,
-                "contexts": list(contexts) if contexts is not None else None,
+                "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
             }
         )
@@ -717,8 +719,8 @@ class AsyncGroups:
         name: str,
         *,
         description: str | None = None,
-        add_contexts: Sequence[str] | None = None,
-        remove_contexts: Sequence[str] | None = None,
+        add_context_ids: Sequence[str] | None = None,
+        remove_context_ids: Sequence[str] | None = None,
         add_groups: Sequence[str] | None = None,
         remove_groups: Sequence[str] | None = None,
     ) -> GroupEntry:
@@ -731,8 +733,10 @@ class AsyncGroups:
         body = drop_none(
             {
                 "description": description,
-                "add_contexts": list(add_contexts) if add_contexts is not None else None,
-                "remove_contexts": list(remove_contexts) if remove_contexts is not None else None,
+                "add_context_ids": list(add_context_ids) if add_context_ids is not None else None,
+                "remove_context_ids": (
+                    list(remove_context_ids) if remove_context_ids is not None else None
+                ),
                 "add_groups": list(add_groups) if add_groups is not None else None,
                 "remove_groups": list(remove_groups) if remove_groups is not None else None,
             }

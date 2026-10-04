@@ -7,7 +7,8 @@
  * import { Taguru } from "taguru";
  *
  * const client = new Taguru(); // TAGURU_URL / TAGURU_API_TOKEN, else localhost:8248
- * const ctx = client.context("sake");
+ * const row = await client.contexts.create("sake");
+ * const ctx = client.context(row.id); // contexts are addressed by the minted id
  * const hits = await ctx.searchPassages("酒蔵の創業年", { limit: 5 });
  * ```
  *

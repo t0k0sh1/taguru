@@ -9,6 +9,43 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (file format + wire) — groups and cross-context search
+  name their members by id** (#965, ADR 0045 §2.7/ADR 0046; same
+  unreleased `http_contract` 2 and `"2026-10-01"` file format): a
+  `group` record, `PUT`/`PATCH /groups/{name}` and every cross-search
+  body now list `context` **ids**, never names — `contexts` became
+  `context_ids` (`add_contexts`/`remove_contexts` became
+  `add_context_ids`/`remove_context_ids`) on `POST /recall`, `/query`,
+  `/sources/search` and the group routes, and a
+  name in any of them is a 400 (`is not a context id`). A group listing
+  and a `group` export line carry `context_ids`; the import outcome's
+  `contexts` stays the member count. Cross-search responses tag every
+  match/hit with `context_id` and the display `context_name` (the old
+  `context` is gone), the plan's `contexts[]` entries carry the same
+  pair, a graph-search plan's `contexts` is `context_ids`, and the
+  cross cursor's `context` is `context_id`. Cross-`context` ties on an
+  identical triple now break by context id (names repeat), so a cursor
+  taken from the old order is not portable. Renaming a `context` no
+  longer rewrites any `group` (members are ids), and a retrieval cache
+  entry is keyed on the display name too, because responses echo it.
+  A `group` file written before this change fails to parse (`contexts`
+  is an unknown field) and is set aside as `.corrupt`; re-create the
+  group or restore it from a fresh export. Through `taguru router`,
+  the id is located by probing the shards (the route map stays
+  name-keyed): an id no reachable shard carries is refused, and one an
+  unreachable shard might own is sent there and answers a labeled
+  partial. MCP tools follow the wire: `recall`/`query`/
+  `search_passages` take `context_ids`, the group tools take
+  `context_ids`/`add_context_ids`/`remove_context_ids`, and the cross
+  cursor's `context` is `context_id` (the single-`context` `context`
+  argument renames are #967). The Python/TypeScript SDKs rename the
+  matching options and fields (`context_ids`, `add_context_ids`,
+  `remove_context_ids`, `GroupEntry.context_ids`,
+  `CrossMatchCursor.context_id`, `MatchPlan.context_ids`,
+  `CrossAssociation`/`CrossPassageHit.context_id` + `context_name`,
+  `SearchContextPlan.context_id` + `context_name`); the LangChain
+  retrievers take `context`/`contexts` as ids and tag every Document's
+  `context` metadata with the id.
 - **Breaking (file format + wire) — import, export, promote and
   `extract` address a `context` by id** (#965, ADR 0045 §2.7; rides the
   same unreleased `http_contract` 2): a source header's `context` is
@@ -34,9 +71,8 @@ Entries that change an on-disk format or a response shape say so.
   block. A router in front of shards sends a header whose id no shard
   carries to `create.name`'s shard, and to the first shard when there
   is no create block (which then refuses in the single-instance words).
-  Grants and quotas are still keyed on display names (#966), and group
-  records and cross-search bodies still name their members (a later
-  #965 step). The Python/TypeScript SDKs rename `ImportOutcome.context`
+  Grants and quotas are still keyed on display names (#966). The
+  Python/TypeScript SDKs rename `ImportOutcome.context`
   and `SchemaImportOutcome.context` to `context_id`, and the LangChain
   ingesters write the new header (client-minting the id on a first
   ingest). Two output changes ride along: `taguru anchoring --json`'s

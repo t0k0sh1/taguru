@@ -76,14 +76,14 @@ export function matchCursor(match: MatchCursor): MatchCursor {
 }
 
 /**
- * `MatchCursor` plus `context`, for cross-`context` `recall`/`query`
- * (`contexts`/`groups`). `context` is the tiebreak two different target
+ * `MatchCursor` plus `context_id`, for cross-`context` `recall`/`query`
+ * (`context_ids`/`groups`). `context_id` is the tiebreak two different target
  * `contexts` can't share on their own: each can independently hold an edge at
  * the identical `(subject, label, object)`.
  */
 export interface CrossMatchCursor {
   weight: number;
-  context: string;
+  context_id: string;
   subject: string;
   label: string;
   object: string;
@@ -93,7 +93,7 @@ export interface CrossMatchCursor {
 export function crossMatchCursor(match: CrossMatchCursor): CrossMatchCursor {
   return {
     weight: match.weight,
-    context: match.context,
+    context_id: match.context_id,
     subject: match.subject,
     label: match.label,
     object: match.object,
@@ -221,15 +221,16 @@ export interface ContextPage {
 // -- groups ---------------------------------------------------------------------
 
 /**
- * One `group` row: member `contexts` bundled many-to-many, plus child `groups`. For
- * a `context`-scoped key `contexts` carries only the members the grant allows;
- * `groups` (child names — labels, not content) is never filtered.
+ * One `group` row: member `context` ids bundled many-to-many, plus child `groups`.
+ * `context_ids` holds ids (the directory's `id` column), never names (#965). For a
+ * `context`-scoped key it carries only the members the grant allows; `groups`
+ * (child names — labels, not content) is never filtered.
  */
 export interface GroupEntry {
   /** The `group`'s name — the row's own key (#851). */
   id: string;
   description: string;
-  contexts: string[];
+  context_ids: string[];
   groups: string[];
   /**
    * Change token over the transitive member contexts' revisions — same
@@ -281,7 +282,7 @@ export interface Association {
 }
 
 /**
- * The execution plan of a graph search (#151): the `contexts` actually
+ * The execution plan of a graph search (#151): the `context_ids` actually
  * consulted, in effective order. For the cross variants that is the RESOLVED
  * target list — `groups` expanded, the key's grants applied — which the tagged
  * matches alone cannot reconstruct when a target came up empty. Absent from
@@ -289,7 +290,7 @@ export interface Association {
  * producers (`unreachableFrom` — an audit, not a search).
  */
 export interface MatchPlan {
-  contexts: string[];
+  context_ids: string[];
 }
 
 /** Ranked matches. `total` above `matches.length` means truncation. */
@@ -302,10 +303,12 @@ export interface MatchPage {
 /**
  * An `Association` tagged with the `context` it came from. The tag is what
  * makes a cross-`context` match actionable — every follow-up (citations,
- * lookups, activate) is a per-`context` call.
+ * lookups, activate) is a per-`context` call, which takes the `context_id`;
+ * `context_name` is the display name (#965).
  */
 export interface CrossAssociation extends Association {
-  context: string;
+  context_id: string;
+  context_name: string;
 }
 
 /**
@@ -698,7 +701,8 @@ export interface PassageHit {
  * only — the cross-`context` order is rank interleaving.
  */
 export interface CrossPassageHit extends PassageHit {
-  context: string;
+  context_id: string;
+  context_name: string;
 }
 
 /**
@@ -731,7 +735,8 @@ export interface FilterPlan {
 
 /** One searched `context`'s account within a `SearchPlan`. */
 export interface SearchContextPlan {
-  context: string;
+  context_id: string;
+  context_name: string;
   lanes: SearchLanesPlan;
   filter?: FilterPlan;
 }

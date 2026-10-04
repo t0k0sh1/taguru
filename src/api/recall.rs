@@ -15,7 +15,8 @@ use crate::registry::{AccessError, AppState};
 use crate::schema::InstalledSchema;
 
 use super::aliases::{OneOrMany, as_refs, validate_positions};
-use super::groups::{scope_allows, scope_refusal};
+use super::groups::{scope_allows_id, scope_refusal};
+use super::invalid_context_ids;
 use super::{
     AppJson, ContextIdPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT,
     MatchCursor, MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map,
@@ -142,7 +143,7 @@ pub async fn recall(
                     total,
                     matches,
                     plan: Some(MatchPlan {
-                        contexts: vec![state.name_of_stem(&id)],
+                        context_ids: vec![id.clone()],
                     }),
                 },
                 vec![total == 0],
@@ -158,21 +159,24 @@ pub async fn recall(
 }
 
 /// Vets a cross-`context` search's target list — the directly named
-/// `contexts` plus every `context` the named `groups` reach, nested children
-/// included — and returns it deduped: direct names lead in
-/// first-appearance order, `group`-resolved members follow in name
+/// `context_ids` plus every `context` the named `groups` reach, nested
+/// children included — and returns it deduped: direct ids lead in
+/// first-appearance order, `group`-resolved members follow in id
 /// order (the tie order the passage merge documents). Refused, in
 /// order: naming nothing at all (a search of nothing is a client bug,
 /// not an empty result — and emphatically not "every `context`"); either
-/// list over the input-items cap; a direct name beyond the key's grant
-/// ([`scope_refusal`] — whole-request, and before existence, so grants
-/// cannot probe names); the first direct name that does not exist
-/// (`no_context`, before any `context` is searched); and the first `group`
-/// name that is not a `group` (`no_group` — `group` rows are visible to
-/// every key, so that refusal probes nothing). `group`-RESOLVED members
-/// beyond the grant are dropped, not refused: a context-scoped key
-/// searches its slice of a `group` exactly as `GET /groups` shows it that
-/// slice ([`group_entry`]) — refusing would name out-of-grant members and
+/// list over the input-items cap; a direct id that is not a context id
+/// (a name, say — 400, before any lookup); a direct id beyond the key's
+/// grant ([`scope_refusal`] — whole-request, and before existence, so
+/// grants cannot probe ids; grants still speak display names, #966, so
+/// each id is read back to its name for the judgement); the first
+/// direct id that does not exist (`no_context`, before any `context` is
+/// searched); and the first `group` name that is not a `group`
+/// (`no_group` — `group` rows are visible to every key, so that refusal
+/// probes nothing). `group`-RESOLVED members beyond the grant are
+/// dropped, not refused: a context-scoped key searches its slice of a
+/// `group` exactly as `GET /groups` shows it that slice
+/// ([`group_entry`]) — refusing would name out-of-grant members and
 /// leak what the listing hides. The slice can come up empty; a legal
 /// request that resolves to nothing is an empty result, not an error.
 ///
@@ -187,40 +191,45 @@ pub(super) fn cross_targets(
     state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
-    contexts: Vec<String>,
+    context_ids: Vec<String>,
     groups: Vec<String>,
     started_at: Instant,
 ) -> Result<CrossTargets, Box<Response>> {
-    if contexts.is_empty() && groups.is_empty() {
+    if context_ids.is_empty() && groups.is_empty() {
         return Err(Box::new(error(
             ErrorCode::InvalidArgument,
-            "'contexts' or 'groups' must name at least one target",
+            "'context_ids' or 'groups' must name at least one target",
             started_at,
         )));
     }
-    for (field, count) in [("contexts", contexts.len()), ("groups", groups.len())] {
+    for (field, count) in [("context_ids", context_ids.len()), ("groups", groups.len())] {
         if let Some(refusal) = overlong(field, count, started_at) {
             return Err(Box::new(refusal));
         }
     }
-    let mut seen = BTreeSet::new();
-    let mut targets: Vec<String> = contexts
-        .into_iter()
-        .filter(|name| seen.insert(name.clone()))
-        .collect();
-    if let Some(refusal) = scope_refusal(grant, key, &targets, started_at) {
+    if let Some(refusal) = invalid_context_ids("context_ids", &context_ids, started_at) {
         return Err(Box::new(refusal));
     }
-    // The body names targets (until #965); the data paths below are
-    // id-keyed, so each name resolves here, once. A missing listed
-    // context refuses now, exactly as the old existence snapshot did,
-    // and an ambiguous one — several contexts share the name (issue
-    // #961 decision 1) — is its own conflict, never a coin flip.
-    let mut ids: Vec<String> = Vec::with_capacity(targets.len());
-    for name in &targets {
-        match state.resolve_wire_name(name) {
-            Ok(id) => ids.push(id),
-            Err(failure) => return Err(Box::new(access_error(state, failure, name, started_at))),
+    let mut seen = BTreeSet::new();
+    let mut ids: Vec<String> = context_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    // Grants judge display names (#966 moves them to ids).
+    let direct_names: Vec<String> = ids.iter().map(|id| state.name_of_stem(id)).collect();
+    if let Some(refusal) = scope_refusal(grant, key, &direct_names, started_at) {
+        return Err(Box::new(refusal));
+    }
+    // A missing listed context refuses now, exactly as the old
+    // existence snapshot did.
+    for id in &ids {
+        if !state.context_id_exists(id) {
+            return Err(Box::new(access_error(
+                state,
+                AccessError::NotFound,
+                id,
+                started_at,
+            )));
         }
     }
     // Resolution is skipped outright when no groups were named: a
@@ -231,36 +240,23 @@ pub(super) fn cross_targets(
             Ok(resolved) => resolved,
             Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
         };
-        for name in resolved {
-            if !(scope_allows(grant, &name) && seen.insert(name.clone())) {
-                continue;
+        for id in resolved {
+            if scope_allows_id(state, grant, &id) && seen.insert(id.clone()) {
+                ids.push(id);
             }
-            match state.resolve_wire_name(&name) {
-                Ok(id) => ids.push(id),
-                // A member deleted since the group record was read:
-                // keep the name itself as the id so the per-target
-                // fetch stays the authoritative "not found" (the
-                // window this function's doc describes) — a UUID can
-                // never collide with a display name that failed to
-                // resolve to one.
-                Err(AccessError::NotFound) => ids.push(name.clone()),
-                Err(failure) => {
-                    return Err(Box::new(access_error(state, failure, &name, started_at)));
-                }
-            }
-            targets.push(name);
         }
     }
+    let names: Vec<String> = ids.iter().map(|id| state.name_of_stem(id)).collect();
     Ok(CrossTargets {
-        names: targets.into(),
+        names: names.into(),
         ids: ids.into(),
     })
 }
 
 /// [`cross_targets`]'s answer: the effective target list, resolved
-/// and scope-filtered — display names for the wire (rows, logs, the
-/// retrieval-cache key) aligned index-for-index with the ids the
-/// id-keyed data paths take.
+/// and scope-filtered — the ids every data path, pool, cursor and
+/// cache key takes, aligned index-for-index with the display names the
+/// wire rows (`context_name`) and the logs show.
 pub(super) struct CrossTargets {
     pub(super) names: Arc<[String]>,
     pub(super) ids: Arc<[String]>,
@@ -276,14 +272,15 @@ pub(crate) fn cross_pool_needs_trim(pool_len: usize, limit: usize) -> bool {
 }
 
 impl CrossTargets {
-    /// name → id over the aligned lists — names are unique within one
-    /// resolved request (the dedup + ambiguity refusal in
-    /// [`cross_targets`]), so the map loses nothing.
-    pub(super) fn id_of_name(&self) -> BTreeMap<&str, &str> {
-        self.names
+    /// id → display name over the aligned lists — ids are unique within
+    /// one resolved request (the dedup in [`cross_targets`]), so the
+    /// map loses nothing. Display names may repeat; that is why the
+    /// pools and cursors key on the id.
+    pub(super) fn name_of_id(&self) -> BTreeMap<&str, &str> {
+        self.ids
             .iter()
             .map(String::as_str)
-            .zip(self.ids.iter().map(String::as_str))
+            .zip(self.names.iter().map(String::as_str))
             .collect()
     }
 }
@@ -297,22 +294,23 @@ type CrossPage = (usize, Vec<(String, Association)>, Vec<bool>);
 /// [`MatchCursor`], cross-`context`: `(subject, label, object)` only
 /// identifies an edge *within* one `context`'s `edge_ids` map, so two
 /// different target `contexts` can each hold an edge with the identical
-/// triple — `context` joins the key as a fifth field to keep the
-/// merged pool's order total. Every wire match already carries
-/// `context` ([`CrossMatch`]'s flattened shape), so a client builds
+/// triple — `context_id` joins the key as a fifth field to keep the
+/// merged pool's order total (the id, not the display name: names
+/// repeat, #965). Every wire match already carries
+/// `context_id` ([`CrossMatch`]'s flattened shape), so a client builds
 /// this from the last match it received exactly as it builds
 /// [`MatchCursor`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CrossMatchCursor {
     pub weight: f64,
-    pub context: String,
+    pub context_id: String,
     pub subject: String,
     pub label: String,
     pub object: String,
 }
 
-/// [`CrossMatchCursor`]'s rank key for one pooled `(context,
+/// [`CrossMatchCursor`]'s rank key for one pooled `(context id,
 /// association)` pair.
 fn cross_key<'a>(
     context: &'a str,
@@ -359,20 +357,20 @@ pub(super) fn cross_page_by(
     mut matches: Vec<(usize, Association)>,
     limit: Option<usize>,
     after: Option<&CrossMatchCursor>,
-    targets: &[String],
+    ids: &[String],
 ) -> (usize, Vec<(usize, Association)>) {
     let total = matches.len();
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if let Some(cursor) = after {
         let seat = (
             cursor.weight,
-            cursor.context.as_str(),
+            cursor.context_id.as_str(),
             cursor.subject.as_str(),
             cursor.label.as_str(),
             cursor.object.as_str(),
         );
         matches.retain(|(index, found)| {
-            let k = cross_key(&targets[*index], found);
+            let k = cross_key(&ids[*index], found);
             // Same reasoning as `page_by`: `(context, subject, label,
             // object)` alone already identifies the edge the cursor
             // names, so a weight that moved between pages can never
@@ -383,9 +381,8 @@ pub(super) fn cross_page_by(
             cross_rank(k, seat) == std::cmp::Ordering::Greater
         });
     }
-    matches.sort_by(|(ia, a), (ib, b)| {
-        cross_rank(cross_key(&targets[*ia], a), cross_key(&targets[*ib], b))
-    });
+    matches
+        .sort_by(|(ia, a), (ib, b)| cross_rank(cross_key(&ids[*ia], a), cross_key(&ids[*ib], b)));
     matches.truncate(limit);
     (total, matches)
 }
@@ -393,8 +390,8 @@ pub(super) fn cross_page_by(
 /// The shared middle of the cross-`context` graph searches: gather every
 /// target's search concurrently ([`bounded_parallel_map`], bounded by
 /// [`cross_search_concurrency`]), pool the matches, cut past the
-/// limit, and only then tag the survivors with their `context` names —
-/// naming every match up front would allocate thousands of strings
+/// limit, and only then tag the survivors with their `context` ids —
+/// tagging every match up front would allocate thousands of strings
 /// just to throw them away. [`cross_page_by`] makes every cut, so
 /// there is exactly one comparator.
 ///
@@ -438,17 +435,16 @@ async fn cross_matches(
     search: impl Fn(&str, &Context) -> Vec<Association> + Send + Sync + 'static,
     started_at: Instant,
 ) -> Result<CrossPage, Box<Response>> {
-    let names = &targets.names;
+    let ids = &targets.ids;
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    let permits = cross_search_concurrency().min(names.len().max(1));
-    let owned_names = Arc::clone(names);
-    let owned_ids = Arc::clone(&targets.ids);
+    let permits = cross_search_concurrency().min(ids.len().max(1));
+    let owned_ids = Arc::clone(ids);
     let job_state = state.clone();
-    let fetched = match bounded_parallel_map(names.len(), permits, move |index| {
-        // The id addresses; the name rides along for the wire rows
-        // and the search closure's reporting.
-        let name = &owned_names[index];
-        job_state.read_context(&owned_ids[index], |context| search(name, context))
+    let fetched = match bounded_parallel_map(ids.len(), permits, move |index| {
+        // The id addresses, and is the key the search closure reports
+        // under.
+        let id = &owned_ids[index];
+        job_state.read_context(id, |context| search(id, context))
     })
     .await
     {
@@ -456,7 +452,7 @@ async fn cross_matches(
         Err(panicked) => {
             return Err(Box::new(cross_job_panic(
                 state,
-                &names[panicked.index],
+                &targets.names[panicked.index],
                 started_at,
             )));
         }
@@ -464,7 +460,7 @@ async fn cross_matches(
 
     let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
-    let mut empties = Vec::with_capacity(names.len());
+    let mut empties = Vec::with_capacity(ids.len());
     for (index, outcome) in fetched.into_iter().enumerate() {
         match outcome {
             Ok(matches) => {
@@ -473,34 +469,35 @@ async fn cross_matches(
                 total += matches.len();
                 pool.extend(matches.into_iter().map(|found| (index, found)));
                 if cross_pool_needs_trim(pool.len(), limit) {
-                    pool = cross_page_by(pool, Some(limit), after, names).1;
+                    pool = cross_page_by(pool, Some(limit), after, ids).1;
                 }
             }
             Err(failure) => {
                 return Err(Box::new(access_error(
                     state,
                     failure,
-                    &names[index],
+                    &ids[index],
                     started_at,
                 )));
             }
         }
     }
-    let (_, pool) = cross_page_by(pool, Some(limit), after, names);
+    let (_, pool) = cross_page_by(pool, Some(limit), after, ids);
     let tagged = pool
         .into_iter()
-        .map(|(index, association)| (names[index].clone(), association))
+        .map(|(index, association)| (ids[index].clone(), association))
         .collect();
     Ok((total, tagged, empties))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossRecallRequest {
-    /// Full `context` names — no patterns.
+    /// `context` ids (the id column of `GET /contexts`, #965) — no
+    /// names, no patterns.
     #[serde(default)]
-    pub contexts: Vec<String>,
+    pub context_ids: Vec<String>,
     /// `group` names — each adds every `context` it reaches, nested
-    /// children included. Overlaps, with `contexts` or between `groups`,
+    /// children included. Overlaps, with `context_ids` or between `groups`,
     /// dedupe silently: a `context` is searched once however many ways
     /// it was named.
     #[serde(default)]
@@ -571,7 +568,7 @@ fn resolve_cross_type_schemas(
         match tokio::task::block_in_place(|| state.schema_of(id)) {
             None | Some(Ok(None)) => {}
             Some(Ok(Some(schema))) => {
-                schemas.insert(name.clone(), schema);
+                schemas.insert(id.clone(), schema);
             }
             Some(Err(message)) => {
                 // ADR 0008 §7: no span-event field is ever named `error`
@@ -622,7 +619,7 @@ pub async fn cross_recall(
         &state,
         &grant,
         &key,
-        request.contexts,
+        request.context_ids,
         request.groups,
         started_at,
     ) {
@@ -673,7 +670,7 @@ pub async fn cross_recall(
         SearchOp::Recall,
         request.limit,
         request.after.as_ref(),
-        move |_name, context| context.recall(&request.cue),
+        move |_id, context| context.recall(&request.cue),
         started_at,
     )
     .await;
@@ -691,7 +688,7 @@ pub async fn cross_recall(
             "search",
         );
     }
-    let matches = cross_associations_out(&state, &targets.id_of_name(), page);
+    let matches = cross_associations_out(&state, &targets.name_of_id(), page);
     cache_and_serve(
         &state,
         key,
@@ -699,7 +696,7 @@ pub async fn cross_recall(
             total,
             matches,
             plan: Some(MatchPlan {
-                contexts: targets.names.to_vec(),
+                context_ids: targets.ids.to_vec(),
             }),
         },
         target_empty,
@@ -954,7 +951,7 @@ pub async fn query(
                     total,
                     matches,
                     plan: Some(MatchPlan {
-                        contexts: vec![state.name_of_stem(&id)],
+                        context_ids: vec![id.clone()],
                     }),
                 },
                 vec![total == 0],
@@ -971,9 +968,10 @@ pub async fn query(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossQueryRequest {
-    /// Full `context` names — no patterns.
+    /// `context` ids (the id column of `GET /contexts`, #965) — no
+    /// names, no patterns.
     #[serde(default)]
-    pub contexts: Vec<String>,
+    pub context_ids: Vec<String>,
     /// `group` names, resolved and deduped as in [`CrossRecallRequest`].
     #[serde(default)]
     pub groups: Vec<String>,
@@ -1034,7 +1032,7 @@ pub async fn cross_query(
         &state,
         &grant,
         &key,
-        request.contexts,
+        request.context_ids,
         request.groups,
         started_at,
     ) {
@@ -1138,7 +1136,7 @@ pub async fn cross_query(
             "search",
         );
     }
-    let matches = cross_associations_out(&state, &targets.id_of_name(), page);
+    let matches = cross_associations_out(&state, &targets.name_of_id(), page);
     cache_and_serve(
         &state,
         key,
@@ -1146,7 +1144,7 @@ pub async fn cross_query(
             total,
             matches,
             plan: Some(MatchPlan {
-                contexts: targets.names.to_vec(),
+                context_ids: targets.ids.to_vec(),
             }),
         },
         target_empty,
@@ -1206,7 +1204,7 @@ mod tests {
         let state = scratch_state("cross-recall-expired");
         let deadline = already_expired_deadline();
         let request = CrossRecallRequest {
-            contexts: vec!["ghost".to_string()],
+            context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             groups: Vec::new(),
             cue: "AAA".to_string(),
             limit: None,
@@ -1241,7 +1239,7 @@ mod tests {
         let state = scratch_state("cross-query-expired");
         let deadline = already_expired_deadline();
         let request = CrossQueryRequest {
-            contexts: vec!["ghost".to_string()],
+            context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             groups: Vec::new(),
             subject: Some(OneOrMany::One("蔵".to_string())),
             label: None,

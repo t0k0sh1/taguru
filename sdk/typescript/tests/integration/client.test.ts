@@ -357,7 +357,7 @@ describe("sources and citations", () => {
     expect(explained.verdict).toBe("filtered_out");
 
     const cross = await client.searchPassages("共通語の資料", {
-      contexts: [name],
+      context_ids: [contextId],
       tags: ["酒"],
     });
     expect(new Set(cross.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
@@ -715,11 +715,13 @@ describe("assembleEvidence end to end", () => {
   });
 });
 
+const GHOST_ID = "ead6ef03-d61e-460c-933d-6d450c50a1e5";
+
 describe("groups and cross-context search", () => {
   /** Two contexts holding one distinct fact (graph + passage) each. */
   /** Returns `[sakeName, teaName, sakeId, teaId]` — group members and
-   * cross-search bodies take the names (until #965); `/contexts/{id}/…`
-   * calls take the ids (#964). */
+   * cross-search bodies take the ids (#965), as do `/contexts/{id}/…`
+   * calls (#964); the names are display labels. */
   async function seededPair(base: string): Promise<[string, string, string, string]> {
     const sake = `${base}-sake`;
     const tea = `${base}-tea`;
@@ -738,31 +740,31 @@ describe("groups and cross-context search", () => {
 
   it("creates, nests, updates by deltas, deletes the bundling only", async () => {
     const base = fresh();
-    const [sake, tea, sakeId, teaId] = await seededPair(base);
+    const [, , sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
     const child = `${base}-child`;
 
     expect(await client.groups.exists(group)).toBe(false);
-    expect(await client.groups.create(group, { description: "蔵元一式", contexts: [sake] })).toBe(true);
+    expect(await client.groups.create(group, { description: "蔵元一式", context_ids: [sakeId] })).toBe(true);
     await expect(client.groups.create(group)).rejects.toMatchObject({ code: "already_exists" });
 
     let entry = await client.groups.get(group);
     expect(entry.description).toBe("蔵元一式");
-    expect(entry.contexts).toEqual([sake]);
+    expect(entry.context_ids).toEqual([sakeId]);
     expect(entry.groups).toEqual([]);
 
     // Deltas: removals are idempotent no-ops, additions demand existence.
     entry = await client.groups.update(group, {
-      add_contexts: [tea],
-      remove_contexts: ["never-a-member"],
+      add_context_ids: [teaId],
+      remove_context_ids: [GHOST_ID],
     });
-    expect(entry.contexts).toEqual([sake, tea].sort());
+    expect(entry.context_ids).toEqual([sakeId, teaId].sort());
     await expect(
-      client.groups.update(group, { add_contexts: [`${base}-missing`] }),
+      client.groups.update(group, { add_context_ids: [GHOST_ID] }),
     ).rejects.toMatchObject({ code: "no_context" });
 
     // Nesting: a child group rides the row's `groups` list.
-    expect(await client.groups.create(child, { contexts: [tea] })).toBe(true);
+    expect(await client.groups.create(child, { context_ids: [teaId] })).toBe(true);
     entry = await client.groups.update(group, { add_groups: [child] });
     expect(entry.groups).toEqual([child]);
 
@@ -778,7 +780,7 @@ describe("groups and cross-context search", () => {
     expect(await client.groups.rename(group, renamedGroup)).toBe(true);
     await expect(client.groups.get(group)).rejects.toMatchObject({ code: "no_group" });
     entry = await client.groups.get(renamedGroup);
-    expect(entry.contexts).toEqual([sake, tea].sort());
+    expect(entry.context_ids).toEqual([sakeId, teaId].sort());
     expect(entry.groups).toEqual([child]);
 
     // Deleting the bundling leaves members (and the child group) alone.
@@ -800,32 +802,33 @@ describe("groups and cross-context search", () => {
     const base = fresh();
     const [sake, tea, sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
-    await client.groups.create(group, { contexts: [sake, tea] });
+    await client.groups.create(group, { context_ids: [sakeId, teaId] });
 
     // recall: named contexts, every match tagged with its origin.
-    const page = await client.recall("代表銘柄", { contexts: [sake, tea] });
+    const page = await client.recall("代表銘柄", { context_ids: [sakeId, teaId] });
     expect(page.total).toBe(2);
-    expect(new Set(page.matches.map((m) => m.context))).toEqual(new Set([sake, tea]));
+    expect(new Set(page.matches.map((m) => m.context_id))).toEqual(new Set([sakeId, teaId]));
+    expect(new Set(page.matches.map((m) => m.context_name))).toEqual(new Set([sake, tea]));
     expect(new Set(page.matches.map((m) => m.object))).toEqual(new Set(["青嶺", "露霜"]));
 
     // query: a group resolves to every context it reaches; overlaps with
     // directly named contexts dedupe silently.
-    const queried = await client.query({ label: "代表銘柄", groups: [group], contexts: [sake] });
+    const queried = await client.query({ label: "代表銘柄", groups: [group], context_ids: [sakeId] });
     expect(queried.total).toBe(2);
-    expect(new Set(queried.matches.map((m) => m.context))).toEqual(new Set([sake, tea]));
+    expect(new Set(queried.matches.map((m) => m.context_id))).toEqual(new Set([sakeId, teaId]));
 
     // searchPassages: rank-interleaved, hits tagged; score is per-context.
     const searched = await client.searchPassages("代表銘柄は青嶺", {
-      contexts: [sake, tea],
+      context_ids: [sakeId, teaId],
       limit: 4,
     });
-    expect(new Set(searched.hits.map((h) => h.context))).toEqual(new Set([sake, tea]));
+    expect(new Set(searched.hits.map((h) => h.context_id))).toEqual(new Set([sakeId, teaId]));
     expect(searched.hits.every((h) => h.text.length > 0)).toBe(true);
     // The plan lists both targets in effective order (#151).
-    expect(searched.plan.contexts.map((entry) => entry.context)).toEqual([sake, tea]);
+    expect(searched.plan.contexts.map((entry) => entry.context_id)).toEqual([sakeId, teaId]);
 
     // An empty target list is refused, an unknown group answers no_group.
-    await expect(client.recall("青嶺", { contexts: [] })).rejects.toMatchObject({
+    await expect(client.recall("青嶺", { context_ids: [] })).rejects.toMatchObject({
       code: "invalid_argument",
     });
     await expect(client.recall("青嶺", { groups: [`${base}-missing`] })).rejects.toMatchObject({
@@ -839,28 +842,28 @@ describe("groups and cross-context search", () => {
 
   it("round-trips a group through export → import", async () => {
     const base = fresh();
-    const [sake, tea, sakeId, teaId] = await seededPair(base);
+    const [, , sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
-    await client.groups.create(group, { description: "蔵元一式", contexts: [sake, tea] });
+    await client.groups.create(group, { description: "蔵元一式", context_ids: [sakeId, teaId] });
 
     const line = await client.groups.export(group);
     const record = JSON.parse(line) as {
       type: string;
       version: string;
       id: string;
-      contexts: string[];
+      context_ids: string[];
     };
     expect(record.type).toBe("group");
     expect(record.version).toBe("2026-10-01");
     expect(record.id).toBe(group);
-    expect(record.contexts).toEqual([sake, tea].sort());
+    expect(record.context_ids).toEqual([sakeId, teaId].sort());
 
     // The record is the group's complete truth: import restores it whole.
     await client.groups.delete(group);
     expect(await client.groups.exists(group)).toBe(false);
     const result = await client.importBatches(line);
     expect(result.groups).toEqual([{ name: group, outcome: "created", contexts: 2, groups: 0 }]);
-    expect((await client.groups.get(group)).contexts).toEqual([sake, tea].sort());
+    expect((await client.groups.get(group)).context_ids).toEqual([sakeId, teaId].sort());
 
     await client.groups.delete(group);
     await client.contexts.delete(sakeId);

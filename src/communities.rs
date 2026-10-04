@@ -191,11 +191,10 @@ pub fn run(args: &[String]) -> i32 {
     }
     let api = Api::new(base);
 
-    // `--context` takes the id (#964); `--group` expansion yields
-    // member display names (group records hold names until #965),
-    // each resolved to its id here. Either way the display name is
-    // in hand too: the derived artifact's default name is built from
-    // it, never from the id.
+    // `--context` takes the id (#964), and `--group` expansion yields
+    // member ids too (group records hold ids, #965). Either way the
+    // display name is read off the row: the derived artifact's
+    // default name is built from it, never from the id.
     let contexts: Vec<(String, String)> = match &group {
         None => {
             let id = context.expect("checked above");
@@ -220,18 +219,20 @@ pub fn run(args: &[String]) -> i32 {
             }
             Ok(members) => {
                 let mut resolved = Vec::with_capacity(members.len());
-                for name in members {
-                    match api.context_id_by_name(&name) {
-                        Ok(Some(id)) => resolved.push((id, name)),
-                        Ok(None) => {
-                            eprintln!(
-                                "taguru: communities: group member '{name}' does not resolve \
-                                 to a context"
-                            );
-                            return 1;
-                        }
+                for id in members {
+                    match api.get(&["contexts", &id]) {
+                        Ok(row) => match row["name"].as_str() {
+                            Some(name) => resolved.push((id.clone(), name.to_string())),
+                            None => {
+                                eprintln!(
+                                    "taguru: communities: group member '{id}': the row \
+                                     carries no name"
+                                );
+                                return 1;
+                            }
+                        },
                         Err(error) => {
-                            eprintln!("taguru: communities: {error}");
+                            eprintln!("taguru: communities: group member '{id}': {error}");
                             return 1;
                         }
                     }
@@ -647,7 +648,7 @@ fn read_manifest(
     Ok(Some(manifest))
 }
 
-/// A `group`'s transitive member `contexts`, child `groups` included —
+/// A `group`'s transitive member `context` ids, child `groups` included —
 /// depth is server-capped, and cycles are refused at write time, so a
 /// plain recursion cannot run away.
 fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
@@ -661,7 +662,7 @@ fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
         let entry = api
             .get_envelope(&["groups", &name])
             .map_err(|failure| failure.into_message())?;
-        for context in entry["contexts"].as_array().into_iter().flatten() {
+        for context in entry["context_ids"].as_array().into_iter().flatten() {
             if let Some(context) = context.as_str() {
                 contexts.insert(context.to_string());
             }

@@ -15,6 +15,11 @@ use serde_json::json;
 
 use crate::support::*;
 
+/// Two canonical ids no test ever creates, distinct so a refusal that
+/// names one cannot be confused with the other.
+const ABSENT_A: &str = "00000000-0000-4000-8000-0000000000a1";
+const ABSENT_B: &str = "00000000-0000-4000-8000-0000000000a2";
+
 /// `cross_targets`'s own existence check (`src/api/recall.rs`) walks
 /// `contexts` with `.iter().find(...)` — a plain, ordered scan, not a
 /// concurrent fan-out — so when several named contexts are missing at
@@ -39,17 +44,17 @@ fn cross_recall_aborts_naming_the_first_missing_context_by_list_order() {
     let (status, refused) = server.call(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["absent-a", "absent-b", "stays"], "cue": "蔵"})),
+        Some(json!({"context_ids": [ABSENT_A, ABSENT_B, server.cx("stays")], "cue": "蔵"})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
     let message = refused["error"].as_str().unwrap();
     assert!(
-        message.contains("absent-a"),
+        message.contains(ABSENT_A),
         "must name the list-first target, not the second: {message}"
     );
     assert!(
-        !message.contains("absent-b"),
+        !message.contains(ABSENT_B),
         "must not name the second target instead: {message}"
     );
 }
@@ -96,13 +101,13 @@ fn cross_recall_mid_loop_pool_cut_still_yields_the_exact_global_top_limit() {
     let page = server.ok(
         "POST",
         "/recall",
-        Some(json!({"contexts": ["r1", "r2", "r3"], "cue": "蔵", "limit": 5})),
+        Some(json!({"context_ids": [server.cx("r1"), server.cx("r2"), server.cx("r3")], "cue": "蔵", "limit": 5})),
     );
     assert_eq!(page["total"], json!(18), "{page}");
     let matches = page["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 5, "{page}");
     for entry in matches {
-        assert_eq!(entry["context"], json!("r3"), "{page}");
+        assert_eq!(entry["context_name"], json!("r3"), "{page}");
     }
     let weights: Vec<f64> = matches
         .iter()

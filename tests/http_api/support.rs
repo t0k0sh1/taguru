@@ -25,6 +25,13 @@ fn read_listen_line_and_drain(label: &str, stdout: ChildStdout) -> String {
     addr
 }
 
+/// A canonical context id no test ever creates — the id a member list
+/// names when the point is "this context does not exist" (#965: a bare
+/// name like "ghost" is not an id and is refused as such, a different
+/// refusal).
+#[allow(dead_code)]
+pub const GHOST_ID: &str = "00000000-0000-4000-8000-00000000dead";
+
 /// One running server on its own port and data directory, killed and
 /// cleaned up on drop.
 pub struct Server {
@@ -111,6 +118,16 @@ impl Server {
     #[allow(dead_code)]
     pub fn cx(&self, name: &str) -> String {
         self.context_stem(name)
+    }
+
+    /// The ids of `names` as the sorted JSON array a group row's
+    /// `context_ids` serves (#965) — id order, not name order, so a
+    /// test spelling the members by name still compares like for like.
+    #[allow(dead_code)]
+    pub fn cx_sorted(&self, names: &[&str]) -> Value {
+        let mut ids: Vec<String> = names.iter().map(|name| self.cx(name)).collect();
+        ids.sort();
+        json!(ids)
     }
 
     /// Creates a context under a CHOSEN id: a header-only import batch

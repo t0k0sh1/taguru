@@ -34,7 +34,7 @@ fn a_schema_record_installs_after_batches_before_groups_and_the_response_names_i
         "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
           \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
          {schema_record}\
-         {{\"type\": \"group\", \"id\": \"breweries\", \"contexts\": [\"sake\"]}}\n",
+         {{\"type\": \"group\", \"id\": \"breweries\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}}\n",
         schema_record = schema_line("cef2e28b-43f0-4b6c-8201-abab0785399f", "warn"),
     );
     let (status, outcome) = post_import(&server, &stream, None);

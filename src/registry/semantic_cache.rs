@@ -814,6 +814,7 @@ mod tests {
             op: RetrievalCacheOp::SearchPassages,
             targets: Box::new([TargetFingerprint {
                 id: "c".to_string(),
+                name: "c".to_string(),
                 identity: 1,
                 lanes: [0, 0],
             }]),

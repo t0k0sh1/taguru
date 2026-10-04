@@ -73,7 +73,7 @@ pub(super) async fn merge_groups(
     router_ok(api::GroupPage { total, groups }, Vec::new(), started_at)
 }
 
-/// Unions one shard's row into the merged directory: member `contexts`
+/// Unions one shard's row into the merged directory: member `context_ids`
 /// are per-shard projections (disjoint by the map), children are
 /// broadcast whole, the description is identical everywhere a
 /// non-drifted record lives. Fingerprints are folded together — each
@@ -84,9 +84,9 @@ pub(super) async fn merge_groups(
 fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::GroupEntry) {
     match rows.get_mut(&entry.name) {
         Some(held) => {
-            let mut members: BTreeSet<String> = held.contexts.drain(..).collect();
-            members.extend(entry.contexts);
-            held.contexts = members.into_iter().collect();
+            let mut members: BTreeSet<String> = held.context_ids.drain(..).collect();
+            members.extend(entry.context_ids);
+            held.context_ids = members.into_iter().collect();
             held.groups.extend(entry.groups);
             let mut digest = crate::hash::fnv1a_fold(
                 crate::hash::FNV1A_OFFSET,
@@ -164,13 +164,16 @@ enum Unprojectable {
 }
 
 /// Projects the named member-list fields of a JSON body per shard.
-/// Members of a `checked` field (the create/add lists) that the map
-/// does not place are refused up front with the single-instance
-/// nonexistent-member message, since a `context` no shard owns cannot
-/// exist on any of them. `unchecked` fields (the remove lists) skip
-/// that gate: a single instance's `update_group` treats removals as an
-/// idempotent set difference and never validates their existence, so
-/// an unplaced member simply projects to no shard — the same no-op.
+/// Members are context ids (#965), and the map speaks names, so the
+/// owner of each id in a `checked` field (the create/add lists) is asked
+/// of the shards themselves ([`locate_owner`]; a single-shard map pays
+/// nothing). An id no shard holds is refused up front with the
+/// single-instance nonexistent-member message, since a `context` no
+/// shard owns cannot exist on any of them. `unchecked` fields (the
+/// remove lists) need no owner: a single instance's `update_group`
+/// treats removals as an idempotent set difference and never validates
+/// their existence, so the whole list goes to every shard, where
+/// whatever is not a member there is the same no-op.
 ///
 /// Three gates before any of that. A body that is not a JSON object
 /// is refused here as `invalid_argument`: indexing a non-object
@@ -187,12 +190,17 @@ enum Unprojectable {
 /// past `MAX_INPUT_ITEMS` is refused with `api::overlong`'s shape on
 /// the WHOLE list — split per shard, each shard's slice would pass its
 /// own cap and the intended hard limit would scale with the shard
-/// count.
-fn project_body(
+/// count. A member that is not a canonical context id is refused with
+/// the shard's own 400, before any probe.
+#[allow(clippy::too_many_arguments)]
+async fn project_body(
+    state: &RouterState,
     map: &RouteMap,
     base: &Value,
     checked: &[&str],
     unchecked: &[&str],
+    headers: &HeaderMap,
+    deadline: Deadline,
     started_at: Instant,
 ) -> Result<impl Fn(usize) -> Option<Bytes> + use<>, Unprojectable> {
     if !base.is_object() {
@@ -202,7 +210,7 @@ fn project_body(
             started_at,
         ))));
     }
-    let mut lists: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut lists: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
     let fields = checked
         .iter()
         .map(|field| (*field, true))
@@ -225,18 +233,40 @@ fn project_body(
         if let Some(refusal) = api::overlong(field, members.len(), started_at) {
             return Err(Unprojectable::Refusal(Box::new(refusal)));
         }
-        if check {
-            for member in &members {
-                if map.shard_of(member).is_none() {
+        if let Some(refusal) = api::invalid_context_ids(field, &members, started_at) {
+            return Err(Unprojectable::Refusal(Box::new(refusal)));
+        }
+        lists.insert(field.to_string(), (check, members));
+    }
+    // Owners, asked once per distinct id of a checked list.
+    let mut owner_of: BTreeMap<String, usize> = BTreeMap::new();
+    for (check, members) in lists.values() {
+        if !check {
+            continue;
+        }
+        for member in members {
+            if owner_of.contains_key(member) {
+                continue;
+            }
+            match locate_owner(state, map, member, headers, deadline, started_at).await {
+                Located::Shard(shard) => {
+                    owner_of.insert(member.clone(), shard);
+                }
+                Located::Missing => {
                     return Err(Unprojectable::Refusal(Box::new(api::error(
                         ErrorCode::NoContext,
                         format!("context '{member}' not found; nothing was applied"),
                         started_at,
                     ))));
                 }
+                Located::Answered(response)
+                | Located::Unreached {
+                    refusal: response, ..
+                } => {
+                    return Err(Unprojectable::Refusal(Box::new(response)));
+                }
             }
         }
-        lists.insert(field.to_string(), members);
     }
     let base = base.clone();
     let shards_projection: Vec<BTreeMap<String, Vec<String>>> = map
@@ -244,11 +274,17 @@ fn project_body(
         .map(|shard| {
             lists
                 .iter()
-                .map(|(field, members)| {
-                    (
-                        field.clone(),
-                        map.project(members.iter().map(String::as_str), shard),
-                    )
+                .map(|(field, (check, members))| {
+                    let projected = if *check {
+                        members
+                            .iter()
+                            .filter(|member| owner_of.get(*member) == Some(&shard))
+                            .cloned()
+                            .collect()
+                    } else {
+                        members.clone()
+                    };
+                    (field.clone(), projected)
                 })
                 .collect()
         })
@@ -293,7 +329,18 @@ pub(super) async fn create_group_broadcast(
         }
     };
     let path = format!("/groups/{}", urlencode(&name));
-    let body_for = match project_body(&map, &base, &["contexts"], &[], started_at) {
+    let body_for = match project_body(
+        &state,
+        &map,
+        &base,
+        &["context_ids"],
+        &[],
+        &headers,
+        deadline,
+        started_at,
+    )
+    .await
+    {
         Ok(body_for) => body_for,
         Err(Unprojectable::Refusal(refusal)) => return *refusal,
         Err(Unprojectable::Probe) => {
@@ -344,12 +391,17 @@ pub(super) async fn update_group_broadcast(
     };
     let path = format!("/groups/{}", urlencode(&name));
     let body_for = match project_body(
+        &state,
         &map,
         &base,
-        &["add_contexts"],
-        &["remove_contexts"],
+        &["add_context_ids"],
+        &["remove_context_ids"],
+        &headers,
+        deadline,
         started_at,
-    ) {
+    )
+    .await
+    {
         Ok(body_for) => body_for,
         Err(Unprojectable::Refusal(refusal)) => return *refusal,
         Err(Unprojectable::Probe) => {
@@ -600,7 +652,7 @@ pub(super) async fn export_group_union(
                 };
                 match &mut merged {
                     Some(held) => {
-                        held.contexts.extend(record.contexts);
+                        held.context_ids.extend(record.context_ids);
                         held.groups.extend(record.groups);
                     }
                     None => merged = Some(record),
@@ -652,7 +704,7 @@ fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        contexts: string_set("contexts"),
+        context_ids: string_set("context_ids"),
         groups: string_set("groups"),
     })
 }
@@ -661,8 +713,43 @@ fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
 mod tests {
     use super::*;
 
-    fn two_shards() -> RouteMap {
-        RouteMap::parse("a = http://a:1\nb = http://b:1\n* = http://b:1\n").unwrap()
+    fn state_over(map_text: &str) -> RouterState {
+        RouterState {
+            inner: Arc::new(RouterInner {
+                map: parking_lot::RwLock::new(Arc::new(RouteMap::parse(map_text).unwrap())),
+                client: reqwest::Client::new(),
+                metrics: RouterMetrics::default(),
+                instructions: OnceLock::new(),
+            }),
+        }
+    }
+
+    const TWO_SHARDS: &str = "a = http://a:1\nb = http://b:1\n* = http://b:1\n";
+    const ONE_SHARD: &str = "* = http://b:1\n";
+
+    /// `project_body` over `map_text`, with the arguments a handler
+    /// would have. No test here reaches a network: every shape that
+    /// needs a probe uses the one-shard map, where ownership is
+    /// answered without asking.
+    async fn project(
+        map_text: &str,
+        base: &Value,
+        checked: &[&str],
+        unchecked: &[&str],
+    ) -> Result<impl Fn(usize) -> Option<Bytes> + use<>, Unprojectable> {
+        let state = state_over(map_text);
+        let map = state.map();
+        project_body(
+            &state,
+            &map,
+            base,
+            checked,
+            unchecked,
+            &HeaderMap::new(),
+            Deadline::unbounded(),
+            Instant::now(),
+        )
+        .await
     }
 
     async fn refusal_body(response: Response) -> serde_json::Value {
@@ -672,12 +759,15 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn id(n: usize) -> String {
+        format!("00000000-0000-4000-8000-{n:012x}")
+    }
+
     /// A non-object body is refused by the router itself — indexing it
     /// by key would panic into a 500, and a probe would let serde's
     /// positional reading create the group on one shard alone.
     #[tokio::test]
     async fn a_non_object_body_is_refused_before_any_shard_sees_it() {
-        let map = two_shards();
         for base in [
             json!([]),
             json!(["d", ["a"]]),
@@ -685,7 +775,7 @@ mod tests {
             json!("x"),
             json!(true),
         ] {
-            let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+            let outcome = project(TWO_SHARDS, &base, &["context_ids"], &[]).await;
             let Err(Unprojectable::Refusal(refusal)) = outcome else {
                 panic!("{base} must be refused, never probed or projected");
             };
@@ -698,47 +788,50 @@ mod tests {
     /// A member list the single-instance extractor would refuse is a
     /// probe, never projected: a list that is not an array, a member
     /// that is not a string (it used to be dropped in silence).
-    #[test]
-    fn a_body_the_typed_extractor_refuses_is_a_probe_not_a_projection() {
-        let map = two_shards();
+    #[tokio::test]
+    async fn a_body_the_typed_extractor_refuses_is_a_probe_not_a_projection() {
         for base in [
-            json!({"contexts": "a"}),
-            json!({"contexts": {"a": 1}}),
-            json!({"contexts": ["a", 42]}),
-            json!({"contexts": ["a", null]}),
+            json!({"context_ids": "a"}),
+            json!({"context_ids": {"a": 1}}),
+            json!({"context_ids": ["a", 42]}),
+            json!({"context_ids": ["a", null]}),
         ] {
-            let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+            let outcome = project(TWO_SHARDS, &base, &["context_ids"], &[]).await;
             assert!(
                 matches!(outcome, Err(Unprojectable::Probe)),
                 "{base} must probe a shard"
             );
         }
         // The unchecked (remove) lists are typed the same way.
-        let base = json!({"remove_contexts": [1]});
-        let outcome = project_body(&map, &base, &[], &["remove_contexts"], Instant::now());
+        let base = json!({"remove_context_ids": [1]});
+        let outcome = project(TWO_SHARDS, &base, &[], &["remove_context_ids"]).await;
         assert!(matches!(outcome, Err(Unprojectable::Probe)));
         // An absent list is empty, a null body field is not an array.
-        assert!(project_body(&map, &json!({}), &["contexts"], &[], Instant::now()).is_ok());
-        let outcome = project_body(
-            &map,
-            &json!({"contexts": null}),
-            &["contexts"],
-            &[],
-            Instant::now(),
+        assert!(
+            project(TWO_SHARDS, &json!({}), &["context_ids"], &[])
+                .await
+                .is_ok()
         );
+        let outcome = project(
+            TWO_SHARDS,
+            &json!({"context_ids": null}),
+            &["context_ids"],
+            &[],
+        )
+        .await;
         assert!(matches!(outcome, Err(Unprojectable::Probe)));
     }
 
     /// The per-request cap is judged on the whole list, before the
     /// split per shard: 1001 members over two shards is refused with
     /// `api::overlong`'s shape even though each shard's slice would
-    /// pass its own cap; 1000 projects.
+    /// pass its own cap; 1000 projects (here over one shard, where
+    /// ownership needs no probe — every member lands on it).
     #[tokio::test]
     async fn the_member_cap_is_the_whole_list_not_the_per_shard_slice() {
-        let map = two_shards();
-        let members: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
-        let base = json!({"contexts": members});
-        let outcome = project_body(&map, &base, &["contexts"], &[], Instant::now());
+        let members: Vec<String> = (0..1001).map(id).collect();
+        let base = json!({"context_ids": members});
+        let outcome = project(TWO_SHARDS, &base, &["context_ids"], &[]).await;
         let Err(Unprojectable::Refusal(refusal)) = outcome else {
             panic!("1001 members must be refused as overlong");
         };
@@ -749,19 +842,78 @@ mod tests {
             body["error"]
                 .as_str()
                 .unwrap()
-                .contains("contexts carries 1001 items"),
+                .contains("context_ids carries 1001 items"),
             "{body}"
         );
 
-        let members: Vec<String> = (0..1000).map(|i| format!("c{i}")).collect();
-        let base = json!({"contexts": members, "description": "d"});
-        let body_for = project_body(&map, &base, &["contexts"], &[], Instant::now())
+        let members: Vec<String> = (0..1000).map(id).collect();
+        let base = json!({"context_ids": members, "description": "d"});
+        let body_for = project(ONE_SHARD, &base, &["context_ids"], &[])
+            .await
             .unwrap_or_else(|_| panic!("1000 members must project"));
-        // Every member falls to the `*` shard; the other gets none.
-        let shard_a: serde_json::Value = serde_json::from_slice(&body_for(0).unwrap()).unwrap();
-        let shard_b: serde_json::Value = serde_json::from_slice(&body_for(1).unwrap()).unwrap();
-        assert_eq!(shard_a["contexts"].as_array().unwrap().len(), 0);
-        assert_eq!(shard_b["contexts"].as_array().unwrap().len(), 1000);
-        assert_eq!(shard_b["description"], "d");
+        let only: serde_json::Value = serde_json::from_slice(&body_for(0).unwrap()).unwrap();
+        assert_eq!(only["context_ids"].as_array().unwrap().len(), 1000);
+        assert_eq!(only["description"], "d");
+    }
+
+    /// A member that is not a canonical context id — a name, an
+    /// uppercase spelling — is refused with the shard's own 400 before
+    /// any probe, in every member list, the remove lists included.
+    #[tokio::test]
+    async fn a_member_that_is_not_a_context_id_is_refused_before_any_probe() {
+        for (base, checked, unchecked) in [
+            (json!({"context_ids": ["sake"]}), "context_ids", ""),
+            (
+                json!({"add_context_ids": [id(1), "SAKE"]}),
+                "add_context_ids",
+                "",
+            ),
+            (
+                json!({"remove_context_ids": ["sake"]}),
+                "",
+                "remove_context_ids",
+            ),
+        ] {
+            let checked: Vec<&str> = Some(checked)
+                .into_iter()
+                .filter(|f| !f.is_empty())
+                .collect();
+            let unchecked: Vec<&str> = Some(unchecked)
+                .into_iter()
+                .filter(|f| !f.is_empty())
+                .collect();
+            let outcome = project(TWO_SHARDS, &base, &checked, &unchecked).await;
+            let Err(Unprojectable::Refusal(refusal)) = outcome else {
+                panic!("{base} must be refused");
+            };
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST, "{base}");
+            let body = refusal_body(*refusal).await;
+            assert_eq!(body["code"], "invalid_argument", "{base}: {body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("is not a context id"),
+                "{body}"
+            );
+        }
+    }
+
+    /// A remove list needs no owner: the whole list goes to every
+    /// shard, where a non-member removes as the same no-op a single
+    /// instance gives — and no probe is made (this two-shard map
+    /// would refuse the connection).
+    #[tokio::test]
+    async fn a_remove_list_goes_whole_to_every_shard_without_a_probe() {
+        let base = json!({"remove_context_ids": [id(1), id(2)], "add_groups": ["g"]});
+        let body_for = project(TWO_SHARDS, &base, &[], &["remove_context_ids"])
+            .await
+            .unwrap_or_else(|_| panic!("a remove list must project"));
+        for shard in 0..2 {
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_for(shard).unwrap()).unwrap();
+            assert_eq!(body["remove_context_ids"], json!([id(1), id(2)]));
+            assert_eq!(body["add_groups"], json!(["g"]));
+        }
     }
 }

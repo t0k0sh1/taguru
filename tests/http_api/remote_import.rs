@@ -529,7 +529,7 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let group_file = batches.join("00-group.jsonl");
     std::fs::write(
         &group_file,
-        "{\"type\": \"group\", \"id\": \"kura\", \"contexts\": [\"sake\", \"beer\"]}\n",
+        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\"]}\n",
     )
     .expect("fixture must be writable");
     let batch_file = batches.join("01-batches.jsonl");
@@ -561,7 +561,7 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let (status, group) = server.call("GET", "/groups/kura", None);
     assert_eq!(status, 200, "{group}");
     assert_eq!(
-        group["result"]["contexts"].as_array().map(Vec::len),
+        group["result"]["context_ids"].as_array().map(Vec::len),
         Some(2)
     );
 
@@ -591,7 +591,7 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
          {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
          {\"type\": \"schema\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-         {\"type\": \"group\", \"id\": \"g\", \"contexts\": [\"a\"]}\n",
+         {\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"ca978112-ca1b-4dca-bac2-31b39a23dc4d\"]}\n",
     )
     .expect("fixture must be writable");
 

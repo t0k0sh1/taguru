@@ -113,20 +113,4 @@ impl RouteMap {
     pub(super) fn url(&self, shard: usize) -> &str {
         &self.shards[shard]
     }
-
-    /// The map's member-list projection for one shard — what a `group`
-    /// write sends there. A member no shard owns keeps flowing to the
-    /// owning-shard check downstream, which refuses it exactly as a
-    /// single instance refuses a nonexistent member.
-    pub(super) fn project<'a>(
-        &self,
-        members: impl IntoIterator<Item = &'a str>,
-        shard: usize,
-    ) -> Vec<String> {
-        members
-            .into_iter()
-            .filter(|name| self.shard_of(name) == Some(shard))
-            .map(str::to_string)
-            .collect()
-    }
 }

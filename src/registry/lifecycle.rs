@@ -222,7 +222,7 @@ impl AppState {
         // effort — the delete's own durability rides on the marker
         // alone, and a sweep that could not persist is healed by the
         // next boot's reconciliation.
-        self.sweep_context_from_groups(&name);
+        self.sweep_context_from_groups(&stem);
         let mut outcome = Ok(());
         for file in context_files(&stem) {
             if let Err(error) = remove_persisted_file(self.0.data_dir.join(file))
@@ -252,11 +252,11 @@ impl AppState {
     /// Renames a `context`: under ids (ADR 0045) a rename is a display-
     /// name change and nothing else — the file family stays where it
     /// is (the stem is the id), so the marker/move/resume machinery
-    /// renames used to need is gone. What remains is: persist the new
-    /// name into the sidecar (the name's one durable home), move the
-    /// id between the two names in the registry's index, and carry
-    /// `group` membership — which still names contexts by name until
-    /// #965 — along.
+    /// renames used to need is gone, and so is the `group` rewrite
+    /// (#965): records hold member ids, which a rename never changes.
+    /// What remains is: persist the new name into the sidecar (the
+    /// name's one durable home) and move the id between the two names
+    /// in the registry's index.
     ///
     /// No availability check and no reservation: the destination name
     /// may already be in use (issue #961 decision 1 — names are not
@@ -267,14 +267,6 @@ impl AppState {
     /// worst a sidecar already renamed whose index entry still says
     /// the old name — the next boot reads the sidecar and registers
     /// the new name, exactly what the caller was about to be told.
-    ///
-    /// The `group` membership rewrite is best-effort: a record that
-    /// will not persist is warned about and heals structurally at
-    /// #965 (group records will hold ids, which a rename never
-    /// changes). Until then a crash between the sidecar write and
-    /// the rewrite loses the renamed context's membership at the next
-    /// boot's `reconcile_groups` — the price of retiring the durable
-    /// marker, accepted by #963's design.
     pub fn rename_context(&self, id: &str, to: &str) -> Result<(), RenameContextError> {
         if to.is_empty() {
             return Err(RenameContextError::InvalidName);
@@ -297,16 +289,6 @@ impl AppState {
                 registry.reindex(id, &from, to);
             }
         }
-        // Group membership still names contexts by name until #965.
-        // Best-effort, after the rename is already served: see this
-        // function's doc for the crash window this accepts.
-        let membership_persisted = {
-            let mut groups = self.0.groups.write();
-            rename_in_membership(&self.0.data_dir, &mut groups, &from, to, |record| {
-                &mut record.contexts
-            })
-        };
-        warn_unpersisted_membership(&from, to, membership_persisted);
         Ok(())
     }
 
@@ -349,25 +331,6 @@ impl AppState {
             return Err(RenameContextError::Io(error));
         }
         Ok(Some(previous))
-    }
-}
-
-/// The rename's membership-rewrite warning, split out so its gate can
-/// be skipped for mutation testing: which branch runs only decides
-/// whether one `warn!` line fires — the rewrite itself already ran and
-/// the rename already succeeded — so a mutated condition here changes
-/// nothing a behavioral test can observe short of capturing log
-/// output, which nothing in this codebase does (same reasoning as
-/// `boot.rs`'s `remove_persisted_file_quietly`).
-#[mutants::skip]
-fn warn_unpersisted_membership(from: &str, to: &str, membership_persisted: bool) {
-    if !membership_persisted {
-        tracing::warn!(
-            from = %from,
-            to = %to,
-            "context rename: a group record still names the old name; retry the rename \
-             or re-put the group, or the next boot's reconcile drops the member"
-        );
     }
 }
 
@@ -793,7 +756,7 @@ mod tests {
                 .create_group(
                     "breweries",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -809,7 +772,7 @@ mod tests {
                 "failure at persistence step {failure} resurrected the context: {outcome:?}"
             );
             assert!(
-                state.group("breweries").unwrap().contexts.is_empty(),
+                state.group("breweries").unwrap().context_ids.is_empty(),
                 "boot did not reconcile group membership at step {failure}"
             );
             assert!(
@@ -1227,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_context_changes_the_name_in_place_and_rewrites_group_membership() {
+    fn rename_context_changes_the_name_in_place_and_leaves_group_membership_alone() {
         let dir = scratch_dir("rename-context-happy");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state
@@ -1251,7 +1214,7 @@ mod tests {
             .create_group(
                 "drinks",
                 String::new(),
-                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::from([state.id_of("sake")]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -1283,9 +1246,10 @@ mod tests {
             "the family stays at its stem"
         );
         assert_eq!(
-            state.group("drinks").unwrap().contexts,
-            BTreeSet::from(["shochu".to_string()]),
-            "group membership follows the rename, not a stale name"
+            state.group("drinks").unwrap().context_ids,
+            BTreeSet::from([stem.clone()]),
+            "members are ids (#965): a rename never touches the record, \
+             and the member still names the same context"
         );
         let count = state
             .read_context(&state.id_of("shochu"), |context| {
@@ -1301,8 +1265,8 @@ mod tests {
         assert!(state.directory_entry("sake").is_none());
         assert!(state.directory_entry("shochu").is_some());
         assert_eq!(
-            state.group("drinks").unwrap().contexts,
-            BTreeSet::from(["shochu".to_string()])
+            state.group("drinks").unwrap().context_ids,
+            BTreeSet::from([stem.clone()])
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -1432,12 +1396,10 @@ mod tests {
     /// The rename fault sweep, under ids: every persistence step of
     /// `rename_context` either rolls the whole call back (the sidecar
     /// write — the name's one durable home — failed, so `from` still
-    /// answers) or lands the rename with membership following. The
-    /// membership rewrite itself is best-effort now (no marker, no
-    /// boot resume — #965 retires the name linkage entirely): a group
-    /// write that fails leaves the LIVE record already rewritten, and
-    /// the reboot's reconcile drops the stale on-disk member rather
-    /// than resurrecting the old name.
+    /// answers) or lands the rename. Group records hold member ids
+    /// (#965), so there is no membership rewrite to fail: the member is
+    /// the same id live, on disk, and after a reboot, whichever name
+    /// the context ends up under.
     #[test]
     fn a_rename_fault_lands_the_context_under_exactly_one_name() {
         let mut exhausted = false;
@@ -1445,11 +1407,12 @@ mod tests {
             let dir = scratch_dir(&format!("rename-membership-fault-{failure}"));
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state.create("sake", ContextMeta::default()).unwrap();
+            let sake_id = state.id_of("sake");
             state
                 .create_group(
                     "drinks",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([sake_id.clone()]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -1457,13 +1420,13 @@ mod tests {
             fail_persistence_ops_after(failure);
             let outcome = state.rename_context(&state.id_of("sake"), "shochu");
             let past_end = clear_persistence_fault();
-            let live_members = state.group("drinks").unwrap().contexts;
+            let live_members = state.group("drinks").unwrap().context_ids;
             drop(state);
 
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             let sake = state.directory_entry("sake");
             let shochu = state.directory_entry("shochu");
-            let members = state.group("drinks").unwrap().contexts;
+            let members = state.group("drinks").unwrap().context_ids;
             match (sake.is_some(), shochu.is_some()) {
                 (true, false) => {
                     assert!(
@@ -1473,7 +1436,7 @@ mod tests {
                     );
                     assert_eq!(
                         members,
-                        BTreeSet::from(["sake".to_string()]),
+                        BTreeSet::from([sake_id.clone()]),
                         "failure at persistence step {failure} ({outcome:?}): the \
                          rename never landed, so membership must be untouched"
                     );
@@ -1481,17 +1444,15 @@ mod tests {
                 (false, true) => {
                     assert_eq!(
                         live_members,
-                        BTreeSet::from(["shochu".to_string()]),
+                        BTreeSet::from([sake_id.clone()]),
                         "failure at persistence step {failure} ({outcome:?}): a \
-                         landed rename rewrites the LIVE record even when its \
-                         persist fails"
+                         landed rename leaves the LIVE record alone"
                     );
-                    assert!(
-                        members == BTreeSet::from(["shochu".to_string()]) || members.is_empty(),
+                    assert_eq!(
+                        members,
+                        BTreeSet::from([sake_id.clone()]),
                         "failure at persistence step {failure} ({outcome:?}): after \
-                         a reboot the member is the new name, or — when the group \
-                         write was the failed step — dropped by reconcile; it must \
-                         never be the old name, got {members:?}"
+                         a reboot the member is still the same id, got {members:?}"
                     );
                 }
                 other => panic!(

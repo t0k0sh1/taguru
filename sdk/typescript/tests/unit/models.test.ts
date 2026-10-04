@@ -43,11 +43,12 @@ describe("crossMatchCursor", () => {
       weight: 1.0,
       count: 2,
       attributions: [],
-      context: "sake",
+      context_id: "id-sake",
+      context_name: "sake",
     };
     expect(crossMatchCursor(match)).toEqual({
       weight: 1.0,
-      context: "sake",
+      context_id: "id-sake",
       subject: "青嶺酒造",
       label: "杜氏",
       object: "高瀬",

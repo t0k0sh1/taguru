@@ -14,7 +14,7 @@ use crate::ingest::AliasRejection;
 use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
 
-use super::groups::{scope_refusal, scoped_member_contexts};
+use super::groups::{scope_refusal_ids, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
     access_error_noted, collected_validation_message, deadline_exceeded, error, group_not_found,
@@ -907,7 +907,8 @@ pub async fn import_batch(
     // pays for the closure read.
     if grant.is_some()
         && !stream.groups.is_empty()
-        && let Some(refusal) = scope_refusal(
+        && let Some(refusal) = scope_refusal_ids(
+            &state,
             &grant,
             &key,
             &state.group_restore_involves(&stream.groups),
@@ -1144,14 +1145,14 @@ pub async fn import_batch(
                             key = %key_name(&key),
                             group = %name,
                             outcome = applied.as_str(),
-                            contexts = record.contexts.len(),
+                            contexts = record.context_ids.len(),
                             children = record.groups.len(),
                             "import group record applied",
                         );
                         group_outcomes.push(GroupImportOutcome {
                             name: name.clone(),
                             outcome: applied.as_str(),
-                            contexts: record.contexts.len(),
+                            contexts: record.context_ids.len(),
                             groups: record.groups.len(),
                         });
                     }
@@ -1329,7 +1330,7 @@ pub async fn export_group(
     };
     let filtered = GroupRecord {
         description: record.description,
-        contexts: scoped_member_contexts(record.contexts, &grant),
+        context_ids: scoped_member_contexts(&state, record.context_ids, &grant),
         // Child names stay whole, as on the row: labels, not content.
         groups: record.groups,
     };

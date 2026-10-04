@@ -290,11 +290,11 @@ group: paper/sato2023
 
 client = Taguru()
 
-<span class="k">def</span> ensure_group(name, description, contexts):
+<span class="k">def</span> ensure_group(name, description, context_ids):
     <span class="k">try</span>:
-        client.groups.create(name, description=description, contexts=contexts)
+        client.groups.create(name, description=description, context_ids=context_ids)
     <span class="k">except</span> ConflictError:
-        client.groups.update(name, add_contexts=contexts)</code></pre>
+        client.groups.update(name, add_context_ids=context_ids)</code></pre>
     <p>
       <code>context</code> creation gets the same idempotence for free from <code>TaguruIngester</code>
       itself — <code>create_context=True</code> stamps a create block that only takes effect
@@ -331,7 +331,10 @@ section_contexts = []
     print(<span class="s">f"{context}: {outcome.associations} facts, {outcome.aliases} aliases"</span>)
     section_contexts.append(context)
 
-ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka et al. 2024, full paper"</span>, section_contexts)</code></pre>
+<span class="c"># groups hold context ids, never names: map this demo's (unique) section names once</span>
+ids_by_name = {row.name: row.id <span class="k">for</span> row <span class="k">in</span> client.contexts.iter()}
+ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka et al. 2024, full paper"</span>,
+             [ids_by_name[name] <span class="k">for</span> name <span class="k">in</span> section_contexts])</code></pre>
     <p>
       <code>metadata["source"]</code> is the retract-then-apply idempotency unit —
       <code>tanaka2024/3</code> here — chosen by this pipeline, not handed out by the server.

@@ -361,7 +361,9 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
     call(
         "PUT",
         "/groups/g",
-        Some(json!({"description": "", "contexts": ["x", "y"], "groups": []})),
+        Some(
+            json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+        ),
         "atok",
     );
 
@@ -574,17 +576,18 @@ fn cross_passage_search_keys_on_target_order() {
             Some(json!({"passages": {"a.md": format!("{context}の蔵は端麗な酒を醸す。")}})),
         );
     }
-    let search = |contexts: Value| {
+    let search = |names: &[&str]| {
+        let ids: Vec<String> = names.iter().map(|name| server.cx(name)).collect();
         server.ok(
             "POST",
             "/sources/search",
-            Some(json!({"contexts": contexts, "query": "端麗"})),
+            Some(json!({"context_ids": ids, "query": "端麗"})),
         )
     };
-    search(json!(["cx", "cy"]));
-    search(json!(["cx", "cy"]));
+    search(&["cx", "cy"]);
+    search(&["cx", "cy"]);
     assert_eq!(cache_hits(&server, "search_passages"), 1);
-    search(json!(["cy", "cx"]));
+    search(&["cy", "cx"]);
     assert_eq!(
         cache_misses(&server, "search_passages"),
         2,
@@ -625,7 +628,7 @@ fn cross_passage_search_tallies_lane_hits_against_the_served_page_not_every_targ
         server.ok(
             "POST",
             "/sources/search",
-            Some(json!({"contexts": ["cx", "cy", "cz"], "query": "端麗", "limit": 2})),
+            Some(json!({"context_ids": [server.cx("cx"), server.cx("cy"), server.cx("cz")], "query": "端麗", "limit": 2})),
         )
     };
 
@@ -696,7 +699,7 @@ fn cross_passage_search_never_caches_a_response_degraded_by_embedding_failure() 
         server.ok(
             "POST",
             "/sources/search",
-            Some(json!({"contexts": ["cx", "cy"], "query": "端麗"})),
+            Some(json!({"context_ids": [server.cx("cx"), server.cx("cy")], "query": "端麗"})),
         )
     };
     let first = search();

@@ -348,7 +348,7 @@ pub(super) fn run_local(
                         json_groups.push(crate::api::GroupImportOutcome {
                             name: name.clone(),
                             outcome: outcome.as_str(),
-                            contexts: record.contexts.len(),
+                            contexts: record.context_ids.len(),
                             groups: record.groups.len(),
                         });
                     } else {
@@ -592,7 +592,7 @@ fn describe_schema(context: &str, installed: &schema::InstalledSchema) -> String
 fn describe_group(name: &str, record: &GroupRecord) -> String {
     format!(
         "group '{name}': {} member context(s), {} child group(s)",
-        record.contexts.len(),
+        record.context_ids.len(),
         record.groups.len()
     )
 }
@@ -624,4 +624,27 @@ pub(super) fn duplicate_group_message(name: &str, earlier: &Path) -> String {
          group's truth",
         earlier.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dry-run line counts members by id and child groups apart.
+    #[test]
+    fn describe_group_counts_member_contexts_and_child_groups() {
+        let record = GroupRecord {
+            description: "d".into(),
+            context_ids: [
+                "cef2e28b-43f0-4b6c-8201-abab0785399f".to_string(),
+                "ead6ef03-d61e-460c-933d-6d450c50a1e5".to_string(),
+            ]
+            .into(),
+            groups: ["child".to_string()].into(),
+        };
+        assert_eq!(
+            describe_group("kura", &record),
+            "group 'kura': 2 member context(s), 1 child group(s)"
+        );
+    }
 }

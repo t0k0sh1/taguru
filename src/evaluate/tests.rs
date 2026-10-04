@@ -343,7 +343,8 @@ fn passage_page_value() -> Value {
         "plan": {
             "contexts": [
                 {
-                    "context": "sake",
+                    "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f",
+                    "context_name": "sake",
                     "lanes": {
                         "bm25": {"ran": true},
                         "vector": {"ran": false, "reason": "no embedding provider is configured"}
@@ -370,7 +371,8 @@ fn extract_passages_reads_the_real_plan_and_hits_shape() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].source, "corpus/brewery.md");
     let plan = plan.expect("plan.contexts must carry the one searched context");
-    assert_eq!(plan.context, "sake");
+    assert_eq!(plan.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
+    assert_eq!(plan.context_name, "sake");
 }
 
 #[test]

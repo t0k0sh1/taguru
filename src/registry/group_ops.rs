@@ -33,7 +33,7 @@ impl AppState {
         &self,
         name: &str,
         description: String,
-        contexts: BTreeSet<String>,
+        context_ids: BTreeSet<String>,
         children: BTreeSet<String>,
     ) -> Result<(), CreateGroupError> {
         if name.is_empty() {
@@ -47,11 +47,11 @@ impl AppState {
         // [`groups::MAX_GROUP_MEMBERS`] (a create can't say more names
         // than a group may hold), but the invariant belongs to the
         // registry, not to whoever happens to call it.
-        check_member_caps(&contexts, &children).map_err(CreateGroupError::OverCap)?;
+        check_member_caps(&context_ids, &children).map_err(CreateGroupError::OverCap)?;
         {
             let registry = self.0.registry.read();
             if let Some(missing) =
-                first_missing(&contexts, |context| registry.contains_name(context))
+                first_missing(&context_ids, |context| registry.contains_id(context))
             {
                 return Err(CreateGroupError::NoSuchContext(missing.clone()));
             }
@@ -71,7 +71,7 @@ impl AppState {
         sweep_stale_rename_markers(&self.0.data_dir, name).map_err(CreateGroupError::Io)?;
         let record = GroupRecord {
             description,
-            contexts,
+            context_ids,
             groups: children,
         };
         // The nesting validator wants the prospective map, so insert
@@ -101,8 +101,8 @@ impl AppState {
         &self,
         name: &str,
         description: Option<String>,
-        add_contexts: BTreeSet<String>,
-        remove_contexts: BTreeSet<String>,
+        add_context_ids: BTreeSet<String>,
+        remove_context_ids: BTreeSet<String>,
         add_groups: BTreeSet<String>,
         remove_groups: BTreeSet<String>,
     ) -> Result<GroupRecord, UpdateGroupError> {
@@ -119,9 +119,9 @@ impl AppState {
             for (field, current, add, remove) in [
                 (
                     "member contexts",
-                    &record.contexts,
-                    &add_contexts,
-                    &remove_contexts,
+                    &record.context_ids,
+                    &add_context_ids,
+                    &remove_context_ids,
                 ),
                 ("child groups", &record.groups, &add_groups, &remove_groups),
             ] {
@@ -140,10 +140,10 @@ impl AppState {
                 }
             }
         }
-        if !add_contexts.is_empty() {
+        if !add_context_ids.is_empty() {
             let registry = self.0.registry.read();
             if let Some(missing) =
-                first_missing(&add_contexts, |context| registry.contains_name(context))
+                first_missing(&add_context_ids, |context| registry.contains_id(context))
             {
                 return Err(UpdateGroupError::NoSuchContext(missing.clone()));
             }
@@ -155,10 +155,10 @@ impl AppState {
         }
         let record = groups.get_mut(name).unwrap();
         let previous = record.clone();
-        for context in &remove_contexts {
-            record.contexts.remove(context);
+        for context in &remove_context_ids {
+            record.context_ids.remove(context);
         }
-        record.contexts.extend(add_contexts);
+        record.context_ids.extend(add_context_ids);
         for group in &remove_groups {
             record.groups.remove(group);
         }
@@ -214,7 +214,7 @@ impl AppState {
             if !incoming.insert(name) {
                 return Err(RestoreGroupsError::Duplicate(name.clone()));
             }
-            check_member_caps(&record.contexts, &record.groups).map_err(|field| {
+            check_member_caps(&record.context_ids, &record.groups).map_err(|field| {
                 RestoreGroupsError::OverCap {
                     group: name.clone(),
                     field,
@@ -228,7 +228,7 @@ impl AppState {
             let registry = self.0.registry.read();
             for (name, record) in records {
                 if let Some(missing) =
-                    first_missing(&record.contexts, |context| registry.contains_name(context))
+                    first_missing(&record.context_ids, |context| registry.contains_id(context))
                 {
                     return Err(RestoreGroupsError::NoSuchContext {
                         group: name.clone(),
@@ -577,7 +577,7 @@ impl AppState {
     pub(super) fn sweep_context_from_groups(&self, context_name: &str) {
         let mut groups = self.0.groups.write();
         sweep_membership(&self.0.data_dir, &mut groups, context_name, |record| {
-            &mut record.contexts
+            &mut record.context_ids
         });
     }
 }
@@ -715,7 +715,7 @@ mod tests {
             .create_group(
                 "drinks",
                 "beverage knowledge".into(),
-                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::from([state.id_of("sake")]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -754,21 +754,21 @@ mod tests {
             Err(UpdateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
         assert_eq!(
-            state.group("drinks").unwrap().contexts,
-            BTreeSet::from(["sake".to_string()])
+            state.group("drinks").unwrap().context_ids,
+            BTreeSet::from([state.id_of("sake")])
         );
         let updated = state
             .update_group(
                 "drinks",
                 Some("all drinks".into()),
-                BTreeSet::from(["beer".to_string()]),
-                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::from([state.id_of("beer")]),
+                BTreeSet::from([state.id_of("sake")]),
                 BTreeSet::new(),
                 BTreeSet::new(),
             )
             .unwrap();
         assert_eq!(updated.description, "all drinks");
-        assert_eq!(updated.contexts, BTreeSet::from(["beer".to_string()]));
+        assert_eq!(updated.context_ids, BTreeSet::from([state.id_of("beer")]));
         assert!(matches!(
             state.update_group(
                 "ghosts",
@@ -786,7 +786,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let survived = state.group("drinks").unwrap();
         assert_eq!(survived.description, "all drinks");
-        assert_eq!(survived.contexts, BTreeSet::from(["beer".to_string()]));
+        assert_eq!(survived.context_ids, BTreeSet::from([state.id_of("beer")]));
 
         // Deletion removes the record and its file; the members live on.
         state.delete_group("drinks").unwrap().unwrap();
@@ -865,7 +865,7 @@ mod tests {
                 .create_group(
                     group,
                     String::new(),
-                    BTreeSet::from(["sake".to_string(), "beer".to_string()]),
+                    BTreeSet::from([state.id_of("sake"), state.id_of("beer")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -875,8 +875,8 @@ mod tests {
 
         for group in ["drinks", "fermented"] {
             assert_eq!(
-                state.group(group).unwrap().contexts,
-                BTreeSet::from(["beer".to_string()]),
+                state.group(group).unwrap().context_ids,
+                BTreeSet::from([state.id_of("beer")]),
                 "'{group}' still names the deleted context"
             );
         }
@@ -885,8 +885,8 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         for group in ["drinks", "fermented"] {
             assert_eq!(
-                state.group(group).unwrap().contexts,
-                BTreeSet::from(["beer".to_string()])
+                state.group(group).unwrap().context_ids,
+                BTreeSet::from([state.id_of("beer")])
             );
         }
 
@@ -917,7 +917,7 @@ mod tests {
         // one too many, but trading the member out in the same request
         // makes room — the cap passes and the existence gate speaks
         // next, proving the judgement order.
-        let one = BTreeSet::from(["real".to_string()]);
+        let one = BTreeSet::from([state.id_of("real")]);
         state
             .create_group("g", String::new(), one.clone(), BTreeSet::new())
             .unwrap();
@@ -958,7 +958,7 @@ mod tests {
             ),
             Err(UpdateGroupError::OverCap("child groups"))
         ));
-        assert_eq!(state.group("g").unwrap().contexts, one);
+        assert_eq!(state.group("g").unwrap().context_ids, one);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -973,7 +973,7 @@ mod tests {
             .create_group(
                 "kura",
                 "old".to_string(),
-                BTreeSet::from(["sake".to_string(), "bunko".to_string()]),
+                BTreeSet::from([state.id_of("sake"), state.id_of("bunko")]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -990,7 +990,7 @@ mod tests {
 
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
             description: "new".to_string(),
-            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
             groups: children.iter().map(|g| g.to_string()).collect(),
         };
         // The set references its own newcomer — parent listed first,
@@ -1039,7 +1039,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
             description: String::new(),
-            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
             groups: children.iter().map(|g| g.to_string()).collect(),
         };
 
@@ -1097,7 +1097,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = |children: &[&str]| GroupRecord {
             description: String::new(),
-            contexts: BTreeSet::new(),
+            context_ids: BTreeSet::new(),
             groups: children.iter().map(|name| name.to_string()).collect(),
         };
         let child_set = |names: &[&str]| -> BTreeSet<String> {
@@ -1169,7 +1169,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
             description: String::new(),
-            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
             groups: children.iter().map(|g| g.to_string()).collect(),
         };
 
@@ -1222,7 +1222,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = GroupRecord {
             description: String::new(),
-            contexts: BTreeSet::new(),
+            context_ids: BTreeSet::new(),
             groups: BTreeSet::new(),
         };
 
@@ -1260,7 +1260,7 @@ mod tests {
         state.create("sake", ContextMeta::default()).unwrap();
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
             description: String::new(),
-            contexts: contexts.iter().map(|c| c.to_string()).collect(),
+            context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
             groups: children.iter().map(|g| g.to_string()).collect(),
         };
 
@@ -1361,7 +1361,7 @@ mod tests {
                         "wide".to_string(),
                         GroupRecord {
                             description: String::new(),
-                            contexts: over,
+                            context_ids: over,
                             groups: BTreeSet::new(),
                         },
                     )],
@@ -1387,14 +1387,15 @@ mod tests {
             state.create(context, ContextMeta::default()).unwrap();
         }
         let one = |name: &str| BTreeSet::from([name.to_string()]);
+        let one_ctx = |name: &str| BTreeSet::from([state.id_of(name)]);
         state
-            .create_group("leaf", String::new(), one("tea"), BTreeSet::new())
+            .create_group("leaf", String::new(), one_ctx("tea"), BTreeSet::new())
             .unwrap();
         state
-            .create_group("mid", String::new(), one("beer"), one("leaf"))
+            .create_group("mid", String::new(), one_ctx("beer"), one("leaf"))
             .unwrap();
         state
-            .create_group("top", String::new(), one("sake"), one("mid"))
+            .create_group("top", String::new(), one_ctx("sake"), one("mid"))
             .unwrap();
 
         // The closure reads through the nesting; the record stays flat.
@@ -1402,10 +1403,10 @@ mod tests {
             state.group_context_closures(["top"]),
             ["sake", "beer", "tea"]
                 .iter()
-                .map(|c| c.to_string())
+                .map(|c| state.id_of(c))
                 .collect()
         );
-        assert_eq!(state.group("top").unwrap().contexts, one("sake"));
+        assert_eq!(state.group("top").unwrap().context_ids, one_ctx("sake"));
 
         // A fourth storey over a full chain refuses, and nothing lands.
         assert!(matches!(
@@ -1459,7 +1460,10 @@ mod tests {
         drop(state);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         assert_eq!(state.group("top").unwrap().groups, BTreeSet::new());
-        assert_eq!(state.group("leaf").unwrap().contexts, one("tea"));
+        assert_eq!(
+            state.group("leaf").unwrap().context_ids,
+            BTreeSet::from([state.id_of("tea")])
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1473,9 +1477,14 @@ mod tests {
         let groups = state.0.groups.read();
         assert_eq!(groups::validate_nesting(&groups), Ok(()));
         for record in groups.values() {
-            assert!(record.contexts.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.context_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(record.groups.len() <= groups::MAX_GROUP_MEMBERS);
-            assert!(record.contexts.iter().all(|name| contexts.contains(name)));
+            assert!(
+                record
+                    .context_ids
+                    .iter()
+                    .all(|name| contexts.contains(name))
+            );
             assert!(record.groups.iter().all(|name| groups.contains_key(name)));
         }
     }
@@ -1533,7 +1542,7 @@ mod tests {
                                     name.to_string(),
                                     GroupRecord {
                                         description: String::new(),
-                                        contexts: contexts.into_iter().map(str::to_string).collect(),
+                                        context_ids: contexts.into_iter().map(str::to_string).collect(),
                                         groups: groups.into_iter().map(str::to_string).collect(),
                                     },
                                 )
@@ -1565,7 +1574,7 @@ mod tests {
             .create_group(
                 "drinks",
                 "before".into(),
-                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::from([state.id_of("sake")]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -1577,7 +1586,7 @@ mod tests {
             "drinks",
             Some("after".into()),
             BTreeSet::new(),
-            BTreeSet::from(["sake".to_string()]),
+            BTreeSet::from([state.id_of("sake")]),
             BTreeSet::new(),
             BTreeSet::new(),
         );
@@ -1585,7 +1594,7 @@ mod tests {
         assert!(matches!(outcome, Err(UpdateGroupError::Io(_))));
         let record = state.group("drinks").unwrap();
         assert_eq!(record.description, "before");
-        assert_eq!(record.contexts, BTreeSet::from(["sake".to_string()]));
+        assert_eq!(record.context_ids, BTreeSet::from([state.id_of("sake")]));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1599,7 +1608,7 @@ mod tests {
             .create_group(
                 "liquor",
                 "d".into(),
-                BTreeSet::from(["sake".to_string()]),
+                BTreeSet::from([state.id_of("sake")]),
                 BTreeSet::new(),
             )
             .unwrap();
@@ -1617,7 +1626,7 @@ mod tests {
         assert!(state.group("liquor").is_none());
         let spirits = state.group("spirits").unwrap();
         assert_eq!(spirits.description, "d");
-        assert_eq!(spirits.contexts, BTreeSet::from(["sake".to_string()]));
+        assert_eq!(spirits.context_ids, BTreeSet::from([state.id_of("sake")]));
         assert_eq!(
             state.group("drinks").unwrap().groups,
             BTreeSet::from(["spirits".to_string()]),
@@ -1659,7 +1668,7 @@ mod tests {
                 .create_group(
                     "liquor",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -1823,7 +1832,7 @@ mod tests {
             .unwrap();
             let record = GroupRecord {
                 description: "restored".to_string(),
-                contexts: BTreeSet::new(),
+                context_ids: BTreeSet::new(),
                 groups: BTreeSet::new(),
             };
             let outcomes = state
@@ -1882,7 +1891,7 @@ mod tests {
                 .create_group(
                     "liquor",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -1914,7 +1923,7 @@ mod tests {
 
             let record = GroupRecord {
                 description: "restored".to_string(),
-                contexts: BTreeSet::from(["sake".to_string()]),
+                context_ids: BTreeSet::from([state.id_of("sake")]),
                 groups: BTreeSet::new(),
             };
             let outcomes = state
@@ -2024,6 +2033,7 @@ mod tests {
         let dir = scratch_dir("groups-reconcile");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
+        let sake_id = state.id_of("sake");
         drop(state);
 
         // A dangling member, planted the way a crash between a
@@ -2033,7 +2043,7 @@ mod tests {
             &file_stem("drinks"),
             &GroupRecord {
                 description: "d".into(),
-                contexts: BTreeSet::from(["sake".to_string(), "gone".to_string()]),
+                context_ids: BTreeSet::from([sake_id, "gone".to_string()]),
                 groups: BTreeSet::new(),
             },
         )
@@ -2041,8 +2051,8 @@ mod tests {
 
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         assert_eq!(
-            state.group("drinks").unwrap().contexts,
-            BTreeSet::from(["sake".to_string()])
+            state.group("drinks").unwrap().context_ids,
+            BTreeSet::from([state.id_of("sake")])
         );
         // Disk is the source of truth: the fix reached the file, not
         // just memory.
@@ -2155,7 +2165,7 @@ mod tests {
                 &file_stem(name),
                 &GroupRecord {
                     description: String::new(),
-                    contexts: BTreeSet::new(),
+                    context_ids: BTreeSet::new(),
                     groups: children.iter().map(|child| child.to_string()).collect(),
                 },
             )
@@ -2209,7 +2219,7 @@ mod tests {
                 .create_group(
                     "liquor",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -2237,7 +2247,7 @@ mod tests {
         let spirits = state
             .group("spirits")
             .expect("the renamed group must exist");
-        assert_eq!(spirits.contexts, BTreeSet::from(["sake".to_string()]));
+        assert_eq!(spirits.context_ids, BTreeSet::from([state.id_of("sake")]));
         assert_eq!(
             state.group("drinks").unwrap().groups,
             BTreeSet::from(["spirits".to_string()]),
@@ -2266,7 +2276,7 @@ mod tests {
                 .create_group(
                     "liquor",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();

@@ -115,27 +115,29 @@ def test_cross_contexts_tag_documents_and_share_one_text_call(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
     retriever = TaguruRetriever(
-        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
     # Every Document names the context it came from.
-    assert all(d.metadata["context"] in {"sake", "tea"} for d in documents)
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert all(d.metadata["context"] in {"id-sake", "id-tea"} for d in documents)
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
     # The graph lane ran per context; the text lane rode the server's own
     # cross-context search — one top-level call naming both targets.
     resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
-    # Cross targets are display names; the graph lane resolves each to
-    # its id and addresses the per-context routes with it (#964).
+    # Cross targets are context ids (#965): the graph lane addresses the
+    # per-context routes with them directly.
     assert resolves == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
-    assert cross_searches == [{"contexts": ["sake", "tea"], "query": "青嶺酒造", "limit": 5}]
+    assert cross_searches == [
+        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+    ]
 
     # Same source id in two contexts stays two Documents (keys carry context).
     graph_backed = [d for d in documents if "graph" in d.metadata["lane"]]
     by_context = {d.metadata["context"] for d in graph_backed}
-    assert by_context == {"sake", "tea"}
+    assert by_context == {"id-sake", "id-tea"}
 
 
 def test_groups_resolve_to_members_nested_children_included(
@@ -148,8 +150,10 @@ def test_groups_resolve_to_members_nested_children_included(
     fetched = [path for path, _ in fake_server.calls if path.startswith("/groups/")]
     assert set(fetched) == {"/groups/parent", "/groups/childg"}
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
-    assert cross_searches == [{"contexts": ["sake", "tea"], "query": "青嶺酒造", "limit": 5}]
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert cross_searches == [
+        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+    ]
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
 def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
@@ -161,7 +165,7 @@ def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
     documents = retriever.invoke("青嶺酒造")
     # parent's members (sake, tea) still come back even though the
     # sibling group 404s.
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
 async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
@@ -171,7 +175,7 @@ async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fe
         groups=["parent", "no-such-group"], client=sync_client, async_client=async_client
     )
     documents = await retriever.ainvoke("青嶺酒造")
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
 def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(
@@ -180,7 +184,7 @@ def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_erro
     # The graph lane addresses tea by its id (#964).
     fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
-        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
@@ -188,10 +192,10 @@ def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_erro
     # still show up.
     graph_docs = [d for d in documents if "graph" in d.metadata["lane"]]
     assert graph_docs
-    assert all(d.metadata["context"] == "sake" for d in graph_docs)
+    assert all(d.metadata["context"] == "id-sake" for d in graph_docs)
     # tea's cross-context text hit isn't a per-context call, so it
     # still shows up despite tea's graph lane failing.
-    assert any(d.metadata["context"] == "tea" for d in documents)
+    assert any(d.metadata["context"] == "id-tea" for d in documents)
 
 
 async def test_async_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(
@@ -200,14 +204,14 @@ async def test_async_keeps_a_healthy_targets_graph_docs_when_another_targets_gra
     # The graph lane addresses tea by its id (#964).
     fake_server.fail_contexts.add("id-tea")
     retriever = TaguruRetriever(
-        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = await retriever.ainvoke("青嶺酒造")
 
     graph_docs = [d for d in documents if "graph" in d.metadata["lane"]]
     assert graph_docs
-    assert all(d.metadata["context"] == "sake" for d in graph_docs)
-    assert any(d.metadata["context"] == "tea" for d in documents)
+    assert all(d.metadata["context"] == "id-sake" for d in graph_docs)
+    assert any(d.metadata["context"] == "id-tea" for d in documents)
 
 
 def test_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
@@ -215,7 +219,7 @@ def test_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
 ) -> None:
     fake_server.fail_text_search = True
     retriever = TaguruRetriever(
-        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = retriever.invoke("青嶺酒造")
 
@@ -224,7 +228,7 @@ def test_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
     # survive it rather than being wiped out along with the text hits.
     assert documents
     assert all("graph" in d.metadata["lane"] for d in documents)
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
 async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
@@ -232,13 +236,13 @@ async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
 ) -> None:
     fake_server.fail_text_search = True
     retriever = TaguruRetriever(
-        contexts=["sake", "tea"], client=sync_client, async_client=async_client
+        contexts=["id-sake", "id-tea"], client=sync_client, async_client=async_client
     )
     documents = await retriever.ainvoke("青嶺酒造")
 
     assert documents
     assert all("graph" in d.metadata["lane"] for d in documents)
-    assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+    assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
 # -- single-context (bare `context=...`) lane isolation ------------------------
@@ -445,7 +449,7 @@ async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
 
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     retriever = TaguruRetriever(
-        contexts=["sake"], groups=["childg"], client=sync_client, async_client=async_client
+        contexts=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
     )
     sync_documents = retriever.invoke("青嶺酒造")
     async_documents = await retriever.ainvoke("青嶺酒造")

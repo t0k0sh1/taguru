@@ -168,13 +168,14 @@ def pdf_to_sections(pdf_path: Path, paper_id: str):
         }
 
 
-def ensure_group(client: Taguru, name: str, description: str, contexts: list[str]) -> None:
+def ensure_group(client: Taguru, name: str, description: str, context_ids: list[str]) -> None:
     """Create the group, or fold new contexts into an existing one — group
-    creation 409s on a rerun, so the idempotence has to be handled here."""
+    creation 409s on a rerun, so the idempotence has to be handled here.
+    Members are context IDs, never names."""
     try:
-        client.groups.create(name, description=description, contexts=contexts)
+        client.groups.create(name, description=description, context_ids=context_ids)
     except ConflictError:
-        client.groups.update(name, add_contexts=contexts)
+        client.groups.update(name, add_context_ids=context_ids)
 
 
 def make_llm(fake_responses: list[str]) -> BaseChatModel:
@@ -245,8 +246,12 @@ def main() -> int:
             print(f"ingested {context}: {outcome.associations} facts, {outcome.aliases} aliases")
             paper_contexts[section["paper"]].append(context)
 
+        # Groups hold context ids; this demo's section names are unique, so
+        # one directory walk maps them (names are display labels, #965).
+        ids_by_name = {row.name: row.id for row in client.contexts.iter()}
         for paper_id, byline in PAPERS.items():
-            ensure_group(client, f"paper/{paper_id}", f"{byline}, full paper", paper_contexts[paper_id])
+            member_ids = [ids_by_name[name] for name in paper_contexts[paper_id]]
+            ensure_group(client, f"paper/{paper_id}", f"{byline}, full paper", member_ids)
 
         # -- read: one retriever across both papers' groups, an independent answer model --
         retriever = TaguruRetriever(client=client, groups=[f"paper/{p}" for p in PAPERS], k=8)

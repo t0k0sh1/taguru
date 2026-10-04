@@ -54,6 +54,7 @@ pub(super) async fn route_import(
                 {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
+                    Located::Unreached { refusal, .. } => return refusal,
                     Located::Missing => match &batch.create {
                         Some(spec) => {
                             let Some(shard) = map.shard_of(&spec.name) else {
@@ -107,6 +108,7 @@ pub(super) async fn route_import(
                 match locate_owner(&state, &map, context_id, &headers, deadline, started_at).await {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
+                    Located::Unreached { refusal, .. } => return refusal,
                     // An id no shard holds: the first shard refuses it in
                     // its own words, as for a batch above.
                     Located::Missing => FIRST_SHARD,
@@ -127,6 +129,31 @@ pub(super) async fn route_import(
         }
         lines
     };
+    // A group record's members are ids (#965): each lands on the shard
+    // that holds it — the batch loop's verdict for an id this stream
+    // creates, a probe for one it only names. An id nobody holds goes
+    // to the first shard, which refuses the missing member in its own
+    // words, as a single instance would.
+    let mut member_shard: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, record) in &stream.groups {
+        for member in &record.context_ids {
+            if member_shard.contains_key(member) {
+                continue;
+            }
+            let shard = match owner_of.get(member) {
+                Some(shard) => *shard,
+                None => {
+                    match locate_owner(&state, &map, member, &headers, deadline, started_at).await {
+                        Located::Shard(shard) => shard,
+                        Located::Answered(response) => return response,
+                        Located::Unreached { refusal, .. } => return refusal,
+                        Located::Missing => FIRST_SHARD,
+                    }
+                }
+            };
+            member_shard.insert(member.clone(), shard);
+        }
+    }
     // Each shard's projected group-record stream, rendered once —
     // preflighted below beside the batch chunks, then applied last.
     let group_lines_for = |shard: usize| -> String {
@@ -134,10 +161,10 @@ pub(super) async fn route_import(
         for (name, record) in &stream.groups {
             let projected = crate::groups::GroupRecord {
                 description: record.description.clone(),
-                contexts: record
-                    .contexts
+                context_ids: record
+                    .context_ids
                     .iter()
-                    .filter(|member| map.shard_of(member) == Some(shard))
+                    .filter(|member| member_shard.get(*member) == Some(&shard))
                     .cloned()
                     .collect(),
                 groups: record.groups.clone(),

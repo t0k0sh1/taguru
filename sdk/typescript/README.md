@@ -15,9 +15,9 @@ npm install taguru
 import { Taguru } from "taguru";
 
 const client = new Taguru(); // defaults: $TAGURU_URL / $TAGURU_API_TOKEN, else http://127.0.0.1:8248
-await client.contexts.create("sake", { description: "青嶺酒造という架空の酒蔵の知識" });
+const row = await client.contexts.create("sake", { description: "青嶺酒造という架空の酒蔵の知識" });
 
-const ctx = client.context("sake");
+const ctx = client.context(row.id); // contexts are addressed by the minted id
 await ctx.addAssociations([
   { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md" },
 ]);

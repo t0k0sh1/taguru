@@ -2340,11 +2340,17 @@ impl ContextTable {
         }
     }
 
-    /// Whether any `context` carries `name` — the create-path
-    /// "name taken" check (the wire's create is still name-addressed,
-    /// so a second create of a live name refuses exactly as before).
+    /// Whether any `context` carries `name` (test fixtures' existence
+    /// check; no production path judges existence by name any more).
+    #[cfg(test)]
     fn contains_name(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
+    }
+
+    /// Whether a `context` is registered under `id` — the group
+    /// records' membership check (their members are ids, #965).
+    fn contains_id(&self, id: &str) -> bool {
+        self.by_id.contains_key(id)
     }
 
     /// The entry registered under `id`, if any — the replica tailer's

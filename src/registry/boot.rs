@@ -569,8 +569,8 @@ fn reconcile_groups(
     let scanned = groups.clone();
     for record in groups.values_mut() {
         record
-            .contexts
-            .retain(|context| registry.contains_name(context));
+            .context_ids
+            .retain(|context| registry.contains_id(context));
         record.groups.retain(|child| scanned.contains_key(child));
     }
     // Dangling names never count toward the cap — they were just
@@ -588,7 +588,7 @@ fn reconcile_groups(
             Ok(()) => {
                 tracing::info!(
                     group = %name,
-                    dropped_contexts = before.contexts.len() - record.contexts.len(),
+                    dropped_contexts = before.context_ids.len() - record.context_ids.len(),
                     dropped_children = before.groups.len() - record.groups.len(),
                     "dropped dangling, over-cap, or ill-nested group reference(s) at boot"
                 );
@@ -734,7 +734,7 @@ mod tests {
                 .create_group(
                     "liquor",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -757,8 +757,8 @@ mod tests {
             .group("spirits")
             .expect("the renamed group must exist");
         assert_eq!(
-            spirits.contexts,
-            BTreeSet::from(["sake".to_string()]),
+            spirits.context_ids,
+            BTreeSet::from([state.id_of("sake")]),
             "membership rides the group rename unchanged"
         );
         assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
@@ -789,7 +789,7 @@ mod tests {
                 .create_group(
                     "drinks",
                     String::new(),
-                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::from([state.id_of("sake")]),
                     BTreeSet::new(),
                 )
                 .unwrap();
@@ -809,7 +809,7 @@ mod tests {
              during reconcile_groups's own write_group call"
         );
         assert_eq!(
-            state.group("drinks").unwrap().contexts,
+            state.group("drinks").unwrap().context_ids,
             BTreeSet::new(),
             "memory must be reconciled even though the write failed"
         );
@@ -818,8 +818,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            on_disk.contexts,
-            BTreeSet::from(["sake".to_string()]),
+            on_disk.context_ids,
+            BTreeSet::from([stem.clone()]),
             "the on-disk file stays stale until the next successful write"
         );
 

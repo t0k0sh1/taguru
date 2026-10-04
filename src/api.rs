@@ -1224,6 +1224,35 @@ where
     }
 }
 
+/// The 400 for a body list (`context_ids`, `add_context_ids`, …) that
+/// carries a value that is not a context id — the same canonical-UUID
+/// test the path extractor applies, so a name in a member list is
+/// refused by name, never half-resolved (#965). `None` when every
+/// value passes. Checked before any lookup: the refusal must not
+/// depend on what exists.
+pub(crate) fn invalid_context_ids<'a>(
+    field: &str,
+    ids: impl IntoIterator<Item = &'a String>,
+    started_at: Instant,
+) -> Option<Response> {
+    let value = ids
+        .into_iter()
+        .find(|id| !crate::registry::is_context_id(id))?;
+    Some(coded(
+        axum::http::StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidArgument,
+        format!(
+            "'{field}' value '{}' is not a context id: it takes the id column of GET /contexts \
+             (a lowercase hyphenated UUID), not the context's name",
+            value
+                .chars()
+                .take(MAX_CONTEXT_NAME_BYTES)
+                .collect::<String>()
+        ),
+        started_at,
+    ))
+}
+
 /// The router-wide 404: paths outside the API answer in the error
 /// shape too, with a pointer at the self-describing endpoint.
 pub async fn unknown_path(method: Method, uri: Uri) -> Response {
@@ -1665,16 +1694,20 @@ pub struct MatchPage {
 /// plan lives in [`sources::SearchPlan`].
 #[derive(Serialize, Deserialize)]
 pub struct MatchPlan {
-    pub contexts: Vec<String>,
+    /// The searched `context` ids, in effective order (#965).
+    pub context_ids: Vec<String>,
 }
 
 /// One cross-`context` result: the per-`context` wire shape, tagged with
 /// the `context` it came from — the tag is what makes the result
 /// actionable, since every follow-up (citations, lookups, activate)
-/// is a per-`context` call.
+/// is a per-`context` call. The tag is the id (#965: what every
+/// follow-up path takes) beside the display name (what a reader
+/// recognizes).
 #[derive(Serialize, Deserialize)]
 pub struct CrossMatch<T> {
-    pub context: String,
+    pub context_id: String,
+    pub context_name: String,
     #[serde(flatten)]
     pub inner: T,
 }
@@ -2165,7 +2198,7 @@ fn recollections_out(
 /// resulting empty key set, so that call costs nothing.
 fn cross_associations_out(
     state: &AppState,
-    id_of_name: &BTreeMap<&str, &str>,
+    name_of_id: &BTreeMap<&str, &str>,
     page: Vec<(String, Association)>,
 ) -> Vec<CrossMatch<AssociationOut>> {
     let mut locators: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
@@ -2177,20 +2210,24 @@ fn cross_associations_out(
     }
     let markers: BTreeMap<String, HashMap<(String, u32), crate::registry::Markers>> = locators
         .into_iter()
-        .map(|(context, keys)| {
-            // Page entries are tagged with display names (the wire's
-            // `context` value until #965); the marker read is
-            // id-keyed. A name the map does not know (a target
-            // deleted mid-response) resolves no markers.
-            let context_id = id_of_name.get(context.as_str()).copied().unwrap_or("");
-            let resolved = state.resolve_markers(context_id, keys.into_iter());
-            (context, resolved)
+        .map(|(context_id, keys)| {
+            let resolved = state.resolve_markers(&context_id, keys.into_iter());
+            (context_id, resolved)
         })
         .collect();
     page.into_iter()
-        .map(|(context, association)| {
-            let inner = association_out(association, &markers[&context]);
-            CrossMatch { context, inner }
+        .map(|(context_id, association)| {
+            let inner = association_out(association, &markers[&context_id]);
+            // A target deleted mid-response keeps its id and loses its
+            // name — the aligned map is the response's own snapshot.
+            let context_name = name_of_id
+                .get(context_id.as_str())
+                .map_or_else(|| context_id.clone(), |name| (*name).to_string());
+            CrossMatch {
+                context_id,
+                context_name,
+                inner,
+            }
         })
         .collect()
 }
@@ -2866,7 +2903,7 @@ mod tests {
         let last = &first[0].1;
         let cursor = CrossMatchCursor {
             weight: last.weight,
-            context: targets[first[0].0].clone(),
+            context_id: targets[first[0].0].clone(),
             subject: last.subject.clone(),
             label: last.label.clone(),
             object: last.object.clone(),
@@ -2886,7 +2923,7 @@ mod tests {
         assert_eq!(targets[*index], "alpha");
         let cursor = CrossMatchCursor {
             weight: last.weight,
-            context: targets[*index].clone(),
+            context_id: targets[*index].clone(),
             subject: last.subject.clone(),
             label: last.label.clone(),
             object: last.object.clone(),

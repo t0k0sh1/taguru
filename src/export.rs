@@ -285,7 +285,7 @@ struct GroupLine<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    contexts: &'a BTreeSet<String>,
+    context_ids: &'a BTreeSet<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     groups: &'a BTreeSet<String>,
 }
@@ -302,7 +302,7 @@ pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
             version: crate::format::FORMAT_VERSION,
             id: name,
             description: &record.description,
-            contexts: &record.contexts,
+            context_ids: &record.context_ids,
             groups: &record.groups,
         },
     );
@@ -1177,7 +1177,7 @@ fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<S
     Ok(format!(
         "{}: group '{name}' → {} member context(s), {} child group(s)",
         path.display(),
-        record.contexts.len(),
+        record.context_ids.len(),
         record.groups.len()
     ))
 }
@@ -1315,7 +1315,7 @@ fn export_group_file(
     Ok(format!(
         "{}: group '{name}' → {} member context(s), {} child group(s)",
         path.display(),
-        record.contexts.len(),
+        record.context_ids.len(),
         record.groups.len()
     ))
 }
@@ -2172,14 +2172,21 @@ mod tests {
     fn a_group_renders_as_one_record_and_round_trips() {
         let record = GroupRecord {
             description: "蔵まとめ".to_string(),
-            contexts: ["sake", "bunko"].iter().map(|c| c.to_string()).collect(),
+            context_ids: [
+                "cef2e28b-43f0-4b6c-8201-abab0785399f",
+                "1d8b4cf8-54cd-42f4-8688-49c4ce329da7",
+            ]
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
             groups: ["kid"].iter().map(|g| g.to_string()).collect(),
         };
         let line = render_group("kura", &record);
         assert_eq!(
             line,
             "{\"type\":\"group\",\"version\":\"2026-10-01\",\"id\":\"kura\",\
-             \"description\":\"蔵まとめ\",\"contexts\":[\"bunko\",\"sake\"],\"groups\":[\"kid\"]}\n"
+             \"description\":\"蔵まとめ\",\"context_ids\":[\"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\",\"cef2e28b-43f0-4b6c-8201-abab0785399f\"],\
+             \"groups\":[\"kid\"]}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
         assert_eq!(stream.groups, vec![("kura".to_string(), record)]);

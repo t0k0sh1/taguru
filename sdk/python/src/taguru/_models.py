@@ -199,18 +199,19 @@ class ContextPage:
 
 @dataclass(slots=True, frozen=True)
 class GroupEntry:
-    """One ``group`` row: member ``contexts`` bundled many-to-many, plus child ``groups``.
+    """One ``group`` row: member ``context`` ids bundled many-to-many, plus child ``groups``.
 
-    For a ``context``-scoped key ``contexts`` carries only the members the grant
-    allows; ``groups`` (child names — labels, not content) is never filtered.
+    ``context_ids`` holds the ids (the ``id`` column of the directory), never
+    names (#965). For a ``context``-scoped key it carries only the members the
+    grant allows; ``groups`` (child names — labels, not content) is never filtered.
     ``id`` is the ``group``'s name — the row's own key (#851).
     """
 
     id: str
     description: str
-    contexts: list[str]
+    context_ids: list[str]
     groups: list[str]
-    #: Change token over the transitive member ``contexts``' revisions —
+    #: Change token over the transitive member ``context_ids``' revisions —
     #: same equality-only contract as ``ContextRevision``. Empty only
     #: from a server that predates the field.
     fingerprint: str = ""
@@ -265,7 +266,7 @@ class Association:
 
 @dataclass(slots=True, frozen=True)
 class MatchPlan:
-    """The execution plan of a graph search (#151): the ``contexts`` actually
+    """The execution plan of a graph search (#151): the ``context_ids`` actually
     consulted, in effective order. For the cross variants that is the
     RESOLVED target list — ``groups`` expanded, the key's grants applied —
     which the tagged matches alone cannot reconstruct when a target came
@@ -273,7 +274,7 @@ class MatchPlan:
     the non-search :class:`MatchPage` producers (``unreachable_from`` —
     an audit, not a search)."""
 
-    contexts: list[str]
+    context_ids: list[str]
 
 
 @dataclass(slots=True, frozen=True)
@@ -290,10 +291,12 @@ class CrossAssociation(Association):
     """An :class:`Association` tagged with the ``context`` it came from.
 
     The tag is what makes a cross-``context`` match actionable — every follow-up
-    (citations, lookups, activate) is a per-``context`` call.
+    (citations, lookups, activate) is a per-``context`` call, which takes the
+    ``context_id``; ``context_name`` is the display name (#965).
     """
 
-    context: str = ""
+    context_id: str = ""
+    context_name: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -685,10 +688,12 @@ class PassageHit:
 
 @dataclass(slots=True, frozen=True)
 class CrossPassageHit(PassageHit):
-    """A :class:`PassageHit` tagged with its ``context``. ``score`` compares
-    within one ``context`` only — the cross-``context`` order is rank interleaving."""
+    """A :class:`PassageHit` tagged with its ``context`` (``context_id`` plus the
+    display ``context_name``). ``score`` compares within one ``context`` only —
+    the cross-``context`` order is rank interleaving."""
 
-    context: str = ""
+    context_id: str = ""
+    context_name: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -725,7 +730,8 @@ class FilterPlan:
 class SearchContextPlan:
     """One searched ``context``'s account within a :class:`SearchPlan`."""
 
-    context: str
+    context_id: str
+    context_name: str
     lanes: SearchLanesPlan
     filter: FilterPlan | None = None
 

@@ -120,14 +120,14 @@ describe("TaguruRetriever cross-context", () => {
   it("tags documents and rides one cross-context text call", async () => {
     const server = new FakeServer();
     const retriever = new TaguruRetriever({
-      contexts: ["sake", "tea"],
+      contexts: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");
 
     // Every Document names the context it came from.
     const contexts = new Set(documents.map((d) => d.metadata["context"]));
-    expect(contexts).toEqual(new Set(["sake", "tea"]));
+    expect(contexts).toEqual(new Set(["id-sake", "id-tea"]));
 
     // The graph lane ran per context; the text lane rode the server's own
     // cross-context search — one top-level call naming both targets.
@@ -138,7 +138,7 @@ describe("TaguruRetriever cross-context", () => {
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ contexts: ["sake", "tea"], query: "青嶺酒造", limit: 5 }]);
+    expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
   });
 
   it("resolves groups to members, nested children included", async () => {
@@ -152,8 +152,8 @@ describe("TaguruRetriever cross-context", () => {
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ contexts: ["sake", "tea"], query: "青嶺酒造", limit: 5 }]);
-    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+    expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 
   it("still resolves the groups it can when one group fails to fetch", async () => {
@@ -166,15 +166,14 @@ describe("TaguruRetriever cross-context", () => {
 
     // parent's members (sake, tea) still come back even though the
     // sibling group 404s.
-    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 
   it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {
     const server = new FakeServer();
-    // The graph lane addresses tea by its id (#964).
     server.failContexts.add("id-tea");
     const retriever = new TaguruRetriever({
-      contexts: ["sake", "tea"],
+      contexts: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");
@@ -183,18 +182,18 @@ describe("TaguruRetriever cross-context", () => {
     // still show up.
     const graphDocs = documents.filter((d) => String(d.metadata["lane"]).includes("graph"));
     expect(graphDocs.length).toBeGreaterThan(0);
-    expect(graphDocs.every((d) => d.metadata["context"] === "sake")).toBe(true);
+    expect(graphDocs.every((d) => d.metadata["context"] === "id-sake")).toBe(true);
 
     // tea's cross-context text hit isn't a per-context call, so it
     // still shows up despite tea's graph lane failing.
-    expect(documents.some((d) => d.metadata["context"] === "tea")).toBe(true);
+    expect(documents.some((d) => d.metadata["context"] === "id-tea")).toBe(true);
   });
 
   it("keeps both targets' graph docs when the text lane errors", async () => {
     const server = new FakeServer();
     server.failTextSearch = true;
     const retriever = new TaguruRetriever({
-      contexts: ["sake", "tea"],
+      contexts: ["id-sake", "id-tea"],
       client: server.client(),
     });
     const documents = await retriever.invoke("青嶺酒造");
@@ -204,7 +203,7 @@ describe("TaguruRetriever cross-context", () => {
     // survive it rather than being wiped out along with the text hits.
     expect(documents.length).toBeGreaterThan(0);
     expect(documents.every((d) => String(d.metadata["lane"]).includes("graph"))).toBe(true);
-    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
+    expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 });
 

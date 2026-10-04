@@ -44,14 +44,22 @@ pub(crate) const MAX_GROUP_DEPTH: usize = 3;
 pub(crate) const MAX_GROUP_MEMBERS: usize = 1000;
 
 /// One `group`: the prose half of the grouping (same routing role as a
-/// `context`'s description) plus the member `context` names and the child
+/// `context`'s description) plus the member `context` ids and the child
 /// `group` names. Sorted sets so membership is deduplicated and every
 /// listing is deterministic.
+///
+/// Members are ids, not names (#965, ADR 0046): a name is a display
+/// label that may repeat and may change, so a record that held one
+/// would silently follow the wrong context after a rename or a second
+/// create. `deny_unknown_fields` makes a file from before the change
+/// (its member list under the old `contexts` key) fail to parse — the
+/// boot scan sets it aside as `.corrupt` and says so — instead of
+/// loading as an empty group with the evidence left unread.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GroupRecord {
     pub description: String,
-    pub contexts: BTreeSet<String>,
+    pub context_ids: BTreeSet<String>,
     /// Child `group` names — nesting, at most [`MAX_GROUP_DEPTH`] `groups`
     /// tall and never cyclic ([`validate_nesting`] guards both). A
     /// child may sit under several parents, exactly as a `context` may:
@@ -205,7 +213,7 @@ pub(crate) fn repair_nesting(groups: &mut BTreeMap<String, GroupRecord>) {
 pub(crate) fn trim_membership(groups: &mut BTreeMap<String, GroupRecord>, cap: usize) {
     for (name, record) in groups.iter_mut() {
         for (field, set) in [
-            ("contexts", &mut record.contexts),
+            ("context_ids", &mut record.context_ids),
             ("child groups", &mut record.groups),
         ] {
             if set.len() <= cap {
@@ -246,7 +254,7 @@ pub(crate) fn context_closure<'map, 'roots: 'map>(
         let Some(record) = groups.get(name) else {
             continue;
         };
-        contexts.extend(record.contexts.iter().cloned());
+        contexts.extend(record.context_ids.iter().cloned());
         frontier.extend(
             record
                 .groups
@@ -400,7 +408,7 @@ mod tests {
                     name.to_string(),
                     GroupRecord {
                         description: String::new(),
-                        contexts: contexts.iter().map(|c| c.to_string()).collect(),
+                        context_ids: contexts.iter().map(|c| c.to_string()).collect(),
                         groups: children.iter().map(|g| g.to_string()).collect(),
                     },
                 )
@@ -506,7 +514,7 @@ mod tests {
         ]);
         trim_membership(&mut groups, 2);
         assert_eq!(
-            groups["wide"].contexts,
+            groups["wide"].context_ids,
             ["c1", "c2"].iter().map(|c| c.to_string()).collect()
         );
         assert_eq!(
@@ -514,7 +522,7 @@ mod tests {
             ["g1", "g2"].iter().map(|g| g.to_string()).collect()
         );
         assert_eq!(
-            groups["fits"].contexts.len(),
+            groups["fits"].context_ids.len(),
             2,
             "within the cap: untouched"
         );
@@ -581,7 +589,7 @@ mod tests {
         let record = &groups["g"];
         assert_eq!(
             record
-                .contexts
+                .context_ids
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
@@ -605,7 +613,7 @@ mod tests {
             trim_membership(&mut under, 2)
         });
         assert!(quiet.lock().unwrap().is_empty());
-        assert_eq!(under["g"].contexts.len(), 2);
+        assert_eq!(under["g"].context_ids.len(), 2);
     }
 
     /// Issue #753: a `group` file already gone counts as removed;
