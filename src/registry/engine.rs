@@ -1645,7 +1645,7 @@ mod tests {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             for name in ["old", "quota_no_cache", "fresh"] {
                 state
-                    .create(name, ContextMeta::default())
+                    .create_if_absent(&test_id(name), name, ContextMeta::default())
                     .map_err(|_| "create")
                     .unwrap();
                 state
@@ -1673,7 +1673,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "quota_no_cache".to_string(),
+                    test_id("quota_no_cache"),
                     ContextQuota {
                         storage_bytes: Some(u64::MAX),
                         cache_bytes: None,
@@ -1721,7 +1721,7 @@ mod tests {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             for name in ["old", "at_ceiling", "fresh"] {
                 state
-                    .create(name, ContextMeta::default())
+                    .create_if_absent(&test_id(name), name, ContextMeta::default())
                     .map_err(|_| "create")
                     .unwrap();
                 state
@@ -1749,7 +1749,7 @@ mod tests {
             None,
             BootOptions {
                 context_quotas: HashMap::from([(
-                    "at_ceiling".to_string(),
+                    test_id("at_ceiling"),
                     ContextQuota {
                         storage_bytes: None,
                         cache_bytes: Some(footprint as u64),
