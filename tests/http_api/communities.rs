@@ -138,6 +138,17 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
             .contains("taguru communities"),
         "{refusal}"
     );
+    // The missing artifact is named by the id the server looked it up
+    // under — and only by that id: no context carries it, so there is no
+    // display name to put beside it.
+    let missing_id = communities_artifact_id(&server.cx("sci"));
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("context '{missing_id}' does not exist")),
+        "{refusal}"
+    );
 
     // Build the artifact by hand through the same API the CLI uses.
     let revision =
