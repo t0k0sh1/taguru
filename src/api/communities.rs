@@ -602,7 +602,6 @@ pub(crate) fn community_hits(
 /// (#966), so the artifact needs its own id in the grant — the id
 /// `GET /contexts` shows once the artifact is built.
 pub(crate) fn check_derived_scope(
-    state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     source_id: &str,
     derived_id: &str,
@@ -616,9 +615,7 @@ pub(crate) fn check_derived_scope(
             ErrorCode::Forbidden,
             format!(
                 "this key's scope does not extend to the artifact context \
-                 '{}' ({derived_id}) — grant it alongside '{}' ({source_id})",
-                state.name_of_stem(derived_id),
-                state.name_of_stem(source_id)
+                 '{derived_id}' — grant it alongside '{source_id}'"
             ),
             started_at,
         )
@@ -647,7 +644,7 @@ pub async fn search_communities(
         .derived_id
         .clone()
         .unwrap_or_else(|| derived_context_id_of(&id));
-    if let Some(refusal) = check_derived_scope(&state, &grant, &id, &derived_id, started_at) {
+    if let Some(refusal) = check_derived_scope(&grant, &id, &derived_id, started_at) {
         return refusal;
     }
     // The source context anchors the staleness verdict; its absence is

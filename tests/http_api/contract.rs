@@ -469,15 +469,15 @@ fn communities_search_community_page() {
     );
     let revision =
         server.ok("GET", &format!("/contexts/{}", server.cx("corpus-d")), None)["revision"].clone();
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "corpus-d::communities"})),
+    // The default artifact: its id derives from the source's (#966).
+    server.create_with_id(
+        &communities_artifact_id(&server.cx("corpus-d")),
+        json!({"name": "corpus-d::communities"}),
     );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "corpus-d",
+        "source_context_id": server.cx("corpus-d"),
         "revision": revision,
         "levels": 1,
         "communities": [
@@ -1034,9 +1034,11 @@ fn error_forbidden() {
         &[
             ("TAGURU_TEST_DETERMINISTIC_IDS", "1"),
             ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
+            // Deterministic ids mint 1, 2, … — the first context created
+            // below is `…0001`, so the grant can name it up front.
             (
                 "TAGURU_KEY_GRANTS",
-                r#"{"reader": {"role": "read", "contexts": ["forbidden-corpus"]}}"#,
+                r#"{"reader": {"role": "read", "contexts": ["00000000-0000-4000-8000-000000000001"]}}"#,
             ),
         ],
     );

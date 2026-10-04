@@ -168,7 +168,7 @@ pub async fn promote_sources(
             format!(
                 "key '{}' has no grant on context '{}' ('into'); nothing was applied",
                 key_name(&key),
-                state.name_of_stem(&request.into)
+                request.into
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),

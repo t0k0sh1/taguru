@@ -556,10 +556,7 @@ async fn serve(
     let mcp_dispatch = app
         .clone()
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::enforce_authorization,
-        ));
+        .layer(axum::middleware::from_fn(auth::enforce_authorization));
     let app = app.route(
         "/mcp",
         post(
@@ -629,10 +626,7 @@ async fn serve(
     // Keyring-free: it judges the grant the bearer gate resolves and
     // stamps, so both layers see one table per request even across a
     // hot reload.
-    let app = app.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth::enforce_authorization,
-    ));
+    let app = app.layer(axum::middleware::from_fn(auth::enforce_authorization));
     let gate = Arc::new(auth::Gate {
         keyring: keyring.clone(),
         oauth: oauth.clone(),

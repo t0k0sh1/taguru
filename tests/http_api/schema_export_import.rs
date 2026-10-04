@@ -100,7 +100,7 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
             ("TAGURU_API_TOKENS", "admin:atok,writer:wtok"),
             (
                 "TAGURU_KEY_GRANTS",
-                r#"{"writer": {"role": "admin", "contexts": ["sake"]}}"#,
+                r#"{"writer": {"role": "admin", "contexts": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
             ),
         ],
     );
@@ -131,7 +131,7 @@ fn a_context_scoped_key_without_a_grant_on_the_schema_records_context_refuses_wi
         refusal["error"]
             .as_str()
             .unwrap()
-            .contains("no grant on context 'bunko'"),
+            .contains("no grant on context '98a4dbfd-92a8-4c44-be61-6b69e8c34c26'"),
         "{refusal}"
     );
     assert!(

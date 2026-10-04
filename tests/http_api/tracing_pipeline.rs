@@ -668,15 +668,14 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     // (the `communities.rs` test's recipe), then ask again.
     let revision =
         server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["revision"].clone();
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "sake::communities"})),
+    server.create_with_id(
+        &communities_artifact_id(&server.cx("sake")),
+        json!({"name": "sake::communities"}),
     );
     let manifest = json!({
         "type": "communities_manifest",
         "algorithm": "louvain-cc/1",
-        "source_context": "sake",
+        "source_context_id": server.cx("sake"),
         "revision": revision,
         "levels": 1,
         "communities": [

@@ -443,7 +443,7 @@ pub async fn assemble_evidence(
         LanePlan::skipped("include_communities was false")
     } else {
         let derived_id = derived_context_id_of(&id);
-        if let Some(refusal) = check_derived_scope(&state, &grant, &id, &derived_id, started_at) {
+        if let Some(refusal) = check_derived_scope(&grant, &id, &derived_id, started_at) {
             return refusal;
         }
         if deadline.expired() {

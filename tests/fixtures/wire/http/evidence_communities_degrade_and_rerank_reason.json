@@ -61,7 +61,7 @@
           },
           "communities": {
             "ran": false,
-            "reason": "no communities artifact for '00000000-0000-4000-8000-000000000001': context 'comm-corpus::communities' does not exist — run `taguru communities` to build it"
+            "reason": "no communities artifact for 'comm-corpus': context '72641c54-ea2f-4dd5-9330-81da8707108d (72641c54-ea2f-4dd5-9330-81da8707108d)' does not exist — run `taguru communities` to build it"
           },
           "passages": {
             "ran": true

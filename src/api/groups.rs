@@ -243,10 +243,10 @@ pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
 /// Checked BEFORE existence on purpose: existence-first would answer
 /// 404 for an id the grant excludes and 403 for a live one, handing
 /// a context-scoped key an oracle for which `context` ids exist beyond
-/// its grant. The refusal names the id the grant is judged by and, for
-/// the human reading it, the context's current display name.
+/// its grant. For the same reason the refusal echoes the id as given
+/// and never the context's display name — a name would tell the key
+/// both that the id is live and what it is called.
 pub(super) fn scope_refusal<'a>(
-    state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     involved: impl IntoIterator<Item = &'a String>,
@@ -261,9 +261,8 @@ pub(super) fn scope_refusal<'a>(
     Some(error(
         ErrorCode::Forbidden,
         format!(
-            "key '{}' has no grant on context '{}' ({refused}); nothing was applied",
+            "key '{}' has no grant on context '{refused}'; nothing was applied",
             key_name(key),
-            state.name_of_stem(refused),
         ),
         started_at,
     ))
@@ -288,7 +287,7 @@ fn scoped_group_refusal<'r, 'd>(
     }
     let mut involved = state.group_context_closures(closure_roots);
     involved.extend(direct.into_iter().cloned());
-    scope_refusal(state, grant, key, &involved, started_at)
+    scope_refusal(grant, key, &involved, started_at)
 }
 
 /// The `group` directory: every `group`'s name, description, member

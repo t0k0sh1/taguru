@@ -292,9 +292,12 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
     ));
     env.push((
         "TAGURU_KEY_GRANTS",
-        r#"{"narrow": {"role": "read", "contexts": ["x"]},
-            "wide": {"role": "read", "contexts": ["x", "y"]}}"#
-            .to_string(),
+        format!(
+            r#"{{"narrow": {{"role": "read", "contexts": ["{x}"]}},
+                "wide": {{"role": "read", "contexts": ["{x}", "{y}"]}}}}"#,
+            x = fixed_id("x"),
+            y = fixed_id("y"),
+        ),
     ));
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let server = Server::start_with_env("semcache-grants", &env);
@@ -304,12 +307,7 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
         parsed["result"].clone()
     };
     for context in ["x", "y"] {
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": context, "description": "d"})),
-            "atok",
-        );
+        server.create_fixed_as(context, "d", Some("atok"));
         call(
             "POST",
             &format!("/contexts/{}/sources", server.cx(context)),

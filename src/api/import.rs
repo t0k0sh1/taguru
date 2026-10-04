@@ -865,7 +865,7 @@ pub async fn import_batch(
                 "key '{}' has no grant on context '{}' (source '{}'); nothing \
                  was applied",
                 key_name(&key),
-                refused.display_name(&state),
+                refused.context_id,
                 refused.source
             ),
             RefusalDetail {
@@ -891,7 +891,7 @@ pub async fn import_batch(
                 "key '{}' has no grant on context '{}' (a schema record); nothing \
                  was applied",
                 key_name(&key),
-                state.name_of_stem(context_id)
+                context_id
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),
@@ -908,7 +908,6 @@ pub async fn import_batch(
     if grant.is_some()
         && !stream.groups.is_empty()
         && let Some(refusal) = scope_refusal(
-            &state,
             &grant,
             &key,
             &state.group_restore_involves(&stream.groups),

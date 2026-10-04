@@ -13,6 +13,10 @@ use crate::support::*;
 /// is judged exactly as the route it dispatches onto.
 #[test]
 fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
+    let grants = format!(
+        r#"{{"reader": "read", "scribe": "write", "potter": {{"role": "write", "contexts": ["{sake}"]}}, "curator": {{"role": "admin", "contexts": ["{sake}"]}}}}"#,
+        sake = fixed_id("sake")
+    );
     let server = Server::start_with_env(
         "http-grants",
         &[
@@ -20,10 +24,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
                 "TAGURU_API_TOKENS",
                 "boss:atok,reader:rtok,scribe:wtok,potter:stok,curator:ctok",
             ),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"reader": "read", "scribe": "write", "potter": {"role": "write", "contexts": ["sake"]}, "curator": {"role": "admin", "contexts": ["sake"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
@@ -34,26 +35,8 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
 
     // The key with no TAGURU_KEY_GRANTS entry keeps the historical full
     // grant: admin, everywhere.
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "sake", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "bunko", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
+    server.create_fixed_as("sake", "d", Some("atok"));
+    server.create_fixed_as("bunko", "d", Some("atok"));
     assert_eq!(
         call(
             "POST",
@@ -278,7 +261,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         outside["error"]
             .as_str()
             .unwrap()
-            .contains("no grant on context 'bunko'"),
+            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
         "{outside}"
     );
     assert_eq!(
@@ -333,7 +316,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         out_of_grant["error"]
             .as_str()
             .unwrap()
-            .contains("no grant on context 'bunko'"),
+            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
         "{out_of_grant}"
     );
     // Judged before anything applies, and the structured field (issue
@@ -361,10 +344,10 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
     let (status, schema_refused) = post_import(&server, &schema_record, Some("ctok"));
     assert_eq!(status, 403, "{schema_refused}");
     assert!(
-        schema_refused["error"]
-            .as_str()
-            .unwrap()
-            .contains("no grant on context 'bunko' (a schema record)"),
+        schema_refused["error"].as_str().unwrap().contains(&format!(
+            "no grant on context '{}' (a schema record)",
+            server.cx("bunko")
+        )),
         "{schema_refused}"
     );
     assert_eq!(
@@ -911,24 +894,22 @@ fn cross_context_search_resolves_groups_beside_contexts() {
 /// would name the very membership the group listings hide.
 #[test]
 fn cross_context_search_respects_grants_without_an_existence_oracle() {
+    let grants = format!(
+        r#"{{"potter": {{"role": "read", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
     let server = Server::start_with_env(
         "cross-grants",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,potter:stok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"potter": {"role": "read", "contexts": ["sake"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
     for name in ["sake", "bunko"] {
-        assert_eq!(
-            call("POST", "/contexts", Some(json!({"name": name})), "atok").0,
-            200
-        );
+        server.create_fixed_as(name, "", Some("atok"));
     }
 
     // Inside the grant: answers.
@@ -940,7 +921,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     );
     assert_eq!(status, 200, "{inside}");
 
-    // One out-of-grant name refuses the whole request…
+    // One out-of-grant id refuses the whole request…
     let (status, live) = call(
         "POST",
         "/recall",
@@ -949,16 +930,18 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     );
     assert_eq!(status, 403, "{live}");
     assert_eq!(live["code"], json!("forbidden"), "{live}");
+    let bunko_id = server.cx("bunko");
+    let live_message = live["error"].as_str().unwrap();
     assert!(
-        live["error"]
-            .as_str()
-            .unwrap()
-            .contains("no grant on context 'bunko'"),
+        live_message.contains(&format!("no grant on context '{bunko_id}'")),
         "{live}"
     );
+    // The refusal echoes the id as given and never the display name:
+    // a name would tell the key that the id is live and what it is.
+    assert!(!live_message.contains("bunko'"), "{live}");
 
-    // …and a nonexistent out-of-grant name answers the IDENTICAL
-    // refusal — never the 404 that would betray which names exist.
+    // …and a nonexistent out-of-grant id answers the IDENTICAL
+    // refusal — never the 404 that would betray which ids exist.
     let (status, ghost) = call(
         "POST",
         "/recall",
@@ -967,9 +950,12 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     );
     assert_eq!(status, 403, "{ghost}");
     assert_eq!(
-        ghost["error"].as_str().unwrap().replace(GHOST_ID, "bunko"),
-        live["error"].as_str().unwrap(),
-        "the refusals must differ in nothing but the echoed name"
+        ghost["error"]
+            .as_str()
+            .unwrap()
+            .replace(GHOST_ID, &bunko_id),
+        live_message,
+        "the refusals must differ in nothing but the echoed id"
     );
 
     // The admin key with no grant entry hears the truth about the same

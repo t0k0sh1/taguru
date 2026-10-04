@@ -1912,7 +1912,7 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
             (
                 "TAGURU_KEY_GRANTS",
-                r#"{"curator": {"role": "admin", "contexts": ["sake"]}}"#,
+                r#"{"curator": {"role": "admin", "contexts": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
             ),
         ],
     );
@@ -1942,12 +1942,20 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     let (status, refusal) = post_import(&server, stream, Some("ctok"));
     assert_eq!(status, 403, "{refusal}");
     assert!(
-        refusal["error"].as_str().unwrap().contains("bunko"),
-        "{refusal}"
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("98a4dbfd-92a8-4c44-be61-6b69e8c34c26"),
+        "the refusal names the out-of-grant id: {refusal}"
     );
     let (status, _) = call("GET", "/groups/kura", None, "atok");
     assert_eq!(status, 404, "the refusal precedes every apply");
-    let (_, sources) = call("GET", "/contexts/sake/sources", None, "atok");
+    let (_, sources) = call(
+        "GET",
+        "/contexts/cef2e28b-43f0-4b6c-8201-abab0785399f/sources",
+        None,
+        "atok",
+    );
     assert!(
         !sources.to_string().contains("s.md"),
         "the batch must not land either: {sources}"
@@ -1969,92 +1977,63 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
     assert_eq!(status, 403, "{refusal}");
 }
 
-/// The destination of `POST /contexts/{name}/rename` rides in the
-/// body, out of the authorization middleware's reach — so a
-/// context-scoped key must not be able to move its data to a name
-/// beyond its grant, whether that name is already someone else's
-/// context or brand new.
+/// A rename touches no grant (#966): grants name the id, which a rename
+/// never changes, so a context-scoped key may rename its own context to
+/// ANY display name — one already carried by an out-of-grant context
+/// included — without gaining or losing a thing. The grant keeps
+/// following the id, and the other context stays out of reach.
 #[test]
-fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_grant() {
+fn a_rename_moves_no_grant_because_grants_name_the_id() {
+    let sake_id = fixed_id("sake");
+    let grants = format!(r#"{{"curator": {{"role": "admin", "contexts": ["{sake_id}"]}}}}"#);
     let server = Server::start_with_env(
         "http-rename-scope",
         &[
-            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok,wide:wtok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"curator": {"role": "admin", "contexts": ["sake"]},
-                    "wide": {"role": "admin", "contexts": ["sake", "shochu"]}}"#,
-            ),
+            ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "sake", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "bunko", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
+    server.create_fixed_as("sake", "d", Some("atok"));
+    server.create_fixed_as("bunko", "d", Some("atok"));
+    let bunko_id = fixed_id("bunko");
 
-    let sake = server.cx("sake");
-    // Destination already exists, but beyond the grant: refused, the
-    // message naming the destination so the caller knows what to fix.
-    let (status, refusal) = call(
+    // The scoped key renames its context to the name an out-of-grant
+    // context carries: allowed — a name is a label, not an address.
+    let (status, applied) = call(
         "POST",
-        &format!("/contexts/{sake}/rename"),
+        &format!("/contexts/{sake_id}/rename"),
         Some(json!({"to": "bunko"})),
         "ctok",
     );
-    assert_eq!(status, 403, "{refusal}");
-    assert!(
-        refusal["error"].as_str().unwrap().contains("bunko"),
-        "{refusal}"
-    );
+    assert_eq!(status, 200, "{applied}");
+    let (status, row) = call("GET", &format!("/contexts/{sake_id}"), None, "ctok");
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["result"]["name"], json!("bunko"), "{row}");
 
-    // Destination is brand new, still beyond the grant: refused the
-    // same way — existence is not what is being checked.
+    // The grant followed the id, not the name: the key still reads and
+    // writes its own context, and the same-named one stays out of reach.
+    let (status, refusal) = call("GET", &format!("/contexts/{bunko_id}"), None, "ctok");
+    assert_eq!(status, 403, "{refusal}");
     let (status, refusal) = call(
         "POST",
-        &format!("/contexts/{sake}/rename"),
-        Some(json!({"to": "shochu"})),
+        &format!("/contexts/{bunko_id}/rename"),
+        Some(json!({"to": "mine"})),
         "ctok",
     );
     assert_eq!(status, 403, "{refusal}");
-
-    // Neither refusal moved anything: the row still answers under its
-    // old display name.
-    let (status, row) = call("GET", &format!("/contexts/{sake}"), None, "atok");
-    assert_eq!(status, 200, "{row}");
-    assert_eq!(row["result"]["name"], json!("sake"), "{row}");
-
-    // A key scoped to BOTH names may rename between them — the grant
-    // check is about the names involved, not a blanket ban. The id
-    // (and so the path) never moves; only the display name does.
-    let (status, applied) = call(
-        "POST",
-        &format!("/contexts/{sake}/rename"),
-        Some(json!({"to": "shochu"})),
-        "wtok",
+    // The scoped directory shows exactly one row — its own, under the
+    // new name.
+    let (status, listing) = call("GET", "/contexts", None, "ctok");
+    assert_eq!(status, 200, "{listing}");
+    assert_eq!(listing["result"]["total"], json!(1), "{listing}");
+    assert_eq!(
+        listing["result"]["contexts"][0]["id"],
+        json!(sake_id),
+        "{listing}"
     );
-    assert_eq!(status, 200, "{applied}");
-    let (status, row) = call("GET", &format!("/contexts/{sake}"), None, "atok");
-    assert_eq!(status, 200, "{row}");
-    assert_eq!(row["result"]["name"], json!("shochu"), "{row}");
 }
 
 /// `GET /groups/{name}/export` serves one `group` record that
@@ -2062,39 +2041,22 @@ fn a_context_scoped_key_cannot_rename_a_context_to_a_destination_beyond_its_gran
 /// exactly the slice its grant lets it read.
 #[test]
 fn a_group_exports_as_one_import_record() {
+    let grants = format!(
+        r#"{{"curator": {{"role": "read", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
     let server = Server::start_with_env(
         "http-group-export",
         &[
             ("TAGURU_API_TOKENS", "boss:atok,curator:ctok"),
-            (
-                "TAGURU_KEY_GRANTS",
-                r#"{"curator": {"role": "read", "contexts": ["sake"]}}"#,
-            ),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
         ],
     );
     let call = |method: &str, path: &str, body: Option<Value>, token: &str| {
         server.call_with_token(method, path, body, Some(token))
     };
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "sake", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
-    assert_eq!(
-        call(
-            "POST",
-            "/contexts",
-            Some(json!({"name": "bunko", "description": "d"})),
-            "atok"
-        )
-        .0,
-        200
-    );
+    server.create_fixed_as("sake", "d", Some("atok"));
+    server.create_fixed_as("bunko", "d", Some("atok"));
     assert_eq!(call("PUT", "/groups/kid", Some(json!({})), "atok").0, 200);
     assert_eq!(
         call(

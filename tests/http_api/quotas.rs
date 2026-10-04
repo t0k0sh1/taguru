@@ -15,7 +15,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
         &[
             (
                 "TAGURU_CONTEXT_QUOTAS",
-                r#"{"capped": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
+                r#"{"5a194219-907f-4bed-a835-23b4776c9948": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
             ),
             ("TAGURU_METRICS_PER_CONTEXT", "1"),
         ],
@@ -126,7 +126,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         "import-quota",
         &[(
             "TAGURU_CONTEXT_QUOTAS",
-            r#"{"capped": {"storage_bytes": 1}}"#,
+            r#"{"5a194219-907f-4bed-a835-23b4776c9948": {"storage_bytes": 1}}"#,
         )],
     );
 

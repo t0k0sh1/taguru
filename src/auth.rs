@@ -875,7 +875,6 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// body or the stored record (`/import`, the `group` writes, the
 /// cross-`context` searches).
 pub async fn enforce_authorization(
-    State(state): State<crate::registry::AppState>,
     matched: Option<MatchedPath>,
     request: Request,
     next: Next,
@@ -935,15 +934,13 @@ pub async fn enforce_authorization(
         let context = api::path_param(&mut parts, "id").await;
         if let Some(context) = context {
             if !grant.allows_context(&context) {
-                // The grant is by id; the refusal also names the
-                // context's display name, for the human reading it.
-                let name = state.name_of_stem(&context);
+                // Echoes the id as given and nothing the registry
+                // knows about it: a display name here would tell a
+                // scoped key both that an out-of-grant id is live and
+                // what it is called (an existence oracle).
                 return api::error(
                     api::ErrorCode::Forbidden,
-                    format!(
-                        "key '{}' has no grant on context '{name}' ({context})",
-                        key.0
-                    ),
+                    format!("key '{}' has no grant on context '{context}'", key.0),
                     started_at,
                 );
             }
@@ -1853,10 +1850,7 @@ mod tests {
                 // Authorization innermost, the bearer gate outside it —
                 // the same nesting main.rs builds. It judges from the
                 // grant extension the gate stamps, keyring-free.
-                .layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    enforce_authorization,
-                ))
+                .layer(axum::middleware::from_fn(enforce_authorization))
                 .layer(axum::middleware::from_fn_with_state(gate, require_bearer))
         };
         let send = |method: &'static str, path: String, token: &'static str| {
@@ -1961,10 +1955,7 @@ mod tests {
                 "/contexts/{id}/associations",
                 axum::routing::post(|| async { "landed" }),
             )
-            .layer(axum::middleware::from_fn_with_state(
-                state,
-                enforce_authorization,
-            ))
+            .layer(axum::middleware::from_fn(enforce_authorization))
             .layer(axum::middleware::from_fn_with_state(gate, require_bearer));
 
         // The first byte percent-encoded: decodes to the minted id,
