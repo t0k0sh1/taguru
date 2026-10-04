@@ -39,7 +39,12 @@ Entries that change an on-disk format or a response shape say so.
   #965 step). The Python/TypeScript SDKs rename `ImportOutcome.context`
   and `SchemaImportOutcome.context` to `context_id`, and the LangChain
   ingesters write the new header (client-minting the id on a first
-  ingest).
+  ingest). Two output changes ride along: `taguru anchoring --json`'s
+  `segments` entries carry `context_id` (the id) instead of `context`
+  (the display name), and the import `taguru::audit` event keeps its
+  `context` field name but now emits the context id, not the display
+  name — so an audit-log consumer that aggregates by name must map ids
+  through `GET /contexts`.
 - **Breaking (wire) — `/contexts/{…}` paths take the context ID, and
   the directory row carries `id` and `name` as separate columns**
   (#964, ADR 0045; rides the same unreleased `http_contract` 2 as

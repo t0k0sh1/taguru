@@ -692,15 +692,30 @@ fn an_export_stream_dry_runs_clean_when_aliases_trail_their_canonicals() {
     let server = Server::start("promote-preview-seeds");
     seed(&server);
 
+    let source_context_id = server.cx("scratch-claude");
+    let fresh_context_id = "00000000-0000-4000-8000-00000000dead";
     let (status, exported) = server.call(
         "GET",
-        &format!("/contexts/{}/export", server.cx("scratch-claude")),
+        &format!("/contexts/{source_context_id}/export"),
         None,
     );
     assert_eq!(status, 200, "{exported}");
-    let stream = exported.as_str().expect("NDJSON body").replace(
-        "\"context\":\"scratch-claude\"",
-        "\"context\":\"fresh-restore\"",
+    // The export names the source by id (+ `create.name`); re-aim both at
+    // an id no context carries, so the preview is of a FRESH restore.
+    let stream = exported
+        .as_str()
+        .expect("NDJSON body")
+        .replace(
+            &format!("\"context_id\":\"{source_context_id}\""),
+            &format!("\"context_id\":\"{fresh_context_id}\""),
+        )
+        .replace(
+            "\"create\":{\"name\":\"scratch-claude\"",
+            "\"create\":{\"name\":\"fresh-restore\"",
+        );
+    assert!(
+        stream.contains(fresh_context_id) && stream.contains("fresh-restore"),
+        "the premise: the stream was re-aimed at a fresh context: {stream}"
     );
     assert!(
         stream.lines().last().unwrap().contains("\"alias\""),
@@ -720,6 +735,11 @@ fn an_export_stream_dry_runs_clean_when_aliases_trail_their_canonicals() {
     assert_eq!(
         previewed["result"]["batches"].as_array().map(Vec::len),
         Some(3),
+        "{previewed}"
+    );
+    assert_eq!(
+        previewed["result"]["batches"][0]["context_id"],
+        json!(fresh_context_id),
         "{previewed}"
     );
     assert!(
