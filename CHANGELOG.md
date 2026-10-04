@@ -29,10 +29,14 @@ Entries that change an on-disk format or a response shape say so.
   source's id (still named `NAME::communities` / `NAME::consolidation`),
   so a rename or a twin display name never detaches it; the manifests
   record the source's id (`source_context_id` for communities,
-  `context_id` for consolidation) instead of its name, and an artifact
-  built before this change is not found (its manifest fails to parse —
-  rebuild; the old context can be deleted). `--into` takes an id on both
-  commands and the wire field `derived` of `POST
+  `context_id` for consolidation) instead of its name. An artifact
+  built before this change is not found by default (the id it lives
+  under is not the derived one, so a search answers the usual "run
+  `taguru communities` to build it" and the next run builds a fresh
+  one — the old context can be deleted; pointing `derived_id` at it
+  fails its manifest's parse). `--into` takes an id on both commands
+  (`taguru communities --json`'s report names `derived_id` +
+  `derived_name`), and the wire field `derived` of `POST
   /contexts/{id}/communities/search` is `derived_id` (response:
   `derived_id` + `derived_name`; MCP `search_communities` follows); a
   scoped key needs the artifact's id in its grant too. A search whose
