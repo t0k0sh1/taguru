@@ -589,6 +589,16 @@ fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
             .contains("does not parse"),
         "{refused}"
     );
+    // The artifact exists, so the message names it the way an operator
+    // reads it: display name, then the id in parentheses.
+    let artifact_id = communities_artifact_id(&server.cx("sci"));
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("'sci::communities ({artifact_id})'")),
+        "{refused}"
+    );
 }
 
 /// A manifest that parses but is not one this build reads (ADR 0042):
