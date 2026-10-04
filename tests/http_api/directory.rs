@@ -270,4 +270,12 @@ fn the_contexts_verb_finds_ids_by_exact_name_and_lists_twins() {
     let (code, _, stderr) = run_cli(&["contexts", "--bogus"], &[]);
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("unknown argument '--bogus'"), "{stderr}");
+
+    // An unusable base URL is a usage mistake (2), not a network failure (1).
+    let (code, _, stderr) = run_cli(&["contexts", "--url", "ftp://h"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("only supports http/https"), "{stderr}");
+    let (code, _, stderr) = run_cli(&["contexts", "--url", "not a url"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("is not a usable base URL"), "{stderr}");
 }

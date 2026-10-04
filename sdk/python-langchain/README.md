@@ -27,7 +27,10 @@ ingester.ingest_documents(docs)          # docs[*].metadata["source"] required
 # (search_passages), merged by Reciprocal Rank Fusion.
 # The retriever takes the context's id (names are not unique); look it up once.
 client = Taguru()
-context_id = next(row.id for row in client.contexts.iter() if row.name == "sake")
+matches = [row.id for row in client.contexts.iter() if row.name == "sake"]
+if len(matches) != 1:
+    raise RuntimeError(f"expected exactly one context named 'sake', found {len(matches)}")
+(context_id,) = matches
 retriever = TaguruRetriever(context_id=context_id, client=client, k=8)
 documents = retriever.invoke("青嶺酒造")
 ```

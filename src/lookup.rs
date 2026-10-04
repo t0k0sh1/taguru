@@ -169,6 +169,9 @@ pub fn run(args: &[String]) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(&base) {
         return usage(&message);
     }
+    if let Err(message) = crate::remote::reject_unusable_base(&base) {
+        return usage(&message);
+    }
 
     let entries = match Api::new(base).list_context_entries() {
         Ok(entries) => entries,

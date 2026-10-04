@@ -28,8 +28,14 @@ await ingester.ingestDocuments(docs); // docs[*].metadata.source required
 // (searchPassages), merged by Reciprocal Rank Fusion.
 // The retriever takes the context's id (names are not unique); look it up once.
 const client = new Taguru();
-let contextId: string | undefined;
-for await (const row of client.contexts.iter()) if (row.name === "sake") contextId = row.id;
+const contextIds: string[] = [];
+for await (const row of client.contexts.iter()) {
+  if (row.name === "sake") contextIds.push(row.id);
+}
+const [contextId] = contextIds;
+if (contextId === undefined || contextIds.length > 1) {
+  throw new Error(`expected exactly one context named "sake", found ${contextIds.length}`);
+}
 const retriever = new TaguruRetriever({ context_id: contextId, client, k: 8 });
 const documents = await retriever.invoke("青嶺酒造");
 ```
