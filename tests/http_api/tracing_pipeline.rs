@@ -52,7 +52,7 @@ fn a_composed_retrieve_exports_one_root_with_a_phase_span_per_step() {
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "retrieve", "arguments": {
-            "context": server.cx("sake"), "origins": ["青嶺酒造"],
+            "context_id": server.cx("sake"), "origins": ["青嶺酒造"],
             "text_fallback_query": "杜氏は誰か", "text_fallback_only_if_empty": false
         }}
     });
@@ -132,7 +132,7 @@ fn skipped_steps_are_recorded_as_events_with_stable_reason_codes() {
         1,
         "retrieve",
         json!({
-            "context": server.cx("sake"), "origins": ["青嶺酒造"],
+            "context_id": server.cx("sake"), "origins": ["青嶺酒造"],
             "describe_first": false, "fetch_citations": false
         }),
     );
@@ -466,7 +466,7 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
     let result = server.call_tool(
         1,
         "retrieve",
-        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
+        json!({"context_id": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
 
@@ -496,7 +496,7 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
     let result = server.call_tool(
         2,
         "retrieve",
-        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
+        json!({"context_id": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
 
@@ -1077,7 +1077,7 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     server.call_tool(
         1,
         "retrieve",
-        json!({"context": "sentinel", "origins": [CONCEPT_NONCE]}),
+        json!({"context_id": "sentinel", "origins": [CONCEPT_NONCE]}),
     );
 
     let _ = server.stop_gracefully();

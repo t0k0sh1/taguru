@@ -41,7 +41,7 @@ use taguru::deadline::Deadline;
 
 const USAGE: &str = "\
 usage: taguru compact [--config FILE] [--url URL] [--parallel N]
-                       [--dry-run] [--json] [CONTEXT...]
+                       [--dry-run] [--json] [ID...]
 
 Rewrites context images in TAGURU_DATA_DIR without the dead weight the
 append-only format accumulates (retracted edges, unlinked attribution

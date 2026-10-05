@@ -364,7 +364,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         Some(json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "add_associations", "arguments": {
-                "context": server.cx("sake"),
+                "context_id": server.cx("sake"),
                 "associations": [{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0}],
             }},
         })),
@@ -385,7 +385,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         "/mcp",
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "recall", "arguments": {"context": server.cx("sake"), "cue": "蔵"}},
+            "params": {"name": "recall", "arguments": {"context_id": server.cx("sake"), "cue": "蔵"}},
         })),
         Some("rtok"),
     );
@@ -572,7 +572,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "context": "izakaya", "context_ids": [server.cx("sakagura")], "cue": "蔵",
+                "context_id": "izakaya", "context_ids": [server.cx("sakagura")], "cue": "蔵",
             }},
         })),
     );
@@ -871,7 +871,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "context": "izakaya", "groups": ["nomiya"], "cue": "蔵",
+                "context_id": "izakaya", "groups": ["nomiya"], "cue": "蔵",
             }},
         })),
     );

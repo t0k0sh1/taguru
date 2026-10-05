@@ -64,6 +64,11 @@ curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application
   -d '{"origins":["青嶺酒造"]}'
 ```
 
+Names are labels, not keys: they are not unique and can be renamed, so every
+call, CLI `--context`, and MCP `context_id` takes the id. Only remember the
+name? `taguru contexts --name sake` prints the matching `ID<TAB>NAME` lines
+(or filter `GET /contexts` / MCP `list_contexts` on `name`).
+
 `contexts` can be bundled into **`groups`** (`PUT /groups/{name}`, nesting
 allowed), and the searches — `POST /recall`, `POST /query`,
 `POST /sources/search` — take `context_ids` / `groups` lists to run one
@@ -348,7 +353,7 @@ load-bearing ones:
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier: an OpenAI-compatible `/embeddings` endpoint, or `local` to run the model in-process — `local` also requires `TAGURU_EMBED_MODEL` naming one of `taguru-code models` (e.g. `TAGURU_EMBED_URL=local TAGURU_EMBED_MODEL=paraphrase-multilingual-minilm-l12-v2-q`; not in the Docker image); unset keeps the entrance purely lexical |
 | `TAGURU_EMBED_AUTO` | off | Re-embed changes with each flush — recommended whenever agents drive the ingest |
 | `TAGURU_EMBED_PASSAGES` | off | Also embed paragraphs (the semantic lane of passage search); a corpus is much larger than its glosses, so the spend is opt-in |
-| `TAGURU_SEMANTIC_FLOOR` | 0.35 | Floor for the semantic tier — a property of the embedding model; `taguru calibrate --context NAME --probes FILE` measures it against a running server whenever you switch |
+| `TAGURU_SEMANTIC_FLOOR` | 0.35 | Floor for the semantic tier — a property of the embedding model; `taguru calibrate --context ID --probes FILE` measures it against a running server whenever you switch |
 | `TAGURU_PUBLIC_URL` | — | Public base URL; enables OAuth on `/mcp` for claude.ai custom connectors |
 | `TAGURU_RATE_LIMIT_PER_MIN` | 0 (off) | Per-key request budget — turn on whenever the server leaves localhost |
 | `TAGURU_REQUEST_TIMEOUT_SECS` | 30 | Per-request budget; raise it when an embedding provider is configured |

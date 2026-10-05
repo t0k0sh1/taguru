@@ -11,6 +11,7 @@ npm install langchain-taguru @langchain/core
 
 ```typescript
 import { ChatOpenAI } from "@langchain/openai";
+import { Taguru } from "taguru";
 import { TaguruIngester, TaguruRetriever } from "langchain-taguru";
 
 // Write: an LLM decomposes documents into the association graph
@@ -25,7 +26,17 @@ await ingester.ingestDocuments(docs); // docs[*].metadata.source required
 
 // Read: graph lane (resolve → activate → citations) + text lane
 // (searchPassages), merged by Reciprocal Rank Fusion.
-const retriever = new TaguruRetriever({ context: "sake", k: 8 });
+// The retriever takes the context's id (names are not unique); look it up once.
+const client = new Taguru();
+const contextIds: string[] = [];
+for await (const row of client.contexts.iter()) {
+  if (row.name === "sake") contextIds.push(row.id);
+}
+const [contextId] = contextIds;
+if (contextId === undefined || contextIds.length > 1) {
+  throw new Error(`expected exactly one context named "sake", found ${contextIds.length}`);
+}
+const retriever = new TaguruRetriever({ context_id: contextId, client, k: 8 });
 const documents = await retriever.invoke("青嶺酒造");
 ```
 

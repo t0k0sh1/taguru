@@ -24,7 +24,12 @@ answers back into prose are your job.
 1. **Pick a context**: `GET /contexts` lists every context — id, name, human-written
    descriptions, mechanical stats (association counts, top concepts,
    label sample — these never go stale), and usage counters (reads,
-   empty reads, writes, last-read/write unix seconds). Torn between a
+   empty reads, writes, last-read/write unix seconds). The `id` is what
+   every later call takes — HTTP paths and MCP's `context_id` argument alike; a
+   name is only a label (not unique, changeable) and is never accepted where an
+   id is expected, so find a context by name by reading this list's `name`
+   column (MCP: `list_contexts`), and create one with `POST /contexts` `{name}`,
+   which answers the new row with its `id`. Torn between a
    few candidates? Search them together: `POST /recall`, `/query`, and
    `/sources/search` take `context_ids: [context ids]` and/or
    `groups: [group names]` (a group searches every context it reaches,

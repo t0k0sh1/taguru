@@ -338,7 +338,7 @@ fn queries_with_no_pinned_position_are_refused_but_one_field_is_enough() {
     );
 
     // The refusal reaches through the MCP tool-call path as well.
-    let reply = server.call_tool(1, "query", json!({"context": server.cx("empty-query")}));
+    let reply = server.call_tool(1, "query", json!({"context_id": server.cx("empty-query")}));
     assert_eq!(reply["isError"], true, "{reply}");
     let error_text = reply["content"][0]["text"].as_str().unwrap();
     assert!(

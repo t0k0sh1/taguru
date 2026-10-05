@@ -10,6 +10,7 @@ pip install langchain-taguru
 
 ```python
 from langchain_openai import ChatOpenAI
+from taguru import Taguru
 from taguru_langchain import TaguruIngester, TaguruRetriever
 
 # Write: an LLM decomposes documents into the association graph
@@ -24,7 +25,13 @@ ingester.ingest_documents(docs)          # docs[*].metadata["source"] required
 
 # Read: graph lane (resolve → activate → citations) + text lane
 # (search_passages), merged by Reciprocal Rank Fusion.
-retriever = TaguruRetriever(context="sake", k=8)
+# The retriever takes the context's id (names are not unique); look it up once.
+client = Taguru()
+matches = [row.id for row in client.contexts.iter() if row.name == "sake"]
+if len(matches) != 1:
+    raise RuntimeError(f"expected exactly one context named 'sake', found {len(matches)}")
+(context_id,) = matches
+retriever = TaguruRetriever(context_id=context_id, client=client, k=8)
 documents = retriever.invoke("青嶺酒造")
 ```
 

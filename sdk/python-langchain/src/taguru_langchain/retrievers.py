@@ -11,14 +11,15 @@ and search's ``score`` are each meaningful only within one call, so ranks are
 the only comparable currency. Hits landing in both lanes collapse into one
 Document tagged ``lane: "graph+text"``.
 
-The retriever addresses one ``context``, several ``contexts``, or ``groups``
+The retriever addresses one ``context_id``, several ``context_ids``, or ``groups``
 (each ``group`` reaches every member ``context``, nested children included). Across
 several ``contexts`` the graph lane runs per ``context`` and interleaves by
 per-``context`` rank — the posture the server itself takes for passage scores —
 and the text lane rides the server's own cross-``context`` search.
 
-``context``/``contexts`` take context IDS — the ``id`` column of
-``client.contexts.list()`` (#964, #965). ``groups`` take group names; a
+``context_id``/``context_ids`` take context IDS — the ``id`` column of
+``client.contexts.list()`` (#964, #965, #967); look a name up with ``taguru contexts --name NAME``
+or filter ``client.contexts.list()`` on ``name``. ``groups`` take group names; a
 group's members are ids already, so nothing is resolved through the
 directory. Every Document's ``context`` metadata is that id.
 """
@@ -60,8 +61,8 @@ class TaguruRetriever(BaseRetriever):
     still become Documents (``page_content`` = "subject label object") when
     ``include_graph_only_facts`` is on, so pure-graph deployments retrieve too.
 
-    Name at least one target: ``context`` (one context id — the ``id``
-    column of ``contexts.list()``), ``contexts`` (several context ids), or
+    Name at least one target: ``context_id`` (one context id — the ``id``
+    column of ``contexts.list()``), ``context_ids`` (several context ids), or
     ``groups`` (``group`` names — each searches every ``context`` it
     reaches). Display names are not accepted anywhere (#965).
     """
@@ -70,8 +71,8 @@ class TaguruRetriever(BaseRetriever):
 
     client: Taguru | None = None
     async_client: AsyncTaguru | None = None
-    context: str | None = None
-    contexts: list[str] | None = None
+    context_id: str | None = None
+    context_ids: list[str] | None = None
     groups: list[str] | None = None
     k: int = 8
     include_graph: bool = True
@@ -106,19 +107,19 @@ class TaguruRetriever(BaseRetriever):
 
     @model_validator(mode="after")
     def _require_a_target(self) -> TaguruRetriever:
-        if self.context is None and not self.contexts and not self.groups:
-            raise ValueError("name a target: context, contexts, or groups")
+        if self.context_id is None and not self.context_ids and not self.groups:
+            raise ValueError("name a target: context_id, context_ids, or groups")
         return self
 
     def _is_cross(self) -> bool:
         """Whether retrieval spans several ``contexts`` (or a ``group``'s worth)."""
-        return bool(self.contexts) or bool(self.groups)
+        return bool(self.context_ids) or bool(self.groups)
 
     def _direct_targets(self) -> list[str]:
         targets: list[str] = []
-        if self.context is not None:
-            targets.append(self.context)
-        for context_id in self.contexts or []:
+        if self.context_id is not None:
+            targets.append(self.context_id)
+        for context_id in self.context_ids or []:
             if context_id not in targets:
                 targets.append(context_id)
         return targets
@@ -193,7 +194,7 @@ class TaguruRetriever(BaseRetriever):
         limit = k if k is not None else self.k
 
         if not self._is_cross():
-            target = self.context
+            target = self.context_id
             assert target is not None  # _require_a_target
             graph_docs: list[Document] = []
             graph_error: Exception | None = None
@@ -356,7 +357,7 @@ class TaguruRetriever(BaseRetriever):
         limit = k if k is not None else self.k
 
         if not self._is_cross():
-            target = self.context
+            target = self.context_id
             assert target is not None  # _require_a_target
             graph_docs: list[Document] = []
             graph_error: Exception | None = None

@@ -177,7 +177,7 @@ async function main(): Promise<void> {
     if (contextId === null) {
       throw new Error("the aomine-qa context was not created");
     }
-    const retriever = new TaguruRetriever({ context: contextId, client, k: 6 });
+    const retriever = new TaguruRetriever({ context_id: contextId, client, k: 6 });
     const llm = await makeLlm(FAKE_ANSWERS);
     const chain = RunnableSequence.from([
       {

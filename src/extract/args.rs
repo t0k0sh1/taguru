@@ -617,8 +617,9 @@ impl Args {
                 "extract",
                 &format!(
                     "--context '{}' is not a context id: it takes a lowercase hyphenated \
-                     UUID — the id column of GET /contexts, or a fresh one (e.g. from \
-                     uuidgen) alongside --name — not the context's name",
+                     UUID — the id column of GET /contexts (`taguru contexts --name NAME` \
+                     looks one up), or a fresh one (e.g. from uuidgen) alongside \
+                     --name — not the context's name",
                     context
                         .chars()
                         .take(MAX_CONTEXT_NAME_BYTES)

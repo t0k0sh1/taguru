@@ -172,6 +172,12 @@ curl -X POST localhost:8248/contexts/$CTX/associations -H 'Content-Type: applica
 curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application/json' \
   -d '{"origins":["青嶺酒造"]}'</code></pre>
     <p>
+      The name is a label, not a key: names are not unique and can be renamed, so every call, every CLI
+      <code>--context</code>, and MCP's <code>context_id</code> takes the id. If you only remember the name,
+      <code>taguru contexts --name sake</code> prints the matching <code>ID&lt;TAB&gt;NAME</code> lines (or
+      filter <code>GET /contexts</code> / MCP <code>list_contexts</code> on <code>name</code>).
+    </p>
+    <p>
       The <code>activate</code> response is a list of associations ordered by strength, each row
       carrying <code>strength</code> (ranking within this call), <code>path</code> (how it was
       reached), and the <code>attributions</code> of its sources. The full endpoint list and the

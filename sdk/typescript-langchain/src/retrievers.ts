@@ -4,14 +4,14 @@
  * see that module for the full design rationale (opaque cue, both lanes by
  * default, RRF merge, graph-only facts as Documents).
  *
- * The retriever addresses one `context`, several `contexts`, or `groups`
+ * The retriever addresses one `context_id`, several `context_ids`, or `groups`
  * (each `group` reaches every member `context`, nested children included).
  * Across several `contexts` the graph lane runs per `context` and interleaves by
  * per-`context` rank — the posture the server itself takes for passage scores —
  * and the text lane rides the server's own cross-`context` search.
  *
- * `context`/`contexts` take context IDs (the `id` column of `contexts.list()`,
- * #964/#965); `groups` take group names, whose members are ids already.
+ * `context_id`/`context_ids` take context IDs (the `id` column of `contexts.list()`,
+ * #964/#965/#967; `taguru contexts --name NAME` looks one up by name); `groups` take group names, whose members are ids already.
  * Every Document's `context` metadata is that id.
  */
 
@@ -32,10 +32,10 @@ const RRF_K = 60;
 const rrf = (rank: number): number => 1.0 / (RRF_K + rank);
 
 export interface TaguruRetrieverFields extends BaseRetrieverInput {
-  /** One target `context` id (the `id` column of `contexts.list()`); name at least one of context/contexts/groups. */
-  context?: string;
+  /** One target `context` id (the `id` column of `contexts.list()`); name at least one of context_id/context_ids/groups. */
+  context_id?: string;
   /** Several target `context` ids. Display names are not accepted (#965). */
-  contexts?: string[];
+  context_ids?: string[];
   /** `group` names — each searches every `context` it reaches, nested children included. */
   groups?: string[];
   client?: Taguru;
@@ -76,8 +76,8 @@ export class TaguruRetriever extends BaseRetriever {
 
   lc_namespace = ["taguru"];
 
-  readonly context: string | undefined;
-  readonly contexts: string[] | undefined;
+  readonly context_id: string | undefined;
+  readonly context_ids: string[] | undefined;
   readonly groups: string[] | undefined;
   readonly k: number;
   readonly include_graph: boolean;
@@ -101,15 +101,15 @@ export class TaguruRetriever extends BaseRetriever {
         api_key: fields.api_key,
         timeout: fields.timeout,
       });
-    this.context = fields.context;
-    this.contexts = fields.contexts;
+    this.context_id = fields.context_id;
+    this.context_ids = fields.context_ids;
     this.groups = fields.groups;
     if (
-      this.context === undefined &&
-      (this.contexts?.length ?? 0) === 0 &&
+      this.context_id === undefined &&
+      (this.context_ids?.length ?? 0) === 0 &&
       (this.groups?.length ?? 0) === 0
     ) {
-      throw new Error("name a target: context, contexts, or groups");
+      throw new Error("name a target: context_id, context_ids, or groups");
     }
     this.k = fields.k ?? 8;
     this.include_graph = fields.include_graph ?? true;
@@ -125,7 +125,7 @@ export class TaguruRetriever extends BaseRetriever {
 
   /** Whether retrieval spans several `contexts` (or a `group`'s worth). */
   private isCross(): boolean {
-    return (this.contexts?.length ?? 0) > 0 || (this.groups?.length ?? 0) > 0;
+    return (this.context_ids?.length ?? 0) > 0 || (this.groups?.length ?? 0) > 0;
   }
 
   /**
@@ -135,7 +135,7 @@ export class TaguruRetriever extends BaseRetriever {
    */
   private async resolveTargets(): Promise<string[]> {
     const targets: string[] = [];
-    for (const id of this.contexts ?? []) {
+    for (const id of this.context_ids ?? []) {
       if (!targets.includes(id)) {
         targets.push(id);
       }
@@ -227,7 +227,7 @@ export class TaguruRetriever extends BaseRetriever {
     _runManager?: CallbackManagerForRetrieverRun,
   ): Promise<Document[]> {
     if (!this.isCross()) {
-      const target = this.context!;
+      const target = this.context_id!;
       let graphDocs: Document[] = [];
       let graphFailed = false;
       let graphError: unknown;

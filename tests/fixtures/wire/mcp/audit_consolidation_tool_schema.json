@@ -21,8 +21,8 @@
               "minItems": 1,
               "type": "array"
             },
-            "context": {
-              "description": "Context id (the id column of list_contexts, a UUID)",
+            "context_id": {
+              "description": "Context id: a UUID — the id column of list_contexts (look a name up there)",
               "type": "string"
             },
             "cosine_floor": {
@@ -50,7 +50,7 @@
             }
           },
           "required": [
-            "context",
+            "context_id",
             "checks"
           ],
           "type": "object"

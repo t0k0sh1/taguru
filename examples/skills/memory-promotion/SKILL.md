@@ -43,13 +43,13 @@ re-asserting within one note inflates weight — don't.
 ## Promotion — end of session, or on request
 
 1. **Review what the scratch holds**: `recall`/`query` the scratch
-   context, or `taguru communities --context scratch-...` for a themed
+   context, or `taguru communities --context SCRATCH_ID` for a themed
    overview when the scratch has grown.
 2. **Graph path — one call when the structure is already right**
    (ADR 0018): when the keepers are the scratch's own structured
    associations (you wrote them during the session; there is no prose
    left to extract), call the `promote` MCP tool with
-   `{context: SCRATCH_ID, into: PERMANENT_ID, sources: [the session
+   `{context_id: SCRATCH_ID, into: PERMANENT_ID, sources: [the session
    ids]}` (both are context ids — the `id` column of `list_contexts` — not names). Each source moves whole — passage, `date`, tags, only its
    own share of every edge — source ids survive (citations still name
    the session), re-promotion is idempotent, and the landing-zone
@@ -70,7 +70,7 @@ re-asserting within one note inflates weight — don't.
    duplicated.
 5. **Audit the landing zone**: judge the consolidation audit on the
    permanent context (bundled in `promote`'s response on the graph
-   path; standalone via `taguru consolidation --context NAME` or the
+   path; standalone via `taguru consolidation --context PERMANENT_ID` or the
    `audit_consolidation` MCP tool) — promotion is exactly when merge
    twins and contradictions appear. Judgments are proposals; apply the
    accepted ones through ordinary writes (alias / retract / negative

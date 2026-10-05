@@ -27,7 +27,7 @@ from .conftest import context_id_of, try_context_id_of
 def test_retriever_serves_both_lanes_from_the_seeded_context(
     client: Taguru, server: object, seeded: str
 ) -> None:
-    retriever = TaguruRetriever(context=seeded, client=client, k=8)
+    retriever = TaguruRetriever(context_id=seeded, client=client, k=8)
     documents = retriever.invoke("青嶺酒造")
 
     assert documents
@@ -44,14 +44,14 @@ def test_retriever_serves_both_lanes_from_the_seeded_context(
 
 
 async def test_retriever_async_lane(client: Taguru, seeded: str) -> None:
-    retriever = TaguruRetriever(context=seeded, k=4)  # env-based connection
+    retriever = TaguruRetriever(context_id=seeded, k=4)  # env-based connection
     documents = await retriever.ainvoke("青嶺酒造")
     assert documents
     assert len(documents) <= 4
 
 
 def test_retriever_text_lane_catches_answer_shaped_queries(client: Taguru, seeded: str) -> None:
-    retriever = TaguruRetriever(context=seeded, include_graph=False, k=3)
+    retriever = TaguruRetriever(context_id=seeded, include_graph=False, k=3)
     documents = retriever.invoke("1907年に創業した")
     assert documents
     assert documents[0].metadata["lane"] == "text"
@@ -136,7 +136,7 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     assert after.count == before.count
 
     # The ingested knowledge is immediately retrievable through the retriever.
-    retriever = TaguruRetriever(context=context_id_of(client, "wagashi"), client=client, k=4)
+    retriever = TaguruRetriever(context_id=context_id_of(client, "wagashi"), client=client, k=4)
     documents = retriever.invoke("月白堂")
     assert any("栗きんとん" in d.page_content for d in documents)
 

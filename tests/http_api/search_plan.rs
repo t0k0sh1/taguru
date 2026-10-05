@@ -225,7 +225,7 @@ fn the_plan_names_every_stable_vector_lane_state() {
     let reply = server.call_tool(
         1,
         "search_passages",
-        json!({"context": server.cx("mine"), "query": "琥珀"}),
+        json!({"context_id": server.cx("mine"), "query": "琥珀"}),
     );
     assert!(reply.get("isError").is_none(), "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();

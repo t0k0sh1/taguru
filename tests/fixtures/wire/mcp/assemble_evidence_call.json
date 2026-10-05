@@ -2,7 +2,7 @@
   "contract": "mcp_contract",
   "operation": "assemble_evidence_call",
   "request": {
-    "context": "00000000-0000-4000-8000-000000000001",
+    "context_id": "00000000-0000-4000-8000-000000000001",
     "origins": [
       "a"
     ]

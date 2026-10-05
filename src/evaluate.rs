@@ -80,7 +80,7 @@ const MAX_ERROR_BYTES: usize = 200;
 const DEFAULT_OUT: &str = "evaluation.json";
 
 const USAGE: &str = "\
-usage: taguru evaluate --eval FILE --context NAME [--url URL]
+usage: taguru evaluate --eval FILE --context ID [--url URL]
                         [--config FILE] [--out FILE] [--thresholds FILE]
                         [--assembly] [--max-items N] [--max-bytes N]
                         [--max-tokens N] [--rerank MODEL]
@@ -94,7 +94,8 @@ concept/label/association coverage, citation recall and locator
 validity, corpus revision bracketing, and run metadata.
 
   --eval FILE            eval.jsonl (ADR 0003 §11's shared dataset)
-  --context NAME          the already-populated context to evaluate
+  --context ID           the already-populated context to evaluate, by
+                        id (`taguru contexts --name NAME` looks it up)
   --url URL              the server to query; default resolves the
                         same way `taguru health` does (TAGURU_ADDR, or
                         --config/TAGURU_CONFIG)
@@ -158,11 +159,11 @@ pub fn run(args: &[String]) -> i32 {
             "evaluate",
             &format!(
                 "unknown subcommand '{other}' — the default mode is selected by a leading \
-                 flag, e.g. 'taguru evaluate --eval FILE --context NAME', or use the \
+                 flag, e.g. 'taguru evaluate --eval FILE --context ID', or use the \
                  'compare' subcommand"
             ),
         ),
-        None => subcommand_usage_error("evaluate", "expected --eval FILE --context NAME"),
+        None => subcommand_usage_error("evaluate", "expected --eval FILE --context ID"),
     }
 }
 
@@ -580,7 +581,7 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
             "--context" => match rest.next() {
                 Some(name) if context.is_none() => context = Some(name.clone()),
                 Some(_) => return Err(usage("--context given twice")),
-                None => return Err(usage("--context needs a name")),
+                None => return Err(usage("--context needs a context id")),
             },
             "--url" => match rest.next() {
                 Some(value) if url.is_none() => url = Some(value.trim_end_matches('/').to_string()),
@@ -626,7 +627,7 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
     }
 
     let eval = eval.ok_or_else(|| usage("--eval FILE is required"))?;
-    let context = context.ok_or_else(|| usage("--context NAME is required"))?;
+    let context = context.ok_or_else(|| usage("--context ID is required"))?;
     if rerank.is_some() && !assembly {
         return Err(usage("--rerank requires --assembly"));
     }

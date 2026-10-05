@@ -190,7 +190,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     let via_mcp = server.call_tool(
         1,
         "query",
-        json!({"context": server.cx("sake"), "subject": "蔵", "label": "杜氏", "until": 1500}),
+        json!({"context_id": server.cx("sake"), "subject": "蔵", "label": "杜氏", "until": 1500}),
     );
     let text: Value =
         serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -201,7 +201,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     let via_mcp = server.call_tool(
         2,
         "query",
-        json!({"context": server.cx("sake"), "subject": "蔵", "label": "杜氏", "since": 1500, "until": 2500}),
+        json!({"context_id": server.cx("sake"), "subject": "蔵", "label": "杜氏", "since": 1500, "until": 2500}),
     );
     let text: Value =
         serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();

@@ -276,7 +276,7 @@ TAGURU_EMBED_API_KEY=…   # from Key Vault, like the API tokens</code></pre>
         this model. One honest caveat from measurement: on Japanese content, true paraphrase
         matches land roughly 0.35–0.55 — the default sits at the <i>bottom</i> of the true
         band, and a marginal true match can dip just under it. Run
-        <code>taguru calibrate --context NAME --probes FILE</code> against your own content
+        <code>taguru calibrate --context ID --probes FILE</code> against your own content
         once (see <a href="bedrock.html#embeddings">the calibration story</a>) rather than
         trusting any table, this one included.</li>
       <li><b>The circuit breaker and budgets apply unchanged:</b> embedding attempts are cut at

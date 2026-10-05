@@ -1091,7 +1091,7 @@ fn mcp_tools_list_assemble_evidence_schema() {
         .clone();
     assert_eq!(
         tool["inputSchema"]["required"],
-        json!(["context", "origins"]),
+        json!(["context_id", "origins"]),
         "{tool}"
     );
     mcp_fixture(
@@ -1116,7 +1116,7 @@ fn mcp_assemble_evidence_call() {
         Some(json!([{"subject": "a", "label": "rel", "object": "b", "weight": 1.0}])),
     );
 
-    let arguments = json!({"context": server.cx("mcp-corpus"), "origins": ["a"]});
+    let arguments = json!({"context_id": server.cx("mcp-corpus"), "origins": ["a"]});
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -1149,7 +1149,7 @@ fn mcp_assemble_evidence_missing_origins_is_a_tool_error() {
         Some(json!({"name": "mcp-error-corpus"})),
     );
 
-    let arguments = json!({"context": server.cx("mcp-error-corpus")});
+    let arguments = json!({"context_id": server.cx("mcp-error-corpus")});
     let (status, body) = server.call(
         "POST",
         "/mcp",
@@ -1484,7 +1484,7 @@ fn mcp_tools_list_audit_consolidation_schema() {
         .clone();
     assert_eq!(
         tool["inputSchema"]["required"],
-        json!(["context", "checks"]),
+        json!(["context_id", "checks"]),
         "{tool}"
     );
     mcp_fixture(

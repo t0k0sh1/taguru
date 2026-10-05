@@ -346,7 +346,7 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": "retract_association",
-                               "arguments": {"context": server.cx("sake"), "subject": "青嶺酒造",
+                               "arguments": {"context_id": server.cx("sake"), "subject": "青嶺酒造",
                                               "label": "杜氏", "object": "高瀬"}}})),
         write,
     );
@@ -406,7 +406,11 @@ fn flush_and_export_ride_the_mcp_transport() {
     let text = flushed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("sake"), "{text}");
 
-    let exported = tool(2, "export_context", json!({"context": server.cx("sake")}));
+    let exported = tool(
+        2,
+        "export_context",
+        json!({"context_id": server.cx("sake")}),
+    );
     assert!(exported.get("isError").is_none(), "{exported}");
     let text = exported["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"type\":\"source\""), "{text}");
@@ -445,7 +449,7 @@ fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
         Some(Value::Array(batch)),
     );
 
-    let reply = server.call_tool(1, "export_context", json!({"context": server.cx("big")}));
+    let reply = server.call_tool(1, "export_context", json!({"context_id": server.cx("big")}));
     assert_eq!(reply["isError"], true, "{reply}");
     let text = reply["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("GET /contexts/{id}/export"), "{text}");
@@ -521,7 +525,7 @@ fn the_mcp_compact_tool_stays_admin_gated() {
             "POST",
             "/mcp",
             Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                        "params": {"name": "compact", "arguments": {"context": server.cx("sake")}}})),
+                        "params": {"name": "compact", "arguments": {"context_id": server.cx("sake")}}})),
             Some(token),
         );
         assert_eq!(status, 200, "{answer}");
@@ -571,7 +575,7 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
         serde_json::from_str::<Value>(&text).unwrap()["result"].clone()
     };
 
-    let context = call("get_context", json!({"context": server.cx("sake")}));
+    let context = call("get_context", json!({"context_id": server.cx("sake")}));
     assert_eq!(context["id"], json!(server.cx("sake")));
     assert_eq!(context["name"], json!("sake"));
     assert_eq!(context["description"], json!("酒蔵の記憶"));
@@ -1011,7 +1015,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                     "params": {"name": "explain_resolve",
-                               "arguments": {"context": server.cx("sake"), "cue": "青嶺", "expected": "幻の蔵"}}})),
+                               "arguments": {"context_id": server.cx("sake"), "cue": "青嶺", "expected": "幻の蔵"}}})),
     );
     assert!(reply["result"].get("isError").is_none(), "{reply}");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
@@ -1029,7 +1033,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                     "params": {"name": "explain_search",
-                               "arguments": {"context": server.cx("sake"), "query": "酒造",
+                               "arguments": {"context_id": server.cx("sake"), "query": "酒造",
                                              "source": "docs/kura.md"}}})),
     );
     assert!(reply["result"].get("isError").is_none(), "{reply}");
@@ -1073,7 +1077,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
     let result = server.call_tool(
         1,
         "retrieve",
-        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
+        json!({"context_id": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
     let text = result["content"][0]["text"].as_str().unwrap();
@@ -1115,7 +1119,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
         2,
         "retrieve",
         json!({
-            "context": server.cx("sake"), "origins": ["青嶺酒造"],
+            "context_id": server.cx("sake"), "origins": ["青嶺酒造"],
             "text_fallback_query": "杜氏は高瀬である",
             "text_fallback_only_if_empty": false
         }),

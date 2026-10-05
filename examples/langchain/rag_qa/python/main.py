@@ -187,7 +187,7 @@ def main() -> int:
         # The retriever addresses a context by its id (#964); the ingester
         # created it by name, so read the id off the directory.
         context_id = next(row.id for row in client.contexts.iter() if row.name == "aomine-qa")
-        retriever = TaguruRetriever(context=context_id, client=client, k=6)
+        retriever = TaguruRetriever(context_id=context_id, client=client, k=6)
         llm = make_llm(FAKE_ANSWERS)
         chain = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}

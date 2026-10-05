@@ -315,16 +315,16 @@
 --rerank MODEL          opts an --assembly run into a configured reranker;
                        usage error without --assembly</code></pre>
     <pre><code># 1. baseline: today's fixed-limit sources/search, no assembly step
-taguru evaluate --eval eval.jsonl --context sake \
+taguru evaluate --eval eval.jsonl --context cef2e28b-43f0-4b6c-8201-abab0785399f \
   --max-items 40 --max-bytes 65536 --max-tokens 4000 --out baseline.json
 
 # 2. deterministic assembly: no reranker configured
-taguru evaluate --eval eval.jsonl --context sake --assembly \
+taguru evaluate --eval eval.jsonl --context cef2e28b-43f0-4b6c-8201-abab0785399f --assembly \
   --max-items 40 --max-bytes 65536 --max-tokens 4000 \
   --thresholds thresholds.json --out assembly.json
 
 # 3. configured reranker, where available (opt-in, never required for the gate)
-taguru evaluate --eval eval.jsonl --context sake --assembly \
+taguru evaluate --eval eval.jsonl --context cef2e28b-43f0-4b6c-8201-abab0785399f --assembly \
   --max-items 40 --max-bytes 65536 --max-tokens 4000 --rerank bge-reranker-v2-m3 \
   --out assembly-reranked.json
 

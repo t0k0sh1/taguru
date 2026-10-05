@@ -62,7 +62,7 @@ afterAll(() => {
 
 describe("TaguruRetriever (real server)", () => {
   it("serves both lanes from the seeded context", async () => {
-    const retriever = new TaguruRetriever({ context: seededId, client, k: 8 });
+    const retriever = new TaguruRetriever({ context_id: seededId, client, k: 8 });
     const documents = await retriever.invoke("青嶺酒造");
 
     expect(documents.length).toBeGreaterThan(0);
@@ -81,7 +81,7 @@ describe("TaguruRetriever (real server)", () => {
 
   it("catches answer-shaped queries through the text lane", async () => {
     const retriever = new TaguruRetriever({
-      context: seededId,
+      context_id: seededId,
       client,
       include_graph: false,
       k: 3,
@@ -154,7 +154,7 @@ describe("TaguruIngester (real server)", () => {
 
     // Immediately retrievable through the retriever.
     const retriever = new TaguruRetriever({
-      context: await contextIdOf("wagashi"),
+      context_id: await contextIdOf("wagashi"),
       client,
       k: 4,
     });

@@ -607,7 +607,7 @@ mod tests {
             // `get_context` puts its argument in the PATH — the overlong
             // case this guards (create_context now carries its name in
             // the body, which no URI limit ever sees).
-            "params": { "name": "get_context", "arguments": { "context": giant } },
+            "params": { "name": "get_context", "arguments": { "context_id": giant } },
         });
         let response = serve(
             Router::new(),
@@ -849,7 +849,7 @@ mod tests {
             "params": {
                 "name": "retrieve",
                 "arguments": {
-                    "context": "ctx",
+                    "context_id": "ctx",
                     "origins": origins,
                     // Trim the composition to resolve + activate: this is
                     // the aggregate-cap path, not describe/cite/search.
@@ -961,7 +961,7 @@ mod tests {
             "method": "tools/call",
             "params": {
                 "name": "retrieve",
-                "arguments": { "context": "ctx", "origins": ["x"] },
+                "arguments": { "context_id": "ctx", "origins": ["x"] },
             },
         });
         let response = serve(
@@ -1053,7 +1053,7 @@ mod tests {
             "method": "tools/call",
             "params": {
                 "name": "retrieve",
-                "arguments": { "context": "ctx", "origins": ["x"] },
+                "arguments": { "context_id": "ctx", "origins": ["x"] },
             },
         });
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));

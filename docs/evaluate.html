@@ -87,11 +87,12 @@
 
   <section id="cli">
     <h2>The CLI shape</h2>
-    <pre><code>taguru evaluate --eval eval.jsonl --context sake \
+    <pre><code>taguru evaluate --eval eval.jsonl --context cef2e28b-43f0-4b6c-8201-abab0785399f \
   --thresholds thresholds.json --out evaluation.json</code></pre>
     <pre><code>--eval FILE          eval.jsonl (ADR 0003 §11's shared dataset, read under
                     this verb's own #215 extension fields — see below)
---context NAME       the already-populated context to evaluate
+--context ID         the already-populated context to evaluate, by id
+                    (<code>taguru contexts --name NAME</code> looks it up)
 --url URL            the server to query; default resolves the same way
                     `taguru health` does (TAGURU_ADDR, or --config/
                     TAGURU_CONFIG)
@@ -226,7 +227,7 @@
 
     <h3 id="calibrate"><code>calibrate</code>: one model's semantic floor, not retrieval quality</h3>
     <p>
-      <code>taguru calibrate --context NAME --probes FILE</code> measures the semantic-floor
+      <code>taguru calibrate --context ID --probes FILE</code> measures the semantic-floor
       bands of a <i>running server's embedding model</i> and suggests a
       <code>TAGURU_SEMANTIC_FLOOR</code>. That floor is a property of the model, not of the
       corpus or the question set — a probe file is <code>cue&lt;TAB&gt;expected</code> pairs

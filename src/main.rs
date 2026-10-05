@@ -30,6 +30,7 @@ mod hydrate;
 mod ingest;
 mod inspect;
 mod limits;
+mod lookup;
 mod mcp;
 mod measure;
 mod metrics;

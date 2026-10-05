@@ -206,3 +206,76 @@ fn the_after_id_cursor_resumes_inside_a_same_named_group_without_repeating() {
         "the cursor row must be excluded, its same-named sibling served: {page}"
     );
 }
+
+/// `taguru contexts` (#967): the CLI bridge from a display name to the
+/// id every `--context` takes. Names are not unique, so `--name` lists
+/// every exact match, and matching is byte-for-byte.
+#[test]
+fn the_contexts_verb_finds_ids_by_exact_name_and_lists_twins() {
+    let server = Server::start("contexts-verb");
+    let sake_a = fixed_id("contexts-verb-sake-a");
+    let sake_b = fixed_id("contexts-verb-sake-b");
+    let beer = server.create_fixed("beer");
+    server.create_with_id(&sake_a, json!({"name": "sake", "description": "first"}));
+    server.create_with_id(&sake_b, json!({"name": "sake", "description": "second"}));
+    let padded = server.create_fixed("Sake ");
+
+    // The whole directory, `ID<TAB>NAME`, in the directory's (name, id) order.
+    let (code, stdout, stderr) = run_cli(&["contexts", "--url", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (low, high) = if sake_a < sake_b {
+        (&sake_a, &sake_b)
+    } else {
+        (&sake_b, &sake_a)
+    };
+    assert_eq!(
+        stdout,
+        format!("{padded}\tSake \n{beer}\tbeer\n{low}\tsake\n{high}\tsake\n"),
+        "{stdout}"
+    );
+
+    // `--name` keeps exact matches only — both twins, never `Sake `.
+    let (code, stdout, stderr) = run_cli(&["contexts", "--name", "sake", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout, format!("{low}\tsake\n{high}\tsake\n"));
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "contexts",
+            "--name",
+            "beer",
+            "--json",
+            "--url",
+            &server.base,
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("--json is one document");
+    assert_eq!(
+        rows,
+        json!([{"id": beer, "name": "beer", "description": ""}])
+    );
+
+    // No match is a failure the shell can branch on.
+    let (code, stdout, stderr) = run_cli(&["contexts", "--name", "ghost", &server.base], &[]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("no context is named 'ghost'"),
+        "stderr: {stderr}"
+    );
+
+    // A usage error is 2, like every other verb.
+    let (code, _, stderr) = run_cli(&["contexts", "--bogus"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("unknown argument '--bogus'"), "{stderr}");
+
+    // An unusable base URL is a usage mistake (2), not a network failure (1).
+    let (code, _, stderr) = run_cli(&["contexts", "--url", "ftp://h"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("only supports http/https"), "{stderr}");
+    let (code, _, stderr) = run_cli(&["contexts", "--url", "not a url"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("is not a usable base URL"), "{stderr}");
+}

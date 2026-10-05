@@ -305,7 +305,7 @@ fn the_search_communities_tool_routes_through_mcp() {
     let result = server.call_tool(
         1,
         "search_communities",
-        json!({"context": server.cx("mcp-src"), "query": "テーマ"}),
+        json!({"context_id": server.cx("mcp-src"), "query": "テーマ"}),
     );
     // No artifact yet: the tool surfaces the server's refusal — with
     // the build command — as a tool error, not an empty result.

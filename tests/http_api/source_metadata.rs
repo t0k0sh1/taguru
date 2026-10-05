@@ -579,7 +579,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
         1,
         "store_passages",
         json!({
-            "context": server.cx("sake"),
+            "context_id": server.cx("sake"),
             "passages": {"a.md": "共通語の資料。\n\n酒の話。", "b.md": "共通語の資料。\n\n蔵の話。"},
             "tags": {"a.md": ["酒"]},
             "dates": {"a.md": 1000}
@@ -590,7 +590,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let searched = server.call_tool(
         2,
         "search_passages",
-        json!({"context": server.cx("sake"), "query": "共通語の資料", "tags": ["酒"]}),
+        json!({"context_id": server.cx("sake"), "query": "共通語の資料", "tags": ["酒"]}),
     );
     assert_ne!(searched["isError"], json!(true), "{searched}");
     // Tool content is the API envelope as JSON text; the payload sits
@@ -614,7 +614,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
         json!({"eligible_sources": 1, "total_sources": 2})
     );
 
-    let listed = server.call_tool(3, "list_sources", json!({"context": server.cx("sake")}));
+    let listed = server.call_tool(3, "list_sources", json!({"context_id": server.cx("sake")}));
     assert_ne!(listed["isError"], json!(true), "{listed}");
     let envelope: Value =
         serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -627,7 +627,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let explained = server.call_tool(
         4,
         "explain_search",
-        json!({"context": server.cx("sake"), "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
+        json!({"context_id": server.cx("sake"), "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
     );
     assert_ne!(explained["isError"], json!(true), "{explained}");
     let envelope: Value =

@@ -2045,7 +2045,7 @@ fn the_mcp_bridge_carries_structured_content_on_a_rejected_write() {
 
     let invalid = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "add_associations", "arguments": {"context": context_id, "associations": [
+        "params": {"name": "add_associations", "arguments": {"context_id": context_id, "associations": [
             {"subject": "s", "label": "l", "object": "o", "weight": "strong"}
         ]}}
     });

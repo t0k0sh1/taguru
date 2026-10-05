@@ -400,7 +400,7 @@ fn the_assemble_evidence_tool_routes_to_the_same_endpoint() {
     let result = server.call_tool(
         1,
         "assemble_evidence",
-        json!({"context": server.cx("sake"), "origins": ["青嶺酒造"]}),
+        json!({"context_id": server.cx("sake"), "origins": ["青嶺酒造"]}),
     );
     assert!(result.get("isError").is_none(), "{result}");
     let text = result["content"][0]["text"].as_str().unwrap();
