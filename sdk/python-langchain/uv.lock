@@ -2394,6 +2394,9 @@ requires-dist = [
 ]
 provides-extras = ["otel", "dev"]
 
+[package.metadata.requires-dev]
+otel-test = [{ name = "opentelemetry-sdk", specifier = ">=1.20,<2" }]
+
 [[package]]
 name = "tenacity"
 version = "9.1.4"

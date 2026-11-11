@@ -37,7 +37,10 @@ something broke:
    is three months away or less is removed from the declared range
    (`requires-python`, `engines`) and from the CI matrices in the first
    release cut inside that window. The drop is recorded in the CHANGELOG
-   as a breaking change.
+   as a breaking change. The rule moves the floor, the oldest version
+   supported. Versions above the floor that CI does not test are allowed
+   by the declared range (Node's odd-numbered "Current" lines, for
+   example), but they are not supported targets.
 2. **Node.js floor: `^22.13.0 || >=24`.** Node 20 is past EOL. 22.13 is
    pdfjs-dist's own `engines` floor. The SDK CI matrix is 22 and 24.
 3. **Rust: the MSRV is the release toolchain.** Rust stable has no
@@ -59,11 +62,14 @@ something broke:
 
 ## 3. Consequences
 
-Dates per the upstream schedules as of 2026-11-11:
+Dates per the upstream schedules as of 2026-11-11. They are provisional:
+an upstream EOL can move, and Python's PEP schedules give a month, not a
+day. When cutting a release, check the current upstream date before
+applying the rule.
 
 | Runtime | Upstream EOL | Dropped from releases cut on or after |
 |---|---|---|
-| Python 3.11 | 2027-10 (late October) | 2027-07-24 |
+| Python 3.11 | 2027-10 (PEP 664; month only) | 2027-07 (provisional) |
 | Node.js 22 | 2027-04-30 | 2027-01-30 |
 | Python 3.12 | 2028-10 | 2028-07 |
 | Node.js 24 | 2028-04-30 | 2028-01-30 |
@@ -76,8 +82,10 @@ Dates per the upstream schedules as of 2026-11-11:
   automated bump can split the two.
 - Unrelated PRs no longer fail because of a new PyPI release in the
   lint, test or mutation jobs. Such a release now surfaces in only two
-  places: `python-fresh`, and the Dependabot `uv` group bumps that move
-  the lockfiles.
+  places: `python-fresh`, and Dependabot's `pip`-ecosystem bumps, which
+  update both `uv.lock` files (as #1011 / #1014 did). The OpenTelemetry
+  SDK that the second core test pass adds is locked too, as a CI-only
+  dependency group (`otel-test`) in `sdk/python`.
 - Still waiting on upstream, outside this decision:
   - vitest 5, blocked on `@stryker-mutator/vitest-runner` (#1018).
   - The `minimatch` advisory, held at `^10.2.2` by

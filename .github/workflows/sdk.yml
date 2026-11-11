@@ -57,10 +57,12 @@ jobs:
       LC_PY: sdk/python-langchain/.venv/bin/python
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - uses: actions/download-artifact@v8
         with:
           name: taguru-server-binary
@@ -119,8 +121,10 @@ jobs:
       # whole suite again to exercise the tracing tests for real. Order
       # matters: doing this before the plain run above would leave the
       # no-op path unverified.
-      - name: Install OpenTelemetry SDK
-        run: uv pip install --python "$CORE_PY" "opentelemetry-sdk>=1.20,<2"
+      # Locked too: the `otel-test` dependency group (CI-only, never
+      # published) is part of sdk/python's uv.lock.
+      - name: Install OpenTelemetry SDK (locked)
+        run: uv sync --locked --project sdk/python --extra dev --group otel-test
       - name: Test (core, with OpenTelemetry)
         run: '"$CORE_PY" -m pytest sdk/python/tests -q'
         env:
@@ -153,6 +157,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -192,10 +198,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       # Locked like the `python` job: mutmut itself is a dev dependency
       # with no upper bound, and an unannounced mutmut release reaching
       # this gate is the drift ADR 0049 locks out.
