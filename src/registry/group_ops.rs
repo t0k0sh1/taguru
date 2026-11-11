@@ -2177,6 +2177,38 @@ mod tests {
             both,
             "the standing twins both count toward what a restore releases"
         );
+        // The restore gate walks through nesting in the stream's own
+        // terms (names): a standing parent's child bundles sake, so
+        // replacing the parent with an empty record still RELEASES sake.
+        state
+            .create_group(
+                "parent",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["kid".to_string()]),
+            )
+            .unwrap_err();
+        state
+            .create_group(
+                "kid",
+                String::new(),
+                BTreeSet::from([sake.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        state
+            .create_group(
+                "parent",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["kid".to_string()]),
+            )
+            .unwrap();
+        assert_eq!(
+            state.group_restore_involves(&[("parent".to_string(), GroupRecord::default())]),
+            BTreeSet::from([sake.clone()]),
+            "a standing child's members count toward what the replace releases"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
