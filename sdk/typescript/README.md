@@ -5,7 +5,7 @@ Official TypeScript/JavaScript client SDK for the
 The Python SDK (`taguru` on PyPI) exposes the identical surface — method names
 differ only by casing convention (`searchPassages` ↔ `search_passages`); data
 fields are the wire's own snake_case in both. Zero runtime dependencies
-(built-in `fetch`), Node 20+.
+(built-in `fetch`), Node 22.13+ (22.x) or 24+.
 
 ```sh
 npm install taguru

@@ -26,6 +26,18 @@ Entries that change an on-disk format or a response shape say so.
   and `filelock` (4.2.1) for this round of advisories require 3.11, so
   a 3.10 install could no longer resolve to an unaffected set. The SDK
   CI matrix's oldest entry moves from 3.10 to 3.11.
+- **Breaking (TypeScript SDKs) — Node.js 20 is no longer supported**
+  (#1013, ADR 0049): `taguru` and `langchain-taguru` now declare
+  `engines.node` `^22.13.0 || >=24`. Node 20 reached end of life on
+  2026-04-30, and pdfjs-dist 6.3+ (the PDF connector's parser) calls
+  `Promise.withResolvers`, which Node 20 lacks. The SDK CI matrix is now
+  22 and 24. Under ADR 0049's rule (a runtime is dropped three months
+  before its upstream EOL), Node 22 itself is due to be dropped from
+  releases cut on or after 2027-01-30.
+- **MSRV is now 1.96** (#1013, ADR 0049): `rust-version` follows the
+  release image's toolchain (`rust:1.96-alpine`), up from 1.89. A new
+  CI job fails if the two differ and runs the full test suite at that
+  version, which no job checked before.
 
 - **Breaking (MCP + LangChain) — the single-context argument is
   `context_id`** (#967, final child of #961; rides the same unreleased

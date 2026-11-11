@@ -42,8 +42,19 @@ dev = [
     "pip-audit>=2.7",
     # Mutation testing, gated in CI against `mutation-baseline.txt` via
     # `sdk/spec/check_mutants.py`. Core SDK only — see that script's docstring.
-    "mutmut>=3.7",
+    # The floor is the release whose mutant numbering the baseline's names
+    # were taken from (regenerated on 3.8.0 in #904): mutmut renumbers
+    # mutants between releases, so an older one reports false survivors.
+    "mutmut>=3.8",
 ]
+
+[dependency-groups]
+# CI-only (PEP 735 groups are never published): the second core test pass
+# installs the OpenTelemetry SDK on top of the locked [dev] environment to
+# exercise the tracing tests for real (ADR 0008). Kept in uv.lock with
+# everything else (ADR 0049); not part of [dev], because the first pass
+# must run in an environment without it.
+otel-test = ["opentelemetry-sdk>=1.20,<2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/taguru"]

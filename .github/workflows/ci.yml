@@ -54,6 +54,36 @@ jobs:
       - name: Doctests
         run: cargo test --doc --locked
 
+  # The declared MSRV (Cargo.toml `rust-version`) is the Dockerfile's
+  # release toolchain (ADR 0049), so this job first fails if the two
+  # drift apart, then builds and tests at exactly that version. `check`
+  # above stays on unpinned stable for fmt/clippy (newer lints).
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: MSRV matches the Dockerfile's toolchain
+        id: msrv
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          docker=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          echo "Cargo.toml rust-version=$msrv, Dockerfile rust:$docker"
+          if [ -z "$msrv" ] || [ "$msrv" != "$docker" ]; then
+            echo "::error::Cargo.toml rust-version ($msrv) must equal the Dockerfile's rust:<version> ($docker) — bump them together (ADR 0049)"
+            exit 1
+          fi
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Test at the MSRV
+        run: cargo nextest run --locked
+
   # Independent of `check`: no Rust toolchain needed, and a newly
   # published CVE turning this red on an unrelated PR is a different
   # signal from a fmt/clippy/test failure.
