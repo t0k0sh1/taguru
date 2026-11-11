@@ -42,7 +42,10 @@ dev = [
     "pip-audit>=2.7",
     # Mutation testing, gated in CI against `mutation-baseline.txt` via
     # `sdk/spec/check_mutants.py`. Core SDK only — see that script's docstring.
-    "mutmut>=3.7",
+    # The floor is the release whose mutant numbering the baseline's names
+    # were taken from (regenerated on 3.8.0 in #904): mutmut renumbers
+    # mutants between releases, so an older one reports false survivors.
+    "mutmut>=3.8",
 ]
 
 [dependency-groups]
