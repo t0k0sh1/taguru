@@ -752,7 +752,7 @@ export class PdfConnector implements Connector {
 
     const paragraphs: string[] = [];
     const locators: LocatorEntry[] = [];
-    const pageParagraphStarts: Array<number | null> = new Array(pageCount).fill(null);
+    const pageParagraphStarts: Array<number | null> = Array.from({ length: pageCount }, () => null);
     // Built after OCR recovery, which may have shrunk both lists.
     const emptyPageSet = new Set(emptyPages);
     const unusablePageSet = new Set(failedPages);

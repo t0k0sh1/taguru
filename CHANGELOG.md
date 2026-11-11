@@ -404,6 +404,17 @@ Entries that change an on-disk format or a response shape say so.
   said "source". `source` keeps its one meaning (the origin an
   association cites). No key, flag, SDK name, or prompt changed.
 
+- **TypeScript SDK toolchain: TypeScript 7, oxlint, no Stryker** (#1021,
+  ADR 0051). Both SDK packages and the LangChain examples build with
+  TypeScript 7. Lint moves from ESLint to oxlint (the same
+  typescript-eslint `recommended` rules, plus oxlint's `correctness`
+  category). Stryker and the `typescript-mutation` CI job are removed;
+  the Python SDK's mutation gate stays. TypeScript 7 has no compiler
+  API, so the published type declarations now come from `tsc` instead
+  of tsup's `--dts`: `dist/` holds one `.d.ts` per module instead of one
+  bundled file per entry point. The `types` paths and the exported
+  types are unchanged.
+
 ### Fixed
 
 - The `--config` watch no longer misses a key rotation that lands
@@ -423,7 +434,10 @@ Entries that change an on-disk format or a response shape say so.
   (RUSTSEC-2026-0386). In the TypeScript SDK workspace (dev and
   transitive dependencies): `vite` 8.3.8, `zod` 4.6.7, `source-map-js`
   1.2.2, `fast-uri` 3.1.9, `qs` 6.17.1, `fast-xml-parser` 5.12.0, and
-  `vitest` 4.1.12.
+  `vitest` 4.1.12. `minimatch` (GHSA-g3hv-75wg-m249, Dependabot #162)
+  is gone from the TypeScript SDK workspace: no release of the dev
+  tools that pulled it in (ESLint, typescript-eslint, Stryker) allowed
+  the fixed 11.x, so those tools were removed (#1021).
 
 ## [0.9.7] - 2026-09-15
 

@@ -7,8 +7,8 @@
  * own exported constants and `SpanHandle` shape.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse } from "yaml";
@@ -16,28 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import * as tracing from "../../src/tracing.js";
 
-/**
- * Walk upward to `sdk/spec/tracing.yaml` instead of hard-coding
- * `../../../`: under Stryker the suite runs from a sandbox copy nested
- * inside `.stryker-tmp/`, which shifts the test file's depth relative to
- * the (uncopied) spec directory.
- */
-function specPath(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (;;) {
-    const candidate = join(dir, "spec", "tracing.yaml");
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = resolve(dir, "..");
-    if (parent === dir) {
-      throw new Error("sdk/spec/tracing.yaml not found in any ancestor directory");
-    }
-    dir = parent;
-  }
-}
-
-const SPEC_PATH = specPath();
+const SPEC_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../../spec/tracing.yaml");
 
 interface TracingSpec {
   tracer_name: string;

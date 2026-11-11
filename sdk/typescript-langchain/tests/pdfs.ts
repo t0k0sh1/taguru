@@ -270,7 +270,7 @@ export function textPdf(
  * §10) exists to name.
  */
 export function scannedPdf(pageCount: number): Uint8Array {
-  return textPdf(new Array<string>(pageCount).fill(""));
+  return textPdf(Array.from({ length: pageCount }, () => ""));
 }
 
 // -- RC4 / standard security handler (PDF 32000-1:2008 §7.6.3, revision 2) --

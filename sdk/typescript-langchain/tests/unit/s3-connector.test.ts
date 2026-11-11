@@ -928,7 +928,7 @@ test("credentials never appear in checkpoint, report, or document bytes", async 
         }
       }
       async *listObjectVersions(): AsyncGenerator<S3ObjectLike> {
-        return;
+        yield* [];
       }
       async getObject(_bucket: string, key: string): Promise<{ body: Uint8Array; contentType: string | null }> {
         if (key !== "a.md") {
