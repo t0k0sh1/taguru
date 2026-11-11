@@ -20,7 +20,7 @@ Entries that change an on-disk format or a response shape say so.
 ### Changed
 
 - **Breaking (Python SDKs) — Python 3.10 is no longer supported**:
-  `taguru` and `taguru-langchain` now require Python 3.11 or later.
+  `taguru` and `langchain-taguru` now require Python 3.11 or later.
   3.10 reached end of life in October 2026, and the fixed releases of
   `pillow` (13.0.0, pulled in by the `pptx` extra through `python-pptx`)
   and `filelock` (4.2.1) for this round of advisories require 3.11, so
@@ -35,7 +35,7 @@ Entries that change an on-disk format or a response shape say so.
   wire's `context_id` / `context_ids`. A call still passing `context` is
   refused with `missing required argument 'context_id'`; the search tools'
   "one of `context_id` / `context_ids` / `groups`" rule and its
-  "not both" refusal follow the rename. `taguru-langchain`'s
+  "not both" refusal follow the rename. `langchain-taguru`'s
   `TaguruRetriever` renames its `context` / `contexts` fields to
   `context_id` / `context_ids` (Python and TypeScript; a name was already
   refused since #965), and `TaguruIngester` keeps taking the context's
@@ -48,7 +48,7 @@ Entries that change an on-disk format or a response shape say so.
   and the `context_id` argument. `TAGURU_KEY_GRANTS` keeps its `contexts`
   key (a grant lists the contexts a key reaches, values are ids, beside
   `groups` — which stay names); a Document's `context` metadata key in
-  `taguru-langchain` is unchanged.
+  `langchain-taguru` is unchanged.
 
 - **Breaking (configuration + wire) — grants and quotas are keyed by
   context id, and a derived context carries its parent's id** (#966,
