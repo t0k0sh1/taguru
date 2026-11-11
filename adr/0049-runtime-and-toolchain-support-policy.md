@@ -78,7 +78,7 @@ Dates per the upstream schedules as of 2026-11-11:
   lint, test or mutation jobs. Such a release now surfaces in only two
   places: `python-fresh`, and the Dependabot `uv` group bumps that move
   the lockfiles.
-- Still waiting on upstream, outside this decision (tracked in #1013):
-  - vitest 5, blocked on `@stryker-mutator/vitest-runner`.
+- Still waiting on upstream, outside this decision:
+  - vitest 5, blocked on `@stryker-mutator/vitest-runner` (#1018).
   - The `minimatch` advisory, held at `^10.2.2` by
-    `@typescript-eslint/typescript-estree`.
+    `@typescript-eslint/typescript-estree` (#1017).
