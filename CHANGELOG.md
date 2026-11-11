@@ -19,6 +19,14 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (Python SDKs) — Python 3.10 is no longer supported**:
+  `taguru` and `taguru-langchain` now require Python 3.11 or later.
+  3.10 reached end of life in October 2026, and the fixed releases of
+  `pillow` (13.0.0, pulled in by the `pptx` extra through `python-pptx`)
+  and `filelock` (4.2.1) for this round of advisories require 3.11, so
+  a 3.10 install could no longer resolve to an unaffected set. The SDK
+  CI matrix's oldest entry moves from 3.10 to 3.11.
+
 - **Breaking (MCP + LangChain) — the single-context argument is
   `context_id`** (#967, final child of #961; rides the same unreleased
   `http_contract` 2): every MCP tool that addressed one context took
@@ -379,6 +387,17 @@ Entries that change an on-disk format or a response shape say so.
   read of its own. Before, such a rotation became the baseline and was
   never applied until the file changed again — silently, with the
   pre-rotation keys still armed.
+
+### Security
+
+- Dependency advisories: `rustls` 0.23.46 (RUSTSEC-2026-0346 through
+  0349), `rustls-webpki` 0.103.16 (RUSTSEC-2026-0382), `webpki-roots` /
+  `webpki-root-certs` 1.0.12 (RUSTSEC-2026-0381 / 0383), `quinn-proto`
+  0.11.19 (RUSTSEC-2026-0338 through 0342), and `tokio` 1.54.1
+  (RUSTSEC-2026-0386). In the TypeScript SDK workspace (dev and
+  transitive dependencies): `vite` 8.3.8, `zod` 4.6.7, `source-map-js`
+  1.2.2, `fast-uri` 3.1.9, `qs` 6.17.1, `fast-xml-parser` 5.12.0, and
+  `vitest` 4.1.12.
 
 ## [0.9.7] - 2026-09-15
 

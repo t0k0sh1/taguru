@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -157,7 +157,7 @@ def test_summary_key_set_matches_every_golden() -> None:
 
 def test_s3_sync_golden(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     store = FakeObjectStore("golden-bucket")
-    same_when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    same_when = datetime(2026, 1, 1, tzinfo=UTC)
 
     store.put("a.md", b"alpha content")
     store.put("b.md", b"beta content", last_modified=same_when)  # pre-seeded -> unchanged

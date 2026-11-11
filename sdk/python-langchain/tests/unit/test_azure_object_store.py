@@ -8,7 +8,7 @@ take."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,7 +29,7 @@ from taguru_langchain.ingest_connectors.objectstore import (
 )
 from taguru_langchain.ingest_connectors.objectstore_azure import AzureBlobObjectStore
 
-_MODIFIED = datetime(2026, 3, 1, tzinfo=timezone.utc)
+_MODIFIED = datetime(2026, 3, 1, tzinfo=UTC)
 
 
 def _properties(**overrides: Any) -> SimpleNamespace:
