@@ -7,28 +7,36 @@ use std::path::Path;
 
 use taguru::deadline::Deadline;
 
-use crate::groups::{self, GroupRecord};
-use crate::storage::{commit_staged, remove_persisted_file};
+use crate::groups::{self, GroupLookup, GroupRecord, GroupTable, StoredGroup};
 
 use super::{
-    AppState, CreateGroupError, GroupRestoreOutcome, RenameGroupError, RestoreGroupsError,
-    UpdateGroupError, file_stem, rename_in_membership, rename_markers_targeting,
-    retire_rename_marker, write_rename_marker,
+    AppState, CreateGroupError, GroupRestoreOutcome, GroupView, RenameGroupError,
+    RestoreGroupsError, UpdateGroupError,
 };
 
+// The name bridge (#994): `groups` are stored and nested by id, but
+// every entrance here still takes NAMES — the wire addresses `groups` by
+// name until #995 (paths) and #996 (references). Each entrance resolves
+// a name through the table's index and refuses one that several `groups`
+// share (a hand-assembled data directory; the name-addressed create and
+// rename below never mint a duplicate) instead of picking one of them.
 impl AppState {
-    /// Registers a `group` and persists it immediately — the create twin
-    /// for `groups`, without the `pending.creates` choreography: the one
-    /// fsync happens under the `groups` lock, which blocks only other
-    /// `group` writes (see the field's doc), so nothing here needs the
-    /// reservation dance.
+    /// Registers a `group` under a freshly minted id and persists it
+    /// immediately — the create twin for `groups`, without the
+    /// `pending.creates` choreography: the one fsync happens under the
+    /// `groups` lock, which blocks only other `group` writes (see the
+    /// field's doc), so nothing here needs the reservation dance.
     ///
     /// Member validation happens under both locks (`groups` before
-    /// `registry` — the documented order): `contains_key` already
-    /// answers false for a name mid-delete, because delete() removes
-    /// the name and reserves it in `pending.deletes` inside one
-    /// critical section. Child `groups` are judged against the same map
+    /// `registry` — the documented order): `contains_id` already
+    /// answers false for a `context` mid-delete, because delete()
+    /// removes it and reserves it in `pending.deletes` inside one
+    /// critical section. Child names are resolved against the same table
     /// the write lock already holds.
+    ///
+    /// The name stays unique among `groups` while the wire addresses
+    /// them by name: a second create under a standing name is
+    /// `AlreadyExists`, exactly as before ids existed.
     pub fn create_group(
         &self,
         name: &str,
@@ -40,7 +48,7 @@ impl AppState {
             return Err(CreateGroupError::InvalidName);
         }
         let mut groups = self.0.groups.write();
-        if groups.contains_key(name) {
+        if groups.ids_named(name).next().is_some() {
             return Err(CreateGroupError::AlreadyExists);
         }
         // Unreachable through HTTP while the request-list cap equals
@@ -56,34 +64,38 @@ impl AppState {
                 return Err(CreateGroupError::NoSuchContext(missing.clone()));
             }
         }
-        if let Some(missing) = first_missing(&children, |child| groups.contains_key(child)) {
-            return Err(CreateGroupError::NoSuchGroup(missing.clone()));
+        let mut group_ids = BTreeSet::new();
+        for child in &children {
+            match groups.lookup(child) {
+                Ok(id) => group_ids.insert(id.clone()),
+                Err(GroupLookup::NotFound) => {
+                    return Err(CreateGroupError::NoSuchGroup(child.clone()));
+                }
+                Err(GroupLookup::Ambiguous(count)) => {
+                    return Err(CreateGroupError::AmbiguousGroup {
+                        name: child.clone(),
+                        count,
+                    });
+                }
+            };
         }
-        // A group rename that half-finished under THIS name — as the
-        // source (its `.grouprenaming` marker sits at this stem) or the
-        // destination (some other stem's marker names it) — would
-        // otherwise have boot's resume-sweep move a stale group file over
-        // the one we are about to write. A create is a clean start:
-        // abandon any such marker. Groups clear their marker on a
-        // graceful move failure, so this only bites after a crash or a
-        // best-effort boot cleanup that could not remove it — cheap
-        // insurance keeping the group path symmetric with create_files.
-        sweep_stale_rename_markers(&self.0.data_dir, name).map_err(CreateGroupError::Io)?;
-        let record = GroupRecord {
-            description,
-            context_ids,
-            groups: children,
-        };
+        let id = groups::mint_group_id();
         // The nesting validator wants the prospective map, so insert
         // first and unwind on refusal — nothing escapes the write lock
         // half-done.
-        groups.insert(name.to_string(), record);
+        groups.insert(StoredGroup {
+            id: id.clone(),
+            name: name.to_string(),
+            description,
+            context_ids,
+            group_ids,
+        });
         commit_group_mutation(
             &self.0.data_dir,
             &mut groups,
-            name,
+            &id,
             |groups| {
-                groups.remove(name);
+                groups.remove(&id);
             },
             CreateGroupError::Nesting,
             CreateGroupError::Io,
@@ -97,6 +109,11 @@ impl AppState {
     /// persists. Nothing applies unless everything does: a refused
     /// nesting or a failed persist restores the previous record, the
     /// update twin of [`rollback_meta`].
+    ///
+    /// A child to ADD resolves by name across every `group`; a child to
+    /// REMOVE resolves among this `group`'s own children only, so a
+    /// name nothing here bundles is the same idempotent no-op it always
+    /// was.
     pub fn update_group(
         &self,
         name: &str,
@@ -105,17 +122,26 @@ impl AppState {
         remove_context_ids: BTreeSet<String>,
         add_groups: BTreeSet<String>,
         remove_groups: BTreeSet<String>,
-    ) -> Result<GroupRecord, UpdateGroupError> {
+    ) -> Result<GroupView, UpdateGroupError> {
         let mut groups = self.0.groups.write();
-        if !groups.contains_key(name) {
-            return Err(UpdateGroupError::NotFound);
-        }
+        let id = match groups.lookup(name) {
+            Ok(id) => id.clone(),
+            Err(GroupLookup::NotFound) => return Err(UpdateGroupError::NotFound),
+            Err(GroupLookup::Ambiguous(count)) => {
+                return Err(UpdateGroupError::AmbiguousGroup {
+                    name: name.to_string(),
+                    count,
+                });
+            }
+        };
         // The cap is judged on the delta's RESULT — removals first,
         // exactly as they will apply — and before the existence
         // lookups: counting needs none, and refusing here lets the
-        // membership tests speak in names that need not exist.
+        // membership tests speak in names that need not exist. Children
+        // are counted in the request's own terms (names).
         {
-            let record = &groups[name];
+            let record = &groups.get(&id).expect("looked up above");
+            let child_names = groups.view(record).groups;
             for (field, current, add, remove) in [
                 (
                     "member contexts",
@@ -123,7 +149,7 @@ impl AppState {
                     &add_context_ids,
                     &remove_context_ids,
                 ),
-                ("child groups", &record.groups, &add_groups, &remove_groups),
+                ("child groups", &child_names, &add_groups, &remove_groups),
             ] {
                 // An empty delta cannot move a set past the cap the
                 // invariant already holds it under — skip the rebuild.
@@ -150,44 +176,82 @@ impl AppState {
         }
         // `name` itself IS registered, so a self-add passes this gate —
         // and lands in the validator's lap as the smallest cycle.
-        if let Some(missing) = first_missing(&add_groups, |child| groups.contains_key(child)) {
-            return Err(UpdateGroupError::NoSuchGroup(missing.clone()));
+        let mut add_ids = BTreeSet::new();
+        for child in &add_groups {
+            match groups.lookup(child) {
+                Ok(child_id) => add_ids.insert(child_id.clone()),
+                Err(GroupLookup::NotFound) => {
+                    return Err(UpdateGroupError::NoSuchGroup(child.clone()));
+                }
+                Err(GroupLookup::Ambiguous(count)) => {
+                    return Err(UpdateGroupError::AmbiguousGroup {
+                        name: child.clone(),
+                        count,
+                    });
+                }
+            };
         }
-        let record = groups.get_mut(name).unwrap();
+        let mut remove_ids = BTreeSet::new();
+        {
+            let record = groups.get(&id).expect("looked up above");
+            for child in &remove_groups {
+                let matching: Vec<&String> = record
+                    .group_ids
+                    .iter()
+                    .filter(|child_id| groups.name_of(child_id) == child)
+                    .collect();
+                if matching.len() > 1 {
+                    return Err(UpdateGroupError::AmbiguousGroup {
+                        name: child.clone(),
+                        count: matching.len(),
+                    });
+                }
+                remove_ids.extend(matching.into_iter().cloned());
+            }
+        }
+        let record = groups.get_mut(&id).expect("looked up above");
         let previous = record.clone();
         for context in &remove_context_ids {
             record.context_ids.remove(context);
         }
         record.context_ids.extend(add_context_ids);
-        for group in &remove_groups {
-            record.groups.remove(group);
+        for child in &remove_ids {
+            record.group_ids.remove(child);
         }
-        record.groups.extend(add_groups);
+        record.group_ids.extend(add_ids);
         if let Some(description) = description {
             record.description = description;
         }
         commit_group_mutation(
             &self.0.data_dir,
             &mut groups,
-            name,
+            &id,
             |groups| {
-                *groups.get_mut(name).unwrap() = previous;
+                *groups.get_mut(&id).expect("looked up above") = previous;
             },
             UpdateGroupError::Nesting,
             UpdateGroupError::Io,
         )?;
-        Ok(groups[name].clone())
+        let record = groups.get(&id).expect("looked up above");
+        Ok(GroupView {
+            id: id.clone(),
+            name: record.name.clone(),
+            record: groups.view(record),
+        })
     }
 
     /// Restores a set of `group` records — import's create-or-replace
     /// twin of [`Self::create_group`]/[`Self::update_group`]: each
     /// record replaces its whole row (description and both member
     /// sets), and a `group` absent from the set is untouched, parents
-    /// naming a restored `group` included. The SET is judged before the
-    /// first write, under the `groups` write lock: every member `context`
-    /// registered, every child registered or in the set itself, both
-    /// caps per record, and the nesting that results — the standing
-    /// map overlaid with every record — acyclic and within
+    /// naming a restored `group` included. A record whose name stands
+    /// replaces that `group` (its id is kept); any other is created
+    /// under a freshly minted id. The SET is judged before the first
+    /// write, under the `groups` write lock: every member `context`
+    /// registered, every child standing or in the set itself (a child
+    /// name the set carries means the set's record), both caps per
+    /// record, and the nesting that results — the standing map overlaid
+    /// with every record — acyclic and within
     /// [`groups::MAX_GROUP_DEPTH`]. A validation refusal applies
     /// nothing.
     ///
@@ -203,15 +267,15 @@ impl AppState {
         deadline: Deadline,
     ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
         let mut groups = self.0.groups.write();
-        // The prospective map — what memory becomes if every write
-        // lands — is what the validators judge.
-        let mut prospective = groups.clone();
-        let mut incoming: BTreeSet<&str> = BTreeSet::new();
+        // Each record's id: the standing `group` its name addresses, or a
+        // fresh one. Minted before the set is judged, so a refused set
+        // burns ids — harmless, nothing ever saw them.
+        let mut incoming: BTreeMap<&str, String> = BTreeMap::new();
         for (name, record) in records {
             if name.is_empty() {
                 return Err(RestoreGroupsError::InvalidName);
             }
-            if !incoming.insert(name) {
+            if incoming.contains_key(name.as_str()) {
                 return Err(RestoreGroupsError::Duplicate(name.clone()));
             }
             check_member_caps(&record.context_ids, &record.groups).map_err(|field| {
@@ -220,8 +284,20 @@ impl AppState {
                     field,
                 }
             })?;
-            prospective.insert(name.clone(), record.clone());
+            let id = match groups.lookup(name) {
+                Ok(id) => id.clone(),
+                Err(GroupLookup::NotFound) => groups::mint_group_id(),
+                Err(GroupLookup::Ambiguous(count)) => {
+                    return Err(RestoreGroupsError::Ambiguous {
+                        group: name.clone(),
+                        name: name.clone(),
+                        count,
+                    });
+                }
+            };
+            incoming.insert(name, id);
         }
+        let mut stored: Vec<StoredGroup> = Vec::with_capacity(records.len());
         {
             // Lock order: `groups` before `registry`, as documented on
             // the field.
@@ -235,26 +311,60 @@ impl AppState {
                         context: missing.clone(),
                     });
                 }
-                if let Some(missing) =
-                    first_missing(&record.groups, |child| prospective.contains_key(child))
-                {
-                    return Err(RestoreGroupsError::NoSuchChild {
-                        group: name.clone(),
-                        child: missing.clone(),
-                    });
+                let mut group_ids = BTreeSet::new();
+                for child in &record.groups {
+                    let child_id = match incoming.get(child.as_str()) {
+                        Some(child_id) => child_id.clone(),
+                        None => match groups.lookup(child) {
+                            Ok(child_id) => child_id.clone(),
+                            Err(GroupLookup::NotFound) => {
+                                return Err(RestoreGroupsError::NoSuchChild {
+                                    group: name.clone(),
+                                    child: child.clone(),
+                                });
+                            }
+                            Err(GroupLookup::Ambiguous(count)) => {
+                                return Err(RestoreGroupsError::Ambiguous {
+                                    group: name.clone(),
+                                    name: child.clone(),
+                                    count,
+                                });
+                            }
+                        },
+                    };
+                    group_ids.insert(child_id);
                 }
+                stored.push(StoredGroup {
+                    id: incoming[name.as_str()].clone(),
+                    name: name.clone(),
+                    description: record.description.clone(),
+                    context_ids: record.context_ids.clone(),
+                    group_ids,
+                });
             }
         }
-        let depths = groups::nesting_depths(&prospective).map_err(RestoreGroupsError::Nesting)?;
-        let outcomes: Vec<(String, GroupRestoreOutcome)> = records
+        // The prospective map — what memory becomes if every write
+        // lands — is what the validators judge.
+        let mut prospective = groups.records().clone();
+        for record in &stored {
+            prospective.insert(record.id.clone(), record.clone());
+        }
+        let depths = groups::nesting_depths(&prospective).map_err(|violation| {
+            RestoreGroupsError::Nesting(violation.rename(|id| {
+                prospective
+                    .get(id)
+                    .map_or_else(|| id.to_string(), |record| record.name.clone())
+            }))
+        })?;
+        let outcomes: Vec<(String, GroupRestoreOutcome)> = stored
             .iter()
-            .map(|(name, record)| {
-                let outcome = match groups.get(name) {
+            .map(|record| {
+                let outcome = match groups.get(&record.id) {
                     Some(standing) if standing == record => GroupRestoreOutcome::Unchanged,
                     Some(_) => GroupRestoreOutcome::Replaced,
                     None => GroupRestoreOutcome::Created,
                 };
-                (name.clone(), outcome)
+                (record.name.clone(), outcome)
             })
             .collect();
         // Depth order over the PROSPECTIVE map alone is not enough: it
@@ -275,29 +385,29 @@ impl AppState {
         // batch is dropping — the two only ever disagree on a pair
         // whose edge is unchanged, and an unchanged edge needs no
         // ordering help here (the prospective check already covers it).
-        let index_of: BTreeMap<&str, usize> = records
+        let index_of: BTreeMap<&str, usize> = stored
             .iter()
             .enumerate()
-            .map(|(index, (name, _))| (name.as_str(), index))
+            .map(|(index, record)| (record.id.as_str(), index))
             .collect();
         // `dependents[p]` lists every record that must land AFTER `p` —
         // the successor direction, built directly (rather than as a
         // predecessor list rescanned per placement below) so resolving
         // "what does landing `p` unblock" is a lookup, not a full-batch
         // scan.
-        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
-        let mut pending = vec![0usize; records.len()];
-        for (parent_index, (parent_name, new_record)) in records.iter().enumerate() {
-            let Some(standing_parent) = groups.get(parent_name) else {
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); stored.len()];
+        let mut pending = vec![0usize; stored.len()];
+        for (parent_index, new_record) in stored.iter().enumerate() {
+            let Some(standing_parent) = groups.get(&new_record.id) else {
                 continue;
             };
-            for old_child in &standing_parent.groups {
+            for old_child in &standing_parent.group_ids {
                 // Only a DROPPED reference needs the ordering help: a
                 // KEPT one is exactly what `nesting_depths(&prospective)`
                 // above already validated (parent's edge, unchanged,
                 // combined with the child's new depth) regardless of
                 // which of the two lands first.
-                if !new_record.groups.contains(old_child)
+                if !new_record.group_ids.contains(old_child)
                     && let Some(&child_index) = index_of.get(old_child.as_str())
                 {
                     dependents[parent_index].push(child_index);
@@ -318,26 +428,27 @@ impl AppState {
         // this O(n log n) instead of O(n²) on a batch this large — the
         // whole pass runs under the exclusive `groups` lock, blocking
         // every other group operation for as long as it takes.
-        let mut ready: BinaryHeap<Reverse<(usize, usize)>> = (0..records.len())
+        let mut ready: BinaryHeap<Reverse<(usize, usize)>> = (0..stored.len())
             .filter(|&index| pending[index] == 0)
-            .map(|index| Reverse((depths[records[index].0.as_str()], index)))
+            .map(|index| Reverse((depths[stored[index].id.as_str()], index)))
             .collect();
-        let mut order: Vec<usize> = Vec::with_capacity(records.len());
+        let mut order: Vec<usize> = Vec::with_capacity(stored.len());
         while let Some(Reverse((_, next))) = ready.pop() {
             order.push(next);
             for &dependent in &dependents[next] {
                 pending[dependent] -= 1;
                 if pending[dependent] == 0 {
-                    ready.push(Reverse((depths[records[dependent].0.as_str()], dependent)));
+                    ready.push(Reverse((depths[stored[dependent].id.as_str()], dependent)));
                 }
             }
         }
         assert_eq!(
             order.len(),
-            records.len(),
+            stored.len(),
             "the standing map's acyclicity bounds `dependents` the same way, \
              so every record eventually becomes ready"
         );
+        drop(depths);
         let mut applied = 0usize;
         for &index in &order {
             // Bound the fsync-per-record storm to the request budget. A
@@ -349,50 +460,21 @@ impl AppState {
             if deadline.expired() {
                 return Err(RestoreGroupsError::Timeout { applied });
             }
-            let (name, record) = &records[index];
             if outcomes[index].1 == GroupRestoreOutcome::Unchanged {
                 // Already standing in the desired state — it counts as
                 // landed for the Io/Timeout report below.
                 applied += 1;
                 continue;
             }
-            if outcomes[index].1 == GroupRestoreOutcome::Created {
-                // Same stale-`.grouprenaming`-marker hazard
-                // `create_group` guards against (see its own comment):
-                // a half-finished rename that crashed before its file
-                // move landed can leave a marker naming this record's
-                // stem as source or destination, which would otherwise
-                // have the next boot's resume-sweep move a stale file
-                // over the record this write is about to durably
-                // establish. `Created` only fires for a name not
-                // currently standing, which is exactly the state a
-                // live marker whose destination hasn't been reached
-                // yet leaves behind — the other case a marker can
-                // survive in, "file move landed but the membership
-                // rewrite didn't persist" (`rename_group`'s
-                // `retire_rename_marker`), instead leaves the
-                // destination name STANDING (`Replaced`, not
-                // `Created`), and that marker must not be swept here:
-                // it's `reconcile_groups`'s only signal to finish
-                // rewriting the parent's stale `from` reference on the
-                // next boot, not a marker this write is entitled to
-                // abandon.
-                if let Err(error) = sweep_stale_rename_markers(&self.0.data_dir, name) {
-                    return Err(RestoreGroupsError::Io {
-                        group: name.clone(),
-                        applied,
-                        error,
-                    });
-                }
-            }
-            if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), record) {
+            let record = &stored[index];
+            if let Err(error) = groups::write_group(&self.0.data_dir, record) {
                 return Err(RestoreGroupsError::Io {
-                    group: name.clone(),
+                    group: record.name.clone(),
                     applied,
                     error,
                 });
             }
-            groups.insert(name.clone(), record.clone());
+            groups.insert(record.clone());
             applied += 1;
         }
         Ok(outcomes)
@@ -405,11 +487,24 @@ impl AppState {
     /// `group` records with this — [`Self::group_context_closures`]'
     /// twin for the restore path, where children may be names the set
     /// itself brings.
+    ///
+    /// Judged in the stream's own terms, names: the standing table is
+    /// folded into a name-keyed map first, every `group` sharing a name
+    /// folded into one entry — a hand-assembled directory's duplicate
+    /// names can only make the gate ask for MORE of the grant, never
+    /// less. (The restore itself refuses such a name.)
     pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
         let groups = self.0.groups.read();
+        let mut standing: BTreeMap<String, GroupRecord> = BTreeMap::new();
+        for record in groups.records().values() {
+            let view = groups.view(record);
+            let folded = standing.entry(record.name.clone()).or_default();
+            folded.context_ids.extend(view.context_ids);
+            folded.groups.extend(view.groups);
+        }
         let roots: Vec<&str> = records.iter().map(|(name, _)| name.as_str()).collect();
-        let mut involved = groups::context_closure(&groups, roots.iter().copied());
-        let mut prospective = groups.clone();
+        let mut involved = groups::context_closure(&standing, roots.iter().copied());
+        let mut prospective = standing;
         for (name, record) in records {
             prospective.insert(name.clone(), record.clone());
         }
@@ -418,153 +513,146 @@ impl AppState {
     }
 
     /// Removes a `group` — the bundling only, never the member `contexts`
-    /// nor the child `groups`. `None` for an unknown name, mirroring
-    /// [`AppState::delete`]. Parents naming the `group` are swept inside
-    /// the same critical section, so no reader ever observes a
+    /// nor the child `groups`. Parents bundling the `group` are swept
+    /// inside the same critical section, so no reader ever observes a
     /// dangling child.
     ///
     /// One file, so no deletion marker: the memory drop and the unlink
     /// are it. The weaker guarantee is deliberate and priced in — if
     /// the unlink fails, the surviving file re-registers the `group` at
     /// the next boot, and the error message says so.
-    pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
+    pub fn delete_group(&self, name: &str) -> Result<io::Result<()>, GroupLookup> {
         let mut groups = self.0.groups.write();
-        groups.remove(name)?;
+        let id = groups.lookup(name)?.clone();
+        groups.remove(&id);
         // Nesting must not outlive the child — the same sweep a
         // deleted context gets, on the child field, under the write
         // lock already held (best effort past the removal; boot
         // reconciliation heals a sweep that could not persist).
-        sweep_membership(&self.0.data_dir, &mut groups, name, |record| {
-            &mut record.groups
+        sweep_membership(&self.0.data_dir, &mut groups, &id, |record| {
+            &mut record.group_ids
         });
-        Some(groups::remove_group_file(
-            &self.0.data_dir,
-            &file_stem(name),
-        ))
+        Ok(groups::remove_group_file(&self.0.data_dir, &id))
     }
 
-    /// Renames a `group`: its file moves to the new name and every OTHER
-    /// `group`'s `groups` field naming it is rewritten to match.
-    /// `groups.write()` covers the whole operation, so — unlike a
-    /// `context` rename — no separate reservation is needed: no
-    /// concurrent create, update, delete, or rename can observe a
-    /// half-renamed state, only wait behind this lock.
+    /// Renames a `group`: its own record's `name` is rewritten, and
+    /// nothing else moves (ADR 0045 §2.6) — the file is stemmed by id and
+    /// every parent bundles it by id, so there is no file move, no parent
+    /// rewrite, and no marker to resume. One staged write, so a crash
+    /// leaves either the old name or the new one.
     ///
-    /// The marker is written and durable BEFORE the file moves, for
-    /// the same reason as [`AppState::rename_context`]'s: a crash
-    /// between the file move and the membership rewrite must not have
-    /// boot's `reconcile_groups` see the old name as a dangling
-    /// reference and drop it, rather than resuming the rewrite.
+    /// The destination must not be another `group`'s name while the wire
+    /// addresses `groups` by name (the create path's gate, applied to the
+    /// other way a name can arrive).
     pub fn rename_group(&self, from: &str, to: &str) -> Result<(), RenameGroupError> {
         if to.is_empty() {
             return Err(RenameGroupError::InvalidName);
         }
         let mut groups = self.0.groups.write();
-        if !groups.contains_key(from) {
-            return Err(RenameGroupError::NotFound);
-        }
+        let id = match groups.lookup(from) {
+            Ok(id) => id.clone(),
+            Err(GroupLookup::NotFound) => return Err(RenameGroupError::NotFound),
+            Err(GroupLookup::Ambiguous(count)) => return Err(RenameGroupError::Ambiguous(count)),
+        };
         // Checked AFTER existence, not before: a self-rename of a name
         // that does not exist is still a `NotFound`, not a silent
         // no-op success.
         if from == to {
             return Ok(());
         }
-        if groups.contains_key(to) {
+        if groups.ids_named(to).next().is_some() {
             return Err(RenameGroupError::AlreadyExists);
         }
-        let from_stem = file_stem(from);
-        let to_stem = file_stem(to);
-        let marker = groups::group_renaming_marker_path(&self.0.data_dir, &from_stem);
-        write_rename_marker(&marker, from, to).map_err(RenameGroupError::Io)?;
-        if let Err(error) = commit_staged(
-            &groups::group_path(&self.0.data_dir, &from_stem),
-            &groups::group_path(&self.0.data_dir, &to_stem),
-        ) {
-            let _ = remove_persisted_file(&marker);
-            return Err(RenameGroupError::Io(error));
-        }
-        let record = groups.remove(from).expect("checked contains_key above");
-        groups.insert(to.to_string(), record);
-        let membership_persisted =
-            rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
-                &mut record.groups
-            });
-        // Same discipline as `AppState::rename_context_locked`: see
-        // `retire_rename_marker`'s doc for why an unconditional removal
-        // here would have the next boot's `reconcile_groups` see
-        // `from` as a plain dangling child reference and drop it
-        // instead of resuming the rewrite.
-        retire_rename_marker(
-            &marker,
-            membership_persisted,
-            from,
-            to,
-            "group's nesting rewrite",
-        );
+        let mut record = groups.get(&id).expect("looked up above").clone();
+        record.name = to.to_string();
+        groups::write_group(&self.0.data_dir, &record).map_err(RenameGroupError::Io)?;
+        groups.insert(record);
         Ok(())
     }
 
-    /// One `group`'s record by name, or `None` for an unknown `group`.
-    pub fn group(&self, name: &str) -> Option<GroupRecord> {
-        self.0.groups.read().get(name).cloned()
+    /// One `group` by name, as a name-addressed caller sees it.
+    pub fn group(&self, name: &str) -> Result<GroupView, GroupLookup> {
+        let groups = self.0.groups.read();
+        let id = groups.lookup(name)?;
+        let record = groups.get(id).expect("the name index points at records");
+        Ok(GroupView {
+            id: id.clone(),
+            name: record.name.clone(),
+            record: groups.view(record),
+        })
     }
 
     /// Union of every `context` reachable from the named `groups` — direct
     /// members plus everything nested children bundle, transitively.
     /// The scoped write gate judges a `group` by what it ADDRESSES, so
-    /// this is its view; unknown names contribute nothing.
+    /// this is its view; unknown names contribute nothing, and a name
+    /// several `groups` share contributes all of them (the gate errs
+    /// toward asking for more of the grant; the write itself refuses the
+    /// name).
     pub fn group_context_closures<'a>(
         &self,
         names: impl IntoIterator<Item = &'a str>,
     ) -> BTreeSet<String> {
-        groups::context_closure(&self.0.groups.read(), names)
-    }
-
-    /// [`group_context_closures`] with existence semantics: the first
-    /// name that is not a registered `group` comes back as the error
-    /// instead of contributing nothing. The cross-`context` searches
-    /// resolve their `groups` targets here — a caller who NAMES a `group`
-    /// deserves a `no_group` refusal, not a silently empty search —
-    /// checked and walked under one lock acquisition so a concurrent
-    /// `group` delete cannot slip between the two.
-    pub fn resolve_groups(&self, names: &[String]) -> Result<BTreeSet<String>, String> {
         let groups = self.0.groups.read();
-        if let Some(missing) = first_missing(names, |name| groups.contains_key(name)) {
-            return Err(missing.clone());
-        }
-        Ok(groups::context_closure(
-            &groups,
-            names.iter().map(String::as_str),
-        ))
+        let roots: Vec<&str> = names
+            .into_iter()
+            .flat_map(|name| groups.ids_named(name))
+            .map(String::as_str)
+            .collect();
+        groups::context_closure(groups.records(), roots)
     }
 
-    /// One name-ordered page of `groups` plus the cursor-independent
-    /// total. Scope filtering is the API layer's business, as with
-    /// [`AppState::directory`] — but unlike the `context` directory,
-    /// which clones only `Arc` handles and can hand over the whole
-    /// map, a `group`'s record IS its data, so the page is cut here
-    /// under the read lock and only the survivors are cloned.
+    /// [`Self::group_context_closures`] for exactly one `group`, by id —
+    /// what a directory row's fingerprint covers, so two `groups` that
+    /// share a name still fingerprint apart.
+    pub fn group_context_closure_of(&self, id: &str) -> BTreeSet<String> {
+        groups::context_closure(self.0.groups.read().records(), [id])
+    }
+
+    /// [`Self::group_context_closures`] with existence semantics: the
+    /// first name that does not resolve to exactly one `group` comes back
+    /// as the error, with why, instead of contributing nothing. The
+    /// cross-`context` searches resolve their `groups` targets here — a
+    /// caller who NAMES a `group` deserves a `no_group` refusal, not a
+    /// silently empty search — checked and walked under one lock
+    /// acquisition so a concurrent `group` delete cannot slip between
+    /// the two.
+    pub fn resolve_groups(
+        &self,
+        names: &[String],
+    ) -> Result<BTreeSet<String>, (String, GroupLookup)> {
+        let groups = self.0.groups.read();
+        let mut roots: Vec<&str> = Vec::with_capacity(names.len());
+        for name in names {
+            match groups.lookup(name) {
+                Ok(id) => roots.push(id),
+                Err(why) => return Err((name.clone(), why)),
+            }
+        }
+        Ok(groups::context_closure(groups.records(), roots))
+    }
+
+    /// One name-ordered page of `groups` (ties by id) plus the
+    /// cursor-independent total. Scope filtering is the API layer's
+    /// business, as with [`AppState::directory`] — but unlike the
+    /// `context` directory, which clones only `Arc` handles and can hand
+    /// over the whole map, a `group`'s record IS its data, so the page is
+    /// cut here under the read lock and only the survivors are cloned.
     /// `limit` is assumed at least 1: callers page through
     /// `api::clamp_page`, never the unfloored `api::clamp`, so a `0`
     /// that would otherwise `take(0)` into an empty page —
     /// indistinguishable from "no more `groups`" to a client's paging
     /// loop — never reaches here.
-    pub fn group_page(
-        &self,
-        after: Option<&str>,
-        limit: usize,
-    ) -> (usize, Vec<(String, GroupRecord)>) {
-        use std::ops::Bound;
-
+    pub fn group_page(&self, after: Option<&str>, limit: usize) -> (usize, Vec<GroupView>) {
         let groups = self.0.groups.read();
-        let start = match after {
-            Some(after) => Bound::Excluded(after),
-            None => Bound::Unbounded,
-        };
         let page = groups
-            .range::<str, _>((start, Bound::Unbounded))
+            .in_name_order(after)
             .take(limit)
-            .map(|(name, record)| (name.clone(), record.clone()))
+            .map(|record| GroupView {
+                id: record.id.clone(),
+                name: record.name.clone(),
+                record: groups.view(record),
+            })
             .collect();
         (groups.len(), page)
     }
@@ -574,51 +662,22 @@ impl AppState {
     /// deletion marker already durable; best effort past that point —
     /// a rewrite that fails leaves memory correct and the file stale,
     /// which the next boot's reconciliation heals.
-    pub(super) fn sweep_context_from_groups(&self, context_name: &str) {
+    pub(super) fn sweep_context_from_groups(&self, context_id: &str) {
         let mut groups = self.0.groups.write();
-        sweep_membership(&self.0.data_dir, &mut groups, context_name, |record| {
+        sweep_membership(&self.0.data_dir, &mut groups, context_id, |record| {
             &mut record.context_ids
         });
     }
 }
 
-/// The strict-membership gate shared by the `group` writes: the first
-/// requested name the given namespace does not have, if any. Strict on
-/// purpose — an add must never mint a dangling reference — and one
-/// function for both namespaces (member `contexts`, child `groups`): the
-/// caller supplies the existence test.
+/// The strict-membership gate for member `contexts`: the first requested
+/// id the registry does not hold, if any. Strict on purpose — an add
+/// must never mint a dangling reference.
 fn first_missing<'a>(
     names: impl IntoIterator<Item = &'a String>,
     exists: impl Fn(&str) -> bool,
 ) -> Option<&'a String> {
     names.into_iter().find(|name| !exists(name))
-}
-
-/// The shared stale-`.grouprenaming`-marker sweep [`AppState::create_group`]
-/// and [`AppState::restore_groups`] both need before durably writing a
-/// name that might be a half-finished rename's source or destination:
-/// an unswept marker would otherwise have the next boot's resume-sweep
-/// (`groups::scan_groups`) move a stale `group` file over the one just
-/// written, clobbering it. `update_group` and `rename_group` don't need
-/// this — the former only ever touches a name already standing (which
-/// implies no live marker can name it, since both `create_group` and
-/// this function already sweep it clean the moment such a name is
-/// (re-)established), and the latter's own marker is retired through
-/// [`retire_rename_marker`] instead.
-fn sweep_stale_rename_markers(data_dir: &Path, name: &str) -> io::Result<()> {
-    let mut stale_markers = rename_markers_targeting(data_dir, name, "grouprenaming");
-    stale_markers.push(groups::group_renaming_marker_path(
-        data_dir,
-        &file_stem(name),
-    ));
-    for marker in stale_markers {
-        if let Err(error) = remove_persisted_file(&marker)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(error);
-        }
-    }
-    Ok(())
 }
 
 /// The per-set membership cap, judged wherever a WHOLE record is
@@ -639,26 +698,32 @@ fn check_member_caps(
 
 /// The shared validate→persist→rollback tail of [`AppState::create_group`]
 /// and [`AppState::update_group`]: validates the nesting the
-/// already-mutated `groups` map implies, then persists `name`'s record —
+/// already-mutated table implies, then persists `id`'s record —
 /// unwinding the mutation through `rollback` on either refusal, so
-/// nothing escapes the caller's write lock half-done. The two callers
-/// differ only in what "previous" means (create removes the fresh
-/// entry, update restores the cloned record) and in their error enums.
+/// nothing escapes the caller's write lock half-done. A nesting refusal
+/// names its `group` by name (looked up BEFORE the rollback, which may
+/// remove the very `group` it blames). The two callers differ only in
+/// what "previous" means (create removes the fresh entry, update
+/// restores the cloned record) and in their error enums.
 /// `restore_groups` does not share this shape: it validates its whole
 /// prospective SET before the first write.
 fn commit_group_mutation<E>(
     data_dir: &Path,
-    groups: &mut BTreeMap<String, GroupRecord>,
-    name: &str,
-    rollback: impl FnOnce(&mut BTreeMap<String, GroupRecord>),
+    groups: &mut GroupTable,
+    id: &str,
+    rollback: impl FnOnce(&mut GroupTable),
     on_nesting: impl FnOnce(groups::NestingViolation) -> E,
     on_io: impl FnOnce(io::Error) -> E,
 ) -> Result<(), E> {
-    if let Err(violation) = groups::validate_nesting(groups) {
+    if let Err(violation) = groups::validate_nesting(groups.records()) {
+        let violation = violation.rename(|blamed| groups.name_of(blamed).to_string());
         rollback(groups);
         return Err(on_nesting(violation));
     }
-    if let Err(error) = groups::write_group(data_dir, &file_stem(name), &groups[name]) {
+    let record = groups
+        .get(id)
+        .expect("the caller just inserted or edited it");
+    if let Err(error) = groups::write_group(data_dir, record) {
         rollback(groups);
         return Err(on_io(error));
     }
@@ -667,24 +732,25 @@ fn commit_group_mutation<E>(
 
 /// Shared body of the two membership sweeps — a deleted `context` out of
 /// every `group`'s members, a deleted `group` out of every parent's
-/// children: removes `stale` from the chosen set field of every record
-/// and persists each touched one. Best effort by design — a rewrite
-/// that fails leaves memory correct and the file stale, which the next
-/// boot's reconciliation heals. Lock-free on purpose: every caller
-/// already holds the `groups` write lock.
+/// children: removes the id `stale` from the chosen set field of every
+/// record and persists each touched one. Best effort by design — a
+/// rewrite that fails leaves memory correct and the file stale, which
+/// the next boot's reconciliation heals. Lock-free on purpose: every
+/// caller already holds the `groups` write lock.
 fn sweep_membership(
     data_dir: &Path,
-    groups: &mut BTreeMap<String, GroupRecord>,
+    groups: &mut GroupTable,
     stale: &str,
-    field: impl Fn(&mut GroupRecord) -> &mut BTreeSet<String>,
+    field: impl Fn(&mut StoredGroup) -> &mut BTreeSet<String>,
 ) {
-    for (group_name, record) in groups.iter_mut() {
+    for record in groups.records_mut() {
         if !field(record).remove(stale) {
             continue;
         }
-        if let Err(error) = groups::write_group(data_dir, &file_stem(group_name), record) {
+        if let Err(error) = groups::write_group(data_dir, record) {
             tracing::warn!(
-                group = %group_name,
+                group = %record.name,
+                group_id = %record.id,
                 removed = %stale,
                 %error,
                 "group membership sweep not persisted; the next boot's reconciliation drops it"
@@ -699,10 +765,37 @@ mod tests {
 
     use super::*;
     use crate::context_proptest::{GeneratedGroupOp, config as proptest_config, group_op_strategy};
+    use crate::groups::GroupLookup;
     use crate::registry::ContextMeta;
-    use crate::registry::paths::RenameMarker;
     use crate::registry::test_support::scratch_dir;
     use crate::storage::{clear_persistence_fault, fail_persistence_ops_after};
+
+    /// A hand-planted `group` id (the shape boot accepts).
+    const GROUP_A: &str = "00000000-0000-4000-9000-00000000a000";
+
+    /// A canonical, name-ordered id for a hand-planted `group`: the
+    /// name's bytes, hex, in the id's last field — so ids sort exactly
+    /// as the names they stand for (for names up to six bytes).
+    fn fixed_id(name: &str) -> String {
+        let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+        format!("00000000-0000-4000-9000-{hex:0<12}")
+    }
+
+    /// The names recorded in the `.group` files on disk — what a refused
+    /// or successful write did (or did not) leave there, without knowing
+    /// the minted ids.
+    fn group_file_names(dir: &Path) -> BTreeSet<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("group"))
+            .filter_map(|path| {
+                serde_json::from_slice::<StoredGroup>(&fs::read(path).ok()?)
+                    .ok()
+                    .map(|record| record.name)
+            })
+            .collect()
+    }
 
     #[test]
     fn group_crud_validates_members_and_survives_a_reboot() {
@@ -737,8 +830,8 @@ mod tests {
             Err(CreateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
         // The refused create left nothing behind, in memory or on disk.
-        assert!(state.group("ghosts").is_none());
-        assert!(!groups::group_path(&dir, &file_stem("ghosts")).exists());
+        assert!(state.group("ghosts").is_err());
+        assert!(!group_file_names(&dir).contains("ghosts"));
 
         // Deltas: removals first, then adds — and an unknown add
         // refuses the whole update, membership untouched.
@@ -754,7 +847,7 @@ mod tests {
             Err(UpdateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
         assert_eq!(
-            state.group("drinks").unwrap().context_ids,
+            state.group("drinks").unwrap().record.context_ids,
             BTreeSet::from([state.id_of("sake")])
         );
         let updated = state
@@ -767,8 +860,11 @@ mod tests {
                 BTreeSet::new(),
             )
             .unwrap();
-        assert_eq!(updated.description, "all drinks");
-        assert_eq!(updated.context_ids, BTreeSet::from([state.id_of("beer")]));
+        assert_eq!(updated.record.description, "all drinks");
+        assert_eq!(
+            updated.record.context_ids,
+            BTreeSet::from([state.id_of("beer")])
+        );
         assert!(matches!(
             state.update_group(
                 "ghosts",
@@ -785,14 +881,17 @@ mod tests {
         drop(state);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let survived = state.group("drinks").unwrap();
-        assert_eq!(survived.description, "all drinks");
-        assert_eq!(survived.context_ids, BTreeSet::from([state.id_of("beer")]));
+        assert_eq!(survived.record.description, "all drinks");
+        assert_eq!(
+            survived.record.context_ids,
+            BTreeSet::from([state.id_of("beer")])
+        );
 
         // Deletion removes the record and its file; the members live on.
         state.delete_group("drinks").unwrap().unwrap();
-        assert!(state.group("drinks").is_none());
-        assert!(state.delete_group("drinks").is_none());
-        assert!(!groups::group_path(&dir, &file_stem("drinks")).exists());
+        assert!(state.group("drinks").is_err());
+        assert!(state.delete_group("drinks").is_err());
+        assert!(!group_file_names(&dir).contains("drinks"));
         assert_eq!(state.group_page(None, usize::MAX), (0, Vec::new()));
         assert!(state.directory().iter().any(|entry| entry.name == "beer"));
 
@@ -828,7 +927,7 @@ mod tests {
                 assert!(first.is_ok());
             } else {
                 assert!(matches!(first, Err(UpdateGroupError::Io(_))));
-                assert_eq!(state.group("drinks").unwrap().description, "old");
+                assert_eq!(state.group("drinks").unwrap().record.description, "old");
                 state
                     .update_group(
                         "drinks",
@@ -843,7 +942,7 @@ mod tests {
             drop(state);
 
             let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-            assert_eq!(state.group("drinks").unwrap().description, "new");
+            assert_eq!(state.group("drinks").unwrap().record.description, "new");
             drop(state);
             let _ = fs::remove_dir_all(&dir);
             if past_end {
@@ -875,7 +974,7 @@ mod tests {
 
         for group in ["drinks", "fermented"] {
             assert_eq!(
-                state.group(group).unwrap().context_ids,
+                state.group(group).unwrap().record.context_ids,
                 BTreeSet::from([state.id_of("beer")]),
                 "'{group}' still names the deleted context"
             );
@@ -885,7 +984,7 @@ mod tests {
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         for group in ["drinks", "fermented"] {
             assert_eq!(
-                state.group(group).unwrap().context_ids,
+                state.group(group).unwrap().record.context_ids,
                 BTreeSet::from([state.id_of("beer")])
             );
         }
@@ -911,7 +1010,7 @@ mod tests {
             state.create_group("g", String::new(), BTreeSet::new(), over.clone()),
             Err(CreateGroupError::OverCap("child groups"))
         ));
-        assert!(state.group("g").is_none());
+        assert!(state.group("g").is_err());
 
         // A delta is judged on its RESULT: 1 member + cap-many adds is
         // one too many, but trading the member out in the same request
@@ -958,7 +1057,7 @@ mod tests {
             ),
             Err(UpdateGroupError::OverCap("child groups"))
         ));
-        assert_eq!(state.group("g").unwrap().context_ids, one);
+        assert_eq!(state.group("g").unwrap().record.context_ids, one);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -988,6 +1087,7 @@ mod tests {
             )
             .unwrap();
 
+        let kura_id = state.group("kura").unwrap().id;
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
             description: "new".to_string(),
             context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
@@ -1006,16 +1106,20 @@ mod tests {
         assert_eq!(outcomes[1].1.as_str(), "created");
         // The replace is the WHOLE record — bunko dropped, description
         // replaced — and parent still names kura.
-        assert_eq!(state.group("kura").unwrap(), records[0].1);
+        assert_eq!(state.group("kura").unwrap().record, records[0].1);
         assert_eq!(
-            state.group("parent").unwrap().groups,
+            state.group("parent").unwrap().record.groups,
             BTreeSet::from(["kura".to_string()])
         );
-        // Disk agrees.
-        let on_disk: GroupRecord =
-            serde_json::from_slice(&fs::read(groups::group_path(&dir, &file_stem("kid"))).unwrap())
-                .unwrap();
-        assert_eq!(on_disk, records[1].1);
+        // Disk agrees — in ids: the replaced kura kept its id, and its
+        // child reference is kid's freshly minted one.
+        let kura = state.group("kura").unwrap();
+        assert_eq!(kura.id, kura_id, "a replace keeps the standing id");
+        let kid = state.group("kid").unwrap();
+        let on_disk: StoredGroup =
+            serde_json::from_slice(&fs::read(groups::group_path(&dir, &kura.id)).unwrap()).unwrap();
+        assert_eq!(on_disk.group_ids, BTreeSet::from([kid.id.clone()]));
+        assert_eq!(on_disk.name, "kura");
 
         // Restoring the same set again converges to no-ops.
         let again = state
@@ -1033,8 +1137,6 @@ mod tests {
 
     #[test]
     fn restore_groups_reports_how_many_landed_before_an_io_failure() {
-        use crate::groups::group_path;
-
         let dir = scratch_dir("groups-restore-io-failure");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
@@ -1044,15 +1146,25 @@ mod tests {
         };
 
         // "a" and "b" are independent (no nesting), so equal depth keeps
-        // them in list order — "a" lands first. Occupying "b"'s target
-        // path with a non-empty directory fails its rename on every
-        // platform this project targets (see
-        // `write_atomic_cleans_up_its_staging_file_when_the_commit_fails`),
-        // isolating an Io failure strictly after "a" already landed.
-        let blocked = group_path(&dir, &file_stem("b"));
-        fs::create_dir(&blocked).unwrap();
-        fs::write(blocked.join("occupied"), b"x").unwrap();
+        // them in list order — "a" lands first. "b"'s file is named by
+        // an id minted inside the call, so its path cannot be occupied
+        // ahead of time; instead the persistence injector is armed at
+        // exactly as many steps as one whole `group` write takes
+        // (measured here, on a scratch create), isolating an Io failure
+        // strictly after "a" already landed.
+        let steps_per_write = (0..16)
+            .find(|&after| {
+                fail_persistence_ops_after(after);
+                let landed = state
+                    .create_group("probe", String::new(), BTreeSet::new(), BTreeSet::new())
+                    .is_ok();
+                clear_persistence_fault();
+                landed
+            })
+            .expect("one group write fits in 16 persistence steps");
+        state.delete_group("probe").unwrap().unwrap();
 
+        fail_persistence_ops_after(steps_per_write);
         let error = state
             .restore_groups(
                 &[
@@ -1062,13 +1174,14 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap_err();
+        clear_persistence_fault();
         assert!(matches!(
             &error,
             RestoreGroupsError::Io { group, .. } if group == "b"
         ));
         assert_eq!(error.applied(), 1, "\"a\" already landed when \"b\" failed");
         assert!(
-            state.group("a").is_some(),
+            state.group("a").is_ok(),
             "\"a\"'s successful write must not be rolled back"
         );
 
@@ -1149,12 +1262,9 @@ mod tests {
         // Nothing changed: "b" must never have been attempted, so the
         // pre-batch (valid, depth <= 3 everywhere) standing state
         // stands exactly as it was.
-        assert_eq!(state.group("a").unwrap().groups, child_set(&["b"]));
-        assert_eq!(state.group("b").unwrap().groups, BTreeSet::new());
-        let standing = {
-            let groups = state.0.groups.read();
-            groups.clone()
-        };
+        assert_eq!(state.group("a").unwrap().record.groups, child_set(&["b"]));
+        assert_eq!(state.group("b").unwrap().record.groups, BTreeSet::new());
+        let standing = state.0.groups.read().records().clone();
         groups::nesting_depths(&standing)
             .expect("the untouched standing map must still be within the depth cap");
 
@@ -1163,8 +1273,6 @@ mod tests {
 
     #[test]
     fn restore_groups_counts_an_unchanged_record_as_already_landed() {
-        use crate::groups::group_path;
-
         let dir = scratch_dir("groups-restore-unchanged-then-io-failure");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let record = |contexts: &[&str], children: &[&str]| GroupRecord {
@@ -1183,15 +1291,10 @@ mod tests {
             )
             .unwrap();
 
-        // "b" is new, so it takes the `write_group` branch. Occupying its
-        // target path with a non-empty directory fails its rename on
-        // every platform this project targets (see
-        // `write_atomic_cleans_up_its_staging_file_when_the_commit_fails`),
-        // isolating an Io failure strictly after "a" is judged unchanged.
-        let blocked = group_path(&dir, &file_stem("b"));
-        fs::create_dir(&blocked).unwrap();
-        fs::write(blocked.join("occupied"), b"x").unwrap();
-
+        // "b" is new, so it takes the `write_group` branch; "a" writes
+        // nothing, so failing the very first persistence step isolates an
+        // Io failure strictly after "a" is judged unchanged.
+        fail_persistence_ops_after(0);
         let error = state
             .restore_groups(
                 &[
@@ -1201,6 +1304,10 @@ mod tests {
                 Deadline::unbounded(),
             )
             .unwrap_err();
+        assert!(
+            !clear_persistence_fault(),
+            "the injected failure must be what refused \"b\""
+        );
         assert!(matches!(
             &error,
             RestoreGroupsError::Io { group, .. } if group == "b"
@@ -1240,11 +1347,11 @@ mod tests {
 
         // Nothing landed — not in memory, not on disk.
         assert!(
-            state.group("a").is_none(),
+            state.group("a").is_err(),
             "no record may land past the budget"
         );
         assert!(
-            !groups::group_path(&dir, &file_stem("a")).exists(),
+            !group_file_names(&dir).contains("a"),
             "no group file may be written past the budget"
         );
 
@@ -1281,10 +1388,7 @@ mod tests {
                 if group == "broken" && context == "ghost"
         ));
         assert_eq!(refusal.applied(), 0);
-        assert!(
-            state.group("fine").is_none(),
-            "nothing applies on a refusal"
-        );
+        assert!(state.group("fine").is_err(), "nothing applies on a refusal");
 
         // A child neither standing nor in the set.
         assert!(matches!(
@@ -1334,7 +1438,7 @@ mod tests {
                 .unwrap_err(),
             RestoreGroupsError::Nesting(NestingViolation::TooDeep(_))
         ));
-        assert!(state.group("deep").is_none());
+        assert!(state.group("deep").is_err());
 
         // One name twice is two truths for one group.
         assert!(matches!(
@@ -1406,15 +1510,18 @@ mod tests {
                 .map(|c| state.id_of(c))
                 .collect()
         );
-        assert_eq!(state.group("top").unwrap().context_ids, one_ctx("sake"));
+        assert_eq!(
+            state.group("top").unwrap().record.context_ids,
+            one_ctx("sake")
+        );
 
         // A fourth storey over a full chain refuses, and nothing lands.
         assert!(matches!(
             state.create_group("over", String::new(), BTreeSet::new(), one("top")),
             Err(CreateGroupError::Nesting(NestingViolation::TooDeep(_)))
         ));
-        assert!(state.group("over").is_none());
-        assert!(!groups::group_path(&dir, &file_stem("over")).exists());
+        assert!(state.group("over").is_err());
+        assert!(!group_file_names(&dir).contains("over"));
 
         // Closing the chain into a cycle refuses — the self-loop
         // included — and an unknown child answers in the group
@@ -1452,16 +1559,16 @@ mod tests {
             ),
             Err(UpdateGroupError::NoSuchGroup(missing)) if missing == "nope"
         ));
-        assert_eq!(state.group("leaf").unwrap().groups, BTreeSet::new());
+        assert_eq!(state.group("leaf").unwrap().record.groups, BTreeSet::new());
 
         // Deleting a child sweeps it out of every parent, durably.
         state.delete_group("mid").unwrap().unwrap();
-        assert_eq!(state.group("top").unwrap().groups, BTreeSet::new());
+        assert_eq!(state.group("top").unwrap().record.groups, BTreeSet::new());
         drop(state);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        assert_eq!(state.group("top").unwrap().groups, BTreeSet::new());
+        assert_eq!(state.group("top").unwrap().record.groups, BTreeSet::new());
         assert_eq!(
-            state.group("leaf").unwrap().context_ids,
+            state.group("leaf").unwrap().record.context_ids,
             BTreeSet::from([state.id_of("tea")])
         );
 
@@ -1474,18 +1581,30 @@ mod tests {
             .into_iter()
             .map(|entry| entry.name)
             .collect();
-        let groups = state.0.groups.read();
-        assert_eq!(groups::validate_nesting(&groups), Ok(()));
-        for record in groups.values() {
+        let table = state.0.groups.read();
+        let groups = table.records();
+        assert_eq!(groups::validate_nesting(groups), Ok(()));
+        for (id, record) in groups {
+            assert_eq!(&record.id, id, "every record sits under its own id");
+            assert_eq!(
+                table.lookup(&record.name),
+                Ok(id),
+                "names stay unique and indexed"
+            );
             assert!(record.context_ids.len() <= groups::MAX_GROUP_MEMBERS);
-            assert!(record.groups.len() <= groups::MAX_GROUP_MEMBERS);
+            assert!(record.group_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(
                 record
                     .context_ids
                     .iter()
                     .all(|name| contexts.contains(name))
             );
-            assert!(record.groups.iter().all(|name| groups.contains_key(name)));
+            assert!(
+                record
+                    .group_ids
+                    .iter()
+                    .all(|child| groups.contains_key(child))
+            );
         }
     }
 
@@ -1593,14 +1712,17 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(outcome, Err(UpdateGroupError::Io(_))));
         let record = state.group("drinks").unwrap();
-        assert_eq!(record.description, "before");
-        assert_eq!(record.context_ids, BTreeSet::from([state.id_of("sake")]));
+        assert_eq!(record.record.description, "before");
+        assert_eq!(
+            record.record.context_ids,
+            BTreeSet::from([state.id_of("sake")])
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn rename_group_moves_the_file_and_rewrites_parent_membership() {
+    fn rename_group_rewrites_only_its_own_record_and_the_parent_follows_by_id() {
         let dir = scratch_dir("rename-group-happy");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
@@ -1621,338 +1743,48 @@ mod tests {
             )
             .unwrap();
 
+        let liquor_id = state.group("liquor").unwrap().id;
+        let drinks = state.group("drinks").unwrap();
+        let drinks_bytes = fs::read(groups::group_path(&dir, &drinks.id)).unwrap();
         state.rename_group("liquor", "spirits").unwrap();
 
-        assert!(state.group("liquor").is_none());
+        assert!(state.group("liquor").is_err());
         let spirits = state.group("spirits").unwrap();
-        assert_eq!(spirits.description, "d");
-        assert_eq!(spirits.context_ids, BTreeSet::from([state.id_of("sake")]));
+        assert_eq!(spirits.record.description, "d");
         assert_eq!(
-            state.group("drinks").unwrap().groups,
+            spirits.record.context_ids,
+            BTreeSet::from([state.id_of("sake")])
+        );
+        assert_eq!(
+            state.group("drinks").unwrap().record.groups,
             BTreeSet::from(["spirits".to_string()]),
             "the parent's child reference follows the rename"
         );
-        assert!(!groups::group_path(&dir, &file_stem("liquor")).exists());
-        assert!(groups::group_path(&dir, &file_stem("spirits")).exists());
-        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+        assert!(!group_file_names(&dir).contains("liquor"));
+        assert!(group_file_names(&dir).contains("spirits"));
+        assert_eq!(
+            state.group("spirits").unwrap().id,
+            liquor_id,
+            "the id — and so the file — stays put"
+        );
+        assert!(groups::group_path(&dir, &liquor_id).exists());
+        // The parent was never rewritten: its file still holds the very
+        // bytes the create wrote.
+        assert_eq!(
+            fs::read(groups::group_path(&dir, &drinks.id)).unwrap(),
+            drinks_bytes
+        );
 
         // Persisted, not just in memory.
         drop(state);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.group("liquor").is_none());
+        assert!(state.group("liquor").is_err());
         assert_eq!(
-            state.group("drinks").unwrap().groups,
+            state.group("drinks").unwrap().record.groups,
             BTreeSet::from(["spirits".to_string()])
         );
 
         let _ = fs::remove_dir_all(dir);
-    }
-
-    /// The `group` twin of
-    /// `a_rename_whose_membership_rewrite_cannot_persist_keeps_its_marker`:
-    /// `rename_group` must keep its `.grouprenaming` marker whenever
-    /// the parent's nesting rewrite (`rename_in_membership` on
-    /// "drinks") does not persist, or the next boot's
-    /// `reconcile_groups` sees "liquor" as a plain dangling child
-    /// reference and drops it instead of resuming the rewrite to
-    /// "spirits". Swept exhaustively, same shape as
-    /// `every_group_write_persistence_failure_rolls_back_and_retries`.
-    #[test]
-    fn a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker() {
-        let mut exhausted = false;
-        for failure in 0..16 {
-            let dir = scratch_dir(&format!("rename-group-membership-fault-{failure}"));
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state.create("sake", ContextMeta::default()).unwrap();
-            state
-                .create_group(
-                    "liquor",
-                    String::new(),
-                    BTreeSet::from([state.id_of("sake")]),
-                    BTreeSet::new(),
-                )
-                .unwrap();
-            state
-                .create_group(
-                    "drinks",
-                    String::new(),
-                    BTreeSet::new(),
-                    BTreeSet::from(["liquor".to_string()]),
-                )
-                .unwrap();
-
-            fail_persistence_ops_after(failure);
-            let outcome = state.rename_group("liquor", "spirits");
-            let past_end = clear_persistence_fault();
-            drop(state);
-
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            let liquor = state.group("liquor");
-            let spirits = state.group("spirits");
-            let parent_children = state.group("drinks").unwrap().groups;
-            match (liquor.is_some(), spirits.is_some()) {
-                (true, false) => assert_eq!(
-                    parent_children,
-                    BTreeSet::from(["liquor".to_string()]),
-                    "failure at persistence step {failure} ({outcome:?}): the \
-                     rename never landed, so nesting must be untouched"
-                ),
-                (false, true) => assert_eq!(
-                    parent_children,
-                    BTreeSet::from(["spirits".to_string()]),
-                    "failure at persistence step {failure} ({outcome:?}): the \
-                     rename landed, so a boot resume must have finished the \
-                     nesting rewrite — an empty set means the marker was \
-                     removed before the rewrite could be retried"
-                ),
-                other => panic!(
-                    "failure at persistence step {failure}: exactly one name \
-                     must survive, not {other:?}"
-                ),
-            }
-            drop(state);
-            let _ = fs::remove_dir_all(&dir);
-
-            if past_end {
-                assert!(outcome.is_ok());
-                exhausted = true;
-                break;
-            }
-        }
-        assert!(exhausted, "group rename exceeded the sweep bound");
-    }
-
-    /// The `group` twin of
-    /// `creating_a_context_abandons_a_rename_marker_at_its_own_stem`: a
-    /// `.grouprenaming` marker at the created `group`'s own stem must be
-    /// abandoned so boot does not resume-move the fresh `group` onto the
-    /// rename's destination.
-    #[test]
-    fn creating_a_group_abandons_a_rename_marker_at_its_own_stem() {
-        let dir = scratch_dir("create-group-clears-source-marker");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            fs::write(
-                groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-                serde_json::to_vec(&RenameMarker {
-                    from: "liquor".to_string(),
-                    to: "spirits".to_string(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-            state
-                .create_group("liquor", String::new(), BTreeSet::new(), BTreeSet::new())
-                .unwrap();
-            assert!(
-                !groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
-                "create_group must clear a rename marker sitting at its own stem"
-            );
-        }
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.group("liquor").is_some());
-        assert!(state.group("spirits").is_none());
-        assert!(groups::group_path(&dir, &file_stem("liquor")).exists());
-        assert!(!groups::group_path(&dir, &file_stem("spirits")).exists());
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    /// The `group` twin of
-    /// `creating_a_context_abandons_a_rename_marker_naming_it_as_destination`:
-    /// creating `spirits` must drop a `.grouprenaming` marker that names
-    /// it as `to` (parked at `liquor`'s stem), or boot resume-moves the
-    /// stale `liquor` `group` file over the fresh `spirits` and drops
-    /// `liquor`.
-    #[test]
-    fn creating_a_group_abandons_a_rename_marker_naming_it_as_destination() {
-        let dir = scratch_dir("create-group-clears-destination-marker");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state
-                .create_group("liquor", String::new(), BTreeSet::new(), BTreeSet::new())
-                .unwrap();
-            fs::write(
-                groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-                serde_json::to_vec(&RenameMarker {
-                    from: "liquor".to_string(),
-                    to: "spirits".to_string(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-            state
-                .create_group("spirits", String::new(), BTreeSet::new(), BTreeSet::new())
-                .unwrap();
-            assert!(
-                !groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
-                "create_group must clear a rename marker that names it as the destination"
-            );
-        }
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(
-            state.group("liquor").is_some(),
-            "the abandoned rename must leave the untouched source group intact"
-        );
-        assert!(
-            state.group("spirits").is_some(),
-            "the freshly created destination group must survive, not be overwritten by the source"
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    /// The `restore_groups` twin of
-    /// `creating_a_group_abandons_a_rename_marker_naming_it_as_destination`
-    /// (issue #675): a `.grouprenaming` marker left by a rename that
-    /// crashed after writing its marker but before its file move landed
-    /// must not survive a `restore_groups` batch that lands a fresh
-    /// record under the marker's destination name — otherwise the next
-    /// boot's resume-sweep moves the stale source `group` file over the
-    /// just-restored record, destroying it.
-    #[test]
-    fn restoring_a_group_abandons_a_rename_marker_naming_it_as_destination() {
-        let dir = scratch_dir("restore-groups-clears-destination-marker");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state
-                .create_group("liquor", String::new(), BTreeSet::new(), BTreeSet::new())
-                .unwrap();
-            // Simulates `rename_group("liquor", "spirits")` crashing
-            // after its marker write but before its file move: the
-            // marker survives, `spirits` never comes to exist.
-            fs::write(
-                groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-                serde_json::to_vec(&RenameMarker {
-                    from: "liquor".to_string(),
-                    to: "spirits".to_string(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-            let record = GroupRecord {
-                description: "restored".to_string(),
-                context_ids: BTreeSet::new(),
-                groups: BTreeSet::new(),
-            };
-            let outcomes = state
-                .restore_groups(
-                    &[("spirits".to_string(), record.clone())],
-                    Deadline::unbounded(),
-                )
-                .unwrap();
-            assert_eq!(outcomes[0].1.as_str(), "created");
-            assert_eq!(state.group("spirits").unwrap(), record);
-            assert!(
-                !groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
-                "restore_groups must clear a rename marker that names it as the destination"
-            );
-        }
-        // Reboot: without the sweep, the resume pass would move
-        // `liquor`'s stale file over `spirits`, dropping both the
-        // restored record and the `liquor` name itself.
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(
-            state.group("liquor").is_some(),
-            "the abandoned rename must leave the untouched source group intact"
-        );
-        assert!(
-            state.group("spirits").is_some(),
-            "the restored destination group must survive, not be overwritten by the source"
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    /// CodeRabbit review on PR #680 (issue #675): the marker sweep
-    /// `restore_groups` needs before establishing a fresh name must NOT
-    /// also fire when it's REPLACING an already-standing one. A marker
-    /// can only survive past a landed rename in one case — the file
-    /// move committed but the parent's membership rewrite did not
-    /// persist (`rename_group`'s `retire_rename_marker`, exercised by
-    /// `a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker`)
-    /// — and in that case the destination name is already STANDING
-    /// (`Replaced`, not `Created`): the marker is `reconcile_groups`'s
-    /// only signal to finish rewriting the parent's stale `from`
-    /// reference on the next boot, and sweeping it here would strand
-    /// that reference as a dangling child forever. Sweeps
-    /// `fail_persistence_ops_after` the same way the sibling rename
-    /// test does to reliably land on that exact state, then restores
-    /// the destination name and confirms both the marker and the
-    /// eventual parent repair survive.
-    #[test]
-    fn restoring_a_replaced_name_does_not_abandon_its_still_needed_rename_marker() {
-        let mut landed_with_marker = false;
-        for failure in 0..16 {
-            let dir = scratch_dir(&format!("restore-replaced-keeps-marker-{failure}"));
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state.create("sake", ContextMeta::default()).unwrap();
-            state
-                .create_group(
-                    "liquor",
-                    String::new(),
-                    BTreeSet::from([state.id_of("sake")]),
-                    BTreeSet::new(),
-                )
-                .unwrap();
-            state
-                .create_group(
-                    "drinks",
-                    String::new(),
-                    BTreeSet::new(),
-                    BTreeSet::from(["liquor".to_string()]),
-                )
-                .unwrap();
-
-            fail_persistence_ops_after(failure);
-            let _ = state.rename_group("liquor", "spirits");
-            let _ = clear_persistence_fault();
-
-            let marker = groups::group_renaming_marker_path(&dir, &file_stem("liquor"));
-            let landed = state.group("spirits").is_some() && state.group("liquor").is_none();
-            if !landed || !marker.exists() {
-                // Either the rename never reached the file move, or the
-                // membership rewrite persisted after all at this exact
-                // failure offset — neither leaves the state this test
-                // targets.
-                drop(state);
-                let _ = fs::remove_dir_all(&dir);
-                continue;
-            }
-            landed_with_marker = true;
-
-            let record = GroupRecord {
-                description: "restored".to_string(),
-                context_ids: BTreeSet::from([state.id_of("sake")]),
-                groups: BTreeSet::new(),
-            };
-            let outcomes = state
-                .restore_groups(&[("spirits".to_string(), record)], Deadline::unbounded())
-                .unwrap();
-            assert_eq!(outcomes[0].1.as_str(), "replaced");
-            assert!(
-                marker.exists(),
-                "failure {failure}: restore_groups must not sweep a marker \
-                 surviving on a REPLACED (already-standing) name"
-            );
-            drop(state);
-
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            assert_eq!(
-                state.group("drinks").unwrap().groups,
-                BTreeSet::from(["spirits".to_string()]),
-                "failure {failure}: boot's reconcile_groups must still finish \
-                 rewriting the parent's stale 'liquor' reference to 'spirits'"
-            );
-            drop(state);
-            let _ = fs::remove_dir_all(&dir);
-            break;
-        }
-        assert!(
-            landed_with_marker,
-            "no failure offset produced a landed-rename-with-surviving-marker \
-             state to test"
-        );
     }
 
     #[test]
@@ -1979,7 +1811,7 @@ mod tests {
             Err(RenameGroupError::InvalidName)
         ));
         assert!(state.rename_group("drinks", "drinks").is_ok());
-        assert!(state.group("drinks").is_some());
+        assert!(state.group("drinks").is_ok());
         // The `from == to` short-circuit must not mask a NotFound: a
         // self-rename of a name that never existed is still a refusal.
         assert!(matches!(
@@ -2015,7 +1847,12 @@ mod tests {
 
             let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
             assert!(
-                !state.group("parent").unwrap().groups.contains("leaf"),
+                !state
+                    .group("parent")
+                    .unwrap()
+                    .record
+                    .groups
+                    .contains("leaf"),
                 "failure at step {failure} left a dangling child after boot"
             );
             drop(state);
@@ -2040,23 +1877,22 @@ mod tests {
         // context's deletion and the sweep's rewrite would leave one.
         groups::write_group(
             &dir,
-            &file_stem("drinks"),
-            &GroupRecord {
+            &StoredGroup {
                 description: "d".into(),
                 context_ids: BTreeSet::from([sake_id, "gone".to_string()]),
-                groups: BTreeSet::new(),
+                ..StoredGroup::empty(GROUP_A, "drinks")
             },
         )
         .unwrap();
 
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         assert_eq!(
-            state.group("drinks").unwrap().context_ids,
+            state.group("drinks").unwrap().record.context_ids,
             BTreeSet::from([state.id_of("sake")])
         );
         // Disk is the source of truth: the fix reached the file, not
         // just memory.
-        let on_disk = fs::read_to_string(groups::group_path(&dir, &file_stem("drinks"))).unwrap();
+        let on_disk = fs::read_to_string(groups::group_path(&dir, GROUP_A)).unwrap();
         assert!(
             !on_disk.contains("gone"),
             "the dangling member survived on disk: {on_disk}"
@@ -2066,16 +1902,18 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_group_file_keeps_its_name_and_sets_the_bytes_aside() {
+    fn a_corrupt_group_file_keeps_its_id_and_sets_the_bytes_aside() {
         let dir = scratch_dir("groups-corrupt");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         drop(state);
-        let live = groups::group_path(&dir, &file_stem("mangled"));
+        let live = groups::group_path(&dir, GROUP_A);
         fs::write(&live, b"{not json").unwrap();
 
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let record = state.group("mangled").unwrap();
-        assert_eq!(record, GroupRecord::default());
+        // The name was lost with the bytes; the id stands in for it.
+        let record = state.group(GROUP_A).unwrap();
+        assert_eq!(record.id, GROUP_A);
+        assert_eq!(record.record, GroupRecord::default());
         // The mangled bytes moved aside for hand recovery, and a fresh
         // empty record took their place — a later write to this group
         // overwrites nothing that was never loaded.
@@ -2084,8 +1922,8 @@ mod tests {
             b"{not json",
             "the original bytes must survive, set aside"
         );
-        let on_disk: GroupRecord = serde_json::from_slice(&fs::read(&live).unwrap()).unwrap();
-        assert_eq!(on_disk, GroupRecord::default());
+        let on_disk: StoredGroup = serde_json::from_slice(&fs::read(&live).unwrap()).unwrap();
+        assert_eq!(on_disk, StoredGroup::empty(GROUP_A, GROUP_A));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -2097,7 +1935,7 @@ mod tests {
             let dir = scratch_dir(&format!("groups-corrupt-fault-{failure}"));
             let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
             drop(state);
-            let live = groups::group_path(&dir, &file_stem("mangled"));
+            let live = groups::group_path(&dir, GROUP_A);
             fs::write(&live, b"{not json").unwrap();
 
             fail_persistence_ops_after(failure);
@@ -2106,7 +1944,7 @@ mod tests {
 
             if past_end {
                 let state = result.unwrap();
-                assert_eq!(state.group("mangled").unwrap(), GroupRecord::default());
+                assert_eq!(state.group(GROUP_A).unwrap().record, GroupRecord::default());
                 drop(state);
             } else {
                 // Whatever the write reached — still the mangled bytes,
@@ -2119,7 +1957,7 @@ mod tests {
                     "failure after {failure} successes must not drop the group file"
                 );
                 let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-                assert_eq!(state.group("mangled").unwrap(), GroupRecord::default());
+                assert_eq!(state.group(GROUP_A).unwrap().record, GroupRecord::default());
                 drop(state);
             }
 
@@ -2141,13 +1979,13 @@ mod tests {
         // every platform, the way a permission hiccup would — and boot
         // must refuse rather than register 'locked' over an empty
         // record a later write would persist.
-        let imposter = dir.join("locked.group");
+        let imposter = groups::group_path(&dir, GROUP_A);
         fs::create_dir(&imposter).unwrap();
         let message = match AppState::boot(dir.clone(), 1 << 20, None) {
             Ok(_) => panic!("boot must refuse while a group file is unreadable"),
             Err(error) => error.to_string(),
         };
-        assert!(message.contains("locked"), "names the group: {message}");
+        assert!(message.contains(GROUP_A), "names the group file: {message}");
         // Clearing the obstacle heals without further ceremony.
         fs::remove_dir(&imposter).unwrap();
         assert!(AppState::boot(dir.clone(), 1 << 20, None).is_ok());
@@ -2159,14 +1997,15 @@ mod tests {
     fn boot_reconciliation_untangles_hand_written_nesting() {
         let dir = scratch_dir("groups-reconcile-nesting");
         drop(AppState::boot(dir.clone(), 1 << 20, None).unwrap());
+        // Ids sort the way the names do, so the repair's id-order walk
+        // drops the same edges a name-order walk would.
+        let id = |name: &str| fixed_id(name);
         let write = |name: &str, children: &[&str]| {
             groups::write_group(
                 &dir,
-                &file_stem(name),
-                &GroupRecord {
-                    description: String::new(),
-                    context_ids: BTreeSet::new(),
-                    groups: children.iter().map(|child| child.to_string()).collect(),
+                &StoredGroup {
+                    group_ids: children.iter().map(|child| id(child)).collect(),
+                    ..StoredGroup::empty(&id(name), name)
                 },
             )
             .unwrap();
@@ -2185,7 +2024,7 @@ mod tests {
         // the cap — deterministically: edges re-admitted in name order,
         // so (cyc-b, cyc-a) and (n3, n4) are the ones that fall.
         let children =
-            |name: &str| -> BTreeSet<String> { state.group(name).unwrap().groups.clone() };
+            |name: &str| -> BTreeSet<String> { state.group(name).unwrap().record.groups.clone() };
         assert_eq!(children("n1"), BTreeSet::from(["n2".to_string()]));
         assert_eq!(children("n2"), BTreeSet::from(["n3".to_string()]));
         assert_eq!(children("n3"), BTreeSet::new());
@@ -2193,144 +2032,14 @@ mod tests {
         assert_eq!(children("cyc-b"), BTreeSet::new());
         // Disk is the source of truth: the repairs reached the files.
         for (group, dropped) in [("cyc-b", "cyc-a"), ("n3", "n4"), ("n1", "ghost")] {
-            let on_disk = fs::read_to_string(groups::group_path(&dir, &file_stem(group))).unwrap();
+            let on_disk = fs::read_to_string(groups::group_path(&dir, &id(group))).unwrap();
             assert!(
-                !on_disk.contains(dropped),
+                !on_disk.contains(&id(dropped)),
                 "'{group}' still names '{dropped}' on disk: {on_disk}"
             );
         }
 
         let _ = fs::remove_dir_all(dir);
-    }
-
-    /// The `group`-rename twin of
-    /// `an_unfinished_context_rename_is_resumed_at_boot_before_group_reconciliation`:
-    /// a surviving `.grouprenaming` marker must resume the file move
-    /// AND rewrite the PARENT's `groups` set to the new child name
-    /// before `reconcile_groups` runs, or the parent loses the child
-    /// as a dangling reference instead of following it to its new name.
-    #[test]
-    fn an_unfinished_group_rename_is_resumed_at_boot_before_group_reconciliation() {
-        let dir = scratch_dir("rename-group-crash");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state.create("sake", ContextMeta::default()).unwrap();
-            state
-                .create_group(
-                    "liquor",
-                    String::new(),
-                    BTreeSet::from([state.id_of("sake")]),
-                    BTreeSet::new(),
-                )
-                .unwrap();
-            state
-                .create_group(
-                    "drinks",
-                    String::new(),
-                    BTreeSet::new(),
-                    BTreeSet::from(["liquor".to_string()]),
-                )
-                .unwrap();
-        }
-        fs::write(
-            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-            serde_json::to_vec(&RenameMarker {
-                from: "liquor".to_string(),
-                to: "spirits".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.group("liquor").is_none());
-        let spirits = state
-            .group("spirits")
-            .expect("the renamed group must exist");
-        assert_eq!(spirits.context_ids, BTreeSet::from([state.id_of("sake")]));
-        assert_eq!(
-            state.group("drinks").unwrap().groups,
-            BTreeSet::from(["spirits".to_string()]),
-            "the parent must be REWRITTEN to the new child name, not pruned as dangling"
-        );
-        assert!(!groups::group_path(&dir, &file_stem("liquor")).exists());
-        assert!(groups::group_path(&dir, &file_stem("spirits")).exists());
-        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    /// The boot-resume twin of
-    /// `a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker`:
-    /// `boot_with`'s OWN resume loop for `group` renames must keep the
-    /// marker whenever the parent's nesting rewrite fails DURING that
-    /// resume, not just when a live `rename_group` call hits the same
-    /// fault.
-    #[test]
-    fn a_resumed_group_renames_nesting_rewrite_that_cannot_persist_keeps_the_marker() {
-        let dir = scratch_dir("rename-group-resume-membership-fault");
-        {
-            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state.create("sake", ContextMeta::default()).unwrap();
-            state
-                .create_group(
-                    "liquor",
-                    String::new(),
-                    BTreeSet::from([state.id_of("sake")]),
-                    BTreeSet::new(),
-                )
-                .unwrap();
-            state
-                .create_group(
-                    "drinks",
-                    String::new(),
-                    BTreeSet::new(),
-                    BTreeSet::from(["liquor".to_string()]),
-                )
-                .unwrap();
-        }
-        // The crash-shaped state: the marker survives, nothing has
-        // moved yet.
-        fs::write(
-            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-            serde_json::to_vec(&RenameMarker {
-                from: "liquor".to_string(),
-                to: "spirits".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        // The group file's own move (`commit_staged`) is the first
-        // persistence op this boot performs; fail the very next one —
-        // the parent's own `write_group` — so the move lands but the
-        // nesting rewrite does not.
-        fail_persistence_ops_after(1);
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        let past_end = clear_persistence_fault();
-        assert!(!past_end, "the group write itself must be what failed");
-
-        assert!(
-            state.group("spirits").is_some(),
-            "the move must still land even though the nesting rewrite failed"
-        );
-        assert!(
-            groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
-            "a boot-time nesting rewrite failure must keep the marker, or \
-             the NEXT boot's reconcile_groups sees \"liquor\" as a plain \
-             dangling child reference and drops it instead of resuming the rewrite"
-        );
-        drop(state);
-
-        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert_eq!(
-            state.group("drinks").unwrap().groups,
-            BTreeSet::from(["spirits".to_string()]),
-            "the retried resume must finish what the first boot could not"
-        );
-        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The member cap admits EXACTLY the cap and refuses one past it —
@@ -2347,5 +2056,255 @@ mod tests {
             check_member_caps(&over, &BTreeSet::new()),
             Err("member contexts")
         );
+    }
+
+    /// Plants two `groups` named "kura" (ids differ) plus a parent "p"
+    /// bundling both, and boots — the hand-assembled shape the name
+    /// bridge must refuse rather than resolve.
+    fn boot_with_twin_names(tag: &str) -> (std::path::PathBuf, AppState) {
+        let dir = scratch_dir(tag);
+        drop(AppState::boot(dir.clone(), 1 << 20, None).unwrap());
+        for id in [fixed_id("k1"), fixed_id("k2")] {
+            groups::write_group(&dir, &StoredGroup::empty(&id, "kura")).unwrap();
+        }
+        groups::write_group(
+            &dir,
+            &StoredGroup {
+                group_ids: BTreeSet::from([fixed_id("k1"), fixed_id("k2")]),
+                ..StoredGroup::empty(&fixed_id("p"), "p")
+            },
+        )
+        .unwrap();
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        (dir, state)
+    }
+
+    #[test]
+    fn a_name_two_groups_share_is_refused_at_every_name_entrance() {
+        let (dir, state) = boot_with_twin_names("groups-twin-names");
+        let kura = || BTreeSet::from(["kura".to_string()]);
+        let none = BTreeSet::<String>::new;
+        assert_eq!(
+            state.group("kura").map(|_| ()),
+            Err(GroupLookup::Ambiguous(2))
+        );
+        assert_eq!(
+            state.delete_group("kura").map(|_| ()),
+            Err(GroupLookup::Ambiguous(2))
+        );
+        assert!(matches!(
+            state.rename_group("kura", "x"),
+            Err(RenameGroupError::Ambiguous(2))
+        ));
+        assert!(matches!(
+            state.update_group("kura", None, none(), none(), none(), none()),
+            Err(UpdateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
+        ));
+        assert!(matches!(
+            state.update_group("p", None, none(), none(), kura(), none()),
+            Err(UpdateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
+        ));
+        // Removing by name resolves among p's own children — both are
+        // called "kura", so that is ambiguous too, and nothing moves.
+        assert!(matches!(
+            state.update_group("p", None, none(), none(), none(), kura()),
+            Err(UpdateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
+        ));
+        assert_eq!(state.group("p").unwrap().record.groups, kura());
+        assert!(matches!(
+            state.create_group("q", String::new(), none(), kura()),
+            Err(CreateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
+        ));
+        assert_eq!(
+            state.resolve_groups(&["kura".to_string()]),
+            Err(("kura".to_string(), GroupLookup::Ambiguous(2)))
+        );
+        let record = |children: &[&str]| GroupRecord {
+            groups: children.iter().map(|child| child.to_string()).collect(),
+            ..GroupRecord::default()
+        };
+        assert!(matches!(
+            state
+                .restore_groups(&[("kura".to_string(), record(&[]))], Deadline::unbounded())
+                .unwrap_err(),
+            RestoreGroupsError::Ambiguous { group, name, count: 2 } if group == "kura" && name == "kura"
+        ));
+        assert!(matches!(
+            state
+                .restore_groups(&[("r".to_string(), record(&["kura"]))], Deadline::unbounded())
+                .unwrap_err(),
+            RestoreGroupsError::Ambiguous { group, name, count: 2 } if group == "r" && name == "kura"
+        ));
+        // The scoped gate's lenient read folds both in; the directory
+        // lists both, name first then id.
+        let page = state.group_page(None, usize::MAX).1;
+        assert_eq!(
+            page.iter().map(|view| view.id.clone()).collect::<Vec<_>>(),
+            [fixed_id("k1"), fixed_id("k2"), fixed_id("p")]
+        );
+        assert_eq!(state.group_page(None, usize::MAX).0, 3);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_scoped_gate_folds_every_group_a_shared_name_addresses() {
+        let dir = scratch_dir("groups-twin-closure");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("beer", ContextMeta::default()).unwrap();
+        let (sake, beer) = (state.id_of("sake"), state.id_of("beer"));
+        drop(state);
+        for (id, member) in [(fixed_id("k1"), &sake), (fixed_id("k2"), &beer)] {
+            groups::write_group(
+                &dir,
+                &StoredGroup {
+                    context_ids: BTreeSet::from([member.clone()]),
+                    ..StoredGroup::empty(&id, "kura")
+                },
+            )
+            .unwrap();
+        }
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let both = BTreeSet::from([sake.clone(), beer.clone()]);
+        assert_eq!(state.group_context_closures(["kura"]), both);
+        assert_eq!(
+            state.group_context_closure_of(&fixed_id("k1")),
+            BTreeSet::from([sake.clone()]),
+            "one id, one group"
+        );
+        assert_eq!(
+            state.group_restore_involves(&[("kura".to_string(), GroupRecord::default())]),
+            both,
+            "the standing twins both count toward what a restore releases"
+        );
+        // The restore gate walks through nesting in the stream's own
+        // terms (names): a standing parent's child bundles sake, so
+        // replacing the parent with an empty record still RELEASES sake.
+        state
+            .create_group(
+                "parent",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["kid".to_string()]),
+            )
+            .unwrap_err();
+        state
+            .create_group(
+                "kid",
+                String::new(),
+                BTreeSet::from([sake.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        state
+            .create_group(
+                "parent",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["kid".to_string()]),
+            )
+            .unwrap();
+        assert_eq!(
+            state.group_restore_involves(&[("parent".to_string(), GroupRecord::default())]),
+            BTreeSet::from([sake.clone()]),
+            "a standing child's members count toward what the replace releases"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removing_a_child_by_name_resolves_among_the_parents_own_children() {
+        let dir = scratch_dir("groups-remove-by-name");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let one = |name: &str| BTreeSet::from([name.to_string()]);
+        let none = BTreeSet::<String>::new;
+        for name in ["a", "b"] {
+            state
+                .create_group(name, String::new(), none(), none())
+                .unwrap();
+        }
+        state
+            .create_group("p", String::new(), none(), one("a"))
+            .unwrap();
+        // A name p does not bundle (b) is the idempotent no-op it always
+        // was; one it does (a) leaves; an unknown name is no error.
+        let after = state
+            .update_group(
+                "p",
+                None,
+                none(),
+                none(),
+                none(),
+                BTreeSet::from(["b".into(), "ghost".into()]),
+            )
+            .unwrap();
+        assert_eq!(after.record.groups, one("a"));
+        let after = state
+            .update_group("p", None, none(), none(), one("b"), one("a"))
+            .unwrap();
+        assert_eq!(after.record.groups, one("b"));
+        assert_eq!(after.name, "p");
+        assert_eq!(after.id, state.group("p").unwrap().id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_nesting_refusal_names_the_blamed_group_not_its_id() {
+        let dir = scratch_dir("groups-nesting-names");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let one = |name: &str| BTreeSet::from([name.to_string()]);
+        let none = BTreeSet::<String>::new;
+        state
+            .create_group("leaf", String::new(), none(), none())
+            .unwrap();
+        state
+            .create_group("mid", String::new(), none(), one("leaf"))
+            .unwrap();
+        state
+            .create_group("top", String::new(), none(), one("mid"))
+            .unwrap();
+        assert!(matches!(
+            state.create_group("over", String::new(), none(), one("top")),
+            Err(CreateGroupError::Nesting(groups::NestingViolation::TooDeep(blamed))) if blamed == "over"
+        ));
+        assert!(matches!(
+            state.update_group("leaf", None, none(), none(), one("top"), none()),
+            Err(UpdateGroupError::Nesting(groups::NestingViolation::Cycle(blamed)))
+                if ["leaf", "mid", "top"].contains(&blamed.as_str())
+        ));
+        let record = |children: &[&str]| GroupRecord {
+            groups: children.iter().map(|child| child.to_string()).collect(),
+            ..GroupRecord::default()
+        };
+        assert!(matches!(
+            state
+                .restore_groups(&[("fresh".to_string(), record(&["top"]))], Deadline::unbounded())
+                .unwrap_err(),
+            RestoreGroupsError::Nesting(groups::NestingViolation::TooDeep(blamed)) if blamed == "fresh"
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The name stays unique among `groups` while the wire addresses them
+    /// by name: a rename onto another `group`'s name is refused, a rename
+    /// onto a free one leaves the old name free for a fresh create, and
+    /// that create mints a different id.
+    #[test]
+    fn a_rename_frees_the_old_name_for_a_fresh_group_with_its_own_id() {
+        let dir = scratch_dir("groups-rename-free-name");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let none = BTreeSet::<String>::new;
+        state
+            .create_group("old", String::new(), none(), none())
+            .unwrap();
+        let old_id = state.group("old").unwrap().id;
+        state.rename_group("old", "new").unwrap();
+        state
+            .create_group("old", String::new(), none(), none())
+            .unwrap();
+        assert_ne!(state.group("old").unwrap().id, old_id);
+        assert_eq!(state.group("new").unwrap().id, old_id);
+        assert!(groups::is_group_id(&old_id), "{old_id}");
+        let _ = fs::remove_dir_all(dir);
     }
 }

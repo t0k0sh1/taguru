@@ -17,8 +17,9 @@ use crate::registry::{AccessError, AppState};
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
-    access_error_noted, collected_validation_message, deadline_exceeded, error, group_not_found,
-    key_name, nesting_error_code, ok, ok_with_issues_total, truncate_issues, validation_error,
+    access_error_noted, collected_validation_message, deadline_exceeded, error,
+    group_lookup_refusal, key_name, nesting_error_code, ok, ok_with_issues_total, truncate_issues,
+    validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -395,6 +396,7 @@ pub(super) fn restore_refusal(
         }
         RestoreGroupsError::NoSuchContext { .. } => ErrorCode::NoContext,
         RestoreGroupsError::NoSuchChild { .. } => ErrorCode::NoGroup,
+        RestoreGroupsError::Ambiguous { .. } => ErrorCode::Conflict,
         RestoreGroupsError::OverCap { .. } => ErrorCode::OverLimit,
         RestoreGroupsError::Nesting(violation) => nesting_error_code(violation),
         RestoreGroupsError::Io { .. } => {
@@ -1325,8 +1327,9 @@ pub async fn export_group(
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> Response {
     let started_at = Instant::now();
-    let Some(record) = state.group(&name) else {
-        return group_not_found(&name, started_at);
+    let record = match state.group(&name) {
+        Ok(view) => view.record,
+        Err(why) => return group_lookup_refusal(&name, why, started_at),
     };
     let filtered = GroupRecord {
         description: record.description,

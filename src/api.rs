@@ -993,6 +993,36 @@ fn group_not_found(name: &str, started_at: Instant) -> Response {
     )
 }
 
+/// A `group` name several `groups` share (#994's bridge: names are not
+/// unique, but the wire still addresses `groups` by name until #995) —
+/// served as an explicit conflict, never as "not found" and never
+/// from one of the claimants. Only a hand-assembled data directory
+/// reaches it: the name-addressed create and rename refuse a standing
+/// name.
+fn ambiguous_group(name: &str, count: usize, started_at: Instant) -> Response {
+    error(
+        ErrorCode::Conflict,
+        format!(
+            "group name '{name}' is ambiguous: {count} groups share it; rename them \
+             apart (ids reach the wire in a later release)"
+        ),
+        started_at,
+    )
+}
+
+/// [`group_not_found`] or [`ambiguous_group`], whichever a failed name
+/// lookup means.
+fn group_lookup_refusal(
+    name: &str,
+    why: crate::groups::GroupLookup,
+    started_at: Instant,
+) -> Response {
+    match why {
+        crate::groups::GroupLookup::NotFound => group_not_found(name, started_at),
+        crate::groups::GroupLookup::Ambiguous(count) => ambiguous_group(name, count, started_at),
+    }
+}
+
 /// The one place the two nesting violations map onto the error
 /// vocabulary: a cycle is a malformed request (`invalid_argument`)
 /// while a too-tall stack trips a cap (`over_limit`) — depth is

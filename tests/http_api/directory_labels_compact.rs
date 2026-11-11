@@ -492,7 +492,9 @@ fn compact_leaves_group_files_byte_for_byte() {
         "/groups/kura",
         Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
     );
-    let group_file = server.data_dir.join("kura.group");
+    let group_file = server
+        .data_dir
+        .join(format!("{}.group", server.group_stem("kura")));
     let before = std::fs::read(&group_file).expect("the group file must exist");
 
     // The live endpoint rewrites the context image, not the group file.

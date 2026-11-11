@@ -21,8 +21,8 @@ use super::{
     AppJson, ContextIdPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT,
     MatchCursor, MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map,
     cache_and_serve, clamp, cross_associations_out, cross_job_panic, cross_search_concurrency,
-    deadline_exceeded, error, group_not_found, not_found, ok, overlong, page, replay_cached_search,
-    search_log_enabled,
+    deadline_exceeded, error, group_lookup_refusal, not_found, ok, overlong, page,
+    replay_cached_search, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -235,7 +235,9 @@ pub(super) fn cross_targets(
     if !groups.is_empty() {
         let resolved = match state.resolve_groups(&groups) {
             Ok(resolved) => resolved,
-            Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
+            Err((name, why)) => {
+                return Err(Box::new(group_lookup_refusal(&name, why, started_at)));
+            }
         };
         for id in resolved {
             if scope_allows(grant, &id) && seen.insert(id.clone()) {

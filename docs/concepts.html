@@ -142,7 +142,8 @@
       updates are deltas (<code>add_context_ids</code> / <code>remove_context_ids</code>,
       <code>add_groups</code> / <code>remove_groups</code>), referential integrity is strict
       (members must exist; deleting a <code>context</code> or <code>group</code> drops it from every <code>group</code>), and each
-      <code>group</code> persists as one <code>{name}.group</code> file beside the <code>context</code> files.
+      <code>group</code> persists as one <code>{id}.group</code> file beside the <code>context</code> files — named by the
+      <code>group</code>'s own id, with its name and its child <code>groups</code> (by id) inside, so a rename rewrites that one record.
     </p>
     <p>
       <code>groups</code> are the addressing unit of <b>cross-<code>context</code> search</b>: <code>POST /recall</code>,

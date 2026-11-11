@@ -24,12 +24,13 @@ use taguru::context::Context;
 
 use crate::config::fmt_bytes;
 use crate::groups::{
-    GroupRecord, MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, repair_nesting, trim_membership,
+    MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, ScannedGroup, StoredGroup, classify_group,
+    foreign_id_refusal, pre_id_refusal, repair_nesting, trim_membership,
 };
 use crate::registry::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ScannedMeta, bm25_path, meta_path, passages_path,
-    passages_wal_path, pvectors_path, read_scanned_meta, scanned_stem_and_name, schema_digest_of,
-    sources_path, vectors_path, wal_path,
+    passages_wal_path, pvectors_path, read_scanned_meta, schema_digest_of, sources_path,
+    vectors_path, wal_path,
 };
 use crate::schema;
 use crate::wal;
@@ -350,13 +351,13 @@ struct GroupRow {
 }
 
 impl GroupRow {
-    fn ok(name: String, record: &GroupRecord) -> Self {
+    fn ok(name: String, record: &StoredGroup) -> Self {
         GroupRow {
             name,
             status: "ok",
             error: None,
             contexts: record.context_ids.len(),
-            groups: record.groups.len(),
+            groups: record.group_ids.len(),
             notes: Vec::new(),
         }
     }
@@ -411,19 +412,41 @@ fn print_json(report: &InspectReport) {
     }
 }
 
-/// One `.group` file through the parse boot runs, read and parse kept
-/// apart — [`load_image`]'s twin one storey up, except the two failure
-/// classes cost differently (an unreadable file refuses a boot;
-/// unparseable bytes reset the record), so both callers must hear
-/// which.
-fn load_group(path: &Path) -> Result<GroupRecord, GroupFileTrouble> {
+/// One `.group` file through the classification boot runs
+/// ([`classify_group`]), read and parse kept apart — [`load_image`]'s
+/// twin one storey up, except the failure classes cost differently (an
+/// unreadable, pre-id, or foreign-id file refuses a boot; unparseable
+/// bytes reset the record), so both callers must hear which.
+fn load_group(path: &Path) -> Result<StoredGroup, GroupFileTrouble> {
+    let stem = group_stem(path);
     let bytes = std::fs::read(path).map_err(GroupFileTrouble::Unreadable)?;
-    serde_json::from_slice(&bytes).map_err(GroupFileTrouble::Corrupt)
+    match classify_group(&stem, &bytes) {
+        ScannedGroup::Current(record) => Ok(record),
+        ScannedGroup::PreId => Err(GroupFileTrouble::Refused(
+            "pre_id",
+            pre_id_refusal(&format!("{stem}.group")),
+        )),
+        ScannedGroup::ForeignId(id) => Err(GroupFileTrouble::Refused(
+            "foreign_id",
+            foreign_id_refusal(&format!("{stem}.group"), &id),
+        )),
+        ScannedGroup::Corrupt(error) => Err(GroupFileTrouble::Corrupt(error)),
+    }
+}
+
+/// A `.group` file's stem — the `group` id when the file is current.
+fn group_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 enum GroupFileTrouble {
     Unreadable(std::io::Error),
-    Corrupt(serde_json::Error),
+    /// A file boot refuses to start on (the `status`, and the sentence
+    /// boot would say).
+    Refused(&'static str, String),
+    Corrupt(String),
 }
 
 /// One bare `.group` record: the "is this `group` file I restored
@@ -446,10 +469,11 @@ fn inspect_group_file(path: &Path, as_json: bool) -> i32 {
                 });
             } else {
                 println!(
-                    "{}: ok  {} member context(s) · {} child group(s)",
+                    "{}: ok  '{}' · {} member context(s) · {} child group(s)",
                     path.display(),
+                    record.name,
                     record.context_ids.len(),
-                    record.groups.len()
+                    record.group_ids.len()
                 );
             }
             0
@@ -474,6 +498,26 @@ fn inspect_group_file(path: &Path, as_json: bool) -> i32 {
             }
             1
         }
+        Err(GroupFileTrouble::Refused(status, message)) => {
+            if as_json {
+                print_json(&InspectReport {
+                    target,
+                    kind: "group",
+                    contexts: Vec::new(),
+                    groups: vec![GroupRow::trouble(
+                        path.display().to_string(),
+                        status,
+                        message,
+                    )],
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 1,
+                });
+            } else {
+                eprintln!("{}: FAILURE — {message}", path.display());
+            }
+            1
+        }
         Err(GroupFileTrouble::Corrupt(error)) => {
             if as_json {
                 print_json(&InspectReport {
@@ -483,7 +527,7 @@ fn inspect_group_file(path: &Path, as_json: bool) -> i32 {
                     groups: vec![GroupRow::trouble(
                         path.display().to_string(),
                         "corrupt",
-                        error.to_string(),
+                        error,
                     )],
                     notices: Vec::new(),
                     total: None,
@@ -1078,13 +1122,15 @@ fn inspect_groups(
     as_json: bool,
 ) -> (usize, usize, Vec<GroupRow>, Vec<Notice>) {
     let mut failures = 0usize;
-    let mut records: BTreeMap<String, GroupRecord> = BTreeMap::new();
+    // Keyed by id (the stem), exactly as boot holds them; every line the
+    // report prints names the `group` by its recorded name.
+    let mut records: BTreeMap<String, StoredGroup> = BTreeMap::new();
     let mut group_rows: Vec<GroupRow> = Vec::new();
     let mut notices: Vec<Notice> = Vec::new();
-    // Names already reported as CORRUPT above — inserted into `records`
+    // Ids already reported as CORRUPT above — inserted into `records`
     // as an empty placeholder so a sibling's dangling-reference check
     // sees the same shape boot will (comment below), but the JSON
-    // preview loop must not ALSO emit an "ok" row for a name that's
+    // preview loop must not ALSO emit an "ok" row for a `group` that's
     // already a `GroupRow::trouble` row; the human line below still
     // prints one, since a person reads the CORRUPT line right above it
     // and the empty "ok" line's own zero counts as a caveat, not new
@@ -1111,74 +1157,85 @@ fn inspect_groups(
         if path.extension().and_then(|e| e.to_str()) != Some("group") {
             continue;
         }
-        let Some((stem, name)) = scanned_stem_and_name(path) else {
-            if as_json {
-                notices.push(Notice::warning(
-                    "undecodable_stem",
-                    file.to_string(),
-                    "stem does not decode; the server will skip it",
-                ));
-            } else {
-                println!("{file}: WARNING — stem does not decode; the server will skip it");
-            }
-            continue;
-        };
+        let stem = group_stem(path);
         match load_group(path) {
             Ok(record) => {
-                records.insert(name, record);
+                records.insert(stem, record);
             }
             Err(GroupFileTrouble::Unreadable(error)) => {
                 if as_json {
                     group_rows.push(GroupRow::trouble(
-                        name.clone(),
+                        file.to_string(),
                         "unreadable",
                         error.to_string(),
                     ));
                 } else {
                     println!(
-                        "{name}: UNREADABLE group — {error} (a boot refuses to start while \
+                        "{file}: UNREADABLE group — {error} (a boot refuses to start while \
                          this file cannot be read)"
                     );
                 }
                 failures += 1;
             }
+            Err(GroupFileTrouble::Refused(status, message)) => {
+                if as_json {
+                    group_rows.push(GroupRow::trouble(file.to_string(), status, message));
+                } else {
+                    println!("{file}: FAILURE — {message} (a boot refuses to start)");
+                }
+                failures += 1;
+            }
             Err(GroupFileTrouble::Corrupt(error)) => {
                 if as_json {
-                    group_rows.push(GroupRow::trouble(
-                        name.clone(),
-                        "corrupt",
-                        error.to_string(),
-                    ));
+                    group_rows.push(GroupRow::trouble(file.to_string(), "corrupt", error));
                 } else {
                     println!(
-                        "{name}: CORRUPT group — {error} (a boot keeps the name, sets these \
-                         bytes aside as {stem}.group.corrupt, and resets the record to empty)"
+                        "{file}: CORRUPT group — {error} (a boot keeps the group under its id, \
+                         sets these bytes aside as {stem}.group.corrupt, and resets the record \
+                         to empty, named by its id)"
                     );
                 }
                 failures += 1;
-                // scan_groups registers the name with an empty record
+                // scan_groups registers the id with an empty record
                 // rather than dropping it — the reference checks below
                 // must see the same shape boot will, or a parent naming
                 // this group as a child gets a false "boot drops this
                 // reference" warning (boot only drops references whose
-                // name is genuinely absent), and the shape preview below
+                // id is genuinely absent), and the shape preview below
                 // would prune the edge before repair_nesting ever runs,
                 // skewing the cycle/depth check for unrelated edges too.
-                reported_corrupt.insert(name.clone());
-                records.insert(name, GroupRecord::default());
+                reported_corrupt.insert(stem.clone());
+                records.insert(stem.clone(), StoredGroup::empty(&stem, &stem));
             }
         }
     }
+    // How every line names a `group`: its recorded name — plus its id
+    // when another `group` here records the same name, or two of them
+    // would read as one (a cycle between them as `'same' → 'same'`) and
+    // the reader could not tell which file a line is about.
+    let mut name_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in records.values() {
+        *name_counts.entry(record.name.as_str()).or_default() += 1;
+    }
+    let label = |record: &StoredGroup| -> String {
+        if name_counts[record.name.as_str()] > 1 {
+            format!("{} ({})", record.name, record.id)
+        } else {
+            record.name.clone()
+        }
+    };
+    let name_of = |id: &str| -> String { records.get(id).map_or_else(|| id.to_string(), label) };
 
     // The healing preview: what boot's reconciliation would drop.
-    for (name, record) in &records {
+    for (id, record) in &records {
+        let name = &label(record);
         let dangling_contexts = record
             .context_ids
             .iter()
             .filter(|context| !context_ids.contains(*context))
             .count();
         let dangling_children = record
-            .groups
+            .group_ids
             .iter()
             .filter(|child| !records.contains_key(*child))
             .count();
@@ -1208,7 +1265,7 @@ fn inspect_groups(
         }
         for (field, len) in [
             ("member contexts", record.context_ids.len()),
-            ("child groups", record.groups.len()),
+            ("child groups", record.group_ids.len()),
         ] {
             if len > MAX_GROUP_MEMBERS {
                 let kind = if field == "member contexts" {
@@ -1227,7 +1284,7 @@ fn inspect_groups(
             }
         }
         if as_json {
-            if !reported_corrupt.contains(name) {
+            if !reported_corrupt.contains(id) {
                 let mut row = GroupRow::ok(name.clone(), record);
                 row.notes = group_notes;
                 group_rows.push(row);
@@ -1236,7 +1293,7 @@ fn inspect_groups(
             println!(
                 "{name}: ok  {} member context(s) · {} child group(s){}",
                 record.context_ids.len(),
-                record.groups.len(),
+                record.group_ids.len(),
                 if group_notes.is_empty() {
                     String::new()
                 } else {
@@ -1262,25 +1319,26 @@ fn inspect_groups(
     // validator walk happens to hit.
     let mut swept = records.clone();
     for record in swept.values_mut() {
-        record.groups.retain(|child| records.contains_key(child));
+        record.group_ids.retain(|child| records.contains_key(child));
     }
     trim_membership(&mut swept, MAX_GROUP_MEMBERS);
     let mut repaired = swept.clone();
     repair_nesting(&mut repaired);
-    for (name, record) in &swept {
-        for child in record.groups.difference(&repaired[name].groups) {
+    for (id, record) in &swept {
+        for child in record.group_ids.difference(&repaired[id].group_ids) {
+            let (parent, child) = (name_of(id), name_of(child));
             if as_json {
                 notices.push(Notice::warning(
                     "dropped_nesting_edge",
                     "groups",
                     format!(
-                        "boot drops the nesting edge '{name}' → '{child}' (it would close a \
+                        "boot drops the nesting edge '{parent}' → '{child}' (it would close a \
                          cycle or stack more than {MAX_GROUP_DEPTH} groups)"
                     ),
                 ));
             } else {
                 println!(
-                    "groups: WARNING — boot drops the nesting edge '{name}' → '{child}' \
+                    "groups: WARNING — boot drops the nesting edge '{parent}' → '{child}' \
                      (it would close a cycle or stack more than {MAX_GROUP_DEPTH} groups)"
                 );
             }

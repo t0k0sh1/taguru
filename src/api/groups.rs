@@ -8,16 +8,16 @@ use serde::{Deserialize, Serialize};
 
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
-use crate::groups::GroupRecord;
 use crate::metrics::ErrorKind;
-use crate::registry::{AppState, CreateGroupError, RenameGroupError, UpdateGroupError};
+use crate::registry::{AppState, CreateGroupError, GroupView, RenameGroupError, UpdateGroupError};
 
 use super::aliases::{KeysetQuery, keyset_bounds};
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found, invalid_context_ids,
-    key_name, nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
+    MAX_MATCH_LIMIT, ambiguous_group, clamp_page, deadline_exceeded, error, group_lookup_refusal,
+    group_not_found, invalid_context_ids, key_name, nesting_refusal, ok, optional_body,
+    over_cap_refusal, overlong, oversized,
 };
 
 /// A bounded `group`-directory page; `total` counts the whole directory,
@@ -91,17 +91,16 @@ pub(super) fn scope_allows(
 /// row, so there is nothing left worth finishing once it gives up.
 fn group_entry(
     state: &AppState,
-    name: String,
-    record: GroupRecord,
+    view: GroupView,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
 ) -> Result<GroupEntry, DeadlineExceeded> {
-    let fingerprint = group_fingerprint(state, &name, grant, deadline)?;
+    let fingerprint = group_fingerprint(state, &view.id, grant, deadline)?;
     Ok(GroupEntry {
-        name,
-        description: record.description,
-        context_ids: scoped_member_contexts(record.context_ids, grant),
-        groups: record.groups,
+        name: view.name,
+        description: view.record.description,
+        context_ids: scoped_member_contexts(view.record.context_ids, grant),
+        groups: view.record.groups,
         fingerprint,
     })
 }
@@ -114,8 +113,7 @@ fn group_entry(
 /// (page-of-many) version of the same gate.
 fn deadline_gated_group_entry(
     state: &AppState,
-    name: String,
-    record: GroupRecord,
+    view: GroupView,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
     started_at: Instant,
@@ -123,13 +121,14 @@ fn deadline_gated_group_entry(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match tokio::task::block_in_place(|| group_entry(state, name, record, grant, deadline)) {
+    match tokio::task::block_in_place(|| group_entry(state, view, grant, deadline)) {
         Ok(entry) => ok(entry, started_at),
         Err(DeadlineExceeded) => deadline_exceeded(started_at),
     }
 }
 
-/// The change token on one `group` row: FNV-1a over the grant-visible
+/// The change token on one `group` row (the `group` by id, so two that
+/// share a name never share a token): FNV-1a over the grant-visible
 /// transitive `context` closure, each member as its length-prefixed name
 /// followed by the three revision counters — structurally unambiguous,
 /// so distinct closures cannot collide by concatenation. The closure
@@ -149,12 +148,12 @@ fn deadline_gated_group_entry(
 /// write already committed) passes `Deadline::unbounded()`.
 fn group_fingerprint(
     state: &AppState,
-    name: &str,
+    id: &str,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     deadline: &Deadline,
 ) -> Result<String, DeadlineExceeded> {
     let mut digest = crate::hash::FNV1A_OFFSET;
-    for context in state.group_context_closures([name]) {
+    for context in state.group_context_closure_of(id) {
         if deadline.expired() || injected_fingerprint_loop_expiry() {
             return Err(DeadlineExceeded);
         }
@@ -325,7 +324,7 @@ pub async fn list_groups(
     }
     let groups: Result<Vec<_>, DeadlineExceeded> = tokio::task::block_in_place(|| {
         page.into_iter()
-            .map(|(name, record)| group_entry(&state, name, record, &grant, &deadline))
+            .map(|view| group_entry(&state, view, &grant, &deadline))
             .collect()
     });
     match groups {
@@ -342,10 +341,8 @@ pub async fn get_group(
 ) -> Response {
     let started_at = Instant::now();
     match state.group(&name) {
-        Some(record) => {
-            deadline_gated_group_entry(&state, name, record, &grant, &deadline, started_at)
-        }
-        None => group_not_found(&name, started_at),
+        Ok(view) => deadline_gated_group_entry(&state, view, &grant, &deadline, started_at),
+        Err(why) => group_lookup_refusal(&name, why, started_at),
     }
 }
 
@@ -441,6 +438,9 @@ pub async fn create_group(
             format!("group '{group}' not found; nothing was applied"),
             started_at,
         ),
+        Err(CreateGroupError::AmbiguousGroup { name, count }) => {
+            ambiguous_group(&name, count, started_at)
+        }
         Err(CreateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(CreateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(CreateGroupError::Io(io_error)) => {
@@ -550,7 +550,7 @@ pub async fn update_group(
             request.remove_groups.into_iter().collect(),
         )
     }) {
-        Ok(record) => {
+        Ok(view) => {
             // The write above already committed (fsync + rename) — a
             // deadline expiring from here on must not turn a durable
             // mutation into an apparent failure. Returning a timeout
@@ -565,7 +565,7 @@ pub async fn update_group(
             // the request's own — the only caller in this file that
             // does, and only because the mutation is already durable.
             let entry = tokio::task::block_in_place(|| {
-                group_entry(&state, name, record, &grant, &Deadline::unbounded())
+                group_entry(&state, view, &grant, &Deadline::unbounded())
             });
             match entry {
                 Ok(entry) => ok(entry, started_at),
@@ -586,6 +586,9 @@ pub async fn update_group(
             format!("group '{group}' not found; nothing was applied"),
             started_at,
         ),
+        Err(UpdateGroupError::AmbiguousGroup { name, count }) => {
+            ambiguous_group(&name, count, started_at)
+        }
         Err(UpdateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(UpdateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(UpdateGroupError::Io(io_error)) => {
@@ -624,8 +627,8 @@ pub async fn delete_group(
     }
     // Unlinks the group file; keep it off the async worker.
     match tokio::task::block_in_place(|| state.delete_group(&name)) {
-        None => group_not_found(&name, started_at),
-        Some(outcome) => {
+        Err(why) => group_lookup_refusal(&name, why, started_at),
+        Ok(outcome) => {
             // Destructive, so it leaves a `taguru::audit` line like
             // delete_context — the member contexts themselves are
             // untouched and say so via their own lines only when THEY
@@ -655,8 +658,9 @@ pub async fn delete_group(
     }
 }
 
-/// `POST /groups/{name}/rename` — the `group`'s file moves to `to` and
-/// every OTHER `group` naming `name` as a child is rewritten to match.
+/// `POST /groups/{name}/rename` — the `group`'s recorded name becomes
+/// `to`; nothing else moves (its file is stemmed by id, and parents
+/// bundle it by id).
 /// Unlike `rename_context`, `{name}` here is a GROUP name, so it is
 /// one of the routes the authorization middleware exempts from its
 /// per-`context` grant check — the grant gate belongs to this handler,
@@ -707,6 +711,7 @@ pub async fn rename_group(
             ok(true, started_at)
         }
         Err(RenameGroupError::NotFound) => group_not_found(&name, started_at),
+        Err(RenameGroupError::Ambiguous(count)) => ambiguous_group(&name, count, started_at),
         Err(RenameGroupError::AlreadyExists) => error(
             ErrorCode::AlreadyExists,
             format!("group '{}' already exists", request.to),
@@ -721,10 +726,7 @@ pub async fn rename_group(
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,
-                format!(
-                    "group '{name}' rename not fully persisted: {io_error} \
-                     (a rename marker remains; the next boot resumes it)"
-                ),
+                format!("group '{name}' rename not persisted (nothing changed): {io_error}"),
                 started_at,
             )
         }
@@ -788,7 +790,7 @@ mod tests {
         one_context_group(&state, "kura", "sake");
 
         let deadline = already_expired_deadline();
-        let result = group_fingerprint(&state, "kura", &None, &deadline);
+        let result = group_fingerprint(&state, &state.group("kura").unwrap().id, &None, &deadline);
         assert_eq!(result, Err(DeadlineExceeded));
     }
 
@@ -830,7 +832,12 @@ mod tests {
         // second reports expired — proof the check runs more than
         // once across the three-context closure.
         expire_fingerprint_loop_after(1);
-        let result = group_fingerprint(&state, "kura", &None, &Deadline::unbounded());
+        let result = group_fingerprint(
+            &state,
+            &state.group("kura").unwrap().id,
+            &None,
+            &Deadline::unbounded(),
+        );
         assert_eq!(result, Err(DeadlineExceeded));
     }
 

@@ -222,13 +222,13 @@ impl AppState {
     }
 
     /// Replica tailer: re-reads `group` records from disk after a shared
-    /// refresh landed new `group` files. Read-only by design — no rename
-    /// resumption, no corrupt set-aside, no reconcile persistence: the
+    /// refresh landed new `group` files. Read-only by design — no
+    /// corrupt set-aside, no reconcile persistence: the
     /// manifest is the author here, and anything odd heals when the
     /// next diff refetches the file. A record that does not parse
     /// falls back to its previous in-memory version rather than
     /// vanishing mid-serve — except the first time this replica ever
-    /// sees that name, when there IS no previous version: it simply
+    /// sees that `group`, when there IS no previous version: it simply
     /// stays absent until a later poll lands a parseable copy (see the
     /// `carried` loop's own comment).
     pub(crate) fn replica_reload_groups(&self) {
@@ -239,46 +239,57 @@ impl AppState {
                 return;
             }
         };
-        let mut fresh: BTreeMap<String, groups::GroupRecord> = BTreeMap::new();
+        let mut fresh: BTreeMap<String, groups::StoredGroup> = BTreeMap::new();
         let mut carried: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("group") {
                 continue;
             }
-            let Some((_stem, name)) = scanned_stem_and_name(&path) else {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let parsed = fs::read(&path).and_then(|bytes| {
-                serde_json::from_slice::<groups::GroupRecord>(&bytes).map_err(io::Error::other)
-            });
+            // The boot scan's classification, read-only: a pre-id or
+            // foreign-id file the writer would never have produced is
+            // skipped (a writer refuses to boot on one), and only a
+            // current record is ever served.
+            let parsed = fs::read(&path).map(|bytes| groups::classify_group(stem, &bytes));
             match parsed {
-                Ok(record) => {
-                    fresh.insert(name, record);
+                Ok(groups::ScannedGroup::Current(record)) => {
+                    fresh.insert(record.id.clone(), record);
                 }
-                Err(error) => {
+                Ok(groups::ScannedGroup::PreId | groups::ScannedGroup::ForeignId(_)) => {
+                    tracing::warn!(
+                        group_id = %stem,
+                        "tailed group file is not a current record for its stem; skipping it"
+                    );
+                }
+                Ok(groups::ScannedGroup::Corrupt(error)) => {
                     // Whether a previous record exists is decided
                     // below, once every file is read — this line
-                    // cannot yet promise "keeping its previous record"
-                    // the way it used to unconditionally claim.
-                    tracing::warn!(group = %name, %error, "tailed group file unreadable");
-                    carried.push(name);
+                    // cannot yet promise "keeping its previous record".
+                    tracing::warn!(group_id = %stem, %error, "tailed group file does not parse");
+                    carried.push(stem.to_string());
+                }
+                Err(error) => {
+                    tracing::warn!(group_id = %stem, %error, "tailed group file unreadable");
+                    carried.push(stem.to_string());
                 }
             }
         }
         let mut groups = self.0.groups.write();
-        for name in carried {
-            match groups.get(&name) {
+        for id in carried {
+            match groups.get(&id) {
                 Some(previous) => {
-                    fresh.insert(name, previous.clone());
+                    fresh.insert(id, previous.clone());
                 }
                 None => {
-                    // No fallback exists for a name this replica has
+                    // No fallback exists for a `group` this replica has
                     // never held a good copy of — it stays absent from
                     // `fresh` (not inserted, not repaired-around) until
                     // the manifest's next diff lands a parseable file.
                     tracing::warn!(
-                        group = %name,
+                        group_id = %id,
                         "no previous record to fall back to for this unreadable group; \
                          it stays absent until a later poll lands a parseable copy"
                     );
@@ -288,16 +299,16 @@ impl AppState {
         // `repair_nesting` requires dangling child references dropped
         // first (its own doc comment) — the other two callers
         // (`boot::reconcile_groups`, `inspect`'s shape preview) both do
-        // this before calling it; a name `carried` above but with no
+        // this before calling it; a `group` `carried` above but with no
         // fallback (just warned about, immediately above) is exactly
         // the kind of dangling reference this guards against, since
-        // some OTHER record's `groups` set may still name it.
+        // some OTHER record's `group_ids` set may still name it.
         let scanned = fresh.clone();
         for record in fresh.values_mut() {
-            record.groups.retain(|child| scanned.contains_key(child));
+            record.group_ids.retain(|child| scanned.contains_key(child));
         }
         groups::repair_nesting(&mut fresh);
-        *groups = fresh;
+        *groups = groups::GroupTable::new(fresh);
     }
 }
 
@@ -444,6 +455,9 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    const KURA: &str = "00000000-0000-4000-9000-0000000000a1";
+    const BRANDNEW: &str = "00000000-0000-4000-9000-0000000000b2";
+
     /// A replica IS a replica, and its `group` reload actually reads the
     /// manifest-delivered `.group` files into the served map.
     #[test]
@@ -461,21 +475,21 @@ mod tests {
         .unwrap();
         assert!(state.is_replica(), "the replica boot must read as one");
 
-        let record = groups::GroupRecord {
+        let record = groups::StoredGroup {
             description: "蔵まとめ".to_string(),
             context_ids: std::collections::BTreeSet::from(["sake".to_string()]),
-            groups: std::collections::BTreeSet::new(),
+            ..groups::StoredGroup::empty(KURA, "kura")
         };
-        fs::write(
-            dir.join(format!("{}.group", file_stem("kura"))),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
+        groups::write_group(&dir, &record).unwrap();
+        // A file the writer could never have produced — a pre-id record
+        // under a name stem — is skipped, not served.
+        fs::write(dir.join("legacy.group"), br#"{"groups":[]}"#).unwrap();
         state.replica_reload_groups();
         let (_, groups) = state.group_page(None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
-        assert_eq!(groups[0].0, "kura");
-        assert_eq!(groups[0].1.context_ids.len(), 1);
+        assert_eq!(groups[0].id, KURA);
+        assert_eq!(groups[0].name, "kura");
+        assert_eq!(groups[0].record.context_ids.len(), 1);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -503,23 +517,19 @@ mod tests {
         // file never lands (deleted upstream, or torn on this exact
         // poll) — the shape `repair_nesting`'s precondition exists
         // for.
-        let parent = groups::GroupRecord {
+        let parent = groups::StoredGroup {
             description: "parent".to_string(),
-            context_ids: std::collections::BTreeSet::new(),
-            groups: std::collections::BTreeSet::from(["child".to_string()]),
+            group_ids: std::collections::BTreeSet::from([BRANDNEW.to_string()]),
+            ..groups::StoredGroup::empty(KURA, "parent")
         };
-        fs::write(
-            dir.join(format!("{}.group", file_stem("parent"))),
-            serde_json::to_vec(&parent).unwrap(),
-        )
-        .unwrap();
+        groups::write_group(&dir, &parent).unwrap();
 
         state.replica_reload_groups();
         let (_, groups) = state.group_page(None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
-        assert_eq!(groups[0].0, "parent");
+        assert_eq!(groups[0].name, "parent");
         assert!(
-            groups[0].1.groups.is_empty(),
+            groups[0].record.groups.is_empty(),
             "the dangling child reference must be dropped, not carried into \
              repair_nesting: {groups:?}"
         );
@@ -548,26 +558,17 @@ mod tests {
         .unwrap();
 
         // An existing, already-loaded group with a good record...
-        let kura = groups::GroupRecord {
+        let kura = groups::StoredGroup {
             description: "蔵まとめ".to_string(),
-            context_ids: std::collections::BTreeSet::new(),
-            groups: std::collections::BTreeSet::new(),
+            ..groups::StoredGroup::empty(KURA, "kura")
         };
-        fs::write(
-            dir.join(format!("{}.group", file_stem("kura"))),
-            serde_json::to_vec(&kura).unwrap(),
-        )
-        .unwrap();
+        groups::write_group(&dir, &kura).unwrap();
         state.replica_reload_groups();
         assert_eq!(state.group_page(None, usize::MAX).1.len(), 1);
 
         // ...plus a BRAND NEW group whose file is unparseable from the
         // start — this replica has never held a good copy of it.
-        fs::write(
-            dir.join(format!("{}.group", file_stem("brandnew"))),
-            b"{not json",
-        )
-        .unwrap();
+        fs::write(dir.join(format!("{BRANDNEW}.group")), b"{not json").unwrap();
         state.replica_reload_groups();
 
         let (_, groups) = state.group_page(None, usize::MAX);
@@ -577,9 +578,17 @@ mod tests {
             "the never-seen unparseable group must stay absent: {groups:?}"
         );
         assert_eq!(
-            groups[0].0, "kura",
+            groups[0].name, "kura",
             "the sibling with a good record survives"
         );
+
+        // Once a good copy was served, a later torn copy falls back to
+        // it instead of vanishing mid-serve.
+        fs::write(dir.join(format!("{KURA}.group")), b"{torn").unwrap();
+        state.replica_reload_groups();
+        let (_, groups) = state.group_page(None, usize::MAX);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].record.description, "蔵まとめ");
 
         let _ = fs::remove_dir_all(dir);
     }

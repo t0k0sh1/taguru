@@ -2427,10 +2427,11 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
     // Delete one context and one group from the data directory, the
     // way an offline operator does — the export must converge on it.
     let old_stem = common::context_stem(&data, "old");
+    let dead_group = format!("{}.group", common::group_stem(&data, "dead"));
     for entry in std::fs::read_dir(&data).expect("data dir must list") {
         let entry = entry.expect("entry must read");
         let name = entry.file_name().into_string().expect("ascii stems");
-        if name.starts_with(&format!("{old_stem}.")) || name == "dead.group" {
+        if name.starts_with(&format!("{old_stem}.")) || name == dead_group {
             std::fs::remove_file(entry.path()).expect("delete must work");
         }
     }
@@ -2652,6 +2653,38 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A canonical `group` id derived from a short name (≤ 6 bytes): the
+/// name's bytes, hex, in the id's last field — so hand-planted files sort
+/// by id exactly as by name, and a test can name what it planted.
+fn cli_group_id(name: &str) -> String {
+    let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("00000000-0000-4000-9000-{hex:0<12}")
+}
+
+/// Plants one current-format `.group` record (#994: stemmed by id, the
+/// name inside, children by id), returning its id.
+fn write_group_file(
+    dir: &std::path::Path,
+    name: &str,
+    contexts: &[&str],
+    children: &[&str],
+) -> String {
+    let id = cli_group_id(name);
+    let record = serde_json::json!({
+        "id": id,
+        "name": name,
+        "description": "",
+        "context_ids": contexts,
+        "group_ids": children.iter().map(|child| cli_group_id(child)).collect::<Vec<_>>(),
+    });
+    std::fs::write(
+        dir.join(format!("{id}.group")),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    id
+}
+
 /// Inspect covers the group files: parse trouble fails the check (a
 /// boot would reset the record, and membership is acknowledged data),
 /// an unreadable file fails it (a boot refuses outright), and what
@@ -2664,11 +2697,15 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
-    std::fs::write(
-        dir.join("kura.group"),
-        "{\"description\": \"\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"], \"groups\": []}",
-    )
-    .unwrap();
+    let kura = write_group_file(
+        &dir,
+        "kura",
+        &[
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            "ead6ef03-d61e-460c-933d-6d450c50a1e5",
+        ],
+        &[],
+    );
 
     // A record that parses is ok; its dangling member is the preview
     // of what boot would drop — a warning, never a failure.
@@ -2686,20 +2723,15 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     // preview runs the real repair, so EVERY doomed edge is named in
     // one run (a cycle and an over-deep chain at once), not just the
     // first violation a walk happens to hit.
-    std::fs::write(dir.join("cyc-a.group"), "{\"groups\": [\"cyc-b\"]}").unwrap();
-    std::fs::write(dir.join("cyc-b.group"), "{\"groups\": [\"cyc-a\"]}").unwrap();
-    for (parent, child) in [("n1", "n2"), ("n2", "n3"), ("n3", "n4"), ("n4", "")] {
-        let children = if child.is_empty() {
-            "[]".to_string()
-        } else {
-            format!("[\"{child}\"]")
-        };
-        std::fs::write(
-            dir.join(format!("{parent}.group")),
-            format!("{{\"groups\": {children}}}"),
-        )
-        .unwrap();
-    }
+    let cyc_a = write_group_file(&dir, "cyc-a", &[], &["cyc-b"]);
+    let cyc_b = write_group_file(&dir, "cyc-b", &[], &["cyc-a"]);
+    let chain: Vec<String> = [("n1", "n2"), ("n2", "n3"), ("n3", "n4"), ("n4", "")]
+        .into_iter()
+        .map(|(parent, child)| {
+            let children: &[&str] = if child.is_empty() { &[] } else { &[child] };
+            write_group_file(&dir, parent, &[], children)
+        })
+        .collect();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(
         output.status.code(),
@@ -2717,15 +2749,27 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
         stdout.contains("boot drops the nesting edge 'n3' → 'n4'"),
         "{stdout}"
     );
-    for stale in ["n1", "n2", "n3", "n4"] {
+    for stale in chain.iter().chain([&cyc_a, &cyc_b]) {
         std::fs::remove_file(dir.join(format!("{stale}.group"))).unwrap();
     }
-    std::fs::remove_file(dir.join("cyc-a.group")).unwrap();
-    std::fs::remove_file(dir.join("cyc-b.group")).unwrap();
+
+    // A record written before groups had ids fails the inspection — a
+    // boot refuses the whole directory (export → import migrates it).
+    std::fs::write(dir.join("legacy.group"), "{\"groups\": []}").unwrap();
+    let output = run(&["inspect", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("legacy.group: FAILURE — group file 'legacy.group' records no group id"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    std::fs::remove_file(dir.join("legacy.group")).unwrap();
 
     // Bytes that do not parse fail the inspection — restoring this
     // backup would reset the record.
-    std::fs::write(dir.join("bad.group"), b"{not json").unwrap();
+    let bad = cli_group_id("bad");
+    std::fs::write(dir.join(format!("{bad}.group")), b"{not json").unwrap();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -2733,11 +2777,12 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    std::fs::remove_file(dir.join("bad.group")).unwrap();
+    std::fs::remove_file(dir.join(format!("{bad}.group"))).unwrap();
 
     // An unreadable file fails it too — a boot refuses to start. A
     // directory wearing the extension fails fs::read on every platform.
-    std::fs::create_dir(dir.join("locked.group")).unwrap();
+    let locked = cli_group_id("locked");
+    std::fs::create_dir(dir.join(format!("{locked}.group"))).unwrap();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -2745,14 +2790,15 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    std::fs::remove_dir(dir.join("locked.group")).unwrap();
+    std::fs::remove_dir(dir.join(format!("{locked}.group"))).unwrap();
 
     // Single-file mode answers for one record's parse, both ways.
-    let output = run(&["inspect", &dir.join("kura.group").display().to_string()]);
+    let kura_file = dir.join(format!("{kura}.group"));
+    let output = run(&["inspect", &kura_file.display().to_string()]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
-    std::fs::write(dir.join("kura.group"), b"{not json").unwrap();
-    let output = run(&["inspect", &dir.join("kura.group").display().to_string()]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok  'kura'"));
+    std::fs::write(&kura_file, b"{not json").unwrap();
+    let output = run(&["inspect", &kura_file.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("CORRUPT"));
 
@@ -2775,11 +2821,15 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
-    std::fs::write(
-        dir.join("kura.group"),
-        "{\"description\": \"\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"], \"groups\": []}",
-    )
-    .unwrap();
+    let kura_id = write_group_file(
+        &dir,
+        "kura",
+        &[
+            "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            "ead6ef03-d61e-460c-933d-6d450c50a1e5",
+        ],
+        &[],
+    );
 
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -2806,8 +2856,8 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     // A cycle: boot's repair drops one edge, reported as a top-level
     // notice (it names an edge between two groups, not one group's own
     // fact).
-    std::fs::write(dir.join("cyc-a.group"), "{\"groups\": [\"cyc-b\"]}").unwrap();
-    std::fs::write(dir.join("cyc-b.group"), "{\"groups\": [\"cyc-a\"]}").unwrap();
+    let cyc_a = write_group_file(&dir, "cyc-a", &[], &["cyc-b"]);
+    let cyc_b = write_group_file(&dir, "cyc-b", &[], &["cyc-a"]);
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(0), "{stdout_text}");
@@ -2823,8 +2873,8 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
         }),
         "{report}"
     );
-    std::fs::remove_file(dir.join("cyc-a.group")).unwrap();
-    std::fs::remove_file(dir.join("cyc-b.group")).unwrap();
+    std::fs::remove_file(dir.join(format!("{cyc_a}.group"))).unwrap();
+    std::fs::remove_file(dir.join(format!("{cyc_b}.group"))).unwrap();
 
     // Directory-scan path: a corrupt .group is registered under an
     // empty placeholder record for reference checks (inspect_groups'
@@ -2832,7 +2882,8 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     // ALSO emit an "ok" row for that same name — exactly one row,
     // status "corrupt". `find` alone would pass even with a stray
     // duplicate "ok" row present, so this counts rows by name instead.
-    std::fs::write(dir.join("bad.group"), b"{not json").unwrap();
+    let bad = cli_group_id("bad");
+    std::fs::write(dir.join(format!("{bad}.group")), b"{not json").unwrap();
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(1), "{stdout_text}");
@@ -2842,7 +2893,11 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row["name"] == "bad")
+        .filter(|row| {
+            row["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with(&bad))
+        })
         .collect();
     assert_eq!(
         bad_rows.len(),
@@ -2851,30 +2906,20 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     );
     assert_eq!(bad_rows[0]["status"], "corrupt");
     assert!(report["corrupt"].as_u64().unwrap() >= 1, "{report}");
-    std::fs::remove_file(dir.join("bad.group")).unwrap();
+    std::fs::remove_file(dir.join(format!("{bad}.group"))).unwrap();
 
     // Single-file `.group` inspect answers the same GroupRow shape.
-    let output = run(&[
-        "inspect",
-        "--json",
-        &dir.join("kura.group").display().to_string(),
-    ]);
-    assert_eq!(output.status.code(), Some(0));
+    let kura_file = dir.join(format!("{kura_id}.group"));
+    let output = run(&["inspect", "--json", &kura_file.display().to_string()]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
     assert_eq!(report["kind"], "group");
-    assert_eq!(
-        report["groups"][0]["name"],
-        dir.join("kura.group").display().to_string()
-    );
+    assert_eq!(report["groups"][0]["name"], kura_file.display().to_string());
     assert_eq!(report["groups"][0]["contexts"], 2);
 
-    std::fs::write(dir.join("kura.group"), b"{not json").unwrap();
-    let output = run(&[
-        "inspect",
-        "--json",
-        &dir.join("kura.group").display().to_string(),
-    ]);
+    std::fs::write(&kura_file, b"{not json").unwrap();
+    let output = run(&["inspect", "--json", &kura_file.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
@@ -2884,7 +2929,7 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
 }
 
 /// A corrupt `.group` file is still a group at boot — `scan_groups`
-/// registers its name with an empty record rather than dropping it, so
+/// registers its id with an empty record rather than dropping it, so
 /// a sibling naming it as a child must not get a false "boot drops this
 /// reference" warning, and it must still be counted in the total.
 #[test]
@@ -2895,12 +2940,9 @@ fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("parent.group"),
-        "{\"description\": \"\", \"context_ids\": [], \"groups\": [\"child\"]}",
-    )
-    .unwrap();
-    std::fs::write(dir.join("child.group"), b"{not json").unwrap();
+    write_group_file(&dir, "parent", &[], &["child"]);
+    let child = cli_group_id("child");
+    std::fs::write(dir.join(format!("{child}.group")), b"{not json").unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2908,7 +2950,10 @@ fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
     // the record), but that is not a dangling-reference problem for
     // `parent` — boot keeps the edge, just to an empty group.
     assert_eq!(output.status.code(), Some(1), "{stdout}");
-    assert!(stdout.contains("child: CORRUPT group"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{child}.group: CORRUPT group")),
+        "{stdout}"
+    );
     assert!(
         !stdout.contains("child group(s) have no group here"),
         "{stdout}"
@@ -2918,8 +2963,10 @@ fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("child: ok  0 member context(s) · 0 child group(s)"),
-        "{stdout}"
+        stdout.contains(&format!(
+            "{child}: ok  0 member context(s) · 0 child group(s)"
+        )),
+        "the reset record is named by its id: {stdout}"
     );
     assert!(stdout.contains("total: 0 contexts · 2 groups"), "{stdout}");
 
@@ -4424,4 +4471,86 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
         !stderr.contains(&format!("{}: group 'kura'", valid.display())),
         "the valid sibling's file must not be blamed: {stderr}"
     );
+}
+
+/// Two `groups` sharing a name (a hand-assembled data directory — #994
+/// keeps the API from minting one) would write one `{name}.group.jsonl`
+/// twice until #996 names the files by id. A full export refuses both
+/// and fails instead of reporting a backup that is missing one of them;
+/// `taguru inspect` labels each with its id so neither line is ambiguous.
+#[test]
+fn groups_sharing_a_name_fail_the_export_and_inspect_tells_them_apart() {
+    let dir = common::scratch_dir("cli-groups-shared-name");
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("data");
+    let taguru = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    // Export needs a context to export; the groups are planted after.
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \
+         \"id\": \"a.md\", \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
+         {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    let seeded = taguru(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+    let first = write_group_file(&data, "same", &[], &["dup"]);
+    // A second "same", stemmed by its own id and nesting the first one
+    // back — a cycle between two groups that read alike. Its id sorts
+    // first, so the id-order repair keeps its edge and drops the other.
+    let second = cli_group_id("dup");
+    std::fs::write(
+        data.join(format!("{second}.group")),
+        serde_json::to_vec(
+            &serde_json::json!({"id": second, "name": "same", "group_ids": [first]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    write_group_file(&data, "solo", &[], &[]);
+
+    let output = run(&["inspect", &data.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("same ({first}): ok")), "{stdout}");
+    assert!(stdout.contains(&format!("same ({second}): ok")), "{stdout}");
+    assert!(
+        stdout.contains("solo: ok"),
+        "an unshared name stays bare: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "boot drops the nesting edge 'same ({first})' → 'same ({second})'"
+        )),
+        "{stdout}"
+    );
+
+    let out = dir.join("out");
+    let output = taguru(&["export", "--out", &out.display().to_string()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    for id in [&first, &second] {
+        assert!(
+            stderr.contains(&format!(
+                "group 'same' ({id}): several groups share this name"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !out.join("same.group.jsonl").exists(),
+        "neither may be written"
+    );
+    assert!(
+        out.join("solo.group.jsonl").exists(),
+        "an unshared group still exports"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

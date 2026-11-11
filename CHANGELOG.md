@@ -19,6 +19,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (on-disk format) — a `group`'s file is named by its own id**
+  (#994, ADR 0050). Each `group` gets a minted UUID. Its file is
+  `{id}.group` and records `{id, name, description, context_ids,
+  group_ids}`, and child groups are referenced by id. Renaming a
+  `group` now rewrites only its own record: no file moves, no parent is
+  rewritten, and the `.grouprenaming` rename marker and its boot-time
+  resume are removed. A data directory whose `.group` files predate ids
+  refuses to boot, and the error names the migration (export with the
+  release that wrote it, import here). `taguru inspect` reports such a
+  file as a FAILURE. The wire is unchanged: every route still addresses
+  a `group` by name until #995. A name shared by several `groups`,
+  which only a hand-assembled data directory can produce, is answered
+  with a 409 `conflict`.
+
 - **Breaking (Python SDKs) — Python 3.10 is no longer supported**:
   `taguru` and `langchain-taguru` now require Python 3.11 or later.
   3.10 reached end of life in October 2026, and the fixed releases of

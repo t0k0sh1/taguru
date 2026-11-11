@@ -887,18 +887,33 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     if !explicit {
         let (_, all_groups) = state.group_page(None, usize::MAX);
         group_count = all_groups.len();
-        for (name, record) in &all_groups {
-            match export_group_file(name, record, out) {
+        // Until #996 names the files by id, two `groups` sharing a name
+        // (a hand-assembled data directory) would write one
+        // `{name}.group.jsonl` twice, the second silently replacing the
+        // first — a backup missing a `group` that still reports success.
+        // Every such `group` is refused instead, and the export fails.
+        let shared = shared_group_names(&all_groups);
+        for view in &all_groups {
+            if shared.contains(view.name.as_str()) {
+                eprintln!(
+                    "taguru: export: group '{}' ({}): several groups share this name and \
+                     would overwrite one export file — rename them apart, then export again",
+                    view.name, view.id
+                );
+                group_failures += 1;
+                continue;
+            }
+            match export_group_file(&view.name, &view.record, out) {
                 Ok(report) => println!("{report}"),
                 Err(message) => {
-                    eprintln!("taguru: export: group '{name}': {message}");
+                    eprintln!("taguru: export: group '{}': {message}", view.name);
                     group_failures += 1;
                 }
             }
         }
         let expected = expected_file_names(
             &file_names,
-            all_groups.iter().map(|(name, _)| name.as_str()),
+            all_groups.iter().map(|view| view.name.as_str()),
         );
         stale_failures = prune_stale_streams(out, &expected);
     }
@@ -912,6 +927,17 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     } else {
         0
     }
+}
+
+/// The names more than one `group` in `groups` carries — the ones whose
+/// `{name}.group.jsonl` export files would collide.
+fn shared_group_names(groups: &[crate::registry::GroupView]) -> BTreeSet<&str> {
+    let mut seen = BTreeSet::new();
+    groups
+        .iter()
+        .map(|view| view.name.as_str())
+        .filter(|name| !seen.insert(*name))
+        .collect()
 }
 
 /// The remote twin of [`run_local`]: enumerates a running server's

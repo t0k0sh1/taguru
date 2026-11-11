@@ -8,8 +8,8 @@
 //! graph write.
 //!
 //! Structurally this follows [`crate::groups::GroupRecord`]'s pattern —
-//! atomic write-then-rename, a rename marker the registry already
-//! provides, `BTreeMap`/`BTreeSet` for deterministic output — with one
+//! atomic write-then-rename, `BTreeMap`/`BTreeSet` for deterministic
+//! output — with one
 //! deliberate divergence a `group` does not need: **a schema file that is
 //! present but cannot be trusted refuses the boot, it is never replaced
 //! with a fresh empty record.** A `GroupRecord` may safely reset to

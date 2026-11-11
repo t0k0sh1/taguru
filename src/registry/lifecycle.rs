@@ -772,7 +772,12 @@ mod tests {
                 "failure at persistence step {failure} resurrected the context: {outcome:?}"
             );
             assert!(
-                state.group("breweries").unwrap().context_ids.is_empty(),
+                state
+                    .group("breweries")
+                    .unwrap()
+                    .record
+                    .context_ids
+                    .is_empty(),
                 "boot did not reconcile group membership at step {failure}"
             );
             assert!(
@@ -1246,7 +1251,7 @@ mod tests {
             "the family stays at its stem"
         );
         assert_eq!(
-            state.group("drinks").unwrap().context_ids,
+            state.group("drinks").unwrap().record.context_ids,
             BTreeSet::from([stem.clone()]),
             "members are ids (#965): a rename never touches the record, \
              and the member still names the same context"
@@ -1265,7 +1270,7 @@ mod tests {
         assert!(state.directory_entry("sake").is_none());
         assert!(state.directory_entry("shochu").is_some());
         assert_eq!(
-            state.group("drinks").unwrap().context_ids,
+            state.group("drinks").unwrap().record.context_ids,
             BTreeSet::from([stem.clone()])
         );
 
@@ -1420,13 +1425,13 @@ mod tests {
             fail_persistence_ops_after(failure);
             let outcome = state.rename_context(&state.id_of("sake"), "shochu");
             let past_end = clear_persistence_fault();
-            let live_members = state.group("drinks").unwrap().context_ids;
+            let live_members = state.group("drinks").unwrap().record.context_ids;
             drop(state);
 
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             let sake = state.directory_entry("sake");
             let shochu = state.directory_entry("shochu");
-            let members = state.group("drinks").unwrap().context_ids;
+            let members = state.group("drinks").unwrap().record.context_ids;
             match (sake.is_some(), shochu.is_some()) {
                 (true, false) => {
                     assert!(
