@@ -32,6 +32,11 @@ fn read_listen_line_and_drain(label: &str, stdout: ChildStdout) -> String {
 #[allow(dead_code)]
 pub const GHOST_ID: &str = "00000000-0000-4000-8000-00000000dead";
 
+/// A canonical `group` id no test ever creates — a dangling child a
+/// test plants straight into a `.group` file (#994: children are ids).
+#[allow(dead_code)]
+pub const GHOST_GROUP_ID: &str = "00000000-0000-4000-9000-00000000dead";
+
 /// A fixed canonical context id derived from `seed` — the same
 /// construction the server's `derived_context_id` uses (SHA-256's first
 /// sixteen bytes in a v4 UUID layout), so a test can also compute the
@@ -133,6 +138,12 @@ impl Server {
     #[allow(dead_code)]
     pub fn context_stem(&self, name: &str) -> String {
         common::context_stem(&self.data_dir, name)
+    }
+
+    /// The id-stem of the `group` this server's data directory records
+    /// under `name` (#994: `group` files are stemmed by id).
+    pub fn group_stem(&self, name: &str) -> String {
+        common::group_stem(&self.data_dir, name)
     }
 
     /// The path id for the `context` named `name` — shorthand for

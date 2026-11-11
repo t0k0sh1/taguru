@@ -136,3 +136,32 @@ pub fn context_stem(data_dir: &std::path::Path, name: &str) -> String {
         data_dir.display()
     );
 }
+
+/// The id-stem of the `group` whose `.group` file records `name` — the
+/// group counterpart of [`context_stem`] (a `group`'s file is stemmed by
+/// its id since #994, and the name lives inside the record).
+#[allow(dead_code)]
+pub fn group_stem(data_dir: &std::path::Path, name: &str) -> String {
+    for entry in std::fs::read_dir(data_dir).expect("data dir must list") {
+        let path = entry.expect("entry must read").path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".group") else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value.get("name").and_then(|v| v.as_str()) == Some(name) {
+            return stem.to_string();
+        }
+    }
+    panic!(
+        "no .group file in {} records the name '{name}'",
+        data_dir.display()
+    );
+}

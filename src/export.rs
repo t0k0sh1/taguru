@@ -887,18 +887,18 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     if !explicit {
         let (_, all_groups) = state.group_page(None, usize::MAX);
         group_count = all_groups.len();
-        for (name, record) in &all_groups {
-            match export_group_file(name, record, out) {
+        for view in &all_groups {
+            match export_group_file(&view.name, &view.record, out) {
                 Ok(report) => println!("{report}"),
                 Err(message) => {
-                    eprintln!("taguru: export: group '{name}': {message}");
+                    eprintln!("taguru: export: group '{}': {message}", view.name);
                     group_failures += 1;
                 }
             }
         }
         let expected = expected_file_names(
             &file_names,
-            all_groups.iter().map(|(name, _)| name.as_str()),
+            all_groups.iter().map(|view| view.name.as_str()),
         );
         stale_failures = prune_stale_streams(out, &expected);
     }

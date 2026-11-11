@@ -54,7 +54,7 @@ use taguru::deadline::{Deadline, DeadlineExceeded as SlotDeadlineExceeded};
 
 use crate::api::evidence::rerank::{EvidenceReranker, RerankOutcome};
 use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, VectorStore};
-use crate::groups::{self, GroupRecord};
+use crate::groups::{self, GroupRecord, GroupTable};
 use crate::metrics::{ContextGaugeRow, GaugeSnapshot, Metrics, PerContextMetrics};
 use crate::schema;
 // Unused-looking from this file alone: hoisted here (rather than into
@@ -125,15 +125,14 @@ use paths::wal_lane_bytes;
 // Consumed by taguru-code's sync only; the server binaries never derive an id.
 #[allow(unused_imports)]
 pub(crate) use paths::derived_context_id;
+#[cfg(test)]
+pub(crate) use paths::name_from_stem;
 pub(crate) use paths::{
-    IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
-    file_stem, image_path, import_marker_path, import_marker_paths, is_context_id, meta_path,
-    mint_context_id, name_from_stem, passages_path, passages_wal_path, pvectors_path,
-    resume_rename_markers, schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
+    IMPORT_MARKER_EXTENSION, ImportMarker, bm25_path, deleted_marker_path, file_stem, image_path,
+    import_marker_path, import_marker_paths, is_context_id, meta_path, mint_context_id,
+    passages_path, passages_wal_path, pvectors_path, schema_corrupt_path, schema_path,
+    sources_path, vectors_path, wal_path,
 };
-// Still used by the `group` rename path (groups keep name-derived
-// stems and durable rename markers until #965).
-use paths::{rename_markers_targeting, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::{SemanticFill, SemanticServe};
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
@@ -1031,6 +1030,14 @@ pub enum CreateGroupError {
     /// through this gate: a child naming the `group` being created is
     /// not registered yet, so it refuses here first.
     NoSuchGroup(String),
+    /// A listed child name is shared by several `groups` (a
+    /// hand-assembled data directory — the name-addressed create never
+    /// mints a duplicate): refused rather than resolved to any one of
+    /// them while the wire still says children by name (#994).
+    AmbiguousGroup {
+        name: String,
+        count: usize,
+    },
     /// The children exist but the shape is not allowed: a cycle, or a
     /// chain of more than [`groups::MAX_GROUP_DEPTH`] `groups`.
     Nesting(groups::NestingViolation),
@@ -1051,6 +1058,13 @@ pub enum UpdateGroupError {
     NoSuchContext(String),
     /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_groups`.
     NoSuchGroup(String),
+    /// [`CreateGroupError::AmbiguousGroup`]'s twin — for the addressed
+    /// `group` itself, an `add_groups` name, or a `remove_groups` name
+    /// two of its children share.
+    AmbiguousGroup {
+        name: String,
+        count: usize,
+    },
     /// [`CreateGroupError::Nesting`]'s twin — and here the cycle arm is
     /// reachable: the `group` being updated IS registered, so adding it
     /// (or an ancestor) as its own child passes the existence gate and
@@ -1096,6 +1110,8 @@ pub enum PutSchemaError {
 #[derive(Debug)]
 pub enum RenameGroupError {
     NotFound,
+    /// The addressed name is shared by this many `groups`.
+    Ambiguous(usize),
     /// Same trap as [`CreateGroupError::InvalidName`], for the
     /// destination name.
     InvalidName,
@@ -1107,11 +1123,7 @@ pub enum RenameGroupError {
 /// validation refusal with NOTHING applied — the set is judged whole
 /// before the first write. `Io` names how many records persisted
 /// first; either way re-importing the same stream is exact, because a
-/// restore is a replace and a replay converges — including across a
-/// crash that left a stale `.grouprenaming` marker naming one of the
-/// stream's records, since each write sweeps that marker clean first
-/// (the same insurance [`AppState::create_group`] takes; see its own
-/// comment).
+/// restore is a replace and a replay converges.
 #[derive(Debug)]
 pub enum RestoreGroupsError {
     /// [`CreateGroupError::InvalidName`]'s twin — the parse layers
@@ -1131,6 +1143,15 @@ pub enum RestoreGroupsError {
     /// restore set itself (records in one set may reference each other
     /// in any order — the set lands children-first).
     NoSuchChild { group: String, child: String },
+    /// A record's own name, or a child name it lists, is shared by
+    /// several standing `groups` — which one the record means cannot be
+    /// told while the stream names `groups` (#994; #996 moves the stream
+    /// to ids). `name` is the shared name, `group` the record naming it.
+    Ambiguous {
+        group: String,
+        name: String,
+        count: usize,
+    },
     /// [`CreateGroupError::OverCap`]'s twin, judged per record.
     OverCap { group: String, field: &'static str },
     /// The set's records plus the standing `groups` would close a cycle
@@ -1160,6 +1181,7 @@ impl RestoreGroupsError {
             Self::Duplicate(group)
             | Self::NoSuchContext { group, .. }
             | Self::NoSuchChild { group, .. }
+            | Self::Ambiguous { group, .. }
             | Self::OverCap { group, .. }
             | Self::Nesting(groups::NestingViolation::Cycle(group))
             | Self::Nesting(groups::NestingViolation::TooDeep(group))
@@ -1196,6 +1218,10 @@ impl RestoreGroupsError {
                 "group '{group}' names child group '{child}', which neither exists nor \
                  rides this stream; no group was applied"
             ),
+            Self::Ambiguous { group, name, count } => format!(
+                "group '{group}' names group '{name}', which {count} groups share; \
+                 no group was applied (rename them apart first)"
+            ),
             Self::OverCap { group, field } => format!(
                 "group '{group}' would bundle more than {} {field}; no group was applied \
                  — split into nested child groups",
@@ -1224,6 +1250,16 @@ impl RestoreGroupsError {
             ),
         }
     }
+}
+
+/// One `group` as a name-addressed caller sees it: its id (for the
+/// registry's own follow-up calls — the wire does not carry it yet,
+/// #995), its display name, and the wire view of its record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupView {
+    pub id: String,
+    pub name: String,
+    pub record: GroupRecord,
 }
 
 /// What restoring one `group` record amounted to, for the import report:
@@ -2489,10 +2525,11 @@ struct StateInner {
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
     registry: RwLock<ContextTable>,
-    /// Groups: bundles of `context` names and child-`group` names (a
+    /// Groups: bundles of `context` ids and child-`group` ids (a
     /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] `groups` tall and
     /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
-    /// names), each persisted as one `{stem}.group` file. Small enough
+    /// ids), each persisted as one `{id}.group` file and indexed by name
+    /// beside the id map. Small enough
     /// to stay resident in full, so one lock over the whole map
     /// suffices — and it is held across the record's own fsync on
     /// writes. That fsync therefore stalls `group` READS too (the
@@ -2500,9 +2537,9 @@ struct StateInner {
     /// only when a `group` write is in flight — but never a `context`
     /// operation: a request that names no `group` never touches this
     /// lock (the cross-`context` searches skip `group` resolution for an
-    /// empty list). BTreeMap keeps the directory listing in name order
-    /// for free.
-    groups: RwLock<BTreeMap<String, GroupRecord>>,
+    /// empty list). The name index keeps the directory listing in name
+    /// order for free.
+    groups: RwLock<GroupTable>,
     /// Logical clock behind `Entry::last_touch`.
     clock: AtomicU64,
     /// The optional semantic entry tier; `None` keeps resolve purely
@@ -3455,90 +3492,6 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
             .as_ref()
             .map(|schema| schema.document().mode.as_str().to_string()),
     })
-}
-
-/// The scan-side decode for `group` sweeps (`groups::scan_groups`,
-/// the replica's group reload, `taguru inspect`): a discovered
-/// file's stem and the group name it encodes, or `None` (logged)
-/// when the name does not decode. `context` scans stopped decoding
-/// anything — their stems are ids, and the name lives in the meta
-/// sidecar (ADR 0045).
-pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
-    let stem = path.file_stem().and_then(|s| s.to_str())?;
-    match name_from_stem(stem) {
-        Some(name) => Some((stem.to_string(), name)),
-        None => {
-            tracing::warn!("skipping {}: file name does not decode", path.display());
-            None
-        }
-    }
-}
-
-/// `sweep_membership`'s replace-not-remove twin: renames `from` to
-/// `to` wherever it appears in the chosen set field, persisting each
-/// touched record. Used both live (a `context` or `group` rename's last
-/// step) and at boot (resuming a rename whose marker survived a
-/// crash) — in both cases the caller already holds the `groups` write
-/// lock and must call this BEFORE `reconcile_groups`, which would
-/// otherwise see `from` as a dangling reference (nothing registered
-/// under that name any more) and drop it instead of carrying it
-/// forward.
-///
-/// Returns whether EVERY touched record persisted. This is not a
-/// suggestion: "the next boot's resume retries it" is only true if the
-/// caller acts on a `false` by keeping the rename marker alive instead
-/// of deleting it unconditionally — see [`AppState::rename_context_locked`]
-/// and `boot_with`'s two resume loops, which is why this used to warn
-/// without a way for either caller to tell.
-fn rename_in_membership(
-    data_dir: &Path,
-    groups: &mut BTreeMap<String, GroupRecord>,
-    from: &str,
-    to: &str,
-    field: impl Fn(&mut GroupRecord) -> &mut BTreeSet<String>,
-) -> bool {
-    let mut all_persisted = true;
-    for (group_name, record) in groups.iter_mut() {
-        let set = field(record);
-        if !set.remove(from) {
-            continue;
-        }
-        set.insert(to.to_string());
-        if let Err(error) = groups::write_group(data_dir, &file_stem(group_name), record) {
-            all_persisted = false;
-            tracing::warn!(
-                group = %group_name,
-                from = %from,
-                to = %to,
-                %error,
-                "group membership rename not persisted; the caller keeps the rename marker so the next boot's resume retries it"
-            );
-        }
-    }
-    all_persisted
-}
-
-/// Retires a rename's durable marker once its membership rewrite is
-/// known to be settled, one way or the other — the single policy every
-/// [`rename_in_membership`] caller must apply, shared here so it is
-/// not reimplemented at each of the four call sites (a live `context`
-/// rename, a live `group` rename, and boot's own resume of each):
-/// `persisted` removes the marker (through the same
-/// [`remove_persisted_file`] choke point every other unlink in the
-/// registry goes through, so a test's fault injector sees it); not
-/// persisted keeps it and warns, so the next boot's resume — not
-/// `reconcile_groups`, which has no notion of a rename in flight and
-/// would drop `from` as a plain dangling reference — gets the chance
-/// to retry the rewrite.
-fn retire_rename_marker(marker: &Path, persisted: bool, from: &str, to: &str, what: &str) {
-    if persisted {
-        let _ = remove_persisted_file(marker);
-    } else {
-        tracing::warn!(
-            from = %from, to = %to,
-            "{what} not fully persisted; the rename marker stays so the next boot resumes it"
-        );
-    }
 }
 
 /// How long a failed load's refusal is answered from memory before the

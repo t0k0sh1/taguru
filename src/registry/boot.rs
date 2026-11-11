@@ -81,38 +81,12 @@ impl AppState {
                 );
             }
         }
-        // Groups scan after contexts. The group scan finishes moving
-        // any in-flight group rename's file and hands back the
-        // (from, to) pairs whose marker survived; rewrite nesting
-        // membership for those FIRST — before reconcile, which has no
-        // notion of a rename in flight and would see `from` as a
-        // plain dangling reference (nothing registered under that
-        // name any more) and drop it instead of carrying it to `to`.
-        // Each rewrite persists immediately (it cannot rely on
-        // reconcile's own before/after diff, which would see no
-        // further change to make and skip the write), so the marker
-        // is safe to remove right after. (Context renames stopped
-        // moving files or writing markers when the stem became the id
-        // — there is nothing to resume for them.)
-        let (mut groups, resumed_group_renames) = groups::scan_groups(&data_dir)?;
-        for rename in &resumed_group_renames {
-            let membership_persisted = if rename.landed {
-                rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
-                    &mut record.groups
-                })
-            } else {
-                true
-            };
-            if rename.complete {
-                retire_rename_marker(
-                    &groups::group_renaming_marker_path(&data_dir, &file_stem(&rename.from)),
-                    membership_persisted,
-                    &rename.from,
-                    &rename.to,
-                    "group rename's nesting rewrite",
-                );
-            }
-        }
+        // Groups scan after contexts (refusing a pre-id or copied
+        // `group` file outright, ADR 0045 §2.7). Nothing is resumed
+        // first: a `group` rename rewrites only its own record (the
+        // stem is the id, and parents bundle children by id), so no
+        // rename can be left half-done across files.
+        let mut groups = groups::scan_groups(&data_dir)?;
         // Reconcile unconditionally: whatever put a dangling member, a
         // dangling child, or an illegal nesting into a group file — a
         // crash between a deletion and the sweep's rewrite, a sweep
@@ -172,7 +146,7 @@ impl AppState {
             _dir_lock: dir_lock,
             cache_bytes,
             registry: RwLock::new(registry),
-            groups: RwLock::new(groups),
+            groups: RwLock::new(groups::GroupTable::new(groups)),
             clock: AtomicU64::new(0),
             embedder,
             embed_breaker,
@@ -550,7 +524,7 @@ fn scan_data_dir(
 
 /// Boot-time counterpart of the delete-path sweeps: drops every `group`
 /// member that is not a registered `context`, every child that is not a
-/// scanned `group`, every name past the [`groups::MAX_GROUP_MEMBERS`]
+/// scanned `group`, every id past the [`groups::MAX_GROUP_MEMBERS`]
 /// per-set cap, and every nesting edge that would close a cycle or
 /// stack more than [`groups::MAX_GROUP_DEPTH`] `groups` (hand-edits
 /// only — nothing running can persist such a shape). Each fix is
@@ -564,14 +538,14 @@ fn scan_data_dir(
 fn reconcile_groups(
     data_dir: &Path,
     registry: &ContextTable,
-    groups: &mut BTreeMap<String, GroupRecord>,
+    groups: &mut BTreeMap<String, groups::StoredGroup>,
 ) {
     let scanned = groups.clone();
     for record in groups.values_mut() {
         record
             .context_ids
             .retain(|context| registry.contains_id(context));
-        record.groups.retain(|child| scanned.contains_key(child));
+        record.group_ids.retain(|child| scanned.contains_key(child));
     }
     // Dangling names never count toward the cap — they were just
     // dropped — so the trim runs on what actually remains…
@@ -579,23 +553,25 @@ fn reconcile_groups(
     // …and what remains can still be the wrong SHAPE — the repair
     // drops exactly the edges the validator refuses, deterministically.
     groups::repair_nesting(groups);
-    for (name, record) in groups.iter() {
-        let before = &scanned[name];
+    for (id, record) in groups.iter() {
+        let before = &scanned[id];
         if before == record {
             continue;
         }
-        match groups::write_group(data_dir, &file_stem(name), record) {
+        match groups::write_group(data_dir, record) {
             Ok(()) => {
                 tracing::info!(
-                    group = %name,
+                    group = %record.name,
+                    group_id = %id,
                     dropped_contexts = before.context_ids.len() - record.context_ids.len(),
-                    dropped_children = before.groups.len() - record.groups.len(),
+                    dropped_children = before.group_ids.len() - record.group_ids.len(),
                     "dropped dangling, over-cap, or ill-nested group reference(s) at boot"
                 );
             }
             Err(error) => {
                 tracing::warn!(
-                    group = %name,
+                    group = %record.name,
+                    group_id = %id,
                     %error,
                     "boot reconciliation not persisted; memory is correct, the file heals on the next successful group write"
                 );
@@ -607,7 +583,6 @@ fn reconcile_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::paths::RenameMarker;
     use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir, stem_on_disk};
 
     #[test]
@@ -716,14 +691,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A `group` mid-rename in a crash still resumes at boot — the one
-    /// rename resume left, now that a `context` rename is a plain
-    /// sidecar write (nothing to resume) — and its `contexts` set
-    /// carries its members unchanged: renaming the group never
-    /// touches the member names.
+    /// A `group` rename rewrites its own record and nothing else (#994):
+    /// parents bundle the child by id, so the nesting edge survives a
+    /// reboot untouched — the case the removed parent rewrite and its
+    /// boot-time resume existed for — and the members ride along.
     #[test]
-    fn a_group_rename_resumes_at_boot_with_membership_intact() {
-        let dir = scratch_dir("group-rename-resume");
+    fn a_renamed_child_group_keeps_its_parent_edge_across_a_reboot() {
+        let dir = scratch_dir("group-rename-reboot");
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             state
@@ -738,44 +712,58 @@ mod tests {
                     BTreeSet::new(),
                 )
                 .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["liquor".to_string()]),
+                )
+                .unwrap();
+            state.rename_group("liquor", "spirits").unwrap();
         }
-        // No manual file move: `groups::scan_groups` performs it once
-        // it sees the marker, exactly as a real crash resume would.
-        fs::write(
-            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
-            serde_json::to_vec(&RenameMarker {
-                from: "liquor".to_string(),
-                to: "spirits".to_string(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.group("liquor").is_none());
-        let spirits = state
-            .group("spirits")
-            .expect("the renamed group must exist");
         assert_eq!(
-            spirits.context_ids,
+            state.group("liquor").map(|_| ()),
+            Err(crate::groups::GroupLookup::NotFound)
+        );
+        assert_eq!(
+            state.group("drinks").unwrap().record.groups,
+            BTreeSet::from(["spirits".to_string()]),
+            "the parent's edge follows the child's id, not its old name"
+        );
+        assert_eq!(
+            state.group("spirits").unwrap().record.context_ids,
             BTreeSet::from([state.id_of("sake")]),
             "membership rides the group rename unchanged"
         );
-        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
-
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// ADR 0045 §2.7 for `groups`: a data directory whose `group` file
+    /// predates ids refuses the boot with the migration path, and the
+    /// file is left as it was (never reset as corrupt).
+    #[test]
+    fn a_pre_id_group_file_refuses_the_boot_with_a_migration_message() {
+        let dir = scratch_dir("boot-pre-id-group");
+        fs::create_dir_all(&dir).unwrap();
+        let pre_id = br#"{"description":"","context_ids":[],"groups":[]}"#;
+        fs::write(dir.join("drinks.group"), pre_id).unwrap();
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("records no group id"), "{error}");
+        assert!(error.to_string().contains("export"), "{error}");
+        assert_eq!(fs::read(dir.join("drinks.group")).unwrap(), pre_id);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `reconcile_groups`'s `write_group` failure arm (warn-only: the
     /// in-memory fix is correct, only the on-disk file stays stale
-    /// until the next successful `group` write) has no test — the two
-    /// existing boot-time faults (`a_resumed_renames_membership_rewrite_that_cannot_persist_keeps_the_marker`
-    /// and its `group` twin) each arm a SINGLE-shot injector on their own
-    /// membership rewrite earlier in the same boot, which consumes the
-    /// fault before `reconcile_groups` ever runs. Here the `group` needs
-    /// no rename at all — a plain dangling reference reconcile itself
-    /// must drop and persist — so the injector can be aimed squarely at
-    /// `reconcile_groups`'s own `write_group` call.
+    /// until the next successful `group` write): a plain dangling
+    /// reference reconcile itself must drop and persist, with a
+    /// single-shot injector aimed squarely at `reconcile_groups`'s own
+    /// `write_group` call (nothing earlier in the boot persists).
     #[test]
     fn reconcile_groups_keeps_the_dangling_reference_in_memory_when_its_write_fails() {
         let dir = scratch_dir("reconcile-write-group-fault");
@@ -808,15 +796,15 @@ mod tests {
             "sanity: the injected failure must actually have fired \
              during reconcile_groups's own write_group call"
         );
+        let drinks = state.group("drinks").unwrap();
         assert_eq!(
-            state.group("drinks").unwrap().context_ids,
+            drinks.record.context_ids,
             BTreeSet::new(),
             "memory must be reconciled even though the write failed"
         );
-        let on_disk: groups::GroupRecord = serde_json::from_slice(
-            &fs::read(groups::group_path(&dir, &file_stem("drinks"))).unwrap(),
-        )
-        .unwrap();
+        let on_disk: groups::StoredGroup =
+            serde_json::from_slice(&fs::read(groups::group_path(&dir, &drinks.id)).unwrap())
+                .unwrap();
         assert_eq!(
             on_disk.context_ids,
             BTreeSet::from([stem.clone()]),

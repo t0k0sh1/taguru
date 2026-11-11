@@ -994,10 +994,11 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // the group file, since every cycle ships all changed files.
     let glossary_stem = writer.context_stem("glossary");
     let sake_stem = writer.context_stem("sake");
+    let breweries_file = format!("{}.group", writer.group_stem("breweries"));
     wait_for("the writer to ship the whole spread", || {
         std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
             .map(|manifest| {
-                manifest.contains("breweries.group")
+                manifest.contains(&breweries_file)
                     && manifest.contains(&format!("{glossary_stem}.ctx"))
                     && manifest.contains(&format!("{sake_stem}.schema.json"))
             })

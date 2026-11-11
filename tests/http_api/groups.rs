@@ -332,15 +332,17 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     );
 
     let sake = server.cx("sake");
+    let drinks = server.group_stem("drinks");
     let data_dir = server.stop_gracefully();
     // Plant a dangling member and a dangling child the way a crash
     // between a deletion and the sweep's rewrite would: straight into
-    // the file.
+    // the file (children are ids on file since #994).
     std::fs::write(
-        data_dir.join("drinks.group"),
+        data_dir.join(format!("{drinks}.group")),
         serde_json::to_vec(
-            &json!({"description": "飲料", "context_ids": [sake, GHOST_ID],
-                                   "groups": ["nowhere"]}),
+            &json!({"id": drinks, "name": "drinks", "description": "飲料",
+                                   "context_ids": [sake, GHOST_ID],
+                                   "group_ids": [GHOST_GROUP_ID]}),
         )
         .unwrap(),
     )
@@ -360,9 +362,9 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
         "boot must reconcile the planted dangling child: {survived}"
     );
     // And the fix reached the file, not just memory.
-    let on_disk = std::fs::read_to_string(server.data_dir.join("drinks.group")).unwrap();
+    let on_disk = std::fs::read_to_string(server.data_dir.join(format!("{drinks}.group"))).unwrap();
     assert!(!on_disk.contains(GHOST_ID), "{on_disk}");
-    assert!(!on_disk.contains("nowhere"), "{on_disk}");
+    assert!(!on_disk.contains(GHOST_GROUP_ID), "{on_disk}");
 }
 
 /// The grant story for groups: every key sees every row but only its
@@ -589,6 +591,7 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
 
     // Unlink needs write permission on the PARENT directory; freezing
     // the data directory makes exactly the unlink fail.
+    let kura_stem = server.group_stem("kura");
     let frozen = std::fs::Permissions::from_mode(0o555);
     std::fs::set_permissions(&server.data_dir, frozen).expect("chmod must apply");
     let (status, refusal) = server.call("DELETE", "/groups/kura", None);
@@ -611,7 +614,7 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
     // …and the surviving file resurfaces it at the next boot.
     let data_dir = server.stop_gracefully();
     assert!(
-        data_dir.join("kura.group").exists(),
+        data_dir.join(format!("{kura_stem}.group")).exists(),
         "the unlink must have failed"
     );
     let server = Server::start_on("group-unlink-reboot", data_dir);
@@ -861,5 +864,69 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
     );
     assert_eq!(via_group["matches"][0]["context_name"], json!("after"));
     assert_eq!(via_group["plan"]["context_ids"], json!([id]), "{via_group}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}
+
+/// #994's bridge: `group` names are not unique on file (ids are), but
+/// the wire still addresses `groups` by name. A name two `groups` share —
+/// only a hand-assembled data directory has one, the API never mints a
+/// duplicate — is a 409 `conflict` at every entrance that takes a
+/// `group` name, never a 404 and never an arbitrary one of the two.
+#[test]
+fn a_group_name_two_groups_share_is_a_conflict_at_every_entrance() {
+    let server = Server::start("groups-ambiguous");
+    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
+    server.ok(
+        "PUT",
+        "/groups/kura",
+        Some(json!({"context_ids": [server.cx("sake")]})),
+    );
+    let sake = server.cx("sake");
+    let data_dir = server.stop_gracefully();
+    let twin = "00000000-0000-4000-9000-00000000beef";
+    std::fs::write(
+        data_dir.join(format!("{twin}.group")),
+        serde_json::to_vec(&json!({"id": twin, "name": "kura", "context_ids": [sake]})).unwrap(),
+    )
+    .unwrap();
+
+    let server = Server::start_on("groups-ambiguous2", data_dir);
+    // Both rows list; only the name-addressed entrances refuse.
+    let page = server.ok("GET", "/groups", None);
+    assert_eq!(page["total"], json!(2), "{page}");
+    for (method, path, body) in [
+        ("GET", "/groups/kura", None),
+        ("PATCH", "/groups/kura", Some(json!({"description": "x"}))),
+        ("DELETE", "/groups/kura", None),
+        (
+            "POST",
+            "/groups/kura/rename",
+            Some(json!({"to": "sakagura"})),
+        ),
+        ("GET", "/groups/kura/export", None),
+        ("PUT", "/groups/parent", Some(json!({"groups": ["kura"]}))),
+        (
+            "POST",
+            "/recall",
+            Some(json!({"groups": ["kura"], "cue": "蔵"})),
+        ),
+    ] {
+        let (status, refusal) = server.call(method, path, body);
+        assert_eq!(status, 409, "{method} {path}: {refusal}");
+        assert_eq!(
+            refusal["code"],
+            json!("conflict"),
+            "{method} {path}: {refusal}"
+        );
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap()
+                .contains("'kura' is ambiguous: 2 groups"),
+            "{method} {path}: {refusal}"
+        );
+    }
+    // A refused rename and delete moved nothing.
+    assert_eq!(server.ok("GET", "/groups", None)["total"], json!(2));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
