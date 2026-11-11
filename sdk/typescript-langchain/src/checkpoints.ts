@@ -366,7 +366,8 @@ export class FilesystemCheckpointStore implements CheckpointStore {
    * check in `acquireLock`.
    */
   async close(): Promise<void> {
-    for (const source of [...this.locks.keys()]) {
+    // A snapshot: releaseLock deletes from this.locks as the loop runs.
+    for (const source of Array.from(this.locks.keys())) {
       await this.releaseLock(source);
     }
   }

@@ -44,7 +44,7 @@ let workDir: string;
 const EMPTY_LLM_ANSWER = JSON.stringify({ associations: [], aliases: [], questions: [] });
 
 function emptyLlm(times = 1): FakeListChatModel {
-  return new FakeListChatModel({ responses: new Array<string>(times).fill(EMPTY_LLM_ANSWER) });
+  return new FakeListChatModel({ responses: Array.from({ length: times }, () => EMPTY_LLM_ANSWER) });
 }
 
 /** Deletes `context` if it still exists — guaranteed cleanup even when an

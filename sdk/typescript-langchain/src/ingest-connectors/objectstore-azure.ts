@@ -400,7 +400,7 @@ export class AzureBlobObjectStore implements ObjectStore {
       async () => {
         const client = await this.clientOrBuild();
         const tags = await client.getBlobClient(key).getTags();
-        return { ...(tags ?? {}) };
+        return { ...tags };
       },
       (error) => classifyAzureError(error, () => new ObjectNotFoundError(errorMessage(error))),
       {},

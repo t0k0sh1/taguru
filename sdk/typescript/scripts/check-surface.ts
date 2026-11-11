@@ -13,7 +13,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import ts from "typescript";
+// TypeScript 7 ships no compiler API; parsing goes through the
+// TypeScript 6 compatibility package instead (#1021).
+import ts from "@typescript/typescript6";
 import { parse } from "yaml";
 
 const here = dirname(fileURLToPath(import.meta.url));

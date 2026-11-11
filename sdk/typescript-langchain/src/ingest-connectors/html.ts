@@ -404,7 +404,7 @@ function expandIpv6(address: string): number[] | null {
     if (missing < 0) {
       return null;
     }
-    full = [...headNums, ...new Array<number>(missing).fill(0), ...tailNums];
+    full = [...headNums, ...Array.from({ length: missing }, () => 0), ...tailNums];
   } else {
     full = headNums;
   }
