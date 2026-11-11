@@ -1209,15 +1209,26 @@ fn inspect_groups(
             }
         }
     }
-    let name_of = |id: &str| -> String {
-        records
-            .get(id)
-            .map_or_else(|| id.to_string(), |record| record.name.clone())
+    // How every line names a `group`: its recorded name — plus its id
+    // when another `group` here records the same name, or two of them
+    // would read as one (a cycle between them as `'same' → 'same'`) and
+    // the reader could not tell which file a line is about.
+    let mut name_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in records.values() {
+        *name_counts.entry(record.name.as_str()).or_default() += 1;
+    }
+    let label = |record: &StoredGroup| -> String {
+        if name_counts[record.name.as_str()] > 1 {
+            format!("{} ({})", record.name, record.id)
+        } else {
+            record.name.clone()
+        }
     };
+    let name_of = |id: &str| -> String { records.get(id).map_or_else(|| id.to_string(), label) };
 
     // The healing preview: what boot's reconciliation would drop.
     for (id, record) in &records {
-        let name = &record.name;
+        let name = &label(record);
         let dangling_contexts = record
             .context_ids
             .iter()

@@ -4472,3 +4472,85 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
         "the valid sibling's file must not be blamed: {stderr}"
     );
 }
+
+/// Two `groups` sharing a name (a hand-assembled data directory — #994
+/// keeps the API from minting one) would write one `{name}.group.jsonl`
+/// twice until #996 names the files by id. A full export refuses both
+/// and fails instead of reporting a backup that is missing one of them;
+/// `taguru inspect` labels each with its id so neither line is ambiguous.
+#[test]
+fn groups_sharing_a_name_fail_the_export_and_inspect_tells_them_apart() {
+    let dir = common::scratch_dir("cli-groups-shared-name");
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("data");
+    let taguru = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    // Export needs a context to export; the groups are planted after.
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \
+         \"id\": \"a.md\", \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
+         {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    let seeded = taguru(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+    let first = write_group_file(&data, "same", &[], &["dup"]);
+    // A second "same", stemmed by its own id and nesting the first one
+    // back — a cycle between two groups that read alike. Its id sorts
+    // first, so the id-order repair keeps its edge and drops the other.
+    let second = cli_group_id("dup");
+    std::fs::write(
+        data.join(format!("{second}.group")),
+        serde_json::to_vec(
+            &serde_json::json!({"id": second, "name": "same", "group_ids": [first]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    write_group_file(&data, "solo", &[], &[]);
+
+    let output = run(&["inspect", &data.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("same ({first}): ok")), "{stdout}");
+    assert!(stdout.contains(&format!("same ({second}): ok")), "{stdout}");
+    assert!(
+        stdout.contains("solo: ok"),
+        "an unshared name stays bare: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "boot drops the nesting edge 'same ({first})' → 'same ({second})'"
+        )),
+        "{stdout}"
+    );
+
+    let out = dir.join("out");
+    let output = taguru(&["export", "--out", &out.display().to_string()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    for id in [&first, &second] {
+        assert!(
+            stderr.contains(&format!(
+                "group 'same' ({id}): several groups share this name"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !out.join("same.group.jsonl").exists(),
+        "neither may be written"
+    );
+    assert!(
+        out.join("solo.group.jsonl").exists(),
+        "an unshared group still exports"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

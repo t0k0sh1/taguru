@@ -567,16 +567,24 @@ pub(crate) fn is_group_id(stem: &str) -> bool {
 }
 
 /// Classifies one `.group` file's bytes (see [`ScannedGroup`]). A pre-id
-/// shape is recognized BEFORE the strict parse, so it can never fall
-/// into the corrupt arm's reset.
+/// or foreign-id shape is recognized BEFORE the strict parse, so neither
+/// can fall into the corrupt arm's reset.
 pub(crate) fn classify_group(stem: &str, bytes: &[u8]) -> ScannedGroup {
     if !is_group_id(stem) {
         return ScannedGroup::PreId;
     }
-    if let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(bytes)
-        && !fields.contains_key("id")
-    {
-        return ScannedGroup::PreId;
+    // The identity check reads the raw object before the strict parse,
+    // so a file that is BOTH foreign and otherwise odd (an unknown
+    // field, say) is still refused as foreign — never reset as corrupt,
+    // which would overwrite a record that only sits under the wrong stem.
+    if let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(bytes) {
+        match fields.get("id") {
+            None => return ScannedGroup::PreId,
+            Some(serde_json::Value::String(id)) if id != stem => {
+                return ScannedGroup::ForeignId(id.clone());
+            }
+            Some(_) => {}
+        }
     }
     match serde_json::from_slice::<StoredGroup>(bytes) {
         Ok(record) if record.id == stem => ScannedGroup::Current(record),
@@ -980,6 +988,12 @@ mod tests {
             classify_group(ID_A, b"{not json"),
             ScannedGroup::Corrupt(_)
         ));
+        // A non-string id is not an identity claim to compare; the
+        // strict parse refuses it as corrupt.
+        assert!(matches!(
+            classify_group(ID_A, br#"{"id":7,"name":"x"}"#),
+            ScannedGroup::Corrupt(_)
+        ));
         // Shaped like a record but not one (an id, then a field this
         // build does not know): corrupt, not pre-id.
         assert!(matches!(
@@ -1020,6 +1034,21 @@ mod tests {
             error.to_string().contains(&format!("records id '{ID_A}'")),
             "{error}"
         );
+
+        // Foreign AND otherwise unparseable (an unknown field): still
+        // refused as foreign, and the file is left exactly as it was.
+        let odd = format!(r#"{{"id":"{ID_A}","name":"copied","extra":1}}"#);
+        fs::write(dir.join(format!("{ID_B}.group")), &odd).unwrap();
+        let error = scan_groups(&dir).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("records id '{ID_A}'")),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(dir.join(format!("{ID_B}.group"))).unwrap(),
+            odd.as_bytes()
+        );
+        assert!(!dir.join(format!("{ID_B}.group.corrupt")).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
