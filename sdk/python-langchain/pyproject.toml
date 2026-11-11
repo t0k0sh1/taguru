@@ -8,7 +8,7 @@ version = "0.9.7"
 description = "LangChain integration for the Taguru long-term semantic memory server"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Takashi Yamashina" }]
 keywords = ["taguru", "langchain", "llm", "memory", "rag", "retriever"]
 classifiers = [

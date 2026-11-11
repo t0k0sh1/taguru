@@ -9,7 +9,7 @@ minio/localstack" testing posture one layer up)."""
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -43,19 +43,19 @@ def test_version_id_wins_over_everything_else() -> None:
     meta = _meta(
         version_id="v1",
         checksum="c1",
-        last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        last_modified=datetime(2026, 1, 1, tzinfo=UTC),
         etag="e1",
     )
     assert object_fingerprint(meta) == ("version_id", "v1")
 
 
 def test_checksum_wins_over_size_last_modified_and_etag() -> None:
-    meta = _meta(checksum="c1", last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc), etag="e1")
+    meta = _meta(checksum="c1", last_modified=datetime(2026, 1, 1, tzinfo=UTC), etag="e1")
     assert object_fingerprint(meta) == ("checksum", "c1")
 
 
 def test_size_and_last_modified_wins_over_etag_alone() -> None:
-    when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    when = datetime(2026, 1, 1, tzinfo=UTC)
     meta = _meta(size=42, last_modified=when, etag="e1")
     assert object_fingerprint(meta) == ("size_last_modified", f"42:{when.isoformat()}")
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -397,7 +397,7 @@ def test_retract_clears_both_checkpoints_so_a_recreated_object_is_reimported(
     very next pass and never be re-ingested, even though the server no
     longer has its passage at all."""
     store = FakeObjectStore("reports")
-    same_when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    same_when = datetime(2026, 1, 1, tzinfo=UTC)
     store.put("a.md", b"alpha", last_modified=same_when)
     checkpoints = RecordingCheckpointStore()
     ingester = _ingester(sync_client, async_client)

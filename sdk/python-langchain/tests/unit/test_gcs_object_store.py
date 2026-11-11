@@ -9,7 +9,7 @@ fake sits at the client surface instead of the HTTP layer)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -30,7 +30,7 @@ from taguru_langchain.ingest_connectors.objectstore import (
 )
 from taguru_langchain.ingest_connectors.objectstore_gcs import GCSObjectStore
 
-_UPDATED = datetime(2026, 3, 1, tzinfo=timezone.utc)
+_UPDATED = datetime(2026, 3, 1, tzinfo=UTC)
 
 
 @dataclass

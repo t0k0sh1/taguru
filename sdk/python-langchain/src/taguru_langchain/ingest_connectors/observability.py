@@ -174,9 +174,9 @@ S3SyncReport = RunReport
 ``retracted``) into the one run summary every connector emits, rather than
 a connector-specific subclass — a slotted, frozen dataclass subclass
 re-declares its base's ``__slots__`` on Python 3.10 (the
-``inherited_slots`` fix landed in 3.11, and this SDK's floor is 3.10), so
-an alias is the only option that stays correct on the whole supported
-Python range."""
+``inherited_slots`` fix landed in 3.11), which was this SDK's floor when
+the alias was chosen. The floor is now 3.11, but the alias stays: it is
+the published shape, and nothing a subclass would add is needed."""
 
 
 class SourceEventSink:

@@ -35,7 +35,7 @@ import mimetypes
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from stat import S_ISREG
 from typing import TYPE_CHECKING, Final, Literal, Protocol
@@ -236,7 +236,7 @@ class FileObjectStore:
             yield ObjectMeta(
                 key=key,
                 size=info.st_size,
-                last_modified=datetime.fromtimestamp(info.st_mtime, tz=timezone.utc),
+                last_modified=datetime.fromtimestamp(info.st_mtime, tz=UTC),
             )
 
     def _scan(self, directory: Path) -> Iterator[tuple[Path, os.stat_result]]:
