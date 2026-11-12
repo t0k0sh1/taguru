@@ -42,8 +42,10 @@ shards become groups nobody asked for.
    the earlier shards as they are. The refusal it answers keeps the
    shard's status and code. When at least one shard already holds the
    group, its message also names the id and those shards, so the caller
-   can finish the create by sending it again with that `id`, or remove
-   the group with `DELETE /groups/{id}`.
+   can finish the create by sending it again with that `id`. When the
+   router minted the id, the message also offers `DELETE /groups/{id}`
+   to remove the group. A caller's own id may name a group that stood
+   before this create, so for it the message offers no DELETE.
 
 ## 3. Consequences
 
@@ -57,8 +59,16 @@ shards become groups nobody asked for.
   router creates each such group empty on every shard that lacks it,
   under the id the other shards already use for that name (or one it
   mints when none does), and each shard's restore then replaces it in
-  place. The import report still labels the record `created`. If the
-  first shard refuses the records, the router removes those empty
-  groups again. If a shard's directory cannot be read, the router skips
-  this step and the shards fall back to their own ids, with a warning
-  in the log.
+  place. The import report still labels the record `created`.
+  - If a shard refuses the records, the router removes those empty
+    groups from that shard and the shards after it, which never
+    restored them. The shards before it keep the restored records. It
+    removes a group only while it is still the empty group it made, so
+    a group a restore filled or another request changed stays.
+  - A name the shards hold under different ids between them is a name
+    two groups share. The router refuses an import that names it, as a
+    record or as a child, the way a single instance refuses an
+    ambiguous name, before anything is applied.
+  - If a shard's directory cannot be read, the router skips this step
+    and the shards fall back to their own ids, with a warning in the
+    log.

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
 from taguru import (
+    ConflictError,
     GroupImportOutcome,
     NotFoundError,
     PermissionDeniedError,
@@ -77,6 +79,15 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     twin = client.groups.create(group)
     assert twin.id != group_id
     assert client.groups.delete(twin.id)
+    # A caller's own id: the same record again answers the standing row,
+    # a different one is a conflict.
+    own_id = str(uuid.uuid4())
+    pinned = client.groups.create(f"{group}-pinned", group_id=own_id)
+    assert pinned.id == own_id
+    assert client.groups.create(f"{group}-pinned", group_id=own_id).id == own_id
+    with pytest.raises(ConflictError):
+        client.groups.create(f"{group}-other", group_id=own_id)
+    assert client.groups.delete(own_id)
     # A name where the id belongs is a 400, never a lookup.
     with pytest.raises(ValidationError) as by_name:
         client.groups.get(group)

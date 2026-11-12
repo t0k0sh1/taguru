@@ -1,5 +1,6 @@
 /** TaguruRetriever against the routed fake server — mirrors the Python suite. */
 
+import { TaguruError } from "taguru";
 import { describe, expect, it } from "vitest";
 
 import { TaguruRetriever } from "../../src/retrievers.js";
@@ -193,6 +194,53 @@ describe("TaguruRetriever cross-context", () => {
     // parent's members (sake, tea) still come back even though the
     // sibling group 404s.
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
+  });
+
+  it("refuses a groups-only retrieval whose group directory fails to read", async () => {
+    // Nothing but groups to search: an unreadable directory is the
+    // caller's error, never an empty result that looks complete.
+    for (const after of [0, 1]) {
+      const server = new FakeServer();
+      server.failGroupDirectoryAfter = after;
+      const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      await expect(retriever.invoke("青嶺酒造")).rejects.toBeInstanceOf(TaguruError);
+      expect(server.calls.filter(([path]) => path === "/sources/search")).toEqual([]);
+    }
+  });
+
+  it("keeps the rows read before a directory failure beside the direct targets", async () => {
+    // The first page reads (every row fits on it); the closing page fails.
+    const server = new FakeServer();
+    server.failGroupDirectoryAfter = 1;
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-tea"],
+      groups: ["brewery"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("pages the group walk through rows that share a name", async () => {
+    // A page boundary between two rows named alike: the (name, id) cursor
+    // resumes after the first, never skipping the second.
+    GROUP_ROWS["gid-twin"] = { id: "gid-twin", name: "childg", description: "", context_ids: [], groups: [] };
+    try {
+      const server = new FakeServer();
+      const walked: string[] = [];
+      for await (const row of server.client().groups.iter({ limit: 1 })) {
+        walked.push(`${row.name}/${row.id}`);
+      }
+      const expected = (Object.values(GROUP_ROWS) as { id: string; name: string }[])
+        .map((row) => `${row.name}/${row.id}`)
+        .sort();
+      expect(walked).toEqual(expected);
+    } finally {
+      delete GROUP_ROWS["gid-twin"];
+    }
   });
 
   it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {

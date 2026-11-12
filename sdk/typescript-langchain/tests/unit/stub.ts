@@ -62,6 +62,12 @@ export class FakeServer {
    * the text lane) fails with a 500, to exercise text/graph lane
    * isolation. */
   failTextSearch = false;
+  /**
+   * When set, GET /groups fails with a 500 — from the first page (0) or
+   * only from the pages after it (1) — to exercise a group directory that
+   * cannot be read, wholly or partway.
+   */
+  failGroupDirectoryAfter: number | null = null;
   /** /embeddings/refresh's status: 501 (default, no provider configured),
    * 200 (success — served with embeddingsRefreshResult), or 502 (provider
    * error). Mirrors the Python conftest's FakeServer knob of the same
@@ -155,12 +161,25 @@ export class FakeServer {
       );
     }
     if (path === "/groups") {
-      // One page in (name, id) order, then the empty page that ends a
-      // keyset walk. Rows are keyed by id (#995); they name children by name.
+      // The server's keyset page: rows in (name, id) order strictly after
+      // the (after, after_id) cursor, `limit` of them. Rows are keyed by id
+      // (#995); they name children by name.
+      const after = url.searchParams.get("after");
+      const page = after === null ? 0 : 1;
+      if (this.failGroupDirectoryAfter !== null && page >= this.failGroupDirectoryAfter) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+          { status: 500 },
+        );
+      }
+      const before = (a: { id: string; name: string }, b: { id: string; name: string }): boolean =>
+        a.name === b.name ? a.id < b.id : a.name < b.name;
       const rows = Object.values(GROUP_ROWS) as { id: string; name: string }[];
-      rows.sort((a, b) => (a.name === b.name ? (a.id < b.id ? -1 : 1) : a.name < b.name ? -1 : 1));
-      const page = url.searchParams.get("after") === null ? rows : [];
-      return ok({ total: rows.length, groups: page });
+      rows.sort((a, b) => (before(a, b) ? -1 : 1));
+      const cursor = after === null ? null : { name: after, id: url.searchParams.get("after_id") ?? "" };
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      const rest = cursor === null ? rows : rows.filter((row) => before(cursor, row));
+      return ok({ total: rows.length, groups: rest.slice(0, limit) });
     }
     if (path.startsWith("/groups/")) {
       const row = GROUP_ROWS[path.slice("/groups/".length)];

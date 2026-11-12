@@ -1,0 +1,15 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "groups_rename",
+  "request": {
+    "to": "sakagura"
+  },
+  "response": {
+    "result": true,
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/groups/{id}/rename",
+  "status": 200
+}

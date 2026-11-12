@@ -998,7 +998,7 @@ fn group_not_found(name: &str, started_at: Instant) -> Response {
 /// never as "not found" and never resolved to one of the claimants.
 /// Names are not unique (ADR 0050), so any two `groups` created under
 /// one name reach it.
-fn ambiguous_group(name: &str, count: usize, started_at: Instant) -> Response {
+pub(crate) fn ambiguous_group(name: &str, count: usize, started_at: Instant) -> Response {
     error(
         ErrorCode::Conflict,
         format!(

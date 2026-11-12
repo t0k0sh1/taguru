@@ -36,15 +36,18 @@ Entries that change an on-disk format or a response shape say so.
   (until #996), and a name several `groups` share is refused there with
   `conflict`. Behind `taguru router` the router mints the id and every
   shard creates the `group` under it; an import record new to a shard
-  is created there under the id the rest of the fleet uses. A create
-  that stops partway names the id and the shards that hold it, so it can
-  be finished (`POST` again with the id) or removed. MCP's group tools
+  is created there under the id the rest of the fleet uses, and an
+  import naming a `group` the shards hold under different ids is
+  refused with `conflict`. A create that stops partway names the id and
+  the shards that hold it, so it can be finished (`POST` again with the
+  id) or, when the router minted the id, removed. MCP's group tools
   take the id in their `name` argument (except `create_group`, whose
   `name` is the display name) and `list_groups` takes `after_id`;
   `taguru communities --group` takes the id; `taguru export --url` walks
   the directory by `(name, id)`. The Python and TypeScript SDKs follow:
   `groups.get/exists/update/delete/rename/export` take the id,
-  `groups.create` returns the row, `GroupEntry` gains `name`, and
+  `groups.create` takes an optional id and returns the row, `GroupEntry`
+  gains `name`, and
   `groups.list` takes `after_id`. `TaguruRetriever(groups=[...])` still
   takes names and resolves them through one read of the directory.
 

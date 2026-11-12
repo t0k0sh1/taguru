@@ -171,9 +171,16 @@ def pdf_to_sections(pdf_path: Path, paper_id: str):
 def ensure_group(client: Taguru, name: str, description: str, context_ids: list[str]) -> None:
     """Create the group, or fold new contexts into the existing one. Group
     names are not unique — creating a name again makes a second group — so a
-    rerun looks the name up first and updates that group by its id. Members
-    are context IDs, never names."""
+    rerun looks the name up first and updates that group by its id. Several
+    groups under the name leave no one group to update, so that stops the run
+    (the retriever would skip the name too). Members are context IDs, never
+    names."""
     existing = [row.id for row in client.groups.iter() if row.name == name]
+    if len(existing) > 1:
+        raise SystemExit(
+            f"{len(existing)} groups are named {name!r}; rename them apart "
+            "(groups.rename) and run again"
+        )
     if existing:
         client.groups.update(existing[0], add_context_ids=context_ids)
     else:

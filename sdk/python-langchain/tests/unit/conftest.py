@@ -80,6 +80,10 @@ class FakeServer:
         # `Context.search_passages` — to exercise text/graph lane
         # isolation for both the cross-context and bare-context retrievers.
         self.fail_text_search = False
+        # When set, GET /groups fails with a 500 — from the first page
+        # (0) or only from the pages after it (1) — to exercise a group
+        # directory that cannot be read, wholly or partway.
+        self.fail_group_directory_after: int | None = None
         # 200 = refreshed; 501 = no embedding provider configured (default);
         # 502 = the provider itself failed. The 501/502 pair both map to
         # EmbeddingUnavailableError, distinguished by its `reason`.
@@ -183,11 +187,32 @@ class FakeServer:
                 },
             )
         if path == "/groups":
-            # One page in (name, id) order, then the empty page that ends
-            # a keyset walk.
+            # The server's keyset page: rows in (name, id) order strictly
+            # after the (after, after_id) cursor, `limit` of them.
+            params = request.url.params
+            page = 0 if params.get("after") is None else 1
+            if (
+                self.fail_group_directory_after is not None
+                and page >= self.fail_group_directory_after
+            ):
+                return httpx.Response(
+                    500,
+                    json={
+                        "status": "error",
+                        "code": "internal",
+                        "error": "simulated failure",
+                        "time": 0.001,
+                    },
+                )
             rows = sorted(GROUP_ROWS.values(), key=lambda row: (row["name"], row["id"]))
-            page = [] if request.url.params.get("after") is not None else rows
-            return ok({"total": len(rows), "groups": page})
+            after = params.get("after")
+            if after is not None:
+                cursor = (after, params.get("after_id", ""))
+                rows_after = [row for row in rows if (row["name"], row["id"]) > cursor]
+            else:
+                rows_after = rows
+            limit = int(params.get("limit", "100"))
+            return ok({"total": len(rows), "groups": rows_after[:limit]})
         if path.startswith("/groups/"):
             row = GROUP_ROWS.get(path.removeprefix("/groups/"))
             if row is None:

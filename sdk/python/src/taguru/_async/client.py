@@ -704,6 +704,7 @@ class AsyncGroups:
         self,
         name: str,
         *,
+        group_id: str | None = None,
         description: str = "",
         context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
@@ -715,10 +716,17 @@ class AsyncGroups:
         ``group``. Every listed member — a ``context`` (by id) or a child
         ``group`` (by name) — must already exist; a ``group`` and a
         ``context`` may share the same name without conflict.
+
+        ``group_id`` creates the ``group`` under that id (a canonical UUID)
+        instead of one the server mints. A create under an id that already
+        stands answers that row when the record is identical and raises
+        ``ConflictError`` when it differs — so the call converges on retry,
+        and it is how a create a router stopped partway is finished.
         """
         body = drop_none(
             {
                 "name": name,
+                "id": group_id,
                 "description": description,
                 "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
@@ -728,7 +736,9 @@ class AsyncGroups:
             "POST",
             "/groups",
             json_body=body,
-            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
+            # Under a caller's id a repeat converges, so an ambiguous
+            # failure is safe to retry; a minted id is not.
+            retry=RetryClass.SAFE if group_id is not None else RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
         return decode(GroupEntry, result)  # type: ignore[no-any-return]
 

@@ -784,19 +784,33 @@ export class Groups {
    * makes a second `group`. Every listed member — a `context` (by id) or a
    * child `group` (by name) — must already exist; a `group` and a `context`
    * may share the same name without conflict.
+   *
+   * `group_id` creates the `group` under that id (a canonical UUID) instead
+   * of one the server mints. A create under an id that already stands
+   * answers that row when the record is identical and throws
+   * `ConflictError` when it differs — so the call converges on retry, and it
+   * is how a create a router stopped partway is finished.
    */
   async create(
     name: string,
-    options: { description?: string; context_ids?: string[]; groups?: string[] } = {},
+    options: {
+      group_id?: string;
+      description?: string;
+      context_ids?: string[];
+      groups?: string[];
+    } = {},
   ): Promise<GroupEntry> {
     const result = await this.client.requestJson("POST", "/groups", {
       jsonBody: dropUndefined({
         name,
+        id: options.group_id,
         description: options.description ?? "",
         context_ids: options.context_ids,
         groups: options.groups,
       }),
-      retry: "unsafe_on_ambiguous",
+      // Under a caller's id a repeat converges, so an ambiguous failure
+      // is safe to retry; a minted id is not.
+      retry: options.group_id !== undefined ? "safe" : "unsafe_on_ambiguous",
     });
     return result as GroupEntry;
   }

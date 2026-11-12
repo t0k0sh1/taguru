@@ -186,7 +186,12 @@ where
 /// (DELETE it). A stop at the first shard applied nothing and passes
 /// through untouched, as does a refusal whose body is not the error
 /// envelope (nothing to extend).
-async fn stopped_create_refusal(stopped: StoppedBroadcast, map: &RouteMap, id: &str) -> Response {
+async fn stopped_create_refusal(
+    stopped: StoppedBroadcast,
+    map: &RouteMap,
+    id: &str,
+    minted: bool,
+) -> Response {
     if stopped.applied.is_empty() {
         return *stopped.refusal;
     }
@@ -208,9 +213,20 @@ async fn stopped_create_refusal(stopped: StoppedBroadcast, map: &RouteMap, id: &
         .and_then(Value::as_str)
         .unwrap_or("a shard refused the create")
         .to_string();
+    // DELETE is a safe undo only for an id the router minted: a
+    // caller's id may name a `group` that stood before this create, and
+    // deleting it would remove that one.
+    let (held, undo) = if minted {
+        (
+            "was already created on",
+            format!(", or DELETE /groups/{id} to remove it"),
+        )
+    } else {
+        ("already stands on", String::new())
+    };
     envelope["error"] = json!(format!(
-        "{message}; group '{id}' was already created on {} before this refusal — POST \
-         /groups again with \"id\": \"{id}\" to finish, or DELETE /groups/{id} to remove it",
+        "{message}; group '{id}' {held} {} before this refusal — POST /groups again with \
+         \"id\": \"{id}\" to finish{undo}",
         applied.join(", ")
     ));
     parts.headers.remove(header::CONTENT_LENGTH);
@@ -395,20 +411,24 @@ pub(super) async fn create_group_broadcast(
         Ok(base) => base,
         Err(_) => return probe(body).await,
     };
-    let id = match base.get("id") {
+    // Whether the router minted the id: only then is every shard's copy
+    // certainly this create's own (a caller's id may name a `group`
+    // already standing), which decides the cleanup a stopped create
+    // may suggest.
+    let (id, minted) = match base.get("id") {
         // `project_body` refuses a non-object body before any shard
         // sees it; there is nothing to stamp an id onto.
-        _ if !base.is_object() => String::new(),
+        _ if !base.is_object() => (String::new(), false),
         None => {
             let id = crate::groups::mint_group_id();
             base["id"] = json!(id);
-            id
+            (id, true)
         }
         Some(Value::String(id)) => {
             if let Some(refusal) = api::invalid_group_id("id", id, started_at) {
                 return refusal;
             }
-            id.clone()
+            (id.clone(), false)
         }
         // An id that is not a string is the typed extractor's refusal.
         Some(_) => return probe(body).await,
@@ -442,7 +462,7 @@ pub(super) async fn create_group_broadcast(
     .await
     {
         Ok(answers) => merged_entry(answers, "created", started_at),
-        Err(stopped) => stopped_create_refusal(stopped, &map, &id).await,
+        Err(stopped) => stopped_create_refusal(stopped, &map, &id, minted).await,
     }
 }
 

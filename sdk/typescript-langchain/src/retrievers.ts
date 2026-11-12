@@ -179,7 +179,9 @@ export class TaguruRetriever extends BaseRetriever {
     // `groups` are names, and so are a row's children, while
     // `groups.get` takes ids (#995): the walk reads the directory once
     // and follows names through it. A directory that fails to read
-    // leaves the direct targets standing.
+    // partway keeps the rows already read beside the direct targets —
+    // and with no direct target, the failure is the caller's to hear,
+    // never an empty search that looks complete.
     let members = new Set<string>();
     if ((this.groups?.length ?? 0) > 0) {
       const rows: GroupEntry[] = [];
@@ -187,8 +189,10 @@ export class TaguruRetriever extends BaseRetriever {
         for await (const row of this.client.groups.iter()) {
           rows.push(row);
         }
-      } catch {
-        rows.length = 0;
+      } catch (error) {
+        if (targets.length === 0) {
+          throw error;
+        }
       }
       members = groupMembers(rows, this.groups ?? []);
     }

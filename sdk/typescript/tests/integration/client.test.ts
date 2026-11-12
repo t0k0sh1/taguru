@@ -773,6 +773,15 @@ describe("groups and cross-context search", () => {
     const twin = await client.groups.create(group);
     expect(twin.id).not.toBe(groupId);
     expect(await client.groups.delete(twin.id)).toBe(true);
+    // A caller's own id: the same record again answers the standing row,
+    // a different one is a conflict.
+    const ownId = randomUUID();
+    expect((await client.groups.create(`${group}-pinned`, { group_id: ownId })).id).toBe(ownId);
+    expect((await client.groups.create(`${group}-pinned`, { group_id: ownId })).id).toBe(ownId);
+    await expect(
+      client.groups.create(`${group}-other`, { group_id: ownId }),
+    ).rejects.toBeInstanceOf(ConflictError);
+    expect(await client.groups.delete(ownId)).toBe(true);
     // A name where the id belongs is a 400, never a lookup.
     await expect(client.groups.get(group)).rejects.toMatchObject({ code: "invalid_argument" });
 

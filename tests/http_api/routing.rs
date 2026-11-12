@@ -1068,6 +1068,20 @@ fn a_create_that_stops_partway_names_the_id_and_the_shards_holding_it() {
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["result"]["id"], json!(id));
 
+    // A caller's own id: the message names it and the shards, but
+    // suggests no DELETE — the id may name a group that stood before.
+    let own = "5d0c1f7e-2b3a-4c8d-9e6f-a1b2c3d4e5f6";
+    let (status, refusal) =
+        router.call("POST", "/groups", Some(json!({"name": "mine", "id": own})));
+    assert_eq!(status, 503, "{refusal}");
+    let message = refusal["error"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("group '{own}' already stands on {}", shard_a.base))
+            && message.contains(&format!("\"id\": \"{own}\" to finish"))
+            && !message.contains("DELETE"),
+        "{message}"
+    );
+
     // The broken shard first: nothing applied anywhere, so its refusal
     // passes through as it is.
     let shard_c = Server::start("gpart-c");
@@ -1676,6 +1690,88 @@ fn a_first_shard_import_refusal_removes_the_groups_made_for_it() {
             shard.try_gx("fresh").is_none(),
             "the empty group made for the import must go again"
         );
+    }
+}
+
+/// A router import a LATER shard refuses: the shards before it keep
+/// the restored record, and the empty groups made for the stream go
+/// again from the refusing shard on — the one that refused and the
+/// ones the records never reached.
+#[test]
+fn a_later_shard_import_refusal_removes_the_groups_made_from_there_on() {
+    let shard_a = Server::start("gimp-later-a");
+    let shard_b = Server::start("gimp-later-b");
+    let shard_c = Server::start("gimp-later-c");
+    let router = Server::start_router(
+        "gimp-later",
+        &format!(
+            "ctx_a = {}\nctx_b = {}\nctx_c = {}\n",
+            shard_a.base, shard_b.base, shard_c.base
+        ),
+        &[],
+    );
+    // A child only shard A holds (drift): A restores the record, B is
+    // the first to refuse it.
+    shard_a.create_group("kid", None);
+    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": [], \
+                  \"groups\": [\"kid\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert!(
+        shard_a.try_gx("fresh").is_some(),
+        "the shard before keeps it"
+    );
+    for shard in [&shard_b, &shard_c] {
+        assert!(
+            shard.try_gx("fresh").is_none(),
+            "an empty group made for the import must go again"
+        );
+    }
+}
+
+/// A name the shards hold under different ids between them is a name
+/// two `groups` share: a router import naming it refuses as a single
+/// instance does, with nothing applied, instead of each shard restoring
+/// its own copy.
+#[test]
+fn a_router_import_refuses_a_name_the_shards_hold_under_different_ids() {
+    let shard_a = Server::start("gimp-split-a");
+    let shard_b = Server::start("gimp-split-b");
+    let router = Server::start_router(
+        "gimp-split",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let ctx_a = router.create_context("ctx_a");
+    let on_a = shard_a.create_group("g", None);
+    let on_b = shard_b.create_group("g", None);
+    assert_ne!(on_a, on_b);
+    let stream =
+        format!("{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n");
+    for dry_run in [false, true] {
+        let (status, body) = if dry_run {
+            post_import_dry_run(&router, &stream, None)
+        } else {
+            post_import(&router, &stream, None)
+        };
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["code"], json!("conflict"), "{body}");
+        assert!(
+            body["error"].as_str().is_some_and(
+                |error| error.contains("group name 'g' is ambiguous: 2 groups share it")
+            ),
+            "{body}"
+        );
+    }
+    // A child name split the same way refuses too.
+    let stream = "{\"type\": \"group\", \"id\": \"parent\", \"context_ids\": [], \
+                  \"groups\": [\"g\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 409, "{body}");
+    for (shard, id) in [(&shard_a, &on_a), (&shard_b, &on_b)] {
+        let row = shard.ok("GET", &format!("/groups/{id}"), None);
+        assert_eq!(row["context_ids"], json!([]), "nothing applied: {row}");
+        assert!(shard.try_gx("parent").is_none());
     }
 }
 

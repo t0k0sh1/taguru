@@ -197,11 +197,20 @@ async function pdfToSections(pdfPath: string, paperId: PaperId): Promise<Section
  * looks the name up first and updates that group by its id.
  */
 async function ensureGroup(client: Taguru, name: string, description: string, contextIds: string[]): Promise<void> {
+  const existing: string[] = [];
   for await (const row of client.groups.iter()) {
     if (row.name === name) {
-      await client.groups.update(row.id, { add_context_ids: contextIds });
-      return;
+      existing.push(row.id);
     }
+  }
+  // Several groups under the name leave no one group to update, so that
+  // stops the run (the retriever would skip the name too).
+  if (existing.length > 1) {
+    throw new Error(`${existing.length} groups are named '${name}'; rename them apart (groups.rename) and run again`);
+  }
+  if (existing.length === 1) {
+    await client.groups.update(existing[0]!, { add_context_ids: contextIds });
+    return;
   }
   await client.groups.create(name, { description, context_ids: contextIds });
 }

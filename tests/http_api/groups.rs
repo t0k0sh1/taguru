@@ -1050,6 +1050,22 @@ fn a_group_name_two_groups_share_is_a_conflict_where_groups_are_still_named() {
         [json!(ids[0]), json!(ids[1])],
         "{page}"
     );
+    // A page boundary between the twins: the (name, id) cursor resumes
+    // after the first, never skipping the second.
+    let head = server.ok("GET", "/groups?limit=1", None);
+    assert_eq!(head["groups"][0]["id"], json!(ids[0]), "{head}");
+    let tail = server.ok(
+        "GET",
+        &format!("/groups?limit=1&after=kura&after_id={}", ids[0]),
+        None,
+    );
+    assert_eq!(tail["groups"][0]["id"], json!(ids[1]), "{tail}");
+    let end = server.ok(
+        "GET",
+        &format!("/groups?limit=1&after=kura&after_id={}", ids[1]),
+        None,
+    );
+    assert_eq!(end["groups"], json!([]), "{end}");
     // By id, each twin answers on its own.
     assert_eq!(
         server.ok("GET", &format!("/groups/{first}"), None)["context_ids"],

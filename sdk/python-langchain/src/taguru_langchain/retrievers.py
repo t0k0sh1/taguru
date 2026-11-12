@@ -169,13 +169,19 @@ class TaguruRetriever(BaseRetriever):
         # ``groups`` are names, and so are a row's children, while
         # ``groups.get`` takes ids (#995): the walk reads the directory
         # once and follows names through it. A directory that fails to
-        # read leaves the direct targets standing.
+        # read partway keeps the rows already read beside the direct
+        # targets — and with no direct target, the failure is the
+        # caller's to hear, never an empty search that looks complete.
+        direct = self._direct_targets()
+        rows: list[GroupEntry] = []
         try:
-            rows = list(client.groups.iter())
+            for entry in client.groups.iter():
+                rows.append(entry)
         except Exception:
-            rows = []
+            if not direct:
+                raise
         members = _group_members(rows, self.groups)
-        return self._with_members(self._direct_targets(), members)
+        return self._with_members(direct, members)
 
     def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
         """``target`` is the context ID, which the Documents' metadata carries
@@ -294,12 +300,16 @@ class TaguruRetriever(BaseRetriever):
         propagate, never swallowed as an unreadable directory."""
         if not self.groups:
             return self._direct_targets()
+        direct = self._direct_targets()
+        rows: list[GroupEntry] = []
         try:
-            rows = [entry async for entry in client.groups.iter()]
+            async for entry in client.groups.iter():
+                rows.append(entry)
         except Exception:
-            rows = []
+            if not direct:
+                raise
         members = _group_members(rows, self.groups)
-        return self._with_members(self._direct_targets(), members)
+        return self._with_members(direct, members)
 
     async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
         """:meth:`_graph_lane`'s async twin."""

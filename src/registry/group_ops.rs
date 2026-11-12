@@ -214,6 +214,19 @@ impl AppState {
                 }
                 remove_ids.extend(matching.into_iter().cloned());
             }
+            // The name count above folds children that share a name
+            // into one, so it can undercount the record: the cap holds
+            // on the ids it will actually carry.
+            let prospective = record
+                .group_ids
+                .iter()
+                .filter(|child| !remove_ids.contains(*child))
+                .chain(add_ids.iter())
+                .collect::<BTreeSet<_>>()
+                .len();
+            if prospective > groups::MAX_GROUP_MEMBERS {
+                return Err(UpdateGroupError::OverCap("child groups"));
+            }
         }
         let record = groups.get_mut(&id).expect("looked up above");
         let previous = record.clone();
@@ -1088,6 +1101,56 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Two children renamed alike read as one name, so the name count
+    /// a delta is judged on first falls one short of the record: the
+    /// cap still holds on the ids the record would carry.
+    #[test]
+    fn the_child_cap_counts_ids_where_children_share_a_name() {
+        let dir = scratch_dir("groups-cap-ids");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let children: BTreeSet<String> = (0..groups::MAX_GROUP_MEMBERS)
+            .map(|i| format!("c{i:04}"))
+            .collect();
+        for child in &children {
+            state
+                .create_group(None, child, String::new(), BTreeSet::new(), BTreeSet::new())
+                .unwrap();
+        }
+        let parent = state
+            .create_group(None, "parent", String::new(), BTreeSet::new(), children)
+            .unwrap()
+            .id;
+        let twin = state.group_named("c0001").unwrap().id;
+        state.rename_group(&twin, "c0000").unwrap();
+        state
+            .create_group(
+                None,
+                "extra",
+                String::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            state.update_group(
+                &parent,
+                None,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::from(["extra".to_string()]),
+                BTreeSet::new()
+            ),
+            Err(UpdateGroupError::OverCap("child groups"))
+        ));
+        assert_eq!(
+            state.group(&parent).unwrap().record.groups.len(),
+            groups::MAX_GROUP_MEMBERS - 1,
+            "the view still folds the twins, and nothing landed"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn group_membership_is_capped_per_set_and_judged_before_existence() {
         let dir = scratch_dir("groups-cap");
@@ -1722,18 +1785,32 @@ mod tests {
         let contexts: BTreeSet<String> = state
             .directory()
             .into_iter()
-            .map(|entry| entry.name)
+            .map(|entry| entry.id)
             .collect();
         let table = state.0.groups.read();
         let groups = table.records();
         assert_eq!(groups::validate_nesting(groups), Ok(()));
         for (id, record) in groups {
             assert_eq!(&record.id, id, "every record sits under its own id");
+            // Names are labels (ADR 0050): the index answers every id
+            // that carries one, and a lookup is unique or ambiguous
+            // exactly as the records say.
+            let named: BTreeSet<&String> = groups
+                .values()
+                .filter(|other| other.name == record.name)
+                .map(|other| &other.id)
+                .collect();
             assert_eq!(
-                table.lookup(&record.name),
-                Ok(id),
-                "names stay unique and indexed"
+                table.ids_named(&record.name).collect::<BTreeSet<_>>(),
+                named,
+                "the name index tracks the records"
             );
+            let expected = if named.len() == 1 {
+                Ok(id)
+            } else {
+                Err(GroupLookup::Ambiguous(named.len()))
+            };
+            assert_eq!(table.lookup(&record.name), expected);
             assert!(record.context_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(record.group_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(
@@ -1761,21 +1838,40 @@ mod tests {
             let dir = scratch_dir("group-properties");
             let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
 
+            // The pool speaks names; the API takes ids. A group name
+            // resolves to the first id carrying it (names may be shared)
+            // and a context name to its id — an unresolved name passes
+            // through as an id nothing answers to, the NotFound arm.
+            let group_id = |name: &str| -> String {
+                state
+                    .0
+                    .groups
+                    .read()
+                    .ids_named(name)
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string())
+            };
+            let context_ids = |names: Vec<&str>| -> BTreeSet<String> {
+                names.into_iter().map(|name| state.id_of(name)).collect()
+            };
             for operation in operations {
                 match operation {
                     GeneratedGroupOp::CreateContext(name) => {
                         let _ = state.create(name, ContextMeta::default());
                     }
                     GeneratedGroupOp::DeleteContext(name) => {
-                        let _ = state.delete(name);
+                        let _ = state.delete(&state.id_of(name));
                     }
                     GeneratedGroupOp::CreateGroup { name, contexts, groups } => {
-                        let _ = state.create_group(
+                        if let Ok(view) = state.create_group(
                             None, name,
                             String::new(),
-                            contexts.into_iter().map(str::to_string).collect(),
+                            context_ids(contexts),
                             groups.into_iter().map(str::to_string).collect(),
-                        );
+                        ) {
+                            prop_assert_eq!(view.name, name);
+                        }
                     }
                     GeneratedGroupOp::UpdateGroup {
                         name,
@@ -1784,17 +1880,28 @@ mod tests {
                         add_groups,
                         remove_groups,
                     } => {
-                        let _ = state.update_group(
-                            name,
+                        let id = group_id(name);
+                        let added = context_ids(add_contexts);
+                        let removed = context_ids(remove_contexts);
+                        if let Ok(view) = state.update_group(
+                            &id,
                             None,
-                            add_contexts.into_iter().map(str::to_string).collect(),
-                            remove_contexts.into_iter().map(str::to_string).collect(),
+                            added.clone(),
+                            removed.clone(),
                             add_groups.into_iter().map(str::to_string).collect(),
                             remove_groups.into_iter().map(str::to_string).collect(),
-                        );
+                        ) {
+                            // Removals apply first, so every added
+                            // member stands afterwards.
+                            prop_assert!(added.is_subset(&view.record.context_ids));
+                            prop_assert_eq!(view.id, id);
+                        }
                     }
                     GeneratedGroupOp::DeleteGroup(name) => {
-                        let _ = state.delete_group(name);
+                        let id = group_id(name);
+                        if state.delete_group(&id).is_some() {
+                            prop_assert!(state.group(&id).is_none());
+                        }
                     }
                     GeneratedGroupOp::RestoreGroups(records) => {
                         let records: Vec<(String, GroupRecord)> = records
@@ -1804,7 +1911,7 @@ mod tests {
                                     name.to_string(),
                                     GroupRecord {
                                         description: String::new(),
-                                        context_ids: contexts.into_iter().map(str::to_string).collect(),
+                                        context_ids: context_ids(contexts),
                                         groups: groups.into_iter().map(str::to_string).collect(),
                                     },
                                 )
@@ -1813,7 +1920,10 @@ mod tests {
                         let _ = state.restore_groups(&records, Deadline::unbounded());
                     }
                     GeneratedGroupOp::RenameGroup { from, to } => {
-                        let _ = state.rename_group(from, to);
+                        let id = group_id(from);
+                        if state.rename_group(&id, to).is_ok() {
+                            prop_assert_eq!(state.group(&id).unwrap().name, to);
+                        }
                     }
                 }
                 assert_live_group_invariants(&state);

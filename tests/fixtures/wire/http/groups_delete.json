@@ -1,0 +1,13 @@
+{
+  "contract": "http_contract",
+  "method": "DELETE",
+  "operation": "groups_delete",
+  "request": null,
+  "response": {
+    "result": true,
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/groups/{id}",
+  "status": 200
+}

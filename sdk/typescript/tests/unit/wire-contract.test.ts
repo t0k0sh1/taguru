@@ -103,6 +103,10 @@ function collectByPath(value: unknown, segments: string[]): unknown[] {
 const TYPED_OPERATIONS = [
   "recall",
   "contexts_list",
+  "groups_list",
+  "groups_create",
+  "groups_get",
+  "groups_update",
   "sources_search",
   "explore",
   "activate",

@@ -60,7 +60,7 @@ classes:
     create:
       route: "POST /groups"
       args: [name]
-      options: [description, context_ids, groups]
+      options: [group_id, description, context_ids, groups]
     update:
       route: "PATCH /groups/{id}"
       args: [group_id]

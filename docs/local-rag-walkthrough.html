@@ -285,7 +285,9 @@ group: paper/sato2023
       (<a href="modeling.html#cross-search">why a <code>group</code>, never a super-<code>context</code></a>). <code>group</code>
       creation has to be idempotent by hand — a <code>group</code>'s name is a label, not a key, so
       <code>groups.create</code> under a name that already exists makes a second <code>group</code>.
-      A rerun looks the name up first and switches to a delta update on that <code>group</code>'s id:
+      A rerun looks the name up first and switches to a delta update on that <code>group</code>'s id.
+      Several <code>groups</code> under the name leave no one <code>group</code> to update, so the
+      script stops there instead of picking one:
     </p>
     <pre><code><span class="k">from</span> taguru <span class="k">import</span> Taguru
 
@@ -293,6 +295,8 @@ client = Taguru()
 
 <span class="k">def</span> ensure_group(name, description, context_ids):
     existing = [row.id <span class="k">for</span> row <span class="k">in</span> client.groups.iter() <span class="k">if</span> row.name == name]
+    <span class="k">if</span> len(existing) &gt; 1:
+        <span class="k">raise</span> SystemExit(f<span class="s">"{len(existing)} groups are named {name!r}; rename them apart"</span>)
     <span class="k">if</span> existing:
         client.groups.update(existing[0], add_context_ids=context_ids)
     <span class="k">else</span>:
