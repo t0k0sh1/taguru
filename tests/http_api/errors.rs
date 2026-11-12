@@ -205,12 +205,23 @@ fn errors_carry_the_documented_machine_readable_code() {
         server.call_with_token("POST", "/contexts", Some(json!({"name": "sake"})), key);
     assert_eq!(status, 200, "{body}");
 
-    // Context creates no longer collide (names are not unique, #961
-    // decision 1) — `already_exists` lives on at the GROUP create,
-    // which still keys on the name.
-    let (status, body) = server.call_with_token("PUT", "/groups/codes-group", Some(json!({})), key);
+    // Creates no longer collide by name (names are not unique, #961 /
+    // ADR 0050) — `already_exists` lives on at a GROUP create under an
+    // id a different group already holds (#995).
+    let pinned = json!({"id": "00000000-0000-4000-9000-00000000c0de"});
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/groups",
+        group_body("codes-group", Some(pinned.clone())),
+        key,
+    );
     assert_eq!(status, 200, "{body}");
-    let (status, body) = server.call_with_token("PUT", "/groups/codes-group", Some(json!({})), key);
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/groups",
+        group_body("other-group", Some(pinned)),
+        key,
+    );
     assert_eq!(
         code_of(status, &body),
         (409, "already_exists".into()),
@@ -412,8 +423,12 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
         Some(json!({"to": long})),
     );
     assert_eq!(status, 400, "{body}");
-    server.ok("PUT", "/groups/kura", Some(json!({})));
-    let (status, body) = server.call("POST", "/groups/kura/rename", Some(json!({"to": long})));
+    server.ok("POST", "/groups", group_body("kura", Some(json!({}))));
+    let (status, body) = server.call(
+        "POST",
+        &format!("/groups/{}/rename", server.gx("kura")),
+        Some(json!({"to": long})),
+    );
     assert_eq!(status, 400, "{body}");
 
     // Nothing landed anywhere.
@@ -445,7 +460,6 @@ fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
         format!("/contexts/{id}/sources?prefix={long}"),
         format!("/contexts/{id}/aliases?prefix={long}"),
         format!("/contexts/{id}/labels?prefix={long}"),
-        format!("/groups?prefix={long}"),
     ] {
         let (status, body) = server.call("GET", &path, None);
         assert_eq!(status, 400, "{path}: {body}");
@@ -456,6 +470,7 @@ fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
         format!("/contexts/{id}/aliases?after={long}"),
         format!("/contexts/{id}/labels?after={long}"),
         format!("/groups?after={long}"),
+        format!("/groups?after=a&after_id={long}"),
     ] {
         let (status, body) = server.call("GET", &path, None);
         assert_eq!(status, 400, "{path}: {body}");

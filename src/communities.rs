@@ -42,7 +42,7 @@ use crate::remote::{Api, ApiFailure};
 
 const COMMUNITIES_USAGE: &str = "usage: taguru communities --context ID [--into ID] [--dry-run]
                            [--json] [--config FILE] [--url URL] [URL]
-       taguru communities --group NAME [--dry-run] [--json] [--config FILE]
+       taguru communities --group ID [--dry-run] [--json] [--config FILE]
                            [--url URL] [URL]
 
 Derives (or refreshes) a community-summaries artifact from a RUNNING
@@ -61,8 +61,9 @@ its stored summary — a re-run over an unchanged graph makes no LLM
 calls at all. --dry-run reports what would change without calling the
 LLM or writing anything.
 
---group NAME derives one artifact per member context (child groups
-included, transitively) — there is no cross-context graph merge.
+--group ID derives one artifact per member context of the group with
+that id (the id column of GET /groups; child groups included,
+transitively) — there is no cross-context graph merge.
 
 Summaries use the extract provider: TAGURU_EXTRACT_URL,
 TAGURU_EXTRACT_MODEL, TAGURU_EXTRACT_API_KEY (docs/extract.html) —
@@ -112,7 +113,7 @@ pub fn run(args: &[String]) -> i32 {
             "--group" => match rest.next() {
                 Some(name) if group.is_none() => group = Some(name.clone()),
                 Some(_) => return usage("--group given twice"),
-                None => return usage("--group needs a name"),
+                None => return usage("--group needs a group id"),
             },
             "--into" => match rest.next() {
                 Some(name) if into.is_none() => into = Some(name.clone()),
@@ -153,7 +154,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     match (&context, &group) {
         (Some(_), Some(_)) => return usage("--context and --group are mutually exclusive"),
-        (None, None) => return usage("--context ID (or --group NAME) is required"),
+        (None, None) => return usage("--context ID (or --group ID) is required"),
         _ => {}
     }
     if into.is_some() && group.is_some() {
@@ -658,17 +659,21 @@ fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManife
 
 /// A `group`'s transitive member `context` ids, child `groups` included —
 /// depth is server-capped, and cycles are refused at write time, so a
-/// plain recursion cannot run away.
+/// plain walk cannot run away. The root is addressed by id; a row names
+/// its children by name (until #996), so those resolve through the
+/// directory, read once on the first child — and a child name several
+/// `groups` share is refused rather than resolved to one of them.
 fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
     let mut contexts = BTreeSet::new();
     let mut pending = vec![group.to_string()];
     let mut seen = BTreeSet::new();
-    while let Some(name) = pending.pop() {
-        if !seen.insert(name.clone()) {
+    let mut ids_by_name: Option<BTreeMap<String, Vec<String>>> = None;
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id.clone()) {
             continue;
         }
         let entry = api
-            .get_envelope(&["groups", &name])
+            .get_envelope(&["groups", &id])
             .map_err(|failure| failure.into_message())?;
         for context in entry["context_ids"].as_array().into_iter().flatten() {
             if let Some(context) = context.as_str() {
@@ -676,8 +681,29 @@ fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
             }
         }
         for child in entry["groups"].as_array().into_iter().flatten() {
-            if let Some(child) = child.as_str() {
-                pending.push(child.to_string());
+            let Some(child) = child.as_str() else {
+                continue;
+            };
+            if ids_by_name.is_none() {
+                let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for (id, name) in api.list_group_rows()? {
+                    index.entry(name).or_default().push(id);
+                }
+                ids_by_name = Some(index);
+            }
+            match ids_by_name
+                .as_ref()
+                .and_then(|index| index.get(child))
+                .map(Vec::as_slice)
+            {
+                Some([child_id]) => pending.push(child_id.clone()),
+                Some(ids) if ids.len() > 1 => {
+                    return Err(format!(
+                        "child group name '{child}' is ambiguous: {} groups share it",
+                        ids.len()
+                    ));
+                }
+                _ => return Err(format!("child group '{child}' not found")),
             }
         }
     }

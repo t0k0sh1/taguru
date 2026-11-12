@@ -648,33 +648,48 @@ class Groups:
     def __init__(self, client: Taguru) -> None:
         self._client = client
 
-    def list(self, *, limit: int | None = None, after: str | None = None) -> GroupPage:
-        """One directory page (keyset cursor: ``after`` = last name shown)."""
+    def list(
+        self,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+        after_id: str | None = None,
+    ) -> GroupPage:
+        """One directory page, ordered by ``(name, id)``.
+
+        The keyset cursor is the last row shown: ``after`` its ``name``
+        and ``after_id`` its ``id`` (names are not unique, so the id
+        breaks ties).
+        """
         result = self._client._request_json(
-            "GET", "/groups", params=drop_none({"limit": limit, "after": after})
+            "GET",
+            "/groups",
+            params=drop_none({"limit": limit, "after": after, "after_id": after_id}),
         )
         return decode(GroupPage, result)  # type: ignore[no-any-return]
 
     def iter(self, *, limit: int | None = None) -> Iterator[GroupEntry]:
         """Walk every directory page transparently."""
         after: str | None = None
+        after_id: str | None = None
         while True:
-            page = self.list(limit=limit, after=after)
+            page = self.list(limit=limit, after=after, after_id=after_id)
             if not page.groups:
                 return
             for entry in page.groups:
                 yield entry
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
-            after = page.groups[-1].id
+            after = page.groups[-1].name
+            after_id = page.groups[-1].id
 
-    def get(self, name: str) -> GroupEntry:
-        result = self._client._request_json("GET", f"/groups/{encode_name(name)}")
+    def get(self, group_id: str) -> GroupEntry:
+        result = self._client._request_json("GET", f"/groups/{encode_name(group_id)}")
         return decode(GroupEntry, result)  # type: ignore[no-any-return]
 
-    def exists(self, name: str) -> bool:
+    def exists(self, group_id: str) -> bool:
         try:
-            self.get(name)
+            self.get(group_id)
         except NotFoundError:
             return False
         return True
@@ -686,31 +701,34 @@ class Groups:
         description: str = "",
         context_ids: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
-    ) -> bool:
-        """Create a ``group`` (409 ``ConflictError`` if it already exists).
+    ) -> GroupEntry:
+        """Create a ``group`` and return its row — ``id`` included, which every
+        other ``group`` call takes.
 
-        Every listed member — a ``context`` (by id) or a child ``group`` (by name) —
-        must already exist; a ``group`` and a ``context`` may share the same name
-        without conflict.
+        ``name`` is a label, not unique: creating a name again makes a second
+        ``group``. Every listed member — a ``context`` (by id) or a child
+        ``group`` (by name) — must already exist; a ``group`` and a
+        ``context`` may share the same name without conflict.
         """
         body = drop_none(
             {
+                "name": name,
                 "description": description,
                 "context_ids": list(context_ids) if context_ids is not None else None,
                 "groups": list(groups) if groups is not None else None,
             }
         )
         result = self._client._request_json(
-            "PUT",
-            f"/groups/{encode_name(name)}",
+            "POST",
+            "/groups",
             json_body=body,
             retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
-        return bool(result)
+        return decode(GroupEntry, result)  # type: ignore[no-any-return]
 
     def update(
         self,
-        name: str,
+        group_id: str,
         *,
         description: str | None = None,
         add_context_ids: Sequence[str] | None = None,
@@ -735,14 +753,16 @@ class Groups:
                 "remove_groups": list(remove_groups) if remove_groups is not None else None,
             }
         )
-        result = self._client._request_json("PATCH", f"/groups/{encode_name(name)}", json_body=body)
+        result = self._client._request_json(
+            "PATCH", f"/groups/{encode_name(group_id)}", json_body=body
+        )
         return decode(GroupEntry, result)  # type: ignore[no-any-return]
 
-    def delete(self, name: str) -> bool:
+    def delete(self, group_id: str) -> bool:
         """Delete the bundling only — member ``contexts`` and child ``groups`` stay."""
         result = self._client._request_json(
             "DELETE",
-            f"/groups/{encode_name(name)}",
+            f"/groups/{encode_name(group_id)}",
             # A repeat delete 404s, so a phantom retry after an ambiguous
             # transport failure would surface as NotFoundError even though
             # the first delete already applied.
@@ -750,21 +770,22 @@ class Groups:
         )
         return bool(result)
 
-    def rename(self, name: str, to: str) -> bool:
-        """Rename a ``group`` (admin role): the ``group``'s file moves to ``to``,
-        and every OTHER ``group`` naming it as a child is rewritten to match."""
+    def rename(self, group_id: str, to: str) -> bool:
+        """Rename a ``group`` (admin role): a display-name change and nothing
+        else — the id and every parent nesting it stay put. Names are not
+        unique, so ``to`` may already be in use."""
         result = self._client._request_json(
             "POST",
-            f"/groups/{encode_name(name)}/rename",
+            f"/groups/{encode_name(group_id)}/rename",
             json_body={"to": to},
             retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
         return bool(result)
 
-    def export(self, name: str) -> str:
+    def export(self, group_id: str) -> str:
         """The ``group`` as one import-stream record (a ``group`` JSON
         line); ``import_batches`` restores it as a whole-record replace."""
-        response = self._client._send("GET", f"/groups/{encode_name(name)}/export")
+        response = self._client._send("GET", f"/groups/{encode_name(group_id)}/export")
         return response.text
 
 

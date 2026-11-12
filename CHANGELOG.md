@@ -19,6 +19,35 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — `groups` are addressed by id** (#995, ADR 0050 / 0052;
+  `http_contract` 2). Every `/groups/{name}` route is now `/groups/{id}`
+  (`GET`, `PATCH`, `DELETE`, `/export`, `/rename`), and a path that is
+  not a canonical UUID answers 400 instead of a lookup. A `group` is
+  created with `POST /groups {name, id?, description?, context_ids?,
+  groups?}`, which answers the new row; `PUT /groups/{name}` is gone. The
+  server mints the id unless the request brings one: a create under a
+  standing id answers that row when the record is identical (a retry
+  converges) and `already_exists` when it differs. Names are no longer
+  unique — a create or rename under a taken name makes or keeps two
+  `groups` apart by id. A row is `{id, name, description, context_ids,
+  groups, fingerprint}`; `GET /groups` sorts by `(name, id)` and pages
+  with `after` + `after_id`, as `GET /contexts` does. Child `groups`,
+  cross-search `groups`, and import records still name `groups` by name
+  (until #996), and a name several `groups` share is refused there with
+  `conflict`. Behind `taguru router` the router mints the id and every
+  shard creates the `group` under it; an import record new to a shard
+  is created there under the id the rest of the fleet uses. A create
+  that stops partway names the id and the shards that hold it, so it can
+  be finished (`POST` again with the id) or removed. MCP's group tools
+  take the id in their `name` argument (except `create_group`, whose
+  `name` is the display name) and `list_groups` takes `after_id`;
+  `taguru communities --group` takes the id; `taguru export --url` walks
+  the directory by `(name, id)`. The Python and TypeScript SDKs follow:
+  `groups.get/exists/update/delete/rename/export` take the id,
+  `groups.create` returns the row, `GroupEntry` gains `name`, and
+  `groups.list` takes `after_id`. `TaguruRetriever(groups=[...])` still
+  takes names and resolves them through one read of the directory.
+
 - **Breaking (on-disk format) — a `group`'s file is named by its own id**
   (#994, ADR 0050). Each `group` gets a minted UUID. Its file is
   `{id}.group` and records `{id, name, description, context_ids,

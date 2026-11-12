@@ -741,62 +741,89 @@ describe("groups and cross-context search", () => {
     return [sake, tea, sakeId, teaId];
   }
 
+  /** The id of the one `group` called `name` — the directory walk a caller
+   * holding only a name makes (names are not unique, #995). */
+  async function groupIdNamed(name: string): Promise<string> {
+    const ids: string[] = [];
+    for await (const row of client.groups.iter()) {
+      if (row.name === name) {
+        ids.push(row.id);
+      }
+    }
+    expect(ids).toHaveLength(1);
+    return ids[0]!;
+  }
+
   it("creates, nests, updates by deltas, deletes the bundling only", async () => {
     const base = fresh();
     const [, , sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
     const child = `${base}-child`;
 
-    expect(await client.groups.exists(group)).toBe(false);
-    expect(await client.groups.create(group, { description: "蔵元一式", context_ids: [sakeId] })).toBe(true);
-    await expect(client.groups.create(group)).rejects.toMatchObject({ code: "already_exists" });
+    const created = await client.groups.create(group, {
+      description: "蔵元一式",
+      context_ids: [sakeId],
+    });
+    const groupId = created.id;
+    expect(created.name).toBe(group);
+    expect(created.context_ids).toEqual([sakeId]);
+    expect(await client.groups.exists(groupId)).toBe(true);
+    expect(await groupIdNamed(group)).toBe(groupId);
+    // A name is a label: creating it again makes a second group.
+    const twin = await client.groups.create(group);
+    expect(twin.id).not.toBe(groupId);
+    expect(await client.groups.delete(twin.id)).toBe(true);
+    // A name where the id belongs is a 400, never a lookup.
+    await expect(client.groups.get(group)).rejects.toMatchObject({ code: "invalid_argument" });
 
-    let entry = await client.groups.get(group);
+    let entry = await client.groups.get(groupId);
+    expect(entry.id).toBe(groupId);
+    expect(entry.name).toBe(group);
     expect(entry.description).toBe("蔵元一式");
     expect(entry.context_ids).toEqual([sakeId]);
     expect(entry.groups).toEqual([]);
 
     // Deltas: removals are idempotent no-ops, additions demand existence.
-    entry = await client.groups.update(group, {
+    entry = await client.groups.update(groupId, {
       add_context_ids: [teaId],
       remove_context_ids: [GHOST_ID],
     });
     expect(entry.context_ids).toEqual([sakeId, teaId].sort());
     await expect(
-      client.groups.update(group, { add_context_ids: [GHOST_ID] }),
+      client.groups.update(groupId, { add_context_ids: [GHOST_ID] }),
     ).rejects.toMatchObject({ code: "no_context" });
 
-    // Nesting: a child group rides the row's `groups` list.
-    expect(await client.groups.create(child, { context_ids: [teaId] })).toBe(true);
-    entry = await client.groups.update(group, { add_groups: [child] });
+    // Nesting: a child group rides the row's `groups` list (by name).
+    const childId = (await client.groups.create(child, { context_ids: [teaId] })).id;
+    entry = await client.groups.update(groupId, { add_groups: [child] });
     expect(entry.groups).toEqual([child]);
 
-    const names: string[] = [];
+    const ids: string[] = [];
     for await (const row of client.groups.iter({ limit: 2 })) {
-      names.push(row.id);
+      ids.push(row.id);
     }
-    expect(names).toContain(group);
-    expect(names).toContain(child);
+    expect(ids).toContain(groupId);
+    expect(ids).toContain(childId);
 
-    // Rename: the old name is gone, the new one keeps the membership.
+    // Rename: a display-name change — the id and the membership stay.
     const renamedGroup = `${base}-g-renamed`;
-    expect(await client.groups.rename(group, renamedGroup)).toBe(true);
-    await expect(client.groups.get(group)).rejects.toMatchObject({ code: "no_group" });
-    entry = await client.groups.get(renamedGroup);
+    expect(await client.groups.rename(groupId, renamedGroup)).toBe(true);
+    entry = await client.groups.get(groupId);
+    expect(entry.name).toBe(renamedGroup);
     expect(entry.context_ids).toEqual([sakeId, teaId].sort());
     expect(entry.groups).toEqual([child]);
 
     // Deleting the bundling leaves members (and the child group) alone.
-    expect(await client.groups.delete(renamedGroup)).toBe(true);
-    await expect(client.groups.get(renamedGroup)).rejects.toMatchObject({ code: "no_group" });
-    expect(await client.groups.exists(child)).toBe(true);
+    expect(await client.groups.delete(groupId)).toBe(true);
+    await expect(client.groups.get(groupId)).rejects.toMatchObject({ code: "no_group" });
+    expect(await client.groups.exists(childId)).toBe(true);
     expect(await client.contexts.exists(sakeId)).toBe(true);
 
     await expect(reader.groups.create(`${base}-denied`)).rejects.toBeInstanceOf(
       PermissionDeniedError,
     );
 
-    await client.groups.delete(child);
+    await client.groups.delete(childId);
     await client.contexts.delete(sakeId);
     await client.contexts.delete(teaId);
   });
@@ -805,7 +832,7 @@ describe("groups and cross-context search", () => {
     const base = fresh();
     const [sake, tea, sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
-    await client.groups.create(group, { context_ids: [sakeId, teaId] });
+    const groupId = (await client.groups.create(group, { context_ids: [sakeId, teaId] })).id;
 
     // recall: named contexts, every match tagged with its origin.
     const page = await client.recall("代表銘柄", { context_ids: [sakeId, teaId] });
@@ -838,7 +865,7 @@ describe("groups and cross-context search", () => {
       code: "no_group",
     });
 
-    await client.groups.delete(group);
+    await client.groups.delete(groupId);
     await client.contexts.delete(sakeId);
     await client.contexts.delete(teaId);
   });
@@ -847,9 +874,11 @@ describe("groups and cross-context search", () => {
     const base = fresh();
     const [, , sakeId, teaId] = await seededPair(base);
     const group = `${base}-g`;
-    await client.groups.create(group, { description: "蔵元一式", context_ids: [sakeId, teaId] });
+    const groupId = (
+      await client.groups.create(group, { description: "蔵元一式", context_ids: [sakeId, teaId] })
+    ).id;
 
-    const line = await client.groups.export(group);
+    const line = await client.groups.export(groupId);
     const record = JSON.parse(line) as {
       type: string;
       version: string;
@@ -862,13 +891,14 @@ describe("groups and cross-context search", () => {
     expect(record.context_ids).toEqual([sakeId, teaId].sort());
 
     // The record is the group's complete truth: import restores it whole.
-    await client.groups.delete(group);
-    expect(await client.groups.exists(group)).toBe(false);
+    await client.groups.delete(groupId);
+    expect(await client.groups.exists(groupId)).toBe(false);
     const result = await client.importBatches(line);
     expect(result.groups).toEqual([{ name: group, outcome: "created", contexts: 2, groups: 0 }]);
-    expect((await client.groups.get(group)).context_ids).toEqual([sakeId, teaId].sort());
+    const restored = await groupIdNamed(group);
+    expect((await client.groups.get(restored)).context_ids).toEqual([sakeId, teaId].sort());
 
-    await client.groups.delete(group);
+    await client.groups.delete(restored);
     await client.contexts.delete(sakeId);
     await client.contexts.delete(teaId);
   });

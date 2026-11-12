@@ -142,6 +142,18 @@ pub fn context_stem(data_dir: &std::path::Path, name: &str) -> String {
 /// its id since #994, and the name lives inside the record).
 #[allow(dead_code)]
 pub fn group_stem(data_dir: &std::path::Path, name: &str) -> String {
+    try_group_stem(data_dir, name).unwrap_or_else(|| {
+        panic!(
+            "no .group file in {} records the name '{name}'",
+            data_dir.display()
+        )
+    })
+}
+
+/// [`group_stem`] for a name that may not resolve — `None` where
+/// `group_stem` panics. For asserting that no `group` carries the name.
+#[allow(dead_code)]
+pub fn try_group_stem(data_dir: &std::path::Path, name: &str) -> Option<String> {
     for entry in std::fs::read_dir(data_dir).expect("data dir must list") {
         let path = entry.expect("entry must read").path();
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -157,11 +169,8 @@ pub fn group_stem(data_dir: &std::path::Path, name: &str) -> String {
             continue;
         };
         if value.get("name").and_then(|v| v.as_str()) == Some(name) {
-            return stem.to_string();
+            return Some(stem.to_string());
         }
     }
-    panic!(
-        "no .group file in {} records the name '{name}'",
-        data_dir.display()
-    );
+    None
 }

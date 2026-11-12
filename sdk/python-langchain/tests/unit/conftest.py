@@ -32,15 +32,29 @@ FACT_ONLY_ASSOCIATION = {
     ],
 }
 
+# Keyed by id (#995); rows name their children by name, as the server's do.
 GROUP_ROWS = {
-    "brewery": {
-        "id": "brewery",
+    "gid-brewery": {
+        "id": "gid-brewery",
+        "name": "brewery",
         "description": "蔵元一式",
         "context_ids": ["id-sake", "id-tea"],
         "groups": [],
     },
-    "parent": {"id": "parent", "description": "", "context_ids": ["id-sake"], "groups": ["childg"]},
-    "childg": {"id": "childg", "description": "", "context_ids": ["id-tea"], "groups": []},
+    "gid-parent": {
+        "id": "gid-parent",
+        "name": "parent",
+        "description": "",
+        "context_ids": ["id-sake"],
+        "groups": ["childg"],
+    },
+    "gid-childg": {
+        "id": "gid-childg",
+        "name": "childg",
+        "description": "",
+        "context_ids": ["id-tea"],
+        "groups": [],
+    },
 }
 
 
@@ -168,6 +182,12 @@ class FakeServer:
                     "time": 0.001,
                 },
             )
+        if path == "/groups":
+            # One page in (name, id) order, then the empty page that ends
+            # a keyset walk.
+            rows = sorted(GROUP_ROWS.values(), key=lambda row: (row["name"], row["id"]))
+            page = [] if request.url.params.get("after") is not None else rows
+            return ok({"total": len(rows), "groups": page})
         if path.startswith("/groups/"):
             row = GROUP_ROWS.get(path.removeprefix("/groups/"))
             if row is None:

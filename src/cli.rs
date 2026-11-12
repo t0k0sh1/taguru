@@ -87,7 +87,7 @@ USAGE:
                                         export --help); a running server
                                         serves the same at
                                         GET /contexts/{id}/export and
-                                        GET /groups/{name}/export, or point
+                                        GET /groups/{id}/export, or point
                                         export itself at one with --url
   taguru compact [ID...]                rewrite context images without the
                                         dead weight the append-only format
@@ -167,7 +167,7 @@ USAGE:
                                         TAGURU_ADDR
   taguru communities --context ID [--into ID] [--dry-run] [--json]
                      [--url URL] [URL]
-  taguru communities --group NAME [--dry-run] [--json] [--url URL] [URL]
+  taguru communities --group ID [--dry-run] [--json] [--url URL] [URL]
                                         derive (or refresh) a community-
                                         summaries artifact from a running
                                         server's context: server-side

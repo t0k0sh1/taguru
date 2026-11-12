@@ -143,7 +143,7 @@ mod state;
 
 use config::RouteMap;
 use cross::{cross_query, cross_recall, cross_search_passages, merge_contexts};
-use endpoints::{health, proxy_protocol, render_metrics, urlencode};
+use endpoints::{health, proxy_protocol, render_metrics};
 use groups::{
     create_group_broadcast, delete_group_broadcast, export_group_union, full_path, merge_groups,
     rename_group_broadcast, union_group, update_group_broadcast,
@@ -375,13 +375,6 @@ mod tests {
         assert!(abort_rank(Some("no_context")) < abort_rank(Some("no_group")));
         assert!(abort_rank(Some("no_group")) < abort_rank(Some("timeout")));
         assert_eq!(abort_rank(None), 3);
-    }
-
-    #[test]
-    fn urlencode_round_trips_a_multibyte_context_name() {
-        assert_eq!(urlencode("sake"), "sake");
-        assert_eq!(urlencode("日本酒"), "%E6%97%A5%E6%9C%AC%E9%85%92");
-        assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
     }
 
     fn state_over(map_text: &str) -> RouterState {

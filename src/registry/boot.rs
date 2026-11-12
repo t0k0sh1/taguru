@@ -706,6 +706,7 @@ mod tests {
                 .unwrap();
             state
                 .create_group(
+                    None,
                     "liquor",
                     String::new(),
                     BTreeSet::from([state.id_of("sake")]),
@@ -714,26 +715,29 @@ mod tests {
                 .unwrap();
             state
                 .create_group(
+                    None,
                     "drinks",
                     String::new(),
                     BTreeSet::new(),
                     BTreeSet::from(["liquor".to_string()]),
                 )
                 .unwrap();
-            state.rename_group("liquor", "spirits").unwrap();
+            state
+                .rename_group(&state.group_named("liquor").unwrap().id, "spirits")
+                .unwrap();
         }
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         assert_eq!(
-            state.group("liquor").map(|_| ()),
+            state.group_named("liquor").map(|_| ()),
             Err(crate::groups::GroupLookup::NotFound)
         );
         assert_eq!(
-            state.group("drinks").unwrap().record.groups,
+            state.group_named("drinks").unwrap().record.groups,
             BTreeSet::from(["spirits".to_string()]),
             "the parent's edge follows the child's id, not its old name"
         );
         assert_eq!(
-            state.group("spirits").unwrap().record.context_ids,
+            state.group_named("spirits").unwrap().record.context_ids,
             BTreeSet::from([state.id_of("sake")]),
             "membership rides the group rename unchanged"
         );
@@ -775,6 +779,7 @@ mod tests {
                 .unwrap();
             state
                 .create_group(
+                    None,
                     "drinks",
                     String::new(),
                     BTreeSet::from([state.id_of("sake")]),
@@ -796,7 +801,7 @@ mod tests {
             "sanity: the injected failure must actually have fired \
              during reconcile_groups's own write_group call"
         );
-        let drinks = state.group("drinks").unwrap();
+        let drinks = state.group_named("drinks").unwrap();
         assert_eq!(
             drinks.record.context_ids,
             BTreeSet::new(),

@@ -485,7 +485,7 @@ mod tests {
         // under a name stem — is skipped, not served.
         fs::write(dir.join("legacy.group"), br#"{"groups":[]}"#).unwrap();
         state.replica_reload_groups();
-        let (_, groups) = state.group_page(None, usize::MAX);
+        let (_, groups) = state.group_page(None, None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].id, KURA);
         assert_eq!(groups[0].name, "kura");
@@ -525,7 +525,7 @@ mod tests {
         groups::write_group(&dir, &parent).unwrap();
 
         state.replica_reload_groups();
-        let (_, groups) = state.group_page(None, usize::MAX);
+        let (_, groups) = state.group_page(None, None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].name, "parent");
         assert!(
@@ -564,14 +564,14 @@ mod tests {
         };
         groups::write_group(&dir, &kura).unwrap();
         state.replica_reload_groups();
-        assert_eq!(state.group_page(None, usize::MAX).1.len(), 1);
+        assert_eq!(state.group_page(None, None, usize::MAX).1.len(), 1);
 
         // ...plus a BRAND NEW group whose file is unparseable from the
         // start — this replica has never held a good copy of it.
         fs::write(dir.join(format!("{BRANDNEW}.group")), b"{not json").unwrap();
         state.replica_reload_groups();
 
-        let (_, groups) = state.group_page(None, usize::MAX);
+        let (_, groups) = state.group_page(None, None, usize::MAX);
         assert_eq!(
             groups.len(),
             1,
@@ -586,7 +586,7 @@ mod tests {
         // it instead of vanishing mid-serve.
         fs::write(dir.join(format!("{KURA}.group")), b"{torn").unwrap();
         state.replica_reload_groups();
-        let (_, groups) = state.group_page(None, usize::MAX);
+        let (_, groups) = state.group_page(None, None, usize::MAX);
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].record.description, "蔵まとめ");
 

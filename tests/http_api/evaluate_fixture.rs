@@ -507,9 +507,9 @@ fn evaluate_never_crosses_into_a_sibling_group_members_sources() {
         Some(json!({"passages": {"corpus/hops.md": "青嶺麦酒のホップは芳醇である。"}})),
     );
     server.ok(
-        "PUT",
-        "/groups/beverages",
-        Some(json!({"description": "飲料", "context_ids": [server.cx("sake"), server.cx("beer")]})),
+        "POST",
+        "/groups",
+        group_body("beverages", Some(json!({"description": "飲料", "context_ids": [server.cx("sake"), server.cx("beer")]}))),
     );
 
     let dir = eval_dir("grouping");
@@ -578,9 +578,9 @@ fn evaluate_preflight_refuses_a_sibling_group_members_source() {
         Some(json!({"passages": {"corpus/hops.md": "青嶺麦酒のホップは芳醇である。"}})),
     );
     server.ok(
-        "PUT",
-        "/groups/beverages",
-        Some(json!({"description": "飲料", "context_ids": [server.cx("sake"), server.cx("beer")]})),
+        "POST",
+        "/groups",
+        group_body("beverages", Some(json!({"description": "飲料", "context_ids": [server.cx("sake"), server.cx("beer")]}))),
     );
 
     let dir = eval_dir("grouping-preflight");

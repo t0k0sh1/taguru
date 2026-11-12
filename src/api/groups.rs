@@ -11,14 +11,31 @@ use taguru::deadline::{Deadline, DeadlineExceeded};
 use crate::metrics::ErrorKind;
 use crate::registry::{AppState, CreateGroupError, GroupView, RenameGroupError, UpdateGroupError};
 
-use super::aliases::{KeysetQuery, keyset_bounds};
+use super::aliases::MAX_CURSOR_BYTES;
 use super::contexts::RenameRequest;
 use super::{
-    AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, ambiguous_group, clamp_page, deadline_exceeded, error, group_lookup_refusal,
-    group_not_found, invalid_context_ids, key_name, nesting_refusal, ok, optional_body,
-    over_cap_refusal, overlong, oversized,
+    AppBytes, AppJson, AppQuery, ErrorCode, GroupIdPath, MAX_CONTEXT_NAME_BYTES,
+    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, ambiguous_group, clamp_page, deadline_exceeded, error,
+    group_not_found, invalid_context_ids, invalid_group_id, key_name, nesting_refusal, ok,
+    optional_body, over_cap_refusal, overlong, oversized,
 };
+
+/// Keyset paging over the name-ordered `group` directory, the
+/// `GET /contexts` cursor's twin: names are not unique (ADR 0050), so
+/// the cursor is `(after, after_id)` — the previous page's last row's
+/// `name` and `id`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ListGroupsQuery {
+    /// Page size; omitted means the ceiling (1000).
+    pub limit: Option<usize>,
+    /// Only `groups` sorting strictly after this name. Alone it means
+    /// "past every `group` with this name"; with `after_id` the cursor
+    /// lands inside a run of same-named `groups`.
+    pub after: Option<String>,
+    /// The id half of the `(name, id)` cursor. Requires `after`.
+    pub after_id: Option<String>,
+}
 
 /// A bounded `group`-directory page; `total` counts the whole directory,
 /// cursor-independent, exactly as [`ContextPage`]'s does.
@@ -32,10 +49,10 @@ pub struct GroupPage {
 /// PATCH response are all this one shape, as with [`DirectoryEntry`].
 #[derive(Serialize, Deserialize)]
 pub struct GroupEntry {
-    /// The `group`'s id — its name. `id` on the wire (#851: a row's own
-    /// key is `id`, as the `group` record on file already says); `name`
-    /// inside the program.
-    #[serde(rename = "id")]
+    /// The `group`'s id — the minted UUID every `/groups/{id}` path takes
+    /// (#995).
+    pub id: String,
+    /// The `group`'s display name — a label, not unique (ADR 0050).
     pub name: String,
     pub description: String,
     /// Member `context` ids, sorted (#965). For a `context`-scoped key
@@ -97,6 +114,7 @@ fn group_entry(
 ) -> Result<GroupEntry, DeadlineExceeded> {
     let fingerprint = group_fingerprint(state, &view.id, grant, deadline)?;
     Ok(GroupEntry {
+        id: view.id,
         name: view.name,
         description: view.record.description,
         context_ids: scoped_member_contexts(view.record.context_ids, grant),
@@ -269,22 +287,27 @@ pub(super) fn scope_refusal<'a>(
 
 /// The gate every `group` write runs, wrapped around
 /// [`scope_refusal`]: resolves what the operation involves — the
-/// transitive `context` closures of the `closure_roots` `groups` plus the
-/// `direct` `context` names — and refuses if any of it sits beyond the
-/// grant. A key with no grant passes immediately, without paying for the
-/// closure read.
+/// transitive `context` closure of the addressed `group` (by id, when
+/// the operation addresses one), those of the `named` child `groups`,
+/// plus the `direct` `context` ids — and refuses if any of it sits
+/// beyond the grant. A key with no grant passes immediately, without
+/// paying for the closure read.
 fn scoped_group_refusal<'r, 'd>(
     state: &AppState,
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
-    closure_roots: impl IntoIterator<Item = &'r str>,
+    addressed: Option<&str>,
+    named: impl IntoIterator<Item = &'r str>,
     direct: impl IntoIterator<Item = &'d String>,
     started_at: Instant,
 ) -> Option<Response> {
     if grant.is_none() {
         return None;
     }
-    let mut involved = state.group_context_closures(closure_roots);
+    let mut involved = state.group_context_closures(named);
+    if let Some(id) = addressed {
+        involved.extend(state.group_context_closure_of(id));
+    }
     involved.extend(direct.into_iter().cloned());
     scope_refusal(grant, key, &involved, started_at)
 }
@@ -299,14 +322,15 @@ pub async fn list_groups(
     State(state): State<AppState>,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
-    AppQuery(query): AppQuery<KeysetQuery>,
+    AppQuery(query): AppQuery<ListGroupsQuery>,
 ) -> Response {
     let started_at = Instant::now();
-    if let Some(refusal) = keyset_bounds(&query, started_at) {
+    if let Some(refusal) = list_groups_query_refusal(&query, started_at) {
         return refusal;
     }
     let (total, page) = state.group_page(
         query.after.as_deref(),
+        query.after_id.as_deref(),
         clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),
     );
     // Each row's fingerprint walks its transitive member closure and
@@ -333,22 +357,52 @@ pub async fn list_groups(
     }
 }
 
+/// The `GET /groups` cursor's own gates, shared with the router's merge
+/// so both refuse the same query the same way: each half within one
+/// cursor's bytes, and `after_id` never alone (the `GET /contexts`
+/// rule).
+pub fn list_groups_query_refusal(query: &ListGroupsQuery, started_at: Instant) -> Option<Response> {
+    for (field, value) in [("after", &query.after), ("after_id", &query.after_id)] {
+        if let Some(value) = value
+            && let Some(refusal) = oversized(field, value, MAX_CURSOR_BYTES, started_at)
+        {
+            return Some(refusal);
+        }
+    }
+    if query.after_id.is_some() && query.after.is_none() {
+        return Some(error(
+            ErrorCode::InvalidArgument,
+            "after_id is the id half of the (after, after_id) cursor and cannot stand alone",
+            started_at,
+        ));
+    }
+    None
+}
+
 pub async fn get_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    GroupIdPath(id): GroupIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    match state.group(&name) {
-        Ok(view) => deadline_gated_group_entry(&state, view, &grant, &deadline, started_at),
-        Err(why) => group_lookup_refusal(&name, why, started_at),
+    match state.group(&id) {
+        Some(view) => deadline_gated_group_entry(&state, view, &grant, &deadline, started_at),
+        None => group_not_found(&id, started_at),
     }
 }
 
+/// `POST /groups`. `name` is required; `id` is optional (#995 decision
+/// 1): absent, the server mints one; present, it must be a canonical
+/// UUID, and a create under an id that already stands answers that
+/// `group` when the record is identical (a retry) and 409 when not.
+/// A router passes the id it minted, so every shard holds the `group`
+/// under the same id.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CreateGroupRequest {
+    pub name: String,
+    pub id: Option<String>,
     pub description: String,
     /// Initial member `context` ids (#965); every one must already exist.
     pub context_ids: Vec<String>,
@@ -360,7 +414,6 @@ pub struct CreateGroupRequest {
 
 pub async fn create_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -371,7 +424,13 @@ pub async fn create_group(
         Ok(request) => request,
         Err(refusal) => return *refusal,
     };
+    let name = request.name;
     if let Some(refusal) = oversized("the group name", &name, MAX_CONTEXT_NAME_BYTES, started_at) {
+        return refusal;
+    }
+    if let Some(id) = &request.id
+        && let Some(refusal) = invalid_group_id("id", id, started_at)
+    {
         return refusal;
     }
     if let Some(refusal) = oversized(
@@ -398,6 +457,7 @@ pub async fn create_group(
         &state,
         &grant,
         &key,
+        None,
         request.groups.iter().map(String::as_str),
         &request.context_ids,
         started_at,
@@ -409,18 +469,30 @@ pub async fn create_group(
     }
     // Writes the group file (fsync + rename) like every other mutating
     // endpoint; keep it off the async worker.
+    let requested_id = request.id;
     match tokio::task::block_in_place(|| {
         state.create_group(
+            requested_id.as_deref(),
             &name,
             request.description,
             request.context_ids.into_iter().collect(),
             request.groups.into_iter().collect(),
         )
     }) {
-        Ok(()) => ok(true, started_at),
-        Err(CreateGroupError::AlreadyExists) => error(
+        // The create already committed; the row's fingerprint must not
+        // turn it into an apparent failure (`update_group`'s reasoning).
+        Ok(view) => match tokio::task::block_in_place(|| {
+            group_entry(&state, view, &grant, &Deadline::unbounded())
+        }) {
+            Ok(entry) => ok(entry, started_at),
+            Err(DeadlineExceeded) => deadline_exceeded(started_at),
+        },
+        Err(CreateGroupError::IdTaken) => error(
             ErrorCode::AlreadyExists,
-            format!("group '{name}' already exists"),
+            format!(
+                "group id '{}' is taken by a group whose record differs; nothing was applied",
+                requested_id.unwrap_or_default()
+            ),
             started_at,
         ),
         Err(CreateGroupError::InvalidName) => error(
@@ -474,7 +546,7 @@ pub struct UpdateGroupRequest {
 
 pub async fn update_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    GroupIdPath(id): GroupIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -516,17 +588,19 @@ pub async fn update_group(
         return refusal;
     }
     // A context-scoped key is judged against every context this update touches:
-    // the group's transitive members plus every name the request
-    // carries — context names directly, group names through their own
+    // the group's transitive members plus everything the request
+    // carries — context ids directly, group names through their own
     // closures.
     if let Some(refusal) = scoped_group_refusal(
         &state,
         &grant,
         &key,
-        [name.as_str()]
-            .into_iter()
-            .chain(request.add_groups.iter().map(String::as_str))
-            .chain(request.remove_groups.iter().map(String::as_str)),
+        Some(&id),
+        request
+            .add_groups
+            .iter()
+            .chain(&request.remove_groups)
+            .map(String::as_str),
         request
             .add_context_ids
             .iter()
@@ -542,7 +616,7 @@ pub async fn update_group(
     // worker.
     match tokio::task::block_in_place(|| {
         state.update_group(
-            &name,
+            &id,
             request.description,
             request.add_context_ids.into_iter().collect(),
             request.remove_context_ids.into_iter().collect(),
@@ -575,7 +649,7 @@ pub async fn update_group(
                 Err(DeadlineExceeded) => deadline_exceeded(started_at),
             }
         }
-        Err(UpdateGroupError::NotFound) => group_not_found(&name, started_at),
+        Err(UpdateGroupError::NotFound) => group_not_found(&id, started_at),
         Err(UpdateGroupError::NoSuchContext(context)) => error(
             ErrorCode::NoContext,
             format!("context '{context}' not found; nothing was applied"),
@@ -604,7 +678,7 @@ pub async fn update_group(
 
 pub async fn delete_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    GroupIdPath(id): GroupIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -616,7 +690,8 @@ pub async fn delete_group(
         &state,
         &grant,
         &key,
-        [name.as_str()],
+        Some(&id),
+        std::iter::empty(),
         std::iter::empty(),
         started_at,
     ) {
@@ -626,9 +701,9 @@ pub async fn delete_group(
         return deadline_exceeded(started_at);
     }
     // Unlinks the group file; keep it off the async worker.
-    match tokio::task::block_in_place(|| state.delete_group(&name)) {
-        Err(why) => group_lookup_refusal(&name, why, started_at),
-        Ok(outcome) => {
+    match tokio::task::block_in_place(|| state.delete_group(&id)) {
+        None => group_not_found(&id, started_at),
+        Some((name, outcome)) => {
             // Destructive, so it leaves a `taguru::audit` line like
             // delete_context — the member contexts themselves are
             // untouched and say so via their own lines only when THEY
@@ -637,6 +712,7 @@ pub async fn delete_group(
                 target: "taguru::audit",
                 key = %key_name(&key),
                 group = %name,
+                group_id = %id,
                 file_removed = outcome.is_ok(),
                 "group deleted",
             );
@@ -647,7 +723,7 @@ pub async fn delete_group(
                     error(
                         ErrorCode::Internal,
                         format!(
-                            "group '{name}' removed but its file was not: {io_error} \
+                            "group '{id}' removed but its file was not: {io_error} \
                              (if the file survives, the group reappears at the next restart)"
                         ),
                         started_at,
@@ -658,16 +734,17 @@ pub async fn delete_group(
     }
 }
 
-/// `POST /groups/{name}/rename` — the `group`'s recorded name becomes
+/// `POST /groups/{id}/rename` — the `group`'s recorded name becomes
 /// `to`; nothing else moves (its file is stemmed by id, and parents
-/// bundle it by id).
-/// Unlike `rename_context`, `{name}` here is a GROUP name, so it is
-/// one of the routes the authorization middleware exempts from its
+/// bundle it by id). `to` may be another `group`'s name: names are
+/// labels (ADR 0050).
+/// Unlike `rename_context`, `{id}` here is a GROUP id, so it is one of
+/// the routes the authorization middleware exempts from its
 /// per-`context` grant check — the grant gate belongs to this handler,
 /// exactly as `delete_group`'s does.
 pub async fn rename_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    GroupIdPath(id): GroupIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -688,7 +765,8 @@ pub async fn rename_group(
         &state,
         &grant,
         &key,
-        [name.as_str()],
+        Some(&id),
+        std::iter::empty(),
         std::iter::empty(),
         started_at,
     ) {
@@ -699,24 +777,19 @@ pub async fn rename_group(
     }
     // Writes the group file (fsync + rename); keep it off the async
     // worker.
-    match tokio::task::block_in_place(|| state.rename_group(&name, &request.to)) {
-        Ok(()) => {
+    match tokio::task::block_in_place(|| state.rename_group(&id, &request.to)) {
+        Ok(from) => {
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
-                from = %name,
+                group_id = %id,
+                from = %from,
                 to = %request.to,
                 "group renamed",
             );
             ok(true, started_at)
         }
-        Err(RenameGroupError::NotFound) => group_not_found(&name, started_at),
-        Err(RenameGroupError::Ambiguous(count)) => ambiguous_group(&name, count, started_at),
-        Err(RenameGroupError::AlreadyExists) => error(
-            ErrorCode::AlreadyExists,
-            format!("group '{}' already exists", request.to),
-            started_at,
-        ),
+        Err(RenameGroupError::NotFound) => group_not_found(&id, started_at),
         Err(RenameGroupError::InvalidName) => error(
             ErrorCode::InvalidArgument,
             "the destination name must not be empty".to_string(),
@@ -726,7 +799,7 @@ pub async fn rename_group(
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,
-                format!("group '{name}' rename not persisted (nothing changed): {io_error}"),
+                format!("group '{id}' rename not persisted (nothing changed): {io_error}"),
                 started_at,
             )
         }
@@ -758,6 +831,7 @@ mod tests {
         state.create(context, ContextMeta::default()).unwrap();
         state
             .create_group(
+                None,
                 group,
                 "d".to_string(),
                 BTreeSet::from([state.id_of(context)]),
@@ -790,7 +864,12 @@ mod tests {
         one_context_group(&state, "kura", "sake");
 
         let deadline = already_expired_deadline();
-        let result = group_fingerprint(&state, &state.group("kura").unwrap().id, &None, &deadline);
+        let result = group_fingerprint(
+            &state,
+            &state.group_named("kura").unwrap().id,
+            &None,
+            &deadline,
+        );
         assert_eq!(result, Err(DeadlineExceeded));
     }
 
@@ -817,6 +896,7 @@ mod tests {
         }
         state
             .create_group(
+                None,
                 "kura",
                 "d".to_string(),
                 BTreeSet::from([
@@ -834,7 +914,7 @@ mod tests {
         expire_fingerprint_loop_after(1);
         let result = group_fingerprint(
             &state,
-            &state.group("kura").unwrap().id,
+            &state.group_named("kura").unwrap().id,
             &None,
             &Deadline::unbounded(),
         );
@@ -853,9 +933,10 @@ mod tests {
         one_context_group(&state, "kura", "sake");
         let deadline = already_expired_deadline();
 
+        let id = state.group_named("kura").unwrap().id;
         let response = get_group(
             State(state),
-            AppPath("kura".to_string()),
+            GroupIdPath(id),
             None,
             axum::Extension(deadline),
         )
@@ -897,11 +978,7 @@ mod tests {
             State(state),
             None,
             axum::Extension(Deadline::unbounded()),
-            AppQuery(KeysetQuery {
-                limit: None,
-                after: None,
-                prefix: None,
-            }),
+            AppQuery(ListGroupsQuery::default()),
         )
         .await;
         let bytes = axum::body::to_bytes(response.into_body(), 4096)

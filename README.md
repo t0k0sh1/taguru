@@ -69,8 +69,9 @@ call, CLI `--context`, and MCP `context_id` takes the id. Only remember the
 name? `taguru contexts --name sake` prints the matching `ID<TAB>NAME` lines
 (or filter `GET /contexts` / MCP `list_contexts` on `name`).
 
-`contexts` can be bundled into **`groups`** (`PUT /groups/{name}`, nesting
-allowed), and the searches — `POST /recall`, `POST /query`,
+`contexts` can be bundled into **`groups`** (`POST /groups` answers the new
+row and its `id`, which every `/groups/{id}` path takes; nesting allowed),
+and the searches — `POST /recall`, `POST /query`,
 `POST /sources/search` — take `context_ids` / `groups` lists to run one
 search across several `contexts` at once, every match tagged with the
 `context_id` and display `context_name` it came from. Every search response also carries a `plan`:

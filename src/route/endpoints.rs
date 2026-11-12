@@ -1,5 +1,5 @@
 //! Router-owned endpoints: `/health`, `/metrics`, and the `/protocol`
-//! proxy, plus the `urlencode` helper the `group` verbs share.
+//! proxy.
 
 use super::*;
 
@@ -94,19 +94,4 @@ pub(super) async fn proxy_protocol(
         }
     }
     unreachable_refusal(&unreached, started_at)
-}
-
-/// Percent-encodes one path segment the way the stdio bridge does:
-/// enough for a `context`/`group` name to survive the round trip.
-pub(super) fn urlencode(segment: &str) -> String {
-    let mut encoded = String::with_capacity(segment.len());
-    for byte in segment.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char)
-            }
-            other => encoded.push_str(&format!("%{other:02X}")),
-        }
-    }
-    encoded
 }

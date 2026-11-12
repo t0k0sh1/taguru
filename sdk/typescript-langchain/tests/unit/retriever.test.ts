@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { TaguruRetriever } from "../../src/retrievers.js";
-import { FakeServer } from "./stub.js";
+import { FakeServer, GROUP_ROWS } from "./stub.js";
 
 const make = (server: FakeServer, fields: Record<string, unknown> = {}) =>
   new TaguruRetriever({ context_id: "sake", client: server.client(), ...fields });
@@ -146,14 +146,40 @@ describe("TaguruRetriever cross-context", () => {
     const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
     const documents = await retriever.invoke("青嶺酒造");
 
-    // parent reaches sake directly and tea through its child group.
-    const fetched = server.calls.filter(([path]) => path.startsWith("/groups/")).map(([p]) => p);
-    expect(new Set(fetched)).toEqual(new Set(["/groups/parent", "/groups/childg"]));
+    // parent reaches sake directly and tea through its child group —
+    // walked over one read of the directory, never a per-group fetch by
+    // name (the single-row route takes ids, #995).
+    const fetched = server.calls.filter(([path]) => path.startsWith("/groups")).map(([p]) => p);
+    expect(fetched).toEqual(["/groups", "/groups"]);
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
     expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
+  });
+
+  it("skips a child name several groups share, keeping the rest of the walk", async () => {
+    // Names are not unique (#995): a second "childg" makes the name
+    // ambiguous, which the server's own cross search refuses — the walk
+    // skips it rather than picking one, and parent's direct member stands.
+    GROUP_ROWS["gid-twin"] = {
+      id: "gid-twin",
+      name: "childg",
+      description: "",
+      context_ids: ["id-tea"],
+      groups: [],
+    };
+    try {
+      const server = new FakeServer();
+      const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      await retriever.invoke("青嶺酒造");
+      const crossSearches = server.calls
+        .filter(([path]) => path === "/sources/search")
+        .map(([, body]) => body);
+      expect(crossSearches).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
+    } finally {
+      delete GROUP_ROWS["gid-twin"];
+    }
   });
 
   it("still resolves the groups it can when one group fails to fetch", async () => {

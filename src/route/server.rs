@@ -379,16 +379,15 @@ fn routes(state: RouterState) -> Router<RouterState> {
         )
         .route("/contexts/{id}", any(proxy_context_root))
         .route("/contexts/{id}/{*rest}", any(proxy_context_sub))
-        .route("/groups", get(merge_groups))
+        .route("/groups", get(merge_groups).post(create_group_broadcast))
         .route(
-            "/groups/{name}",
+            "/groups/{id}",
             get(union_group)
-                .put(create_group_broadcast)
                 .patch(update_group_broadcast)
                 .delete(delete_group_broadcast),
         )
-        .route("/groups/{name}/export", get(export_group_union))
-        .route("/groups/{name}/rename", post(rename_group_broadcast))
+        .route("/groups/{id}/export", get(export_group_union))
+        .route("/groups/{id}/rename", post(rename_group_broadcast))
         .route("/recall", post(cross_recall))
         .route("/query", post(cross_query))
         .route("/sources/search", post(cross_search_passages))

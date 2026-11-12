@@ -558,7 +558,7 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("group 'kura'"), "{stdout}");
 
-    let (status, group) = server.call("GET", "/groups/kura", None);
+    let (status, group) = server.call("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(status, 200, "{group}");
     assert_eq!(
         group["result"]["context_ids"].as_array().map(Vec::len),

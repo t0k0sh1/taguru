@@ -129,21 +129,22 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every `group`'s name, description, member `context` ids, and child `group` names. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. A `group` and a `context` may share the same name without conflict.",
+            "Group directory: every `group`'s id, name, description, member `context` ids, and child `group` names. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. The row's id is what every other group tool's name argument takes; names are labels and need not be unique. A `group` and a `context` may share the same name without conflict.",
             object_schema(
                 json!({
-                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
-                    "after": { "type": "string", "description": "only groups whose name sorts strictly after this one" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by (name, id) (default/ceiling 1000)" },
+                    "after": { "type": "string", "description": "only groups sorting strictly after this name; pass the previous page's last row's name (with after_id) to resume exactly" },
+                    "after_id": { "type": "string", "description": "the previous page's last row's id, beside after — names are not unique, so the id breaks ties" }
                 }),
                 &[],
             ),
         ),
         (
             "create_group",
-            "Create a `group` bundling `contexts` (by id) and, optionally, child `groups` (nesting: at most 3 `groups` tall, never cyclic; each set holds at most 1000 entries — past that, split into nested child `groups`). Every listed `context` and child `group` must already exist; membership never dangles — deleting a `context` or a `group` drops it from every `group`.",
+            "Create a `group` bundling `contexts` (by id) and, optionally, child `groups` (nesting: at most 3 `groups` tall, never cyclic; each set holds at most 1000 entries — past that, split into nested child `groups`). Answers the new row, whose id the other group tools take. The name need not be unique. Every listed `context` and child `group` must already exist; membership never dangles — deleting a `context` or a `group` drops it from every `group`.",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
+                    "name": { "type": "string", "description": "the group's display name" },
                     "description": { "type": "string" },
                     "context_ids": {
                         "type": "array",
@@ -164,7 +165,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "Update a `group`'s description and/or membership. add_context_ids/remove_context_ids and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added `contexts` and child `groups` must exist; removing a non-member is a no-op; nesting stays at most 3 `groups` tall and acyclic, and the resulting membership at most 1000 member `contexts` and 1000 child `groups` (removals apply first, so one request can trade members within the cap).",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
+                    "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" },
                     "description": { "type": "string", "description": "omit to leave unchanged" },
                     "add_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids (the id column of list_contexts) to add" },
                     "remove_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids to remove" },
@@ -177,14 +178,17 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         (
             "delete_group",
             "Delete a `group` (irreversible). Only the bundling goes; the member `contexts`, the child `groups`, and their data are untouched — parents naming the `group` just drop the child.",
-            object_schema(json!({ "name": { "type": "string" } }), &["name"]),
+            object_schema(
+                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
+                &["name"],
+            ),
         ),
         (
             "rename_group",
-            "Rename a `group` (admin role): the `group`'s file moves to the new name and every OTHER `group` naming it as a child is rewritten to match. Fails if the destination name is already taken.",
+            "Rename a `group` (admin role): a display-name change and nothing else — the id, the file, and every parent bundling it stay put. Names are not unique, so the destination may already be in use.",
             object_schema(
                 json!({
-                    "name": { "type": "string" },
+                    "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" },
                     "to": { "type": "string", "description": "the new name" }
                 }),
                 &["name", "to"],
@@ -923,7 +927,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "export_group",
             "One `group` as its import-stream record (a single `group` JSON line — the `group`'s complete truth); importing it restores the `group` as a whole-record replace. A `context`-scoped key exports exactly the slice its grant can read.",
             object_schema(
-                json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
+                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
                 &["name"],
             ),
         ),
@@ -936,7 +940,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "get_group",
             "One `group`'s name, description, member `contexts`, and child `groups`.",
             object_schema(
-                json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
+                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
                 &["name"],
             ),
         ),

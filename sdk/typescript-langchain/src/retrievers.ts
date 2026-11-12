@@ -24,6 +24,7 @@ import {
   citationKey,
   type Activation,
   type Citation,
+  type GroupEntry,
   type PassageHit,
 } from "taguru";
 
@@ -69,6 +70,41 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
  * (`page_content` = "subject label object") when `include_graph_only_facts`
  * is on.
  */
+/**
+ * Every `context` id the `groups` named in `roots` reach, nested children
+ * included, walked over one read of the directory (`rows`). A name no row
+ * carries — or several rows share, which the server's own cross search
+ * refuses — contributes nothing, and the rest of the walk still stands: one
+ * unresolvable `group` must not blank out every other member.
+ */
+function groupMembers(rows: GroupEntry[], roots: string[]): Set<string> {
+  const byName = new Map<string, GroupEntry[]>();
+  for (const row of rows) {
+    const named = byName.get(row.name) ?? [];
+    named.push(row);
+    byName.set(row.name, named);
+  }
+  const members = new Set<string>();
+  const seen = new Set<string>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const name = stack.pop()!;
+    if (seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    const matching = byName.get(name) ?? [];
+    if (matching.length !== 1) {
+      continue;
+    }
+    for (const member of matching[0]!.context_ids) {
+      members.add(member);
+    }
+    stack.push(...matching[0]!.groups);
+  }
+  return members;
+}
+
 export class TaguruRetriever extends BaseRetriever {
   static lc_name(): string {
     return "TaguruRetriever";
@@ -140,31 +176,21 @@ export class TaguruRetriever extends BaseRetriever {
         targets.push(id);
       }
     }
-    const members = new Set<string>();
-    const seen = new Set<string>();
-    // BFS by frontier: the groups of one level are independent fetches,
-    // so each level resolves concurrently (nesting is at most 3 levels
-    // deep server-side). allSettled, not all: one group failing to
-    // fetch (deleted mid-walk, transient error) should not blank out
-    // every other member this walk already found or would still reach.
-    let frontier = [...(this.groups ?? [])];
-    while (frontier.length > 0) {
-      const fetch = [...new Set(frontier)].filter((name) => !seen.has(name));
-      for (const name of fetch) {
-        seen.add(name);
-      }
-      const settled = await Promise.allSettled(fetch.map((name) => this.client.groups.get(name)));
-      frontier = [];
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          continue;
+    // `groups` are names, and so are a row's children, while
+    // `groups.get` takes ids (#995): the walk reads the directory once
+    // and follows names through it. A directory that fails to read
+    // leaves the direct targets standing.
+    let members = new Set<string>();
+    if ((this.groups?.length ?? 0) > 0) {
+      const rows: GroupEntry[] = [];
+      try {
+        for await (const row of this.client.groups.iter()) {
+          rows.push(row);
         }
-        const entry = outcome.value;
-        for (const member of entry.context_ids) {
-          members.add(member);
-        }
-        frontier.push(...entry.groups);
+      } catch {
+        rows.length = 0;
       }
+      members = groupMembers(rows, this.groups ?? []);
     }
     for (const id of [...members].sort()) {
       if (!targets.includes(id)) {

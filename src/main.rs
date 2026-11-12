@@ -860,16 +860,15 @@ fn routes(
                 .patch(api::update_context)
                 .delete(api::delete_context),
         )
-        .route("/groups", get(api::list_groups))
+        .route("/groups", get(api::list_groups).post(api::create_group))
         .route(
-            "/groups/{name}",
+            "/groups/{id}",
             get(api::get_group)
-                .put(api::create_group)
                 .patch(api::update_group)
                 .delete(api::delete_group),
         )
-        .route("/groups/{name}/export", get(api::export_group))
-        .route("/groups/{name}/rename", post(api::rename_group))
+        .route("/groups/{id}/export", get(api::export_group))
+        .route("/groups/{id}/rename", post(api::rename_group))
         // The cross-context searches: the per-context operation of the
         // same name, run across several contexts named in the body.
         .route("/recall", post(api::cross_recall))

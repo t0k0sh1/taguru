@@ -22,10 +22,22 @@ export const FACT_ONLY_ASSOCIATION = {
   attributions: [{ source: "口伝", weight: 1.0, count: 1, paragraph: null, section: null }],
 };
 
-const GROUP_ROWS: Record<string, unknown> = {
-  brewery: { id: "brewery", description: "蔵元一式", context_ids: ["id-sake", "id-tea"], groups: [] },
-  parent: { id: "parent", description: "", context_ids: ["id-sake"], groups: ["childg"] },
-  childg: { id: "childg", description: "", context_ids: ["id-tea"], groups: [] },
+export const GROUP_ROWS: Record<string, unknown> = {
+  "gid-brewery": {
+    id: "gid-brewery",
+    name: "brewery",
+    description: "蔵元一式",
+    context_ids: ["id-sake", "id-tea"],
+    groups: [],
+  },
+  "gid-parent": {
+    id: "gid-parent",
+    name: "parent",
+    description: "",
+    context_ids: ["id-sake"],
+    groups: ["childg"],
+  },
+  "gid-childg": { id: "gid-childg", name: "childg", description: "", context_ids: ["id-tea"], groups: [] },
 };
 
 const ok = (result: unknown): Response =>
@@ -141,6 +153,14 @@ export class FakeServer {
         JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
         { status: 500 },
       );
+    }
+    if (path === "/groups") {
+      // One page in (name, id) order, then the empty page that ends a
+      // keyset walk. Rows are keyed by id (#995); they name children by name.
+      const rows = Object.values(GROUP_ROWS) as { id: string; name: string }[];
+      rows.sort((a, b) => (a.name === b.name ? (a.id < b.id ? -1 : 1) : a.name < b.name ? -1 : 1));
+      const page = url.searchParams.get("after") === null ? rows : [];
+      return ok({ total: rows.length, groups: page });
     }
     if (path.startsWith("/groups/")) {
       const row = GROUP_ROWS[path.slice("/groups/".length)];

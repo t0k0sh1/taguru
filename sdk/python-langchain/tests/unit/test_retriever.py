@@ -20,7 +20,7 @@ from taguru import (
 
 from taguru_langchain import TaguruRetriever
 
-from .conftest import FakeServer
+from .conftest import GROUP_ROWS, FakeServer
 
 
 def make_retriever(
@@ -148,14 +148,33 @@ def test_groups_resolve_to_members_nested_children_included(
     retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
     documents = retriever.invoke("青嶺酒造")
 
-    # parent reaches sake directly and tea through its child group.
-    fetched = [path for path, _ in fake_server.calls if path.startswith("/groups/")]
-    assert set(fetched) == {"/groups/parent", "/groups/childg"}
+    # parent reaches sake directly and tea through its child group — walked
+    # over one read of the directory, never a per-group fetch by name (the
+    # single-row route takes ids, #995).
+    fetched = [path for path, _ in fake_server.calls if path.startswith("/groups")]
+    assert fetched == ["/groups", "/groups"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
         {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
     ]
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
+
+
+def test_a_child_name_several_groups_share_contributes_nothing(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Names are not unique (#995): a second "childg" makes the name
+    # ambiguous, which the server's own cross search refuses — the walk
+    # skips it rather than picking one, and parent's direct member stands.
+    twin = {"id": "gid-twin", "name": "childg", "description": "", "groups": []}
+    monkeypatch.setitem(GROUP_ROWS, "gid-twin", {**twin, "context_ids": ["id-tea"]})
+    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    retriever.invoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
 
 
 def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(

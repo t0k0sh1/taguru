@@ -754,6 +754,7 @@ mod tests {
             state.flush_dirty();
             state
                 .create_group(
+                    None,
                     "breweries",
                     String::new(),
                     BTreeSet::from([state.id_of("sake")]),
@@ -773,7 +774,7 @@ mod tests {
             );
             assert!(
                 state
-                    .group("breweries")
+                    .group_named("breweries")
                     .unwrap()
                     .record
                     .context_ids
@@ -1217,6 +1218,7 @@ mod tests {
             .unwrap();
         state
             .create_group(
+                None,
                 "drinks",
                 String::new(),
                 BTreeSet::from([state.id_of("sake")]),
@@ -1251,7 +1253,7 @@ mod tests {
             "the family stays at its stem"
         );
         assert_eq!(
-            state.group("drinks").unwrap().record.context_ids,
+            state.group_named("drinks").unwrap().record.context_ids,
             BTreeSet::from([stem.clone()]),
             "members are ids (#965): a rename never touches the record, \
              and the member still names the same context"
@@ -1270,7 +1272,7 @@ mod tests {
         assert!(state.directory_entry("sake").is_none());
         assert!(state.directory_entry("shochu").is_some());
         assert_eq!(
-            state.group("drinks").unwrap().record.context_ids,
+            state.group_named("drinks").unwrap().record.context_ids,
             BTreeSet::from([stem.clone()])
         );
 
@@ -1415,6 +1417,7 @@ mod tests {
             let sake_id = state.id_of("sake");
             state
                 .create_group(
+                    None,
                     "drinks",
                     String::new(),
                     BTreeSet::from([sake_id.clone()]),
@@ -1425,13 +1428,13 @@ mod tests {
             fail_persistence_ops_after(failure);
             let outcome = state.rename_context(&state.id_of("sake"), "shochu");
             let past_end = clear_persistence_fault();
-            let live_members = state.group("drinks").unwrap().record.context_ids;
+            let live_members = state.group_named("drinks").unwrap().record.context_ids;
             drop(state);
 
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
             let sake = state.directory_entry("sake");
             let shochu = state.directory_entry("shochu");
-            let members = state.group("drinks").unwrap().record.context_ids;
+            let members = state.group_named("drinks").unwrap().record.context_ids;
             match (sake.is_some(), shochu.is_some()) {
                 (true, false) => {
                     assert!(

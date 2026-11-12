@@ -316,10 +316,13 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
         );
     }
     call(
-        "PUT",
-        "/groups/g",
-        Some(
-            json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+        "POST",
+        "/groups",
+        group_body(
+            "g",
+            Some(
+                json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+            ),
         ),
         "atok",
     );

@@ -488,9 +488,12 @@ fn compact_leaves_group_files_byte_for_byte() {
         Some(json!({"source": "gone.md"})),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        ),
     );
     let group_file = server
         .data_dir
@@ -526,7 +529,7 @@ fn compact_leaves_group_files_byte_for_byte() {
 
     // And the untouched record still boots: the group answers as stored.
     let server = Server::start_on("compact-groups-reboot", data_dir);
-    let row = server.ok("GET", "/groups/kura", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(row["context_ids"], server.cx_sorted(&["sake"]), "{row}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

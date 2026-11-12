@@ -40,17 +40,17 @@ pub async fn track_http(
     // Extracted by hand: a route's params can't ride the signature as
     // an extractor the way MatchedPath (which supports optional
     // extraction) does. `path_param` decodes the same way a handler's
-    // extractor would. Context routes carry `{id}` (#964) and group
-    // routes still carry `{name}`, so each column reads its own
-    // parameter — a log query over `context=` (ids now) never
-    // silently matches group names, the same split the audit lines
-    // and /metrics gauges keep.
+    // extractor would. Context routes (#964) and group routes (#995)
+    // both carry `{id}`, so the route decides which column the id
+    // lands in — a log query over `context=` never silently matches a
+    // group's id, the same split the audit lines and /metrics gauges
+    // keep.
     let (mut parts, body) = request.into_parts();
     let (context, group) = if route.starts_with("/groups") {
-        let name = crate::api::path_param(&mut parts, "name")
+        let id = crate::api::path_param(&mut parts, "id")
             .await
             .unwrap_or_else(|| "-".to_string());
-        ("-".to_string(), name)
+        ("-".to_string(), id)
     } else {
         let id = crate::api::path_param(&mut parts, "id")
             .await

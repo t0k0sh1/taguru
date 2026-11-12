@@ -254,20 +254,33 @@ impl GroupTable {
     }
 
     /// Records in display order — by name, ties by id — starting after
-    /// the name `after` (exclusive), as the name-addressed directory
-    /// pages.
+    /// the `(name, id)` cursor (exclusive). `after_id` alone is
+    /// meaningless and the API refuses it; with `after` alone the page
+    /// starts past every `group` called `after`, and with both it starts
+    /// inside that name's run of same-named `groups`, after `after_id`
+    /// — names are not unique, so the id is what lets a page break fall
+    /// between duplicates without losing any.
     pub(crate) fn in_name_order<'a>(
         &'a self,
-        after: Option<&str>,
+        after: Option<&'a str>,
+        after_id: Option<&'a str>,
     ) -> impl Iterator<Item = &'a StoredGroup> + 'a {
         use std::ops::Bound;
-        let start = match after {
-            Some(after) => Bound::Excluded(after),
-            None => Bound::Unbounded,
+        let start = match (after, after_id) {
+            (Some(after), Some(_)) => Bound::Included(after),
+            (Some(after), None) => Bound::Excluded(after),
+            (None, _) => Bound::Unbounded,
         };
         self.by_name
             .range::<str, _>((start, Bound::Unbounded))
-            .flat_map(|(_, ids)| ids.iter().map(|id| &self.records[id]))
+            .flat_map(move |(name, ids)| {
+                ids.iter()
+                    .filter(move |id| match (after, after_id) {
+                        (Some(after), Some(after_id)) if name == after => id.as_str() > after_id,
+                        _ => true,
+                    })
+                    .map(|id| &self.records[id])
+            })
     }
 }
 
@@ -1104,7 +1117,7 @@ mod tests {
         );
         assert_eq!(
             table
-                .in_name_order(None)
+                .in_name_order(None, None)
                 .map(|record| record.id.as_str())
                 .collect::<Vec<_>>(),
             [ID_A, ID_B],
@@ -1126,23 +1139,37 @@ mod tests {
     }
 
     #[test]
-    fn the_name_order_pages_after_a_name_exclusively() {
+    fn the_name_order_pages_after_a_name_and_id_cursor_exclusively() {
+        const ID_C: &str = "00000000-0000-4000-9000-00000000000c";
         let table = GroupTable::new(
             [
                 (ID_A.to_string(), stored(ID_A, "b", &[])),
                 (ID_B.to_string(), stored(ID_B, "a", &[])),
+                (ID_C.to_string(), stored(ID_C, "a", &[])),
             ]
             .into(),
         );
-        let names = |after| {
+        let ids = |after, after_id| {
             table
-                .in_name_order(after)
-                .map(|record| record.name.clone())
+                .in_name_order(after, after_id)
+                .map(|record| record.id.as_str())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(None), ["a", "b"]);
-        assert_eq!(names(Some("a")), ["b"]);
-        assert_eq!(names(Some("b")), Vec::<String>::new());
+        assert_eq!(ids(None, None), [ID_B, ID_C, ID_A]);
+        // A name alone skips every `group` under it.
+        assert_eq!(ids(Some("a"), None), [ID_A]);
+        assert_eq!(ids(Some("b"), None), Vec::<&str>::new());
+        // With an id, the page resumes inside the name's run.
+        assert_eq!(ids(Some("a"), Some(ID_B)), [ID_C, ID_A]);
+        assert_eq!(ids(Some("a"), Some(ID_C)), [ID_A]);
+        // The id only narrows the cursor's own name, never a later one.
+        assert_eq!(
+            ids(Some("a"), Some("ffffffff-ffff-4fff-9fff-ffffffffffff")),
+            [ID_A]
+        );
+        assert_eq!(ids(Some("b"), Some(ID_A)), Vec::<&str>::new());
+        // A cursor name nothing carries still lands between its neighbours.
+        assert_eq!(ids(Some("a0"), Some(ID_A)), [ID_A]);
     }
 
     #[test]

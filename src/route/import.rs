@@ -359,6 +359,16 @@ pub(super) async fn route_import(
     // omitting them from the preview.
     let mut groups: Vec<Value> = Vec::new();
     if !stream.groups.is_empty() {
+        let precreated = if query.dry_run {
+            Vec::new()
+        } else {
+            let names: Vec<&str> = stream
+                .groups
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            precreate_new_groups(&state, &map, &headers, deadline, &names).await
+        };
         let mut per_group: BTreeMap<usize, Vec<GroupOutcomeWire>> = BTreeMap::new();
         for shard in map.all() {
             match state
@@ -383,6 +393,18 @@ pub(super) async fn route_import(
                     }
                 }
                 Ok(answer) => {
+                    // Refused before any shard restored a record: the
+                    // groups made empty for this stream go too, so the
+                    // refusal leaves no group behind — a single
+                    // instance's whole-set refusal. Past the first
+                    // shard the earlier ones hold the records
+                    // (documented divergence), and the empty copies
+                    // elsewhere carry the same ids, so a retry
+                    // converges.
+                    if shard == FIRST_SHARD {
+                        remove_precreated_groups(&state, &map, &headers, deadline, &precreated)
+                            .await;
+                    }
                     return rewrap_import_refusal(
                         answer,
                         batches_landed,
@@ -392,6 +414,10 @@ pub(super) async fn route_import(
                     );
                 }
                 Err(error) => {
+                    if shard == FIRST_SHARD {
+                        remove_precreated_groups(&state, &map, &headers, deadline, &precreated)
+                            .await;
+                    }
                     return unreachable_refusal(
                         &[Unreached {
                             shard: map.url(shard).to_string(),
@@ -413,7 +439,14 @@ pub(super) async fn route_import(
             // whole is unchanged — while a created projection carrying
             // members (or any shard actually replacing its own copy)
             // means the union's row really changed.
-            let outcome = if outcomes.iter().all(|entry| entry.outcome == "created") {
+            // A record the router made empty first (below) restores as
+            // a replace on every shard; it is new to the fleet all the
+            // same.
+            let outcome = if precreated
+                .iter()
+                .any(|made| made.new_to_fleet && made.name == first.name)
+                || outcomes.iter().all(|entry| entry.outcome == "created")
+            {
                 "created"
             } else if outcomes.iter().any(|entry| {
                 entry.outcome == "replaced" || (entry.outcome == "created" && entry.contexts > 0)
@@ -441,6 +474,186 @@ pub(super) async fn route_import(
         result["groups"] = json!(groups);
     }
     api::ok(result, started_at)
+}
+
+/// Group records name their `group` by name (until #996), and a shard
+/// restoring a name it does not hold mints an id of its own — so a
+/// record new to the fleet (or to a drifted shard) would land under a
+/// different id on each shard, and the router, which unions `groups` by
+/// id (#995), would list it once per id. Before the records broadcast,
+/// every shard that does not hold a record's name gets it created EMPTY
+/// under the one id the fleet uses for it — the id the shards that hold
+/// the name agree on, or one the router mints when none does — so each
+/// shard's restore finds it standing and replaces it in place. A name
+/// the holding shards carry under several ids is left alone (the
+/// restore refuses it there). Answers what it created.
+///
+/// Best effort: a shard whose directory cannot be read, or that refuses
+/// a create, undoes what this made and leaves the records to the
+/// broadcast below, which meets the same shard and answers its refusal
+/// with the import's own durable-prefix framing. The ids then fall back
+/// to each shard's own — the shape before #995, logged.
+async fn precreate_new_groups(
+    state: &RouterState,
+    map: &RouteMap,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    names: &[&str],
+) -> Vec<Precreated> {
+    let mut held: Vec<BTreeMap<String, BTreeSet<String>>> = Vec::new();
+    for shard in map.all() {
+        match shard_group_ids(state, map, shard, headers, deadline).await {
+            Some(directory) => held.push(directory),
+            None => {
+                warn!(
+                    shard = %map.url(shard),
+                    "the shard's group directory could not be read; new import groups \
+                     may land under a different id on each shard"
+                );
+                return Vec::new();
+            }
+        }
+    }
+    let mut created: Vec<Precreated> = Vec::new();
+    for name in names {
+        let ids: BTreeSet<&String> = held
+            .iter()
+            .filter_map(|directory| directory.get(*name))
+            .flatten()
+            .collect();
+        let (id, new_to_fleet) = match ids.len() {
+            0 => (crate::groups::mint_group_id(), true),
+            1 => ((*ids.iter().next().expect("one id")).clone(), false),
+            _ => continue,
+        };
+        let mut made = Precreated {
+            name: name.to_string(),
+            id,
+            new_to_fleet,
+            shards: Vec::new(),
+        };
+        let body = Bytes::from(json!({"id": made.id, "name": name}).to_string());
+        for shard in map.all() {
+            if held[shard].contains_key(*name) {
+                continue;
+            }
+            let outcome = state
+                .call_shard(
+                    map,
+                    shard,
+                    Method::POST,
+                    "/groups",
+                    headers,
+                    Some(body.clone()),
+                    deadline,
+                )
+                .await;
+            if outcome
+                .as_ref()
+                .is_ok_and(|answer| answer.status.is_success())
+            {
+                made.shards.push(shard);
+                continue;
+            }
+            warn!(
+                group = %name,
+                shard = %map.url(shard),
+                "the shard refused an empty group made for an import; new import groups \
+                 may land under a different id on each shard"
+            );
+            created.push(made);
+            remove_precreated_groups(state, map, headers, deadline, &created).await;
+            return Vec::new();
+        }
+        created.push(made);
+    }
+    created
+}
+
+/// One `group` [`precreate_new_groups`] made empty: under which name and
+/// id, on which shards, and whether no shard held the name before.
+struct Precreated {
+    name: String,
+    id: String,
+    new_to_fleet: bool,
+    shards: Vec<usize>,
+}
+
+/// One shard's `group` directory as name → ids, paged by the
+/// `(name, id)` cursor; `None` when the shard cannot answer it.
+async fn shard_group_ids(
+    state: &RouterState,
+    map: &RouteMap,
+    shard: usize,
+    headers: &HeaderMap,
+    deadline: Deadline,
+) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    let mut directory: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let path = match &cursor {
+            None => "/groups".to_string(),
+            Some((name, id)) => format!(
+                "/groups?after={}&after_id={id}",
+                url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>()
+            ),
+        };
+        let answer = state
+            .call_shard(map, shard, Method::GET, &path, headers, None, deadline)
+            .await
+            .ok()
+            .filter(|answer| answer.status.is_success())?;
+        let page = serde_json::from_slice::<ShardEnvelope<api::GroupPage>>(&answer.body)
+            .ok()?
+            .result
+            .groups;
+        let Some(last) = page.last() else {
+            return Some(directory);
+        };
+        cursor = Some((last.name.clone(), last.id.clone()));
+        for entry in page {
+            directory.entry(entry.name).or_default().insert(entry.id);
+        }
+    }
+}
+
+/// Best-effort removal of the empty `groups` [`precreate_new_groups`]
+/// made, on the shards it made them on — the undo when the records
+/// never landed. A removal that fails leaves an empty `group` behind,
+/// which a retried import under the same name finds standing.
+async fn remove_precreated_groups(
+    state: &RouterState,
+    map: &RouteMap,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    precreated: &[Precreated],
+) {
+    for made in precreated {
+        for &shard in &made.shards {
+            let outcome = state
+                .call_shard(
+                    map,
+                    shard,
+                    Method::DELETE,
+                    &format!("/groups/{}", made.id),
+                    headers,
+                    None,
+                    deadline,
+                )
+                .await;
+            if !outcome
+                .as_ref()
+                .is_ok_and(|answer| answer.status.is_success())
+            {
+                warn!(
+                    group = %made.name,
+                    group_id = %made.id,
+                    shard = %map.url(shard),
+                    "an empty group made for a refused import could not be removed"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]

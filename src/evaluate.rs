@@ -727,7 +727,7 @@ fn fetch_embeddings(api: &Api, context: &str) -> Option<EmbeddingsBlock> {
 }
 
 /// Keyset-walks `GET /contexts/{id}/sources` itself: its page items
-/// are bare strings, not `{name: ...}` objects, so `Api::list_names`
+/// are bare strings, not `{id, name}` objects, so `Api::list_group_rows`
 /// (built for the latter) does not fit — see `remote.rs`'s own comment
 /// on `get_with_query` for why this is not new HTTP client code.
 fn list_all_sources(api: &Api, context: &str) -> Result<BTreeSet<String>, String> {
@@ -752,7 +752,7 @@ fn list_all_sources(api: &Api, context: &str) -> Result<BTreeSet<String>, String
         }
         let page_len = page.len();
         // Same "did the cursor actually advance" guard as
-        // `remote.rs`'s own `list_names_paged`.
+        // `remote.rs`'s own `list_group_rows_paged`.
         if let (Some(cursor), Some(first)) = (after.as_deref(), page.first())
             && first.as_str() <= cursor
         {

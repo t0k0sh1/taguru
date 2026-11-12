@@ -1367,8 +1367,10 @@ fn import_dry_run_skips_group_records() {
         "dry_run previews no group records: {preview}"
     );
 
-    let (status, _) = server.call("GET", "/groups/kura", None);
-    assert_eq!(status, 404, "dry_run must not create the group");
+    assert!(
+        server.try_gx("kura").is_none(),
+        "dry_run must not create the group"
+    );
     assert!(
         server.try_cx("sake").is_none(),
         "dry_run must not create the context either"
@@ -1800,7 +1802,7 @@ fn import_restores_group_records_after_the_batches() {
     assert_eq!(restored[0]["outcome"], json!("created"), "{first}");
     assert_eq!(restored[0]["contexts"], json!(2), "{first}");
     assert_eq!(restored[0]["groups"], json!(1), "{first}");
-    let row = server.ok("GET", "/groups/kura", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(
         row["context_ids"],
         server.cx_sorted(&["bunko", "sake"]),
@@ -1834,7 +1836,7 @@ fn import_restores_group_records_after_the_batches() {
         json!("replaced"),
         "{third}"
     );
-    let row = server.ok("GET", "/groups/kura", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(row["context_ids"], server.cx_sorted(&["sake"]), "{row}");
     assert_eq!(row["groups"], json!([]), "{row}");
     assert_eq!(
@@ -1870,8 +1872,7 @@ fn import_refuses_group_records_that_would_dangle_or_misshape() {
         status, 200,
         "the batches before the group refusal are durable"
     );
-    let (status, gone) = server.call("GET", "/groups/kura", None);
-    assert_eq!(status, 404, "{gone}");
+    assert!(server.try_gx("kura").is_none(), "no group landed");
 
     // A child that neither exists nor rides the stream: no_group.
     let stream = "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"], \
@@ -1948,8 +1949,10 @@ fn a_context_scoped_key_cannot_import_group_records_beyond_its_grant() {
             .contains("98a4dbfd-92a8-4c44-be61-6b69e8c34c26"),
         "the refusal names the out-of-grant id: {refusal}"
     );
-    let (status, _) = call("GET", "/groups/kura", None, "atok");
-    assert_eq!(status, 404, "the refusal precedes every apply");
+    assert!(
+        server.try_gx("kura").is_none(),
+        "the refusal precedes every apply"
+    );
     let (_, sources) = call(
         "GET",
         "/contexts/cef2e28b-43f0-4b6c-8201-abab0785399f/sources",
@@ -2057,15 +2060,24 @@ fn a_group_exports_as_one_import_record() {
     };
     server.create_fixed_as("sake", "d", Some("atok"));
     server.create_fixed_as("bunko", "d", Some("atok"));
-    assert_eq!(call("PUT", "/groups/kid", Some(json!({})), "atok").0, 200);
     assert_eq!(
         call(
-            "PUT",
-            "/groups/kura",
-            Some(
+            "POST",
+            "/groups",
+            group_body("kid", Some(json!({}))),
+            "atok"
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "POST",
+            "/groups",
+            group_body("kura", Some(
                 json!({"description": "蔵まとめ", "context_ids": [server.cx("sake"), server.cx("bunko")],
                         "groups": ["kid"]})
-            ),
+            )),
             "atok"
         )
         .0,
@@ -2076,7 +2088,12 @@ fn a_group_exports_as_one_import_record() {
     // back parsed — assert the record's shape (the byte-exact
     // rendering, field order and omitted empties, is pinned by
     // export's own unit test).
-    let (status, exported) = call("GET", "/groups/kura/export", None, "atok");
+    let (status, exported) = call(
+        "GET",
+        &format!("/groups/{}/export", server.gx("kura")),
+        None,
+        "atok",
+    );
     assert_eq!(status, 200, "{exported}");
     assert_eq!(
         exported,
@@ -2085,7 +2102,16 @@ fn a_group_exports_as_one_import_record() {
     );
 
     // Deleting and re-importing the record restores the group whole.
-    assert_eq!(call("DELETE", "/groups/kura", None, "atok").0, 200);
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("/groups/{}", server.gx("kura")),
+            None,
+            "atok"
+        )
+        .0,
+        200
+    );
     let line = format!("{exported}\n");
     let (status, restored) = post_import(&server, &line, Some("atok"));
     assert_eq!(status, 200, "{restored}");
@@ -2094,7 +2120,12 @@ fn a_group_exports_as_one_import_record() {
         json!("created"),
         "{restored}"
     );
-    let (_, row) = call("GET", "/groups/kura", None, "atok");
+    let (_, row) = call(
+        "GET",
+        &format!("/groups/{}", server.gx("kura")),
+        None,
+        "atok",
+    );
     assert_eq!(
         row["result"]["context_ids"],
         server.cx_sorted(&["bunko", "sake"]),
@@ -2103,7 +2134,12 @@ fn a_group_exports_as_one_import_record() {
 
     // A context-scoped key exports its grant's slice — the row it can
     // read IS the record it takes away.
-    let (status, sliced) = call("GET", "/groups/kura/export", None, "ctok");
+    let (status, sliced) = call(
+        "GET",
+        &format!("/groups/{}/export", server.gx("kura")),
+        None,
+        "ctok",
+    );
     assert_eq!(status, 200, "{sliced}");
     assert_eq!(
         sliced["context_ids"],
@@ -2112,7 +2148,12 @@ fn a_group_exports_as_one_import_record() {
     );
 
     // Unknown group: the ordinary 404.
-    let (status, missing) = call("GET", "/groups/ghost/export", None, "atok");
+    let (status, missing) = call(
+        "GET",
+        &format!("/groups/{GHOST_GROUP_ID}/export"),
+        None,
+        "atok",
+    );
     assert_eq!(status, 404, "{missing}");
 }
 

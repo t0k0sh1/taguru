@@ -163,10 +163,22 @@ fn seed(server: &Server) {
     // A nested group whose direct member and child live on different
     // shards: `contexts` needs projection, `groups` broadcasts whole.
     server.ok(
-        "PUT",
-        "/groups/all",
-        Some(json!({"description": "全部", "context_ids": [BREWERIES_ID], "groups": ["jp"]})),
+        "POST",
+        "/groups",
+        Some(
+            json!({"name": "all", "description": "全部", "context_ids": [BREWERIES_ID], "groups": ["jp"]}),
+        ),
     );
+}
+
+/// `/groups/{id}{suffix}` for the `group` named `name` on each front
+/// door — ids are minted per fleet (#995), so the single instance and
+/// the router spell the same `group` differently.
+fn group_paths(single: &Server, router: &Server, name: &str, suffix: &str) -> (String, String) {
+    (
+        format!("/groups/{}{suffix}", single.gx(name)),
+        format!("/groups/{}{suffix}", router.gx_http(name)),
+    )
 }
 
 /// Runs one request against both front doors and asserts the answers
@@ -352,12 +364,20 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         !floored["result"]["groups"].as_array().unwrap().is_empty(),
         "{floored}"
     );
-    assert_equivalent(&single, &router, "GET", "/groups/jp", None);
-    assert_equivalent(&single, &router, "GET", "/groups/all", None);
+    let (single_jp, router_jp) = group_paths(&single, &router, "jp", "");
+    assert_equivalent_at(&single, &router, "GET", &single_jp, &router_jp, None);
+    let (single_all, router_all) = group_paths(&single, &router, "all", "");
+    assert_equivalent_at(&single, &router, "GET", &single_all, &router_all, None);
+    // Every shard holds the router's groups under the router's ids.
+    for shard in [&shard_a, &shard_b] {
+        assert_eq!(shard.gx("jp"), router.gx_http("jp"));
+        assert_eq!(shard.gx("all"), router.gx_http("all"));
+    }
     // The export record: the router unions per-shard projections back
     // into the one line the single instance renders.
-    let (single_status, single_export) = single.call("GET", "/groups/jp/export", None);
-    let (router_status, router_export) = router.call("GET", "/groups/jp/export", None);
+    let (single_export_path, router_export_path) = group_paths(&single, &router, "jp", "/export");
+    let (single_status, single_export) = single.call("GET", &single_export_path, None);
+    let (router_status, router_export) = router.call("GET", &router_export_path, None);
     assert_eq!(single_status, 200);
     assert_eq!(router_status, 200);
     assert_eq!(single_export, router_export, "the exported record diverged");
@@ -367,7 +387,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // but a member write on either shard must still move it). Mirror
     // the write into the single instance so the corpora stay equal for
     // the assertions below.
-    let fingerprint_before = router.ok("GET", "/groups/jp", None)["fingerprint"]
+    let fingerprint_before = router.ok("GET", &router_jp, None)["fingerprint"]
         .as_str()
         .unwrap()
         .to_string();
@@ -383,7 +403,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &format!("/contexts/{}/associations", single.cx("glossary")),
         Some(member_write),
     );
-    let fingerprint_after = router.ok("GET", "/groups/jp", None)["fingerprint"]
+    let fingerprint_after = router.ok("GET", &router_jp, None)["fingerprint"]
         .as_str()
         .unwrap()
         .to_string();
@@ -395,41 +415,45 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // Group deltas through the router: remove one member (a
     // projection-touching PATCH), compare the returned row, put it
     // back, compare again.
-    assert_equivalent(
+    assert_equivalent_at(
         &single,
         &router,
         "PATCH",
-        "/groups/jp",
+        &single_jp,
+        &router_jp,
         Some(json!({"remove_context_ids": [GLOSSARY_ID]})),
     );
-    assert_equivalent(
+    assert_equivalent_at(
         &single,
         &router,
         "PATCH",
-        "/groups/jp",
+        &single_jp,
+        &router_jp,
         Some(json!({"add_context_ids": [GLOSSARY_ID]})),
     );
     // Removals are an idempotent set difference on a single instance —
     // never existence-checked — so a name no shard places must not be
     // refused by the router's projection either.
-    assert_equivalent(
+    assert_equivalent_at(
         &single,
         &router,
         "PATCH",
-        "/groups/jp",
+        &single_jp,
+        &router_jp,
         Some(json!({"remove_context_ids": [GHOST_ID]})),
     );
     // ADDITIONS keep the existence check — `project_body`'s refusal
     // for an unplaced member must be the shard's own nonexistent-member
     // answer, byte for byte, and leave the group unchanged.
-    assert_equivalent(
+    assert_equivalent_at(
         &single,
         &router,
         "PATCH",
-        "/groups/jp",
+        &single_jp,
+        &router_jp,
         Some(json!({"add_context_ids": [GHOST_ID]})),
     );
-    assert_equivalent(&single, &router, "GET", "/groups/jp", None);
+    assert_equivalent_at(&single, &router, "GET", &single_jp, &router_jp, None);
 
     // Refusals: naming nothing, an unknown context (first in list
     // order), an unknown group — same code, same message, same status.
@@ -902,7 +926,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
 
     // Shard A already holds g's projection; shard B has never heard of
     // it — the drifted state a re-import heals.
-    shard_a.ok("PUT", "/groups/g", Some(json!({"context_ids": [ctx_a]})));
+    let g = shard_a.create_group("g", Some(json!({"context_ids": [ctx_a]})));
 
     // The same membership shard A already holds: A answers
     // "unchanged", B "created" with an empty projection — nothing in
@@ -916,6 +940,16 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         json!("unchanged"),
         "an empty created projection beside unchanged siblings replaced nothing: {body}"
     );
+    // The drift healed under shard A's id: shard B now holds `g` under
+    // it too, so the router lists one row, not one per shard (#995).
+    assert_eq!(
+        shard_b.gx("g"),
+        g,
+        "the missing shard adopts the standing id"
+    );
+    assert_eq!(router.gx_http("g"), g);
+    // A record new to the fleet landed under ONE id on every shard.
+    assert_eq!(shard_a.gx("g0"), shard_b.gx("g0"));
 
     // The record gains ctx_b: shard B's projection now carries a
     // member, so the union's row really changed.
@@ -944,7 +978,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     );
     let ctx_c = router.create_context("ctx_c");
     let ctx_d = router.create_context("ctx_d");
-    shard_c.ok("PUT", "/groups/g2", Some(json!({"context_ids": [ctx_c]})));
+    let g2 = shard_c.create_group("g2", Some(json!({"context_ids": [ctx_c]})));
     let stream = &format!(
         "{{\"type\": \"group\", \"id\": \"g2\", \"context_ids\": [\"{ctx_c}\", \"{ctx_d}\"]}}\n"
     );
@@ -955,6 +989,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         json!("replaced"),
         "a created projection CARRYING members changes the union: {body}"
     );
+    assert_eq!(shard_d.gx("g2"), g2);
 }
 
 /// The group union's three-way sort of shard answers: a 404 is drift
@@ -974,8 +1009,8 @@ fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
         &[],
     );
     let ctx_a = shard_a.create_context("ctx_a");
-    shard_a.ok("PUT", "/groups/g", Some(json!({"context_ids": [ctx_a]})));
-    let healed = router.ok("GET", "/groups/g", None);
+    let g = shard_a.create_group("g", Some(json!({"context_ids": [ctx_a]})));
+    let healed = router.ok("GET", &format!("/groups/{g}"), None);
     assert_eq!(healed["context_ids"], json!([ctx_a]), "{healed}");
 
     // An erroring shard: same fleet shape, but shard B answers 500 to
@@ -987,7 +1022,7 @@ fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, broken.endpoint),
         &[],
     );
-    let (status, body) = router.call("GET", "/groups/g", None);
+    let (status, body) = router.call("GET", &format!("/groups/{g}"), None);
     assert_eq!(status, 500, "{body}");
     assert_eq!(body["code"], json!("internal"), "{body}");
 }
@@ -1509,14 +1544,20 @@ fn group_delete_broadcasts_and_a_malformed_body_gets_the_shards_refusal() {
         &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/groups/g", Some(json!({"description": "対象"})));
-    let deleted = router.ok("DELETE", "/groups/g", None);
+    let g = router.create_group("g", Some(json!({"description": "対象"})));
+    // The router minted the id and every shard holds it (#995).
+    assert_eq!(shard_a.gx("g"), g);
+    assert_eq!(shard_b.gx("g"), g);
+    let deleted = router.ok("DELETE", &format!("/groups/{g}"), None);
     assert_eq!(deleted, json!(true), "{deleted}");
-    assert_eq!(router.call("GET", "/groups/g", None).0, 404);
+    assert_eq!(router.call("GET", &format!("/groups/{g}"), None).0, 404);
+    // A name in the path is the router's own 400, before any shard.
+    let (status, refusal) = router.call("DELETE", "/groups/g", None);
+    assert_eq!(status, 400, "{refusal}");
 
     let (status, refusal) = router.call_raw(
-        "PUT",
-        "/groups/probe",
+        "POST",
+        "/groups",
         Some("not json"),
         Some("application/json"),
     );
@@ -1623,21 +1664,37 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
     // instance reads it as a positional struct — serde's doing — and
     // would create the group; the router refuses instead, since a
     // probe to one shard would create it there alone.)
-    let (status, refusal) = router.call("PUT", "/groups/g", Some(json!([])));
+    let (status, refusal) = router.call("POST", "/groups", Some(json!([])));
     assert_eq!(status, 400, "{refusal}");
     assert_eq!(refusal["code"], "invalid_argument", "{refusal}");
-    assert_eq!(router.call("GET", "/groups/g", None).0, 404);
+    assert_eq!(router.ok("GET", "/groups", None)["total"], json!(0));
     for shard in [&shard_a, &shard_b] {
-        assert_eq!(shard.call("GET", "/groups/g", None).0, 404);
+        assert_eq!(shard.ok("GET", "/groups", None)["total"], json!(0));
     }
+    // An id that is not a string is the shard's typed refusal, and one
+    // that is not a canonical UUID the router's own 400 — nothing lands
+    // either way.
+    let (status, refusal) = router.call("POST", "/groups", Some(json!({"name": "g", "id": 42})));
+    assert_eq!(status, 400, "{refusal}");
+    assert_eq!(refusal["code"], "malformed_request", "{refusal}");
+    let (status, refusal) = router.call("POST", "/groups", Some(json!({"name": "g", "id": "g"})));
+    assert_eq!(status, 400, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("is not a group id"),
+        "{refusal}"
+    );
+    assert_eq!(router.ok("GET", "/groups", None)["total"], json!(0));
 
     // A non-string member is refused whole, not dropped — in the
     // shard's own extractor shape (its 422), since the body went to
     // one shard verbatim.
-    router.ok("PUT", "/groups/g", Some(json!({"description": "対象"})));
+    let g = router.create_group("g", Some(json!({"description": "対象"})));
     let (status, refusal) = router.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{g}"),
         Some(json!({"add_context_ids": [sake, 42]})),
     );
     assert_eq!(status, 422, "{refusal}");
@@ -1649,7 +1706,7 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
             .contains("add_context_ids[1]"),
         "{refusal}"
     );
-    let entry = router.ok("GET", "/groups/g", None);
+    let entry = router.ok("GET", &format!("/groups/{g}"), None);
     assert_eq!(entry["context_ids"], json!([]), "{entry}");
 
     // 1001 members over two shards: each shard's slice would pass its
@@ -1659,11 +1716,11 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
         .collect();
     let (status, refusal) = router.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{g}"),
         Some(json!({"add_context_ids": members})),
     );
     assert_eq!(status, 400, "{refusal}");
     assert_eq!(refusal["code"], "over_limit", "{refusal}");
-    let entry = router.ok("GET", "/groups/g", None);
+    let entry = router.ok("GET", &format!("/groups/{g}"), None);
     assert_eq!(entry["context_ids"], json!([]), "{entry}");
 }

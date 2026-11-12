@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::support::{Server, batch_dir, run_cli, run_import};
+use crate::support::{Server, batch_dir, group_body, run_cli, run_import};
 
 /// A well-formed id no context carries — subset args are ids (#964),
 /// so "unknown context" means an unresolvable id, not an unknown name.
@@ -139,9 +139,12 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
         Some(json!({"name": "bunko", "description": "d"})),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        ),
     );
 
     let out = std::env::temp_dir().join(format!(
@@ -173,8 +176,10 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
     let metrics_text = metrics_body
         .as_str()
         .expect("metrics body is text, not JSON");
+    // `POST /groups` (the seed above) shares the route template, so
+    // the method is part of the check.
     assert!(
-        !metrics_text.contains("route=\"/groups\""),
+        !metrics_text.contains("method=\"GET\",route=\"/groups\""),
         "a subset export must never call GET /groups: {metrics_text}"
     );
 
@@ -471,14 +476,14 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: a valid record — for the WRONG
-            // group.
+            // GET /groups/{g's id}/export: a valid record — for the
+            // WRONG group.
             (
                 "HTTP/1.1 200 OK",
                 r#"{"type": "group", "id":"h","description":"x","context_ids":["cef2e28b-43f0-4b6c-8201-abab0785399f"]}"#.to_string(),
@@ -518,7 +523,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Issue #751: `GET /groups/{name}/export` answering something that is
+/// Issue #751: `GET /groups/{id}/export` answering something that is
 /// not a group record — here a well-formed JSON object with a 200
 /// status — is a per-item failure, and nothing lands on disk for it.
 /// "Parses as JSON" alone used to let any such body through as a
@@ -554,13 +559,14 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: valid JSON, but no group record.
+            // GET /groups/{g's id}/export: valid JSON, but no group
+            // record.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
         ];
         for (status_line, body) in responses {
@@ -754,18 +760,19 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups: two groups, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":2,"groups":[{"id":"g"},{"id":"h"}]}}"#.to_string(),
+                r#"{"result":{"total":2,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"},{"id":"00000000-0000-4000-9000-00000000000b","name":"h"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":2,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: gone between enumeration and fetch.
+            // GET /groups/{g's id}/export: gone between enumeration and
+            // fetch.
             (
                 "HTTP/1.1 404 Not Found",
                 r#"{"status":"error","code":"no_context","error":"no such group"}"#.to_string(),
             ),
-            // GET /groups/h/export: the survivor still lands.
+            // GET /groups/{h's id}/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
                 r#"{"type": "group", "id":"h","description":"x","context_ids":[]}"#.to_string(),

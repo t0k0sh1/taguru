@@ -300,7 +300,8 @@ struct CreateBlock {
 }
 
 /// The `group` record line: one `group`'s complete truth, the
-/// same fields `GET /groups/{name}` serves. Absent fields read as
+/// same fields `GET /groups/{id}` serves (the record names the `group`
+/// by name, in `id`, until #996). Absent fields read as
 /// empty — matching what export omits — so the round trip is exact.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

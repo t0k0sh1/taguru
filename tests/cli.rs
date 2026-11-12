@@ -499,7 +499,7 @@ fn communities_argument_parse_guards_answer_each_misuse_by_name() {
         ),
         (
             vec!["communities"],
-            "--context ID (or --group NAME) is required",
+            "--context ID (or --group ID) is required",
         ),
         (
             vec!["communities", "--context", "a", "--group", "b"],
@@ -532,7 +532,7 @@ fn communities_argument_parse_guards_answer_each_misuse_by_name() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("--context ID (or --group NAME) is required"),
+            .contains("--context ID (or --group ID) is required"),
         "{output:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -93,7 +93,7 @@ must not be running; the directory lock enforces it).
   --url URL    export from a RUNNING server instead of the local data
                directory: GET /contexts and GET /groups are enumerated
                (keyset-paged) and each item is fetched from
-               GET /contexts/{id}/export / GET /groups/{name}/export
+               GET /contexts/{id}/export / GET /groups/{id}/export
                — the same files land in --out. Auth rides
                TAGURU_API_TOKEN (or the first name:token entry of
                TAGURU_API_TOKENS), the same variables the server
@@ -885,7 +885,7 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     let mut group_failures = 0usize;
     let mut stale_failures = 0usize;
     if !explicit {
-        let (_, all_groups) = state.group_page(None, usize::MAX);
+        let (_, all_groups) = state.group_page(None, None, usize::MAX);
         group_count = all_groups.len();
         // Until #996 names the files by id, two `groups` sharing a name
         // (a hand-assembled data directory) would write one
@@ -1040,20 +1040,41 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     let mut group_failures = 0usize;
     let mut stale_failures = 0usize;
     if !explicit {
-        match api.list_names("groups") {
-            Ok(group_names) => {
-                group_count = group_names.len();
-                for name in &group_names {
-                    match remote_export_group(&api, name, out) {
+        match api.list_group_rows() {
+            Ok(group_rows) => {
+                group_count = group_rows.len();
+                // The same shared-name refusal `run_local` makes: two
+                // `groups` under one name would write one
+                // `{name}.group.jsonl` twice until #996 names the files
+                // by id.
+                let mut seen = BTreeSet::new();
+                let shared: BTreeSet<&str> = group_rows
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .filter(|name| !seen.insert(*name))
+                    .collect();
+                for (id, name) in &group_rows {
+                    if shared.contains(name.as_str()) {
+                        eprintln!(
+                            "taguru: export: group '{name}' ({id}): several groups share this \
+                             name and would overwrite one export file — rename them apart, \
+                             then export again"
+                        );
+                        group_failures += 1;
+                        continue;
+                    }
+                    match remote_export_group(&api, id, name, out) {
                         Ok(report) => println!("{report}"),
                         Err(message) => {
-                            eprintln!("taguru: export: group '{name}': {message}");
+                            eprintln!("taguru: export: group '{name}' ({id}): {message}");
                             group_failures += 1;
                         }
                     }
                 }
-                let expected =
-                    expected_file_names(&file_names, group_names.iter().map(String::as_str));
+                let expected = expected_file_names(
+                    &file_names,
+                    group_rows.iter().map(|(_, name)| name.as_str()),
+                );
                 stale_failures = prune_stale_streams(out, &expected);
             }
             Err(error) => {
@@ -1165,10 +1186,17 @@ fn remote_export_one(
     ))
 }
 
-/// One `group`'s record, fetched from `GET /groups/{name}/export` — the
-/// remote twin of [`export_group_file`].
-fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
-    let stream = api.get_raw(&["groups", name, "export"])?;
+/// One `group`'s record, fetched from `GET /groups/{id}/export` — the
+/// remote twin of [`export_group_file`]. `name` is the directory row's,
+/// which the record line must carry (it names the `group` by name until
+/// #996).
+fn remote_export_group(
+    api: &Api,
+    id: &str,
+    name: &str,
+    out: &std::path::Path,
+) -> Result<String, String> {
+    let stream = api.get_raw(&["groups", id, "export"])?;
     // Validated before it touches disk: write_atomic's whole point is
     // that a crash mid-write must never shred a previously-good
     // backup, which a malformed response would defeat if it landed
@@ -1314,7 +1342,7 @@ fn summary_line(
         "export: {context_ok} of {context_total} context(s){} written to {}",
         match (group_count, group_failures) {
             (0, 0) => String::new(),
-            // `group_count` stays 0 when `list_names("groups")` itself
+            // `group_count` stays 0 when `list_group_rows()` itself
             // errored — the run still failed (the caller exits
             // non-zero on any `group_failures`), so the summary must
             // say so rather than silently dropping groups as if this

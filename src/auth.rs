@@ -796,8 +796,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         // The retrieval loop, the directory, and the manual.
         (&Method::GET, "/contexts")
         | (&Method::GET, "/groups")
-        | (&Method::GET, "/groups/{name}")
-        | (&Method::GET, "/groups/{name}/export")
+        | (&Method::GET, "/groups/{id}")
+        | (&Method::GET, "/groups/{id}/export")
         | (&Method::GET, "/contexts/{id}")
         | (&Method::GET, "/contexts/{id}/labels")
         | (&Method::GET, "/contexts/{id}/schema")
@@ -839,8 +839,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         (&Method::POST, "/contexts")
         | (&Method::PATCH, "/contexts/{id}")
         | (&Method::PUT, "/contexts/{id}/schema")
-        | (&Method::PUT, "/groups/{name}")
-        | (&Method::PATCH, "/groups/{name}")
+        | (&Method::POST, "/groups")
+        | (&Method::PATCH, "/groups/{id}")
         | (&Method::POST, "/contexts/{id}/associations")
         | (&Method::POST, "/contexts/{id}/associations/retract")
         | (&Method::POST, "/contexts/{id}/aliases")
@@ -912,9 +912,9 @@ pub async fn enforce_authorization(
         );
     }
     let (mut parts, body) = request.into_parts();
-    // `{id}` is a CONTEXT id on every route that has it; the two
-    // `/groups/{name}` routes below carry the group's own name
-    // instead: a group's member contexts live in the body and the
+    // `{id}` is a CONTEXT id on every route that has it but the
+    // `/groups/{id}` routes below, where it is the GROUP's own id
+    // instead (#995): a group's member contexts live in the body and the
     // stored record, out of this middleware's reach, so the group
     // handlers judge them (`api::scope_refusal`) or filter to the
     // grant (the row and the export). The exclusion names its routes
@@ -928,7 +928,7 @@ pub async fn enforce_authorization(
     if grant.contexts.is_some()
         && !matches!(
             route.as_str(),
-            "/groups/{name}" | "/groups/{name}/export" | "/groups/{name}/rename"
+            "/groups/{id}" | "/groups/{id}/export" | "/groups/{id}/rename"
         )
     {
         let context = api::path_param(&mut parts, "id").await;
@@ -1703,7 +1703,7 @@ mod tests {
             Role::Read
         );
         assert_eq!(
-            required_role(&Method::GET, "/groups/{name}/export"),
+            required_role(&Method::GET, "/groups/{id}/export"),
             Role::Read
         );
         assert_eq!(

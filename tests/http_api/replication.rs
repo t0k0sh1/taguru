@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::support::Server;
+use crate::support::{Server, group_body};
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = crate::support::common::scratch_dir(&format!("repl-{tag}"));
@@ -151,9 +151,12 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     // every published file the same way; a live OAuth flow would only
     // change who wrote the bytes).
     server.ok(
-        "PUT",
-        "/groups/breweries",
-        Some(json!({"context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "breweries",
+            Some(json!({"context_ids": [server.cx("sake")]})),
+        ),
     );
     std::fs::write(server.data_dir.join("oauth.json"), b"{\"grants\":[]}").unwrap();
 
@@ -723,9 +726,12 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
         ])),
     );
     first.ok(
-        "PUT",
-        "/groups/breweries",
-        Some(json!({"context_ids": [first.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "breweries",
+            Some(json!({"context_ids": [first.cx("sake")]})),
+        ),
     );
     wait_for("the source baseline", || {
         bucket
@@ -983,9 +989,12 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         Some(json!({"pinned": true})),
     );
     writer.ok(
-        "PUT",
-        "/groups/breweries",
-        Some(json!({"context_ids": [writer.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "breweries",
+            Some(json!({"context_ids": [writer.cx("sake")]})),
+        ),
     );
     // The writer keeps running (unlike the bucket-boot test's graceful
     // stop), so "complete exists" alone could be an EARLIER cycle's
@@ -1041,7 +1050,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     );
     assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
     let groups = replica.ok("GET", "/groups", None);
-    assert_eq!(groups["groups"][0]["id"], "breweries", "{groups}");
+    assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
     // `GET /schema` is a read (ADR 0009 §12.5) — it passes the replica
     // gate like every other retrieval GET. `glossary` never installed
     // one, so its 404 is the ordinary "no schema installed" answer,

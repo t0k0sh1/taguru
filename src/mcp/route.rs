@@ -136,14 +136,23 @@ pub fn route_tool(
         }
         "list_groups" => (
             "GET",
-            format!("/groups{}", query_string(arguments, &["limit", "after"])?),
+            format!(
+                "/groups{}",
+                query_string(arguments, &["limit", "after", "after_id"])?
+            ),
             None,
         ),
-        "create_group" => (
-            "PUT",
-            group_path("name")?,
-            Some(pick(arguments, &["description", "context_ids", "groups"])),
-        ),
+        "create_group" => {
+            need(arguments, "name")?;
+            (
+                "POST",
+                "/groups".to_string(),
+                Some(pick(
+                    arguments,
+                    &["name", "description", "context_ids", "groups"],
+                )),
+            )
+        }
         "update_group" => (
             "PATCH",
             group_path("name")?,

@@ -107,9 +107,8 @@ pub use vocabulary::{audit_drift, audit_vocabulary};
 // The router mode's imports: the wire shapes it re-serializes when
 // merging shard pages, the exact merge comparator, and the query
 // shapes it pre-parses (`crate::route`).
-pub(crate) use aliases::KeysetQuery;
 pub(crate) use contexts::{ContextPage, ListContextsQuery};
-pub(crate) use groups::{GroupEntry, GroupPage};
+pub(crate) use groups::{GroupEntry, GroupPage, ListGroupsQuery, list_groups_query_refusal};
 pub(crate) use import::ImportQuery;
 pub(crate) use recall::{CrossQueryRequest, CrossRecallRequest, cross_rank};
 pub(crate) use sources::{
@@ -993,18 +992,18 @@ fn group_not_found(name: &str, started_at: Instant) -> Response {
     )
 }
 
-/// A `group` name several `groups` share (#994's bridge: names are not
-/// unique, but the wire still addresses `groups` by name until #995) —
-/// served as an explicit conflict, never as "not found" and never
-/// from one of the claimants. Only a hand-assembled data directory
-/// reaches it: the name-addressed create and rename refuse a standing
-/// name.
+/// A `group` NAME several `groups` share, where the wire still names a
+/// `group` by name — a child in a nesting list, a cross-search target,
+/// an import record (until #996) — served as an explicit conflict,
+/// never as "not found" and never resolved to one of the claimants.
+/// Names are not unique (ADR 0050), so any two `groups` created under
+/// one name reach it.
 fn ambiguous_group(name: &str, count: usize, started_at: Instant) -> Response {
     error(
         ErrorCode::Conflict,
         format!(
-            "group name '{name}' is ambiguous: {count} groups share it; rename them \
-             apart (ids reach the wire in a later release)"
+            "group name '{name}' is ambiguous: {count} groups share it; this field still \
+             names groups by name, so rename them apart (POST /groups/{{id}}/rename)"
         ),
         started_at,
     )
@@ -1223,8 +1222,8 @@ where
 /// spelling of the same UUID (braced, uppercase, un-hyphenated —
 /// all of which `uuid` parses) cannot address one `context` under
 /// several path strings; anything else answers 400 in the shared
-/// error shape, before any registry lookup. Group routes keep the
-/// plain [`AppPath`]: their `{name}` really is a name.
+/// error shape, before any registry lookup. Group routes take
+/// [`GroupIdPath`], the same rule for a `group` id.
 pub struct ContextIdPath(pub String);
 
 impl<S> axum::extract::FromRequestParts<S> for ContextIdPath
@@ -1252,6 +1251,48 @@ where
             ))
         }
     }
+}
+
+/// The `{id}` segment of every `/groups/{id}/…` route (#995): a
+/// `group` id, held to [`ContextIdPath`]'s canonical-UUID rule, so a
+/// `group`'s name in the path answers 400 instead of a 404 that would
+/// read as "no such group".
+pub struct GroupIdPath(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for GroupIdPath
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let AppPath(id) = AppPath::<String>::from_request_parts(parts, state).await?;
+        match invalid_group_id("the path", &id, Instant::now()) {
+            None => Ok(Self(id)),
+            Some(refusal) => Err(refusal),
+        }
+    }
+}
+
+/// The 400 for a `group` id that is not the canonical UUID spelling —
+/// in the path, or in `POST /groups`' `id` field. `None` when it is.
+pub(crate) fn invalid_group_id(field: &str, id: &str, started_at: Instant) -> Option<Response> {
+    if crate::groups::is_group_id(id) {
+        return None;
+    }
+    Some(coded(
+        axum::http::StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidArgument,
+        format!(
+            "{field}'s '{}' is not a group id: it takes the id column of GET /groups \
+             (a lowercase hyphenated UUID), not the group's name",
+            id.chars().take(MAX_CONTEXT_NAME_BYTES).collect::<String>()
+        ),
+        started_at,
+    ))
 }
 
 /// The 400 for a body list (`context_ids`, `add_context_ids`, …) that

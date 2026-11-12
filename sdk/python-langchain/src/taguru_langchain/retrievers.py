@@ -40,6 +40,7 @@ from taguru import (
     Activation,
     AsyncTaguru,
     Citation,
+    GroupEntry,
     NotFoundError,
     PassageHit,
     Taguru,
@@ -50,6 +51,31 @@ RRF_K = 60
 
 def _rrf(rank: int) -> float:
     return 1.0 / (RRF_K + rank)
+
+
+def _group_members(rows: list[GroupEntry], roots: list[str]) -> set[str]:
+    """Every ``context`` id the ``group`` names in ``roots`` reach, nested children
+    included, walked over one read of the directory (``rows``). A name no row
+    carries — or several rows share, which the server's own cross search
+    refuses — contributes nothing, and the rest of the walk still stands: one
+    unresolvable ``group`` must not blank out every other member."""
+    by_name: dict[str, list[GroupEntry]] = {}
+    for row in rows:
+        by_name.setdefault(row.name, []).append(row)
+    members: set[str] = set()
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        matching = by_name.get(name, [])
+        if len(matching) != 1:
+            continue
+        members.update(matching[0].context_ids)
+        stack.extend(matching[0].groups)
+    return members
 
 
 class TaguruRetriever(BaseRetriever):
@@ -138,23 +164,17 @@ class TaguruRetriever(BaseRetriever):
     # -- sync lane ---------------------------------------------------------
 
     def _resolve_targets(self, client: Taguru) -> list[str]:
-        members: set[str] = set()
-        seen: set[str] = set()
-        stack = list(self.groups or [])
-        while stack:
-            group = stack.pop()
-            if group in seen:
-                continue
-            seen.add(group)
-            # One group failing to fetch (deleted mid-walk, transient
-            # error) should not blank out every other member this walk
-            # already found or would still reach.
-            try:
-                entry = client.groups.get(group)
-            except Exception:
-                continue
-            members.update(entry.context_ids)
-            stack.extend(entry.groups)
+        if not self.groups:
+            return self._direct_targets()
+        # ``groups`` are names, and so are a row's children, while
+        # ``groups.get`` takes ids (#995): the walk reads the directory
+        # once and follows names through it. A directory that fails to
+        # read leaves the direct targets standing.
+        try:
+            rows = list(client.groups.iter())
+        except Exception:
+            rows = []
+        members = _group_members(rows, self.groups)
         return self._with_members(self._direct_targets(), members)
 
     def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
@@ -269,34 +289,16 @@ class TaguruRetriever(BaseRetriever):
     # -- async lane ----------------------------------------------------------
 
     async def _aresolve_targets(self, client: AsyncTaguru) -> list[str]:
-        members: set[str] = set()
-        seen: set[str] = set()
-        # BFS by frontier: the groups of one level are independent
-        # fetches, so each level resolves concurrently (nesting is at
-        # most 3 levels deep server-side). return_exceptions=True: one
-        # group failing to fetch (deleted mid-walk, transient error)
-        # should not blank out every other member this walk already
-        # found or would still reach.
-        frontier = list(self.groups or [])
-        while frontier:
-            fetch = [name for name in dict.fromkeys(frontier) if name not in seen]
-            seen.update(fetch)
-            entries = await asyncio.gather(
-                *(client.groups.get(name) for name in fetch), return_exceptions=True
-            )
-            frontier = []
-            for entry in entries:
-                if isinstance(entry, BaseException):
-                    # Match the sync walk's `except Exception`: a plain fetch
-                    # failure is tolerated (one deleted/erroring group must
-                    # not blank the walk), but a BaseException that is NOT an
-                    # Exception — CancelledError above all — must propagate,
-                    # never be swallowed as if it were a missing group.
-                    if not isinstance(entry, Exception):
-                        raise entry
-                    continue
-                members.update(entry.context_ids)
-                frontier.extend(entry.groups)
+        """:meth:`_resolve_targets`' async twin. ``except Exception`` lets a
+        BaseException that is NOT an Exception — CancelledError above all —
+        propagate, never swallowed as an unreadable directory."""
+        if not self.groups:
+            return self._direct_targets()
+        try:
+            rows = [entry async for entry in client.groups.iter()]
+        except Exception:
+            rows = []
+        members = _group_members(rows, self.groups)
         return self._with_members(self._direct_targets(), members)
 
     async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
