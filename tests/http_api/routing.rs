@@ -1693,6 +1693,26 @@ fn a_first_shard_import_refusal_removes_the_groups_made_for_it() {
     }
 }
 
+/// A router dry run makes no `group`: the empty groups a real import
+/// creates first (so every shard restores a new name under one id) are
+/// skipped, since the dry run restores nothing into them.
+#[test]
+fn a_router_dry_run_import_makes_no_group() {
+    let shard_a = Server::start("gimp-dry-a");
+    let shard_b = Server::start("gimp-dry-b");
+    let router = Server::start_router(
+        "gimp-dry",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": []}\n";
+    let (status, body) = post_import_dry_run(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    for shard in [&shard_a, &shard_b] {
+        assert_eq!(shard.ok("GET", "/groups", None)["total"], json!(0));
+    }
+}
+
 /// A router import a LATER shard refuses: the shards before it keep
 /// the restored record, and the empty groups made for the stream go
 /// again from the refusing shard on — the one that refused and the

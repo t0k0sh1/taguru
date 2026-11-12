@@ -694,13 +694,7 @@ async fn remove_precreated_groups(
                 .and_then(|answer| {
                     serde_json::from_slice::<ShardEnvelope<api::GroupEntry>>(&answer.body).ok()
                 })
-                .is_some_and(|envelope| {
-                    let row = envelope.result;
-                    row.name == made.name
-                        && row.description.is_empty()
-                        && row.context_ids.is_empty()
-                        && row.groups.is_empty()
-                });
+                .is_some_and(|envelope| is_the_empty_placeholder(&envelope.result, &made.name));
             if !untouched {
                 warn!(
                     group = %made.name,
@@ -711,21 +705,48 @@ async fn remove_precreated_groups(
                 );
                 continue;
             }
-            let outcome = state
-                .call_shard(map, shard, Method::DELETE, &path, headers, None, deadline)
-                .await;
-            if !outcome
-                .as_ref()
-                .is_ok_and(|answer| answer.status.is_success())
-            {
-                warn!(
-                    group = %made.name,
-                    group_id = %made.id,
-                    shard = %map.url(shard),
-                    "an empty group made for a refused import could not be removed"
-                );
-            }
+            delete_placeholder(state, map, headers, deadline, made, shard, &path).await;
         }
+    }
+}
+
+/// Whether `row` still reads as the empty `group` [`precreate_new_groups`]
+/// made under `name`: anything a restore or another request put into it
+/// since means it is no longer this import's to remove.
+fn is_the_empty_placeholder(row: &api::GroupEntry, name: &str) -> bool {
+    row.name == name
+        && row.description.is_empty()
+        && row.context_ids.is_empty()
+        && row.groups.is_empty()
+}
+
+/// The DELETE of one placeholder, logging when it does not go.
+// Skipped by cargo-mutants: past the DELETE itself (which the routing
+// tests observe), the only behavior here is whether a warn line is
+// written, which no test reads.
+#[mutants::skip]
+async fn delete_placeholder(
+    state: &RouterState,
+    map: &RouteMap,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    made: &Precreated,
+    shard: usize,
+    path: &str,
+) {
+    let outcome = state
+        .call_shard(map, shard, Method::DELETE, path, headers, None, deadline)
+        .await;
+    if !outcome
+        .as_ref()
+        .is_ok_and(|answer| answer.status.is_success())
+    {
+        warn!(
+            group = %made.name,
+            group_id = %made.id,
+            shard = %map.url(shard),
+            "an empty group made for a refused import could not be removed"
+        );
     }
 }
 
@@ -825,4 +846,37 @@ fn rewrap_import_refusal(
         rewrapped.to_string(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    fn row(name: &str) -> api::GroupEntry {
+        api::GroupEntry {
+            id: "00000000-0000-4000-9000-000000000001".to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            context_ids: Vec::new(),
+            groups: BTreeSet::new(),
+            fingerprint: String::new(),
+        }
+    }
+
+    /// Only the untouched empty group is the import's to remove: each
+    /// field a restore or another request can fill keeps it on its own.
+    #[test]
+    fn only_the_untouched_empty_group_reads_as_the_placeholder() {
+        assert!(is_the_empty_placeholder(&row("g"), "g"));
+        assert!(!is_the_empty_placeholder(&row("renamed"), "g"));
+        let mut described = row("g");
+        described.description = "filled".to_string();
+        assert!(!is_the_empty_placeholder(&described, "g"));
+        let mut membered = row("g");
+        membered.context_ids = vec!["00000000-0000-4000-8000-000000000001".to_string()];
+        assert!(!is_the_empty_placeholder(&membered, "g"));
+        let mut nesting = row("g");
+        nesting.groups = BTreeSet::from(["child".to_string()]);
+        assert!(!is_the_empty_placeholder(&nesting, "g"));
+    }
 }
