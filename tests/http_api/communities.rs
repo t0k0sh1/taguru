@@ -1325,6 +1325,17 @@ fn group_traversal_derives_each_member_and_into_renames() {
         json!("m1::communities"),
         "the create block names it by default: {row}"
     );
+
+    // A second `group` named "child": kura's row still names its child
+    // by name (until #996), which now picks out two groups — refused,
+    // never resolved to one of them.
+    server.ok("POST", "/groups", group_body("child", None));
+    let (code, _stdout, stderr) = run_communities(&["--group", &kura, &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("child group name 'child' is ambiguous: 2 groups share it"),
+        "{stderr}"
+    );
 }
 
 /// `--json` serializes the reports themselves — one object per

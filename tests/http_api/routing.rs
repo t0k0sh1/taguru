@@ -1027,6 +1027,61 @@ fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
     assert_eq!(body["code"], json!("internal"), "{body}");
 }
 
+/// #995 decision 2: a create the router broadcasts stops at the first
+/// shard that refuses it, the earlier shards keeping the `group`. The
+/// refusal keeps the shard's status and code and names the id the
+/// router minted and the shards holding it — and a retry under that id
+/// converges on the shards that already hold it. A refusal at the FIRST
+/// shard applied nothing and passes through untouched.
+#[test]
+fn a_create_that_stops_partway_names_the_id_and_the_shards_holding_it() {
+    let shard_a = Server::start("gpart-a");
+    let broken = FakeShard::start_with_status(
+        503,
+        json!({"status": "error", "code": "unavailable", "error": "boom"}),
+    );
+    let router = Server::start_router(
+        "gpart",
+        &format!("a = {}\nb = {}\n", shard_a.base, broken.endpoint),
+        &[],
+    );
+    let (status, refusal) = router.call("POST", "/groups", Some(json!({"name": "g"})));
+    assert_eq!(status, 503, "the shard's own status: {refusal}");
+    assert_eq!(refusal["code"], json!("unavailable"), "{refusal}");
+    let id = shard_a.gx("g");
+    let message = refusal["error"].as_str().unwrap();
+    assert!(
+        message.starts_with("boom; "),
+        "the shard's message leads: {message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "group '{id}' was already created on {}",
+            shard_a.base
+        )) && message.contains(&format!("\"id\": \"{id}\""))
+            && message.contains(&format!("DELETE /groups/{id}")),
+        "{message}"
+    );
+    // The same create under that id answers shard A's standing row
+    // again instead of a conflict.
+    let (status, again) = shard_a.call("POST", "/groups", Some(json!({"name": "g", "id": id})));
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["result"]["id"], json!(id));
+
+    // The broken shard first: nothing applied anywhere, so its refusal
+    // passes through as it is.
+    let shard_c = Server::start("gpart-c");
+    let router = Server::start_router(
+        "gpart-first",
+        &format!("a = {}\nb = {}\n", broken.endpoint, shard_c.base),
+        &[],
+    );
+    let (status, refusal) = router.call("POST", "/groups", Some(json!({"name": "h"})));
+    assert_eq!(status, 503, "{refusal}");
+    assert_eq!(refusal["error"], json!("boom"), "{refusal}");
+    assert!(shard_c.try_gx("h").is_none());
+}
+
 /// The MCP manual comes from the FIRST shard that answers
 /// `GET /protocol` — a dead shard ahead of a live one must not take
 /// the manual down with it, and a fleet with no live shard at all
@@ -1566,6 +1621,62 @@ fn group_delete_broadcasts_and_a_malformed_body_gets_the_shards_refusal() {
         refusal["code"].is_string(),
         "the shard's own refusal shape must pass through: {refusal}"
     );
+}
+
+/// Group rename broadcasts through the router: every shard renames the
+/// `group` under its one id, and the router answers the
+/// single-instance `result: true`.
+#[test]
+fn group_rename_broadcasts_to_every_shard() {
+    let shard_a = Server::start("gren-a");
+    let shard_b = Server::start("gren-b");
+    let router = Server::start_router(
+        "gren",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let g = router.create_group("g", None);
+    let renamed = router.ok(
+        "POST",
+        &format!("/groups/{g}/rename"),
+        Some(json!({"to": "h"})),
+    );
+    assert_eq!(renamed, json!(true), "{renamed}");
+    for shard in [&shard_a, &shard_b] {
+        assert_eq!(shard.gx("h"), g, "the id stays, the name moves");
+        assert!(shard.try_gx("g").is_none());
+    }
+    assert_eq!(
+        router.ok("GET", &format!("/groups/{g}"), None)["name"],
+        json!("h")
+    );
+}
+
+/// A router import that the FIRST shard refuses leaves no `group`
+/// behind: the empty groups made for the stream's new names (so every
+/// shard restores them under one id) are removed again, as a single
+/// instance's whole-set refusal would leave nothing.
+#[test]
+fn a_first_shard_import_refusal_removes_the_groups_made_for_it() {
+    let shard_a = Server::start("gimp-undo-a");
+    let shard_b = Server::start("gimp-undo-b");
+    let router = Server::start_router(
+        "gimp-undo",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    // A member no shard holds lands in the first shard's projection,
+    // which refuses it.
+    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": \
+                  [\"189ac1bb-03ba-433b-b379-89fabbe4757c\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    for shard in [&shard_a, &shard_b] {
+        assert!(
+            shard.try_gx("fresh").is_none(),
+            "the empty group made for the import must go again"
+        );
+    }
 }
 
 /// One HTTP/1.1 request over a bare socket, the request-target sent

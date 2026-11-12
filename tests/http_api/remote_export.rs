@@ -824,6 +824,86 @@ fn per_item_failures_count_and_the_rest_still_lands() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// Two `groups` sharing a name would write one `{name}.group.jsonl`
+/// twice, so the remote export refuses each of them — one failure per
+/// group, counted in the summary — and still exports the rest, the
+/// same refusal the local export makes.
+#[test]
+fn groups_sharing_a_name_each_count_as_a_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            ("HTTP/1.1 200 OK", "not an export stream".to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":3,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"same"},{"id":"00000000-0000-4000-9000-00000000000b","name":"same"},{"id":"00000000-0000-4000-9000-00000000000c","name":"solo"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":3,"groups":[]}}"#.to_string(),
+            ),
+            // Only `solo` is fetched.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"type": "group", "id":"solo","description":"x","context_ids":[]}"#.to_string(),
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-shared-name");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    for id in [
+        "00000000-0000-4000-9000-00000000000a",
+        "00000000-0000-4000-9000-00000000000b",
+    ] {
+        assert!(
+            stderr.contains(&format!(
+                "group 'same' ({id}): several groups share this name"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        stdout.contains("export: 0 of 1 context(s) and 1 of 3 group(s)"),
+        "{stdout}"
+    );
+    let contents = dir_contents(&out);
+    assert!(!contents.contains_key("same.group.jsonl"), "{contents:?}");
+    assert!(contents.contains_key("solo.group.jsonl"), "{contents:?}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// Issue #753: an `--out` that cannot be created — its parent is a
 /// FILE — is a clean exit-1 refusal naming the path, for the remote
 /// path exactly like the local one (`tests/cli.rs`'s twin).
