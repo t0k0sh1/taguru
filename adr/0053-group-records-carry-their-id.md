@@ -79,9 +79,12 @@ since a name lookup could not tell those groups apart.
   from `GET /groups`.
 - A stream written before this revision cannot be imported, and
   re-exporting it with an earlier build writes the earlier `version`
-  again (ADR 0045 §2.7). The way across is the data directory, which
-  this revision leaves as it is: `group` files have carried their id
-  since ADR 0050. Import the stream into a server of the build that
-  wrote it, start this build on that data directory, and export from
-  it; the new stream carries the new revision and the id-bearing
-  records. Nothing converts a stream file in place.
+  again (ADR 0045 §2.7). The way across is a data directory, which
+  this revision leaves as it is, written by a build of ADR 0050 to ADR
+  0052: those builds read `2026-10-01` streams and already store each
+  `group` under its id. Import the stream into such a build, start
+  this build on that data directory, and export from it; the new
+  stream carries the new revision and the id-bearing records. A data
+  directory from before ADR 0050 does not boot on this build (ADR 0050
+  §3), so the build that wrote an older stream is not a stop on the
+  way. Nothing converts a stream file in place.
