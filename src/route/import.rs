@@ -271,8 +271,10 @@ pub(super) async fn route_import(
             Ok(answer) => {
                 return rewrap_import_refusal(
                     answer,
-                    batches_landed,
-                    0,
+                    Landed {
+                        batches: batches_landed,
+                        ..Landed::default()
+                    },
                     !query.dry_run && index > 0,
                     started_at,
                 );
@@ -332,11 +334,15 @@ pub(super) async fn route_import(
                 }
             }
             Ok(answer) => {
+                let landed = Landed {
+                    batches: batches_landed,
+                    schemas: schemas_landed,
+                    ..Landed::default()
+                };
                 return rewrap_import_refusal(
                     answer,
-                    batches_landed,
-                    schemas_landed,
-                    !query.dry_run && (batches_landed > 0 || schemas_landed > 0),
+                    landed,
+                    !query.dry_run && landed.any(),
                     started_at,
                 );
             }
@@ -362,6 +368,7 @@ pub(super) async fn route_import(
     let mut groups: Vec<Value> = Vec::new();
     if !stream.groups.is_empty() {
         let mut per_group: BTreeMap<usize, Vec<GroupOutcomeWire>> = BTreeMap::new();
+        let mut group_shards_landed = 0usize;
         for shard in map.all() {
             match state
                 .call_shard(
@@ -376,6 +383,7 @@ pub(super) async fn route_import(
                 .await
             {
                 Ok(answer) if answer.status.is_success() => {
+                    group_shards_landed += 1;
                     if let Ok(envelope) =
                         serde_json::from_slice::<ShardEnvelope<GroupsOnlyWire>>(&answer.body)
                     {
@@ -386,13 +394,19 @@ pub(super) async fn route_import(
                 }
                 Ok(answer) => {
                     // The shards before this one hold the restored
-                    // records (documented divergence); a retry restores
-                    // the same ids again, so it converges.
+                    // records (documented divergence), so the refusal
+                    // reports them as landed; a retry restores the same
+                    // ids again, so it converges.
+                    let landed = Landed {
+                        batches: batches_landed,
+                        schemas: schemas_landed,
+                        groups: stream.groups.len(),
+                        group_shards: group_shards_landed,
+                    };
                     return rewrap_import_refusal(
                         answer,
-                        batches_landed,
-                        schemas_landed,
-                        !query.dry_run && (batches_landed > 0 || schemas_landed > 0),
+                        landed,
+                        !query.dry_run && landed.any(),
                         started_at,
                     );
                 }
@@ -449,6 +463,41 @@ pub(super) async fn route_import(
     api::ok(result, started_at)
 }
 
+/// What earlier requests of one import already made durable, counted
+/// across shards: source batches and schema records on the shards that
+/// own them, and the stream's `group` records on every shard the
+/// broadcast reached before the refusal.
+#[derive(Clone, Copy, Default)]
+struct Landed {
+    batches: usize,
+    schemas: usize,
+    groups: usize,
+    group_shards: usize,
+}
+
+impl Landed {
+    fn any(self) -> bool {
+        self.batches > 0 || self.schemas > 0 || self.group_shards > 0
+    }
+
+    fn describe(self) -> String {
+        let mut parts = Vec::new();
+        if self.batches > 0 {
+            parts.push(format!("{} source(s)", self.batches));
+        }
+        if self.schemas > 0 {
+            parts.push(format!("{} schema record(s)", self.schemas));
+        }
+        if self.group_shards > 0 {
+            parts.push(format!(
+                "{} group record(s) on {} shard(s)",
+                self.groups, self.group_shards
+            ));
+        }
+        parts.join(" and ")
+    }
+}
+
 #[derive(Deserialize)]
 struct GroupsOnlyWire {
     #[serde(default)]
@@ -465,12 +514,13 @@ struct GroupOutcomeWire {
 }
 
 /// A shard refusal from the real (post-preflight) import run, with the
-/// cross-chunk truth prepended when earlier chunks OR schema records
-/// already landed on a different shard — the failing shard's own note
-/// counts only what reached IT, never what an earlier request to a
-/// different shard already made durable. `schemas_landed` is 0 for
-/// the batch loop's own call site (the schema loop has not started
-/// yet at that point), so its wording is unchanged.
+/// cross-chunk truth prepended when earlier chunks, schema records OR
+/// group records already landed on a different shard — the failing
+/// shard's own note counts only what reached IT, never what an earlier
+/// request to a different shard already made durable. Each loop passes
+/// only the counts it can have reached ([`Landed`]'s later fields stay
+/// 0 before their own loop starts), so the batch loop's wording is
+/// unchanged.
 ///
 /// `integrity`/`durable_batches` are RECOMPUTED here from the true
 /// cross-shard counts, never copied from the failing shard's own
@@ -483,8 +533,7 @@ struct GroupOutcomeWire {
 /// `context` does not change.
 fn rewrap_import_refusal(
     answer: ShardAnswer,
-    batches_landed: usize,
-    schemas_landed: usize,
+    landed: Landed,
     other_landed: bool,
     started_at: Instant,
 ) -> Response {
@@ -511,28 +560,25 @@ fn rewrap_import_refusal(
             None,
         ),
     };
-    let landed = match (batches_landed, schemas_landed) {
-        (batches, 0) => format!("{batches} source(s)"),
-        (0, schemas) => format!("{schemas} schema record(s)"),
-        (batches, schemas) => format!("{batches} source(s) and {schemas} schema record(s)"),
-    };
+    let landed_text = landed.describe();
     let mut rewrapped = json!({
         "status": "error",
         "code": code,
         "error": format!(
-            "{landed} landed durably on earlier shards before this refusal (re-POSTing the \
+            "{landed_text} landed durably on earlier shards before this refusal (re-POSTing the \
              whole stream is exact — each source file replaces its predecessor, each schema install \
-             is independent); the refusing shard says: {message}"
+             is independent, each group record lands under its own id); the refusing shard says: \
+             {message}"
         ),
-        // `other_landed` is true only when at least one of the two
+        // `other_landed` is true only when at least one of the
         // counts is nonzero, so this is always "durable_prefix" here
         // — the `!other_landed` early return above is what answers
         // "nothing_written" (the failing shard's own body, unedited).
         "integrity": "durable_prefix",
         "time": started_at.elapsed().as_secs_f64(),
     });
-    if batches_landed > 0 {
-        rewrapped["durable_batches"] = json!(batches_landed);
+    if landed.batches > 0 {
+        rewrapped["durable_batches"] = json!(landed.batches);
     }
     if let Some(issues) = issues {
         rewrapped["issues"] = issues;

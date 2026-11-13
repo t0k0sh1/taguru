@@ -148,7 +148,7 @@
     <p>
       <code>groups</code> are the addressing unit of <b>cross-<code>context</code> search</b>: <code>POST /recall</code>,
       <code>POST /query</code>, and <code>POST /sources/search</code> take
-      <code>context_ids</code> and/or <code>groups</code> lists and run one search across every
+      <code>context_ids</code> and/or <code>group_ids</code> lists (ids, never names) and run one search across every
       <code>context</code> reached — nested children included, overlaps deduped, every match tagged with the
       <code>context_id</code> (and display <code>context_name</code>) it came from. Graph matches merge on |weight| (weights share one
       scale — evidence mass); passage hits interleave by per-<code>context</code> rank, because passage

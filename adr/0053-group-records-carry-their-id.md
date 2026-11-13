@@ -77,5 +77,11 @@ since a name lookup could not tell those groups apart.
 - A hand-written record must now carry an id. To create a new group,
   take one from `uuidgen`; to change a standing group, take its id
   from `GET /groups`.
-- Streams written before this revision must be re-exported with the
-  build that wrote them and imported again (ADR 0045 §2.7).
+- A stream written before this revision cannot be imported, and
+  re-exporting it with an earlier build writes the earlier `version`
+  again (ADR 0045 §2.7). The way across is the data directory, which
+  this revision leaves as it is: `group` files have carried their id
+  since ADR 0050. Import the stream into a server of the build that
+  wrote it, start this build on that data directory, and export from
+  it; the new stream carries the new revision and the id-bearing
+  records. Nothing converts a stream file in place.

@@ -314,17 +314,34 @@ impl AppState {
             let Some(standing_parent) = groups.get(&new_record.id) else {
                 continue;
             };
-            for old_child in &standing_parent.group_ids {
-                // Only a DROPPED reference needs the ordering help: a
-                // KEPT one is exactly what `nesting_depths(&prospective)`
-                // above already validated (parent's edge, unchanged,
-                // combined with the child's new depth) regardless of
-                // which of the two lands first.
-                if !new_record.group_ids.contains(old_child)
-                    && let Some(&child_index) = index_of.get(old_child.as_str())
-                {
+            // Only a DROPPED reference needs the ordering help: a KEPT
+            // one is exactly what `nesting_depths(&prospective)` above
+            // already validated (parent's edge, unchanged, combined
+            // with the child's new depth) regardless of which of the
+            // two lands first. The whole STANDING branch under the
+            // dropped child counts, not just the child: with a > b > c
+            // standing and only "a" (dropping "b") and "c" (deepening)
+            // in the batch, "c" landing first deepens the old "a"
+            // through the untouched "b" just the same. Every edge added
+            // runs from a standing ancestor to a standing descendant,
+            // so `dependents` stays acyclic.
+            let mut stack: Vec<&str> = standing_parent
+                .group_ids
+                .iter()
+                .filter(|old_child| !new_record.group_ids.contains(*old_child))
+                .map(String::as_str)
+                .collect();
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            while let Some(below) = stack.pop() {
+                if !seen.insert(below) {
+                    continue;
+                }
+                if let Some(&child_index) = index_of.get(below) {
                     dependents[parent_index].push(child_index);
                     pending[child_index] += 1;
+                }
+                if let Some(standing) = groups.get(below) {
+                    stack.extend(standing.group_ids.iter().map(String::as_str));
                 }
             }
         }
@@ -1366,6 +1383,71 @@ mod tests {
         let standing = state.0.groups.read().records().clone();
         groups::nesting_depths(&standing)
             .expect("the untouched standing map must still be within the depth cap");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The same stranding one level further down: the record that
+    /// deepens is not the dropped child itself but a descendant of it,
+    /// reached through a group the batch does not carry. Standing
+    /// a > b > c and y > z; the batch moves "a" onto "y" (dropping "b")
+    /// and hangs "z" under "c". The final state is depth 3 everywhere,
+    /// but "c" (prospective depth 2) sorts before "a" (3), and landing
+    /// it first makes the old a > b > c > z four deep. "a" must land
+    /// first, so failing its write leaves the standing state untouched.
+    #[test]
+    fn restore_groups_orders_a_parent_before_a_deeper_descendant_of_its_dropped_branch() {
+        let dir = scratch_dir("groups-restore-depth-race-transitive");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let record = |name: &str, children: &[&str]| StoredGroup {
+            group_ids: ids_for(&state, children),
+            ..StoredGroup::empty(&id_for(&state, name), name)
+        };
+        let child_set = |names: &[&str]| -> BTreeSet<String> { ids_for(&state, names) };
+        for (name, children) in [
+            ("c", &[][..]),
+            ("b", &["c"][..]),
+            ("a", &["b"][..]),
+            ("z", &[][..]),
+            ("y", &["z"][..]),
+        ] {
+            state
+                .create_group(
+                    None,
+                    name,
+                    String::new(),
+                    BTreeSet::new(),
+                    child_set(children),
+                )
+                .unwrap();
+        }
+
+        let batch = [record("c", &["z"]), record("a", &["y"])];
+        fail_persistence_ops_after(0);
+        let error = state
+            .restore_groups(&batch, Deadline::unbounded())
+            .unwrap_err();
+        assert!(
+            !clear_persistence_fault(),
+            "the fault must have fired, not run out of persistence steps first"
+        );
+        assert!(
+            matches!(&error, RestoreGroupsError::Io { group, .. } if *group == id_for(&state, "a")),
+            "\"a\" lands before \"c\", so its write hits the fault: {error:?}"
+        );
+        assert_eq!(error.applied(), 0);
+        assert_eq!(
+            state.group_named("c").unwrap().record.group_ids,
+            BTreeSet::new()
+        );
+        let standing = state.0.groups.read().records().clone();
+        groups::nesting_depths(&standing)
+            .expect("the untouched standing map must still be within the depth cap");
+
+        // Without the fault the whole batch lands, within the cap.
+        state.restore_groups(&batch, Deadline::unbounded()).unwrap();
+        let landed = state.0.groups.read().records().clone();
+        groups::nesting_depths(&landed).unwrap();
 
         let _ = fs::remove_dir_all(dir);
     }

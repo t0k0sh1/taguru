@@ -272,16 +272,16 @@
     </p>
     <p class="note warn">
       <b>Membership is the only hierarchy.</b> A name that looks like a path is a naming
-      convention for humans reading a list. A <code>group</code> whose <code>contexts</code> or
-      <code>groups</code> field names something is a fact the server enforces — referential
+      convention for humans reading a list. A <code>group</code> whose <code>context_ids</code> or
+      <code>group_ids</code> field names something is a fact the server enforces — referential
       integrity, nesting depth, cycle checks all apply to it. Only the second kind of statement is
       structure.
     </p>
     <p class="note">
       A slash-bearing name never sits in a URL path: <code>contexts</code> and <code>groups</code>
       are addressed by their ids (<code>/contexts/{id}</code>, <code>/groups/{id}</code>), and a
-      name travels in a body (a <code>POST /groups</code> create, a <code>recall</code> request's
-      <code>groups</code> list) as-is, with no percent-encoding.
+      name travels in a body (the <code>name</code> of a <code>POST /groups</code> create or a
+      rename) as-is, with no percent-encoding.
     </p>
   </section>
 

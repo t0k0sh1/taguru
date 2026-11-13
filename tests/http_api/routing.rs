@@ -1739,8 +1739,9 @@ fn a_router_import_lands_a_new_group_under_its_records_id_on_every_shard() {
 
 /// A router import a LATER shard refuses: the shards before it keep
 /// the restored record (the documented divergence), the refusing shard
-/// and the ones after never restored it, and the refusal is the
-/// shard's own.
+/// and the ones after never restored it, and the refusal keeps the
+/// shard's own code while reporting what the earlier shard made
+/// durable — never the refusing shard's "nothing written".
 #[test]
 fn a_later_shard_import_refusal_leaves_the_earlier_shards_restore_in_place() {
     let shard_a = Server::start("gimp-later-a");
@@ -1765,6 +1766,17 @@ fn a_later_shard_import_refusal_leaves_the_earlier_shards_restore_in_place() {
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["code"], json!("no_group"), "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert!(body.get("durable_batches").is_none(), "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with("1 group record(s) on 1 shard(s) landed durably on earlier shards"),
+        "{body}"
+    );
+    assert!(
+        message.contains(kid),
+        "the shard's own reason stays: {body}"
+    );
     assert!(
         shard_a.try_gx("fresh").is_some(),
         "the shard before keeps it"
