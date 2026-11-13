@@ -425,40 +425,14 @@ pub(crate) fn trim_membership(groups: &mut BTreeMap<String, StoredGroup>, cap: u
     }
 }
 
-/// The two sets a `group` bundles, whichever shape holds them — the
-/// stored record or the row's membership view, both children by id.
-/// [`context_closure`] walks either.
-pub(crate) trait Bundle {
-    fn member_contexts(&self) -> &BTreeSet<String>;
-    fn child_groups(&self) -> &BTreeSet<String>;
-}
-
-impl Bundle for StoredGroup {
-    fn member_contexts(&self) -> &BTreeSet<String> {
-        &self.context_ids
-    }
-    fn child_groups(&self) -> &BTreeSet<String> {
-        &self.group_ids
-    }
-}
-
-impl Bundle for GroupRecord {
-    fn member_contexts(&self) -> &BTreeSet<String> {
-        &self.context_ids
-    }
-    fn child_groups(&self) -> &BTreeSet<String> {
-        &self.group_ids
-    }
-}
-
 /// Every `context` reachable from the given roots — direct members plus
 /// everything nested children bundle, transitively. The scoped write
 /// gate judges a `group` by this closure: a grant must cover what the
 /// `group` ADDRESSES, not just what it lists directly. Keys without a
 /// record contribute nothing; the seen set keeps even a (transient,
 /// mid-repair) cycle from looping the walk.
-pub(crate) fn context_closure<'map, 'roots: 'map, B: Bundle>(
-    groups: &'map BTreeMap<String, B>,
+pub(crate) fn context_closure<'map, 'roots: 'map>(
+    groups: &'map BTreeMap<String, StoredGroup>,
     roots: impl IntoIterator<Item = &'roots str>,
 ) -> BTreeSet<String> {
     let mut contexts = BTreeSet::new();
@@ -472,10 +446,10 @@ pub(crate) fn context_closure<'map, 'roots: 'map, B: Bundle>(
         let Some(record) = groups.get(key) else {
             continue;
         };
-        contexts.extend(record.member_contexts().iter().cloned());
+        contexts.extend(record.context_ids.iter().cloned());
         frontier.extend(
             record
-                .child_groups()
+                .group_ids
                 .iter()
                 .map(String::as_str)
                 .filter(|child| seen.insert(*child)),
