@@ -37,6 +37,9 @@ Entries that change an on-disk format or a response shape say so.
   `taguru router` an import broadcasts the records as they are: the
   empty `groups` the router used to create first, their removal after a
   refusal, and the refusal of a name split across shards are removed.
+  A shard refusing after earlier shards restored the records answers
+  `durable_prefix` and counts those restores, instead of passing the
+  refusing shard's `nothing_written` through.
   `taguru communities --group` follows child ids. MCP's `create_group`,
   `update_group`, `recall`, `query` and `search_passages` take the same
   `group_ids` / `add_group_ids` / `remove_group_ids` fields. The Python
