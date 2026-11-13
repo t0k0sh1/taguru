@@ -146,6 +146,55 @@ impl Server {
         common::group_stem(&self.data_dir, name)
     }
 
+    /// The id of the `group` named `name` (read off its file in this
+    /// server's data directory) — the path id a test that created the
+    /// `group` by name builds `/groups/{id}/…` paths from (#995).
+    /// Panics when no file records the name.
+    #[allow(dead_code)]
+    pub fn gx(&self, name: &str) -> String {
+        self.group_stem(name)
+    }
+
+    /// [`Server::gx`] for a name that may not resolve — `None` where
+    /// `gx` panics. For asserting that no `group` carries the name.
+    #[allow(dead_code)]
+    pub fn try_gx(&self, name: &str) -> Option<String> {
+        common::try_group_stem(&self.data_dir, name)
+    }
+
+    /// [`Server::gx`] over HTTP (`GET /groups`) instead of the data
+    /// directory — the resolver that works on a ROUTER handle. Panics
+    /// unless exactly one row carries the name.
+    #[allow(dead_code)]
+    pub fn gx_http(&self, name: &str) -> String {
+        let listing = self.ok("GET", "/groups", None);
+        let rows: Vec<&Value> = listing["groups"]
+            .as_array()
+            .expect("group rows")
+            .iter()
+            .filter(|row| row["name"] == json!(name))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one group row named '{name}': {listing}"
+        );
+        rows[0]["id"].as_str().expect("a row id").to_string()
+    }
+
+    /// `POST /groups` with `name` plus `body`'s fields, asserting
+    /// success and handing back the minted id from the response row —
+    /// the one-liner most tests want where the old wire's
+    /// `PUT /groups/{name}` stood.
+    #[allow(dead_code)]
+    pub fn create_group(&self, name: &str, body: Option<Value>) -> String {
+        let row = self.ok("POST", "/groups", group_body(name, body));
+        row["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("create must answer the row: {row}"))
+            .to_string()
+    }
+
     /// The path id for the `context` named `name` — shorthand for
     /// [`Server::context_stem`] wherever a test creates by display
     /// name and then builds `/contexts/{id}/…` paths (#964). Panics
@@ -941,6 +990,17 @@ fn post_import_query(
         request = request.header("Authorization", format!("Bearer {token}"));
     }
     finish(request.send(body), "POST", "/import")
+}
+
+/// A `POST /groups` body: `body`'s fields (none when `None`) with
+/// `name` set — what the old `PUT /groups/{name}` carried in its path.
+#[allow(dead_code)]
+pub fn group_body(name: &str, body: Option<Value>) -> Option<Value> {
+    let mut body = body.unwrap_or_else(|| json!({}));
+    if let Some(object) = body.as_object_mut() {
+        object.insert("name".to_string(), json!(name));
+    }
+    Some(body)
 }
 
 pub fn post_import(server: &Server, body: &str, token: Option<&str>) -> (u16, Value) {

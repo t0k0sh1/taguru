@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
@@ -56,56 +57,81 @@ def seeded_pair(client: Taguru, base: str) -> tuple[str, str, str, str]:
     return sake, tea, sake_id, tea_id
 
 
+def group_id_named(client: Taguru, name: str) -> str:
+    """The id of the one ``group`` called ``name`` — the directory walk a caller
+    holding only a name makes (names are not unique, #995)."""
+    ids = [row.id for row in client.groups.iter() if row.name == name]
+    assert len(ids) == 1, ids
+    return ids[0]
+
+
 def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group, child = f"{fresh_name}-g", f"{fresh_name}-child"
 
-    assert not client.groups.exists(group)
-    assert client.groups.create(group, description="蔵元一式", context_ids=[sake_id])
-    with pytest.raises(ConflictError) as conflict:
-        client.groups.create(group)
-    assert conflict.value.code == "already_exists"
+    created = client.groups.create(group, description="蔵元一式", context_ids=[sake_id])
+    group_id = created.id
+    assert created.name == group
+    assert created.context_ids == [sake_id]
+    assert client.groups.exists(group_id)
+    assert group_id_named(client, group) == group_id
+    # A name is a label: creating it again makes a second group.
+    twin = client.groups.create(group)
+    assert twin.id != group_id
+    assert client.groups.delete(twin.id)
+    # A caller's own id: the same record again answers the standing row,
+    # a different one is a conflict.
+    own_id = str(uuid.uuid4())
+    pinned = client.groups.create(f"{group}-pinned", group_id=own_id)
+    assert pinned.id == own_id
+    assert client.groups.create(f"{group}-pinned", group_id=own_id).id == own_id
+    with pytest.raises(ConflictError):
+        client.groups.create(f"{group}-other", group_id=own_id)
+    assert client.groups.delete(own_id)
+    # A name where the id belongs is a 400, never a lookup.
+    with pytest.raises(ValidationError) as by_name:
+        client.groups.get(group)
+    assert by_name.value.code == "invalid_argument"
 
-    entry = client.groups.get(group)
-    assert entry.id == group
+    entry = client.groups.get(group_id)
+    assert entry.id == group_id
+    assert entry.name == group
     assert entry.description == "蔵元一式"
     assert entry.context_ids == [sake_id]
     assert entry.groups == []
 
     # Deltas: removals are idempotent no-ops, additions demand existence.
-    entry = client.groups.update(group, add_context_ids=[tea_id], remove_context_ids=[GHOST_ID])
+    entry = client.groups.update(group_id, add_context_ids=[tea_id], remove_context_ids=[GHOST_ID])
     assert entry.context_ids == sorted([sake_id, tea_id])
     with pytest.raises(NotFoundError) as missing_member:
-        client.groups.update(group, add_context_ids=[GHOST_ID])
+        client.groups.update(group_id, add_context_ids=[GHOST_ID])
     assert missing_member.value.code == "no_context"
 
-    # Nesting: a child group rides the row's `groups` list.
-    assert client.groups.create(child, context_ids=[tea_id])
-    entry = client.groups.update(group, add_groups=[child])
+    # Nesting: a child group rides the row's `groups` list (by name).
+    child_id = client.groups.create(child, context_ids=[tea_id]).id
+    entry = client.groups.update(group_id, add_groups=[child])
     assert entry.groups == [child]
 
-    names = [row.id for row in client.groups.iter(limit=2)]
-    assert group in names and child in names
+    ids = [row.id for row in client.groups.iter(limit=2)]
+    assert group_id in ids and child_id in ids
 
-    # Rename: the old name is gone, the new one keeps the membership.
+    # Rename: a display-name change — the id and the membership stay.
     renamed_group = f"{fresh_name}-g-renamed"
-    assert client.groups.rename(group, renamed_group)
-    with pytest.raises(NotFoundError) as renamed_away:
-        client.groups.get(group)
-    assert renamed_away.value.code == "no_group"
-    entry = client.groups.get(renamed_group)
+    assert client.groups.rename(group_id, renamed_group)
+    entry = client.groups.get(group_id)
+    assert entry.name == renamed_group
     assert entry.context_ids == sorted([sake_id, tea_id])
     assert entry.groups == [child]
 
     # Deleting the bundling leaves members (and the child group) alone.
-    assert client.groups.delete(renamed_group)
+    assert client.groups.delete(group_id)
     with pytest.raises(NotFoundError) as gone:
-        client.groups.get(renamed_group)
+        client.groups.get(group_id)
     assert gone.value.code == "no_group"
-    assert client.groups.exists(child)
+    assert client.groups.exists(child_id)
     assert client.contexts.exists(sake_id)
 
-    client.groups.delete(child)
+    client.groups.delete(child_id)
     client.contexts.delete(sake_id)
     client.contexts.delete(tea_id)
 
@@ -121,7 +147,7 @@ def test_group_writes_need_the_write_role(
 def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) -> None:
     sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group = f"{fresh_name}-g"
-    client.groups.create(group, context_ids=[sake_id, tea_id])
+    group_id = client.groups.create(group, context_ids=[sake_id, tea_id]).id
 
     # recall: named contexts, every match tagged with its origin.
     page = client.recall("代表銘柄", context_ids=[sake_id, tea_id])
@@ -152,7 +178,7 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
         client.recall("青嶺", groups=[f"{fresh_name}-missing"])
     assert missing.value.code == "no_group"
 
-    client.groups.delete(group)
+    client.groups.delete(group_id)
     client.contexts.delete(sake_id)
     client.contexts.delete(tea_id)
 
@@ -160,9 +186,9 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
 def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None:
     sake, tea, sake_id, tea_id = seeded_pair(client, fresh_name)
     group = f"{fresh_name}-g"
-    client.groups.create(group, description="蔵元一式", context_ids=[sake_id, tea_id])
+    group_id = client.groups.create(group, description="蔵元一式", context_ids=[sake_id, tea_id]).id
 
-    line = client.groups.export(group)
+    line = client.groups.export(group_id)
     record = json.loads(line)
     assert record["type"] == "group"
     assert record["version"] == "2026-10-01"
@@ -170,14 +196,15 @@ def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None
     assert record["context_ids"] == sorted([sake_id, tea_id])
 
     # The record is the group's complete truth: import restores it whole.
-    client.groups.delete(group)
-    assert not client.groups.exists(group)
+    client.groups.delete(group_id)
+    assert not client.groups.exists(group_id)
     result = client.import_batches(line)
     assert result.groups == [
         GroupImportOutcome(name=group, outcome="created", contexts=2, groups=0)
     ]
-    assert client.groups.get(group).context_ids == sorted([sake_id, tea_id])
+    restored = group_id_named(client, group)
+    assert client.groups.get(restored).context_ids == sorted([sake_id, tea_id])
 
-    client.groups.delete(group)
+    client.groups.delete(restored)
     client.contexts.delete(sake_id)
     client.contexts.delete(tea_id)

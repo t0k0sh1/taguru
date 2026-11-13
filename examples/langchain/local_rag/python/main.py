@@ -38,7 +38,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from pypdf import PdfReader
-from taguru import ConflictError, Taguru
+from taguru import Taguru
 from taguru_langchain import TaguruIngester, TaguruRetriever
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -169,13 +169,22 @@ def pdf_to_sections(pdf_path: Path, paper_id: str):
 
 
 def ensure_group(client: Taguru, name: str, description: str, context_ids: list[str]) -> None:
-    """Create the group, or fold new contexts into an existing one — group
-    creation 409s on a rerun, so the idempotence has to be handled here.
-    Members are context IDs, never names."""
-    try:
+    """Create the group, or fold new contexts into the existing one. Group
+    names are not unique — creating a name again makes a second group — so a
+    rerun looks the name up first and updates that group by its id. Several
+    groups under the name leave no one group to update, so that stops the run
+    (the retriever would skip the name too). Members are context IDs, never
+    names."""
+    existing = [row.id for row in client.groups.iter() if row.name == name]
+    if len(existing) > 1:
+        raise SystemExit(
+            f"{len(existing)} groups are named {name!r}; rename them apart "
+            "(groups.rename) and run again"
+        )
+    if existing:
+        client.groups.update(existing[0], add_context_ids=context_ids)
+    else:
         client.groups.create(name, description=description, context_ids=context_ids)
-    except ConflictError:
-        client.groups.update(name, add_context_ids=context_ids)
 
 
 def make_llm(fake_responses: list[str]) -> BaseChatModel:

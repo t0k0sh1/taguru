@@ -53,21 +53,21 @@ classes:
     rename: { route: "POST /contexts/{id}/rename", args: [context_id, to] }
 
   Groups:
-    list: { route: "GET /groups", options: [limit, after] }
+    list: { route: "GET /groups", options: [limit, after, after_id] }
     iter: { route: "GET /groups", options: [limit] }
-    get: { route: "GET /groups/{name}", args: [name] }
-    exists: { route: "GET /groups/{name}", args: [name] }
+    get: { route: "GET /groups/{id}", args: [group_id] }
+    exists: { route: "GET /groups/{id}", args: [group_id] }
     create:
-      route: "PUT /groups/{name}"
+      route: "POST /groups"
       args: [name]
-      options: [description, context_ids, groups]
+      options: [group_id, description, context_ids, groups]
     update:
-      route: "PATCH /groups/{name}"
-      args: [name]
+      route: "PATCH /groups/{id}"
+      args: [group_id]
       options: [description, add_context_ids, remove_context_ids, add_groups, remove_groups]
-    delete: { route: "DELETE /groups/{name}", args: [name] }
-    rename: { route: "POST /groups/{name}/rename", args: [name, to] }
-    export: { route: "GET /groups/{name}/export", args: [name] }
+    delete: { route: "DELETE /groups/{id}", args: [group_id] }
+    rename: { route: "POST /groups/{id}/rename", args: [group_id, to] }
+    export: { route: "GET /groups/{id}/export", args: [group_id] }
 
   Context:
     resolve:

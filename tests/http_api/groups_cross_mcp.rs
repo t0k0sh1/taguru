@@ -23,6 +23,11 @@ fn groups_ride_the_mcp_transport() {
         json!({"name": "drinks", "description": "飲料", "context_ids": [server.cx("sake")]}),
     );
     assert!(created.get("isError").is_none(), "{created}");
+    // The create answers the row; its id is what the other tools take.
+    let drinks: Value =
+        serde_json::from_str(created["content"][0]["text"].as_str().unwrap()).unwrap();
+    let drinks = drinks["result"]["id"].as_str().unwrap().to_string();
+    assert_eq!(drinks, server.gx("drinks"));
     // Nesting rides the same tools: a child at create, deltas at update.
     let nested = tool(
         2,
@@ -39,13 +44,13 @@ fn groups_ride_the_mcp_transport() {
     let updated = tool(
         4,
         "update_group",
-        json!({"name": "drinks", "remove_context_ids": [server.cx("sake")]}),
+        json!({"name": drinks, "remove_context_ids": [server.cx("sake")]}),
     );
     assert!(updated.get("isError").is_none(), "{updated}");
     let text = updated["content"][0]["text"].as_str().unwrap();
     assert!(!text.contains(&server.cx("sake")), "{text}");
 
-    let deleted = tool(5, "delete_group", json!({"name": "drinks"}));
+    let deleted = tool(5, "delete_group", json!({"name": drinks}));
     assert!(deleted.get("isError").is_none(), "{deleted}");
     let listed = tool(6, "list_groups", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
@@ -56,7 +61,7 @@ fn groups_ride_the_mcp_transport() {
 
     // A failing group tool travels as isError content with the API's
     // machine code visible to the agent.
-    let failed = tool(7, "delete_group", json!({"name": "drinks"}));
+    let failed = tool(7, "delete_group", json!({"name": drinks}));
     assert_eq!(failed["isError"], json!(true), "{failed}");
     let text = failed["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("HTTP 404"), "{text}");
@@ -102,9 +107,9 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
         ])),
     );
     server.ok(
-        "PUT",
-        "/groups/kirisawa",
-        Some(json!({"description": "霧沢の酒", "context_ids": [server.cx("brewery"), server.cx("region")]})),
+        "POST",
+        "/groups",
+        group_body("kirisawa", Some(json!({"description": "霧沢の酒", "context_ids": [server.cx("brewery"), server.cx("region")]}))),
     );
 
     // 「青嶺酒造はどの県にあるか」— 所在地 (brewery) と 所在する県
@@ -394,9 +399,12 @@ fn flush_and_export_ride_the_mcp_transport() {
         ])),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        ),
     );
 
     let tool = |id: u64, name: &str, arguments: Value| server.call_tool(id, name, arguments);
@@ -416,7 +424,7 @@ fn flush_and_export_ride_the_mcp_transport() {
     assert!(text.contains("\"type\":\"source\""), "{text}");
     assert!(text.contains("青嶺酒造"), "{text}");
 
-    let group = tool(3, "export_group", json!({"name": "kura"}));
+    let group = tool(3, "export_group", json!({"name": server.gx("kura")}));
     assert!(group.get("isError").is_none(), "{group}");
     let text = group["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("\"type\":\"group\""), "{text}");
@@ -553,9 +561,12 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
         Some(json!({"name": "sake", "description": "酒蔵の記憶"})),
     );
     server.ok(
-        "PUT",
-        "/groups/breweries",
-        Some(json!({"description": "g", "context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "breweries",
+            Some(json!({"description": "g", "context_ids": [server.cx("sake")]})),
+        ),
     );
 
     let call = |name: &str, arguments: Value| {
@@ -580,8 +591,9 @@ fn the_mcp_get_context_and_get_group_tools_return_the_http_rows() {
     assert_eq!(context["name"], json!("sake"));
     assert_eq!(context["description"], json!("酒蔵の記憶"));
 
-    let group = call("get_group", json!({"name": "breweries"}));
-    assert_eq!(group["id"], json!("breweries"));
+    let group = call("get_group", json!({"name": server.gx("breweries")}));
+    assert_eq!(group["id"], json!(server.gx("breweries")));
+    assert_eq!(group["name"], json!("breweries"));
     assert_eq!(group["context_ids"], server.cx_sorted(&["sake"]));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

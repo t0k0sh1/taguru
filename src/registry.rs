@@ -1016,7 +1016,12 @@ pub enum DeleteError {
 
 #[derive(Debug)]
 pub enum CreateGroupError {
-    AlreadyExists,
+    /// The requested id is already a `group` whose record differs from
+    /// the one asked for (#995 decision 1). The same record asked for
+    /// again is not this: a create retried under its id answers the
+    /// standing row, which is how a broadcast that stopped partway
+    /// converges.
+    IdTaken,
     /// Same trap as [`CreateError::InvalidName`]: an empty name would
     /// persist as a bare `.group` file the boot scan (keying on the
     /// extension) never rediscovers.
@@ -1030,10 +1035,9 @@ pub enum CreateGroupError {
     /// through this gate: a child naming the `group` being created is
     /// not registered yet, so it refuses here first.
     NoSuchGroup(String),
-    /// A listed child name is shared by several `groups` (a
-    /// hand-assembled data directory — the name-addressed create never
-    /// mints a duplicate): refused rather than resolved to any one of
-    /// them while the wire still says children by name (#994).
+    /// A listed child name is shared by several `groups` (names are not
+    /// unique): refused rather than resolved to any one of them while
+    /// the wire still says children by name (until #996).
     AmbiguousGroup {
         name: String,
         count: usize,
@@ -1058,9 +1062,9 @@ pub enum UpdateGroupError {
     NoSuchContext(String),
     /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_groups`.
     NoSuchGroup(String),
-    /// [`CreateGroupError::AmbiguousGroup`]'s twin — for the addressed
-    /// `group` itself, an `add_groups` name, or a `remove_groups` name
-    /// two of its children share.
+    /// [`CreateGroupError::AmbiguousGroup`]'s twin — for an
+    /// `add_groups` name, or a `remove_groups` name two of the `group`'s
+    /// children share.
     AmbiguousGroup {
         name: String,
         count: usize,
@@ -1110,12 +1114,9 @@ pub enum PutSchemaError {
 #[derive(Debug)]
 pub enum RenameGroupError {
     NotFound,
-    /// The addressed name is shared by this many `groups`.
-    Ambiguous(usize),
     /// Same trap as [`CreateGroupError::InvalidName`], for the
     /// destination name.
     InvalidName,
-    AlreadyExists,
     Io(io::Error),
 }
 

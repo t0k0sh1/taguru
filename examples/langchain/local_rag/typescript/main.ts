@@ -36,7 +36,7 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { RunnablePassthrough, RunnableSequence } from "@langchain/core/runnables";
 import { FakeListChatModel } from "@langchain/core/utils/testing";
 import { PDFParse } from "pdf-parse";
-import { ConflictError, Taguru } from "taguru";
+import { Taguru } from "taguru";
 import { serverBinary, spawnServer, type SpawnedServer } from "taguru/testing";
 import { TaguruIngester, TaguruRetriever } from "langchain-taguru";
 
@@ -192,19 +192,27 @@ async function pdfToSections(pdfPath: string, paperId: PaperId): Promise<Section
 }
 
 /**
- * Create the group, or fold new contexts into an existing one — group
- * creation 409s on a rerun, so the idempotence has to be handled here.
+ * Create the group, or fold new contexts into the existing one. Group names
+ * are not unique — creating a name again makes a second group — so a rerun
+ * looks the name up first and updates that group by its id.
  */
 async function ensureGroup(client: Taguru, name: string, description: string, contextIds: string[]): Promise<void> {
-  try {
-    await client.groups.create(name, { description, context_ids: contextIds });
-  } catch (error) {
-    if (error instanceof ConflictError) {
-      await client.groups.update(name, { add_context_ids: contextIds });
-    } else {
-      throw error;
+  const existing: string[] = [];
+  for await (const row of client.groups.iter()) {
+    if (row.name === name) {
+      existing.push(row.id);
     }
   }
+  // Several groups under the name leave no one group to update, so that
+  // stops the run (the retriever would skip the name too).
+  if (existing.length > 1) {
+    throw new Error(`${existing.length} groups are named '${name}'; rename them apart (groups.rename) and run again`);
+  }
+  if (existing.length === 1) {
+    await client.groups.update(existing[0]!, { add_context_ids: contextIds });
+    return;
+  }
+  await client.groups.create(name, { description, context_ids: contextIds });
 }
 
 /** A real local Ollama model when OLLAMA_MODEL is set, else a canned fake. */

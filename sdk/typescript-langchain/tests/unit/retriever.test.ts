@@ -1,9 +1,10 @@
 /** TaguruRetriever against the routed fake server — mirrors the Python suite. */
 
+import { TaguruError } from "taguru";
 import { describe, expect, it } from "vitest";
 
 import { TaguruRetriever } from "../../src/retrievers.js";
-import { FakeServer } from "./stub.js";
+import { FakeServer, GROUP_ROWS } from "./stub.js";
 
 const make = (server: FakeServer, fields: Record<string, unknown> = {}) =>
   new TaguruRetriever({ context_id: "sake", client: server.client(), ...fields });
@@ -146,14 +147,40 @@ describe("TaguruRetriever cross-context", () => {
     const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
     const documents = await retriever.invoke("青嶺酒造");
 
-    // parent reaches sake directly and tea through its child group.
-    const fetched = server.calls.filter(([path]) => path.startsWith("/groups/")).map(([p]) => p);
-    expect(new Set(fetched)).toEqual(new Set(["/groups/parent", "/groups/childg"]));
+    // parent reaches sake directly and tea through its child group —
+    // walked over one read of the directory, never a per-group fetch by
+    // name (the single-row route takes ids, #995).
+    const fetched = server.calls.filter(([path]) => path.startsWith("/groups")).map(([p]) => p);
+    expect(fetched).toEqual(["/groups", "/groups"]);
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
     expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
+  });
+
+  it("skips a child name several groups share, keeping the rest of the walk", async () => {
+    // Names are not unique (#995): a second "childg" makes the name
+    // ambiguous, which the server's own cross search refuses — the walk
+    // skips it rather than picking one, and parent's direct member stands.
+    GROUP_ROWS["gid-twin"] = {
+      id: "gid-twin",
+      name: "childg",
+      description: "",
+      context_ids: ["id-tea"],
+      groups: [],
+    };
+    try {
+      const server = new FakeServer();
+      const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      await retriever.invoke("青嶺酒造");
+      const crossSearches = server.calls
+        .filter(([path]) => path === "/sources/search")
+        .map(([, body]) => body);
+      expect(crossSearches).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
+    } finally {
+      delete GROUP_ROWS["gid-twin"];
+    }
   });
 
   it("still resolves the groups it can when one group fails to fetch", async () => {
@@ -167,6 +194,53 @@ describe("TaguruRetriever cross-context", () => {
     // parent's members (sake, tea) still come back even though the
     // sibling group 404s.
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
+  });
+
+  it("refuses a groups-only retrieval whose group directory fails to read", async () => {
+    // Nothing but groups to search: an unreadable directory is the
+    // caller's error, never an empty result that looks complete.
+    for (const after of [0, 1]) {
+      const server = new FakeServer();
+      server.failGroupDirectoryAfter = after;
+      const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      await expect(retriever.invoke("青嶺酒造")).rejects.toBeInstanceOf(TaguruError);
+      expect(server.calls.filter(([path]) => path === "/sources/search")).toEqual([]);
+    }
+  });
+
+  it("keeps the rows read before a directory failure beside the direct targets", async () => {
+    // The first page reads (every row fits on it); the closing page fails.
+    const server = new FakeServer();
+    server.failGroupDirectoryAfter = 1;
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-tea"],
+      groups: ["brewery"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("pages the group walk through rows that share a name", async () => {
+    // A page boundary between two rows named alike: the (name, id) cursor
+    // resumes after the first, never skipping the second.
+    GROUP_ROWS["gid-twin"] = { id: "gid-twin", name: "childg", description: "", context_ids: [], groups: [] };
+    try {
+      const server = new FakeServer();
+      const walked: string[] = [];
+      for await (const row of server.client().groups.iter({ limit: 1 })) {
+        walked.push(`${row.name}/${row.id}`);
+      }
+      const expected = (Object.values(GROUP_ROWS) as { id: string; name: string }[])
+        .map((row) => `${row.name}/${row.id}`)
+        .sort();
+      expect(walked).toEqual(expected);
+    } finally {
+      delete GROUP_ROWS["gid-twin"];
+    }
   });
 
   it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {

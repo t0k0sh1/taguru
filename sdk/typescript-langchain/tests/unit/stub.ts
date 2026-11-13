@@ -22,10 +22,22 @@ export const FACT_ONLY_ASSOCIATION = {
   attributions: [{ source: "口伝", weight: 1.0, count: 1, paragraph: null, section: null }],
 };
 
-const GROUP_ROWS: Record<string, unknown> = {
-  brewery: { id: "brewery", description: "蔵元一式", context_ids: ["id-sake", "id-tea"], groups: [] },
-  parent: { id: "parent", description: "", context_ids: ["id-sake"], groups: ["childg"] },
-  childg: { id: "childg", description: "", context_ids: ["id-tea"], groups: [] },
+export const GROUP_ROWS: Record<string, unknown> = {
+  "gid-brewery": {
+    id: "gid-brewery",
+    name: "brewery",
+    description: "蔵元一式",
+    context_ids: ["id-sake", "id-tea"],
+    groups: [],
+  },
+  "gid-parent": {
+    id: "gid-parent",
+    name: "parent",
+    description: "",
+    context_ids: ["id-sake"],
+    groups: ["childg"],
+  },
+  "gid-childg": { id: "gid-childg", name: "childg", description: "", context_ids: ["id-tea"], groups: [] },
 };
 
 const ok = (result: unknown): Response =>
@@ -50,6 +62,12 @@ export class FakeServer {
    * the text lane) fails with a 500, to exercise text/graph lane
    * isolation. */
   failTextSearch = false;
+  /**
+   * When set, GET /groups fails with a 500 — from the first page (0) or
+   * only from the pages after it (1) — to exercise a group directory that
+   * cannot be read, wholly or partway.
+   */
+  failGroupDirectoryAfter: number | null = null;
   /** /embeddings/refresh's status: 501 (default, no provider configured),
    * 200 (success — served with embeddingsRefreshResult), or 502 (provider
    * error). Mirrors the Python conftest's FakeServer knob of the same
@@ -141,6 +159,27 @@ export class FakeServer {
         JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
         { status: 500 },
       );
+    }
+    if (path === "/groups") {
+      // The server's keyset page: rows in (name, id) order strictly after
+      // the (after, after_id) cursor, `limit` of them. Rows are keyed by id
+      // (#995); they name children by name.
+      const after = url.searchParams.get("after");
+      const page = after === null ? 0 : 1;
+      if (this.failGroupDirectoryAfter !== null && page >= this.failGroupDirectoryAfter) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+          { status: 500 },
+        );
+      }
+      const before = (a: { id: string; name: string }, b: { id: string; name: string }): boolean =>
+        a.name === b.name ? a.id < b.id : a.name < b.name;
+      const rows = Object.values(GROUP_ROWS) as { id: string; name: string }[];
+      rows.sort((a, b) => (before(a, b) ? -1 : 1));
+      const cursor = after === null ? null : { name: after, id: url.searchParams.get("after_id") ?? "" };
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      const rest = cursor === null ? rows : rows.filter((row) => before(cursor, row));
+      return ok({ total: rows.length, groups: rest.slice(0, limit) });
     }
     if (path.startsWith("/groups/")) {
       const row = GROUP_ROWS[path.slice("/groups/".length)];

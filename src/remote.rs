@@ -307,9 +307,9 @@ impl Api {
     ///
     /// `pub(crate)`: `evaluate` (#273) keyset-walks
     /// `GET /contexts/{id}/sources` itself — its `limit`/`after` shape
-    /// does not fit [`Api::list_names`], which assumes each page item is
-    /// an object carrying a `name` field; `sources` pages a bare string
-    /// array instead. No new HTTP client code, per ADR 0004 §11.
+    /// does not fit [`Api::list_group_rows`], which assumes each page item
+    /// is an object carrying `id` and `name`; `sources` pages a bare
+    /// string array instead. No new HTTP client code, per ADR 0004 §11.
     pub(crate) fn get_with_query(
         &self,
         segments: &[&str],
@@ -320,88 +320,88 @@ impl Api {
         finish(request.call(), &url).map_err(ApiFailure::into_message)
     }
 
-    /// Every name in a listing collection (`"contexts"` or
-    /// `"groups"`), keyset-walked with the server's own page size —
-    /// the enumeration step `export --url` (and, after it, `compact
-    /// --url`) needs before it can call each item's own endpoint.
-    pub(crate) fn list_names(&self, collection: &str) -> Result<Vec<String>, String> {
-        self.list_names_paged(collection, LIST_PAGE_LIMIT)
+    /// Every `group` of `GET /groups` as `(id, name)`, keyset-walked
+    /// with the server's own page size — the enumeration step
+    /// `export --url` needs before it can call each `group`'s own
+    /// export endpoint (`/groups/{id}/export`, #995).
+    pub(crate) fn list_group_rows(&self) -> Result<Vec<(String, String)>, String> {
+        self.list_group_rows_paged(LIST_PAGE_LIMIT)
     }
 
-    /// [`Api::list_names`] with an explicit page size, split out so a
-    /// test can walk several pages (including a short-but-nonempty
+    /// [`Api::list_group_rows`] with an explicit page size, split out so
+    /// a test can walk several pages (including a short-but-nonempty
     /// page that must NOT end the walk, only an empty one does — and
     /// the non-advancing-cursor guard) without provisioning thousands
-    /// of `contexts` to cross the real ceiling.
+    /// of `groups` to cross the real ceiling.
     ///
-    /// The collection name doubles as the envelope's array key — both
-    /// `GET /contexts` and `GET /groups` answer `{total, <collection>:
-    /// [{name, ...}, ...]}`, keyset-paged by `after`/`limit`.
-    fn list_names_paged(&self, collection: &str, page: usize) -> Result<Vec<String>, String> {
-        let mut names = Vec::new();
-        let mut after: Option<String> = None;
+    /// The directory sorts by `(name, id)` — names are not unique (ADR
+    /// 0050) — so the cursor is the pair, as for `GET /contexts`.
+    fn list_group_rows_paged(&self, page: usize) -> Result<Vec<(String, String)>, String> {
+        let mut rows = Vec::new();
+        let mut after: Option<(String, String)> = None;
         loop {
             let limit = page.to_string();
             let mut query: Vec<(&str, &str)> = vec![("limit", limit.as_str())];
-            if let Some(cursor) = after.as_deref() {
-                query.push(("after", cursor));
+            if let Some((cursor_name, cursor_id)) = after.as_ref() {
+                query.push(("after", cursor_name.as_str()));
+                query.push(("after_id", cursor_id.as_str()));
             }
-            let body = self.get_with_query(&[collection], &query)?;
-            let items = body[collection]
+            let body = self.get_with_query(&["groups"], &query)?;
+            let items = body["groups"]
                 .as_array()
-                .ok_or_else(|| format!("{}: not a taguru {collection} page", self.base))?;
-            let mut page_names = Vec::with_capacity(items.len());
+                .ok_or_else(|| format!("{}: not a taguru groups page", self.base))?;
+            let mut page_rows = Vec::with_capacity(items.len());
             for item in items {
-                let name = item["id"].as_str().ok_or_else(|| {
-                    format!("{}: a {collection} entry is missing its id", self.base)
-                })?;
-                page_names.push(name.to_string());
+                let field = |key: &str| {
+                    item[key].as_str().map(str::to_string).ok_or_else(|| {
+                        format!("{}: a groups entry is missing its {key}", self.base)
+                    })
+                };
+                page_rows.push((field("id")?, field("name")?));
             }
-            let page_len = page_names.len();
-            // Checked against the FIRST name, not the last: a page is
-            // internally sorted ascending (the server keyset-pages a
-            // name-sorted directory), so first > cursor already proves
-            // every name in the page cleared it. Checking only the
-            // last name would miss a page that partially overlaps the
-            // previous one (cursor "b", page ["a", "c"]) — first > cursor
-            // fails there, catching the would-be duplicate "a".
-            if let (Some(cursor), Some(first)) = (after.as_deref(), page_names.first())
-                && first.as_str() <= cursor
+            let page_len = page_rows.len();
+            // Checked against the FIRST row, not the last: a page is
+            // internally sorted ascending, so first > cursor already
+            // proves every row in the page cleared it. Checking only
+            // the last row would miss a page that partially overlaps
+            // the previous one (cursor "b", page ["a", "c"]) — first >
+            // cursor fails there, catching the would-be duplicate "a".
+            if let (Some((cursor_name, cursor_id)), Some((first_id, first_name))) =
+                (after.as_ref(), page_rows.first())
+                && (first_name.as_str(), first_id.as_str())
+                    <= (cursor_name.as_str(), cursor_id.as_str())
             {
                 return Err(format!(
-                    "the server's {collection} page did not advance past '{cursor}'"
+                    "the server's groups page did not advance past '{cursor_name}'"
                 ));
             }
-            after = page_names.last().cloned();
-            names.extend(page_names);
-            // Only an EMPTY page marks the end — `after.is_none()` is
-            // exactly that condition, since a non-empty page always
-            // leaves a last name behind. A page shorter than `limit`
-            // is not a signal to stop: the server's own contract
-            // (`directory_page`) allows a short-but-nonempty page when
-            // a delete races the seek, and re-seeks internally only
-            // when the whole window comes up empty — so a short page
-            // here can still have more names after it. Stopping on
-            // `page_len < page` silently truncated the walk on that
-            // race; `export --url`'s enumeration must not drop names.
+            after = page_rows
+                .last()
+                .map(|(id, name)| (name.clone(), id.clone()));
+            rows.extend(page_rows);
+            // Only an EMPTY page marks the end — `after` is left
+            // behind by every non-empty page. A page shorter than
+            // `limit` is not a signal to stop: a delete racing the
+            // server's seek may answer a short-but-nonempty page with
+            // more rows still after it, and `export --url`'s
+            // enumeration must not drop any.
             if page_len == 0 {
                 break;
             }
         }
-        Ok(names)
+        Ok(rows)
     }
 
     /// Every row of `GET /contexts`, keyset-walked the same way
-    /// [`Api::list_names`] walks `"contexts"`/`"groups"` but decoded
+    /// [`Api::list_group_rows`] walks `"groups"` but decoded
     /// whole — `compact --dry-run --url` (issue #371) needs each row's
     /// `stats` (`dead_edges`, `associations`, `arena_slack`, …), which
     /// a bare name throws away. `GET /contexts` already carries them
     /// per row, so no new server surface is required.
     ///
     /// `contexts`-only: `GET /groups` rows don't decode as
-    /// [`crate::registry::DirectoryEntry`] (no `stats`/`usage`), so
-    /// this has no `collection` parameter the way `list_names` does —
-    /// a caller enumerating `groups` keeps using `list_names("groups")`.
+    /// [`crate::registry::DirectoryEntry`] (no `stats`/`usage`) — a
+    /// caller enumerating `groups` uses [`Api::list_group_rows`].
     pub(crate) fn list_context_entries(
         &self,
     ) -> Result<Vec<crate::registry::DirectoryEntry>, String> {
@@ -409,7 +409,7 @@ impl Api {
     }
 
     /// [`Api::list_context_entries`] with an explicit page size — same
-    /// split-out-for-testing reason as [`Api::list_names_paged`].
+    /// split-out-for-testing reason as [`Api::list_group_rows_paged`].
     fn list_context_entries_paged(
         &self,
         page: usize,
@@ -436,7 +436,7 @@ impl Api {
                 page_rows.push(entry);
             }
             let page_len = page_rows.len();
-            // Same first-vs-cursor advancement check `list_names_paged`
+            // Same first-vs-cursor advancement check `list_group_rows_paged`
             // runs — see its comment for why the first row, not the
             // last, is the one compared. The directory sorts by
             // `(name, id)` (names are not unique, #964), so the
@@ -455,7 +455,7 @@ impl Api {
                 .map(|entry| (entry.name.clone(), entry.id.clone()));
             rows.extend(page_rows);
             // Only an EMPTY page marks the end — see
-            // `list_names_paged`'s comment for why a short-but-nonempty
+            // `list_group_rows_paged`'s comment for why a short-but-nonempty
             // page must not stop the walk.
             if page_len == 0 {
                 break;
@@ -1249,7 +1249,7 @@ mod tests {
     /// connection per entry in order, answer each with its own fixed
     /// status and JSON body, close, then move to the next. Lets a test
     /// exercise a client that issues several requests in sequence
-    /// (`list_names_paged`'s keyset walk) against one fake server, and
+    /// (`list_group_rows_paged`'s keyset walk) against one fake server, and
     /// hands back each request's start line so the test can assert on
     /// the query string the client actually sent.
     fn respond_in_order_capturing(
@@ -1280,27 +1280,40 @@ mod tests {
         (format!("http://{addr}"), requests)
     }
 
+    fn group_row(id: &str, name: &str) -> serde_json::Value {
+        json!({"id": id, "name": name})
+    }
+
     #[test]
-    fn list_names_walks_after_cursors_until_an_empty_page() {
+    fn list_group_rows_walks_name_and_id_cursors_until_an_empty_page() {
         let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
+                json!({"result": {"total": 4, "groups": [group_row("i1", "a"), group_row("i2", "b")]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"id": "c"}, {"id": "d"}]}}),
+                json!({"result": {"total": 4, "groups": [group_row("i3", "b"), group_row("i4", "d")]}}),
             ),
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": []}}),
+                json!({"result": {"total": 4, "groups": []}}),
             ),
         ]);
         let api = Api::new(base);
-        let names = api
-            .list_names_paged("contexts", 2)
+        let rows = api
+            .list_group_rows_paged(2)
             .expect("three pages should walk cleanly to an empty-page end");
-        assert_eq!(names, vec!["a", "b", "c", "d"]);
+        let pair = |id: &str, name: &str| (id.to_string(), name.to_string());
+        assert_eq!(
+            rows,
+            vec![
+                pair("i1", "a"),
+                pair("i2", "b"),
+                pair("i3", "b"),
+                pair("i4", "d")
+            ]
+        );
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3, "{requests:?}");
@@ -1309,40 +1322,47 @@ mod tests {
             "{}",
             requests[0]
         );
-        assert!(requests[1].contains("after=b"), "{}", requests[1]);
-        assert!(requests[2].contains("after=d"), "{}", requests[2]);
+        // A name shared across the page break resumes inside its run.
+        assert!(
+            requests[1].contains("after=b") && requests[1].contains("after_id=i2"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[2].contains("after=d") && requests[2].contains("after_id=i4"),
+            "{}",
+            requests[2]
+        );
     }
 
-    /// The server's own contract (`registry::context_io::directory_page`)
-    /// allows a page shorter than `limit` to come back non-empty — a
+    /// The server may answer a page shorter than `limit` non-empty — a
     /// delete racing the seek — without that meaning the directory is
     /// exhausted. Only an empty page marks the end; a short-but-nonempty
-    /// one must not truncate the walk (this is what `page_len < page`
-    /// used to do wrong).
+    /// one must not truncate the walk.
     #[test]
     fn a_short_nonempty_page_does_not_end_the_walk() {
         let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 3, "contexts": [{"id": "a"}, {"id": "b"}]}}),
+                json!({"result": {"total": 3, "groups": [group_row("i1", "a"), group_row("i2", "b")]}}),
             ),
             // Short (1 < limit 2) but non-empty: a delete raced the
             // seek on the server side. The walk must keep going.
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 3, "contexts": [{"id": "c"}]}}),
+                json!({"result": {"total": 3, "groups": [group_row("i3", "c")]}}),
             ),
             // Only this empty page is the real end.
             (
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 3, "contexts": []}}),
+                json!({"result": {"total": 3, "groups": []}}),
             ),
         ]);
         let api = Api::new(base);
-        let names = api
-            .list_names_paged("contexts", 2)
+        let rows = api
+            .list_group_rows_paged(2)
             .expect("a short-but-nonempty page must not truncate enumeration");
-        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(rows.len(), 3);
 
         let requests = requests.lock().unwrap();
         assert_eq!(
@@ -1354,52 +1374,64 @@ mod tests {
     }
 
     #[test]
-    fn list_names_refuses_a_page_that_does_not_advance() {
-        let (base, _requests) = respond_in_order_capturing(vec![
-            (
-                "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
-            ),
-            (
-                "HTTP/1.1 200 OK",
-                json!({"result": {"total": 4, "contexts": [{"id": "a"}, {"id": "b"}]}}),
-            ),
-        ]);
-        let api = Api::new(base);
-        let error = api
-            .list_names_paged("contexts", 2)
-            .expect_err("a page that repeats the previous cursor must not loop forever");
-        assert!(error.contains("did not advance"), "{error}");
+    fn list_group_rows_refuses_a_page_that_does_not_advance() {
+        for second in [
+            // The same page again.
+            json!([group_row("i1", "a"), group_row("i2", "b")]),
+            // Same name as the cursor, an id at or below it.
+            json!([group_row("i2", "b"), group_row("i9", "c")]),
+            json!([group_row("i1", "b")]),
+        ] {
+            let (base, _requests) = respond_in_order_capturing(vec![
+                (
+                    "HTTP/1.1 200 OK",
+                    json!({"result": {"total": 4, "groups": [group_row("i1", "a"), group_row("i2", "b")]}}),
+                ),
+                (
+                    "HTTP/1.1 200 OK",
+                    json!({"result": {"total": 4, "groups": second}}),
+                ),
+            ]);
+            let api = Api::new(base);
+            let error = api
+                .list_group_rows_paged(2)
+                .expect_err("a page that does not clear the cursor must not loop forever");
+            assert!(error.contains("did not advance"), "{error}");
+        }
     }
 
-    /// A row without `id` — including a pre-#851 server's `name`-keyed
-    /// row — is refused, never silently skipped.
+    /// A row without `id` or `name` — including a pre-#995 server's row,
+    /// whose `id` was the name and which had no `name` — is refused,
+    /// never silently skipped.
     #[test]
-    fn list_names_refuses_a_page_without_ids() {
-        for row in [
-            json!({"description": "no id field"}),
-            json!({"name": "a", "description": "the old key"}),
+    fn list_group_rows_refuses_a_row_without_an_id_or_a_name() {
+        for (row, missing) in [
+            (json!({"name": "a"}), "missing its id"),
+            (
+                json!({"id": "a", "description": "the old row"}),
+                "missing its name",
+            ),
         ] {
             let base = respond_once(
                 "HTTP/1.1 200 OK",
-                json!({"result": {"total": 1, "contexts": [row]}}),
+                json!({"result": {"total": 1, "groups": [row]}}),
             );
             let api = Api::new(base);
             let error = api
-                .list_names_paged("contexts", 10)
-                .expect_err("a listing entry without an id must not be silently skipped");
-            assert!(error.contains("missing its id"), "{error}");
+                .list_group_rows_paged(10)
+                .expect_err("a listing entry without an id or a name must not be skipped");
+            assert!(error.contains(missing), "{error}");
         }
     }
 
     #[test]
-    fn an_empty_collection_lists_as_no_names() {
+    fn an_empty_collection_lists_as_no_rows() {
         let base = respond_once(
             "HTTP/1.1 200 OK",
             json!({"result": {"total": 0, "groups": []}}),
         );
         let api = Api::new(base);
-        assert_eq!(api.list_names("groups"), Ok(Vec::new()));
+        assert_eq!(api.list_group_rows(), Ok(Vec::new()));
     }
 
     #[test]
@@ -1419,7 +1451,7 @@ mod tests {
         assert_eq!(REMOTE_RESPONSE_CAP_BYTES, 268_435_456);
     }
 
-    /// Issue #753: the entries walk mirrors `list_names_paged`'s
+    /// Issue #753: the entries walk mirrors `list_group_rows_paged`'s
     /// contract — a short-but-nonempty page continues (only an empty
     /// page ends the walk), and a page that does not advance past the
     /// cursor is refused rather than looping on duplicates.

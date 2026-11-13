@@ -1,0 +1,17 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "groups_export",
+  "request": null,
+  "response": {
+    "description": "蔵元一式",
+    "groups": [
+      "child"
+    ],
+    "id": "sakagura",
+    "type": "group",
+    "version": "2026-10-01"
+  },
+  "route": "/groups/{id}/export",
+  "status": 200
+}

@@ -349,9 +349,9 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
         );
     }
     server.ok(
-        "PUT",
-        "/groups/minerals",
-        Some(json!({"description": "", "context_ids": [server.cx("amber"), server.cx("quartz")], "groups": []})),
+        "POST",
+        "/groups",
+        group_body("minerals", Some(json!({"description": "", "context_ids": [server.cx("amber"), server.cx("quartz")], "groups": []}))),
     );
 
     let single = server.ok(

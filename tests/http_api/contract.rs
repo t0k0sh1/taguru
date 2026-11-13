@@ -274,6 +274,89 @@ fn recall_match_page_and_contexts_list() {
     );
 }
 
+/// The `group` shapes (#995): a row is `{id, name, …}`, addressed by
+/// its id everywhere — the create's answer, the single row, the
+/// listing, a delta update, a rename, an export record, and a delete.
+#[test]
+fn group_rows_and_operations() {
+    let server =
+        Server::start_with_env("contract-groups", &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")]);
+    seed_basic_corpus(&server, "corpus-g");
+    let member = server.cx("corpus-g");
+
+    let request = json!({"name": "kura", "description": "蔵元一式", "context_ids": [member]});
+    let (status, body) = server.call("POST", "/groups", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    let id = body["result"]["id"].as_str().unwrap().to_string();
+    http_fixture(
+        "groups_create",
+        "POST",
+        "/groups",
+        Some(request),
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("GET", &format!("/groups/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    http_fixture("groups_get", "GET", "/groups/{id}", None, status, body);
+
+    server.ok("POST", "/groups", Some(json!({"name": "child"})));
+    let request = json!({"add_groups": ["child"], "remove_context_ids": [member]});
+    let (status, body) = server.call("PATCH", &format!("/groups/{id}"), Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    http_fixture(
+        "groups_update",
+        "PATCH",
+        "/groups/{id}",
+        Some(request),
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("GET", "/groups", None);
+    assert_eq!(status, 200, "{body}");
+    http_fixture("groups_list", "GET", "/groups", None, status, body);
+
+    let request = json!({"to": "sakagura"});
+    let (status, body) = server.call(
+        "POST",
+        &format!("/groups/{id}/rename"),
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    http_fixture(
+        "groups_rename",
+        "POST",
+        "/groups/{id}/rename",
+        Some(request),
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("GET", &format!("/groups/{id}/export"), None);
+    assert_eq!(status, 200, "{body}");
+    http_fixture(
+        "groups_export",
+        "GET",
+        "/groups/{id}/export",
+        None,
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("DELETE", &format!("/groups/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    http_fixture(
+        "groups_delete",
+        "DELETE",
+        "/groups/{id}",
+        None,
+        status,
+        body,
+    );
+}
+
 #[test]
 fn explore_and_activate_pages() {
     let server = Server::start_with_env(

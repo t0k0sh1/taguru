@@ -729,10 +729,16 @@ export class Contexts {
 export class Groups {
   constructor(private readonly client: Taguru) {}
 
-  /** One directory page (keyset cursor: `after` = last name shown). */
-  async list(options: { limit?: number; after?: string } = {}): Promise<GroupPage> {
+  /**
+   * One directory page, ordered by `(name, id)`. The keyset cursor is the
+   * last row shown: `after` its `name` and `after_id` its `id` (names are
+   * not unique, so the id breaks ties).
+   */
+  async list(
+    options: { limit?: number; after?: string; after_id?: string } = {},
+  ): Promise<GroupPage> {
     const result = await this.client.requestJson("GET", "/groups", {
-      params: { limit: options.limit, after: options.after },
+      params: { limit: options.limit, after: options.after, after_id: options.after_id },
     });
     return result as GroupPage;
   }
@@ -740,26 +746,29 @@ export class Groups {
   /** Walk every directory page transparently. */
   async *iter(options: { limit?: number } = {}): AsyncGenerator<GroupEntry, void, undefined> {
     let after: string | undefined;
+    let afterId: string | undefined;
     for (;;) {
-      const page = await this.list({ limit: options.limit, after });
+      const page = await this.list({ limit: options.limit, after, after_id: afterId });
       if (page.groups.length === 0) {
         return;
       }
       yield* page.groups;
       // A short page is not the last one: a concurrent delete can shorten
       // it while later rows remain, so page until an empty page.
-      after = page.groups[page.groups.length - 1]!.id;
+      const last = page.groups[page.groups.length - 1]!;
+      after = last.name;
+      afterId = last.id;
     }
   }
 
-  async get(name: string): Promise<GroupEntry> {
-    const result = await this.client.requestJson("GET", `/groups/${encodeName(name)}`);
+  async get(groupId: string): Promise<GroupEntry> {
+    const result = await this.client.requestJson("GET", `/groups/${encodeName(groupId)}`);
     return result as GroupEntry;
   }
 
-  async exists(name: string): Promise<boolean> {
+  async exists(groupId: string): Promise<boolean> {
     try {
-      await this.get(name);
+      await this.get(groupId);
     } catch (error) {
       if (error instanceof NotFoundError) {
         return false;
@@ -770,23 +779,40 @@ export class Groups {
   }
 
   /**
-   * Create a `group` (409 ConflictError if it already exists). Every listed
-   * member — a `context` (by id) or a child `group` (by name) — must already
-   * exist; a `group` and a `context` may share the same name without conflict.
+   * Create a `group` and return its row — `id` included, which every other
+   * `group` call takes. `name` is a label, not unique: creating a name again
+   * makes a second `group`. Every listed member — a `context` (by id) or a
+   * child `group` (by name) — must already exist; a `group` and a `context`
+   * may share the same name without conflict.
+   *
+   * `group_id` creates the `group` under that id (a canonical UUID) instead
+   * of one the server mints. A create under an id that already stands
+   * answers that row when the record is identical and throws
+   * `ConflictError` when it differs — so the call converges on retry, and it
+   * is how a create a router stopped partway is finished.
    */
   async create(
     name: string,
-    options: { description?: string; context_ids?: string[]; groups?: string[] } = {},
-  ): Promise<boolean> {
-    const result = await this.client.requestJson("PUT", `/groups/${encodeName(name)}`, {
+    options: {
+      group_id?: string;
+      description?: string;
+      context_ids?: string[];
+      groups?: string[];
+    } = {},
+  ): Promise<GroupEntry> {
+    const result = await this.client.requestJson("POST", "/groups", {
       jsonBody: dropUndefined({
+        name,
+        id: options.group_id,
         description: options.description ?? "",
         context_ids: options.context_ids,
         groups: options.groups,
       }),
-      retry: "unsafe_on_ambiguous",
+      // Under a caller's id a repeat converges, so an ambiguous failure
+      // is safe to retry; a minted id is not.
+      retry: options.group_id !== undefined ? "safe" : "unsafe_on_ambiguous",
     });
-    return Boolean(result);
+    return result as GroupEntry;
   }
 
   /**
@@ -796,7 +822,7 @@ export class Groups {
    * child `groups` — past that, split into nested child `groups`.
    */
   async update(
-    name: string,
+    groupId: string,
     options: {
       description?: string;
       add_context_ids?: string[];
@@ -805,7 +831,7 @@ export class Groups {
       remove_groups?: string[];
     } = {},
   ): Promise<GroupEntry> {
-    const result = await this.client.requestJson("PATCH", `/groups/${encodeName(name)}`, {
+    const result = await this.client.requestJson("PATCH", `/groups/${encodeName(groupId)}`, {
       jsonBody: dropUndefined({
         description: options.description,
         add_context_ids: options.add_context_ids,
@@ -818,8 +844,8 @@ export class Groups {
   }
 
   /** Delete the bundling only — member `contexts` and child `groups` stay. */
-  async delete(name: string): Promise<boolean> {
-    const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`, {
+  async delete(groupId: string): Promise<boolean> {
+    const result = await this.client.requestJson("DELETE", `/groups/${encodeName(groupId)}`, {
       // A repeat delete 404s, so a phantom retry after an ambiguous
       // transport failure would surface as NotFoundError even though
       // the first delete already applied.
@@ -829,14 +855,19 @@ export class Groups {
   }
 
   /**
-   * Rename a `group` (admin role): the `group`'s file moves to `to`, and
-   * every OTHER `group` naming it as a child is rewritten to match.
+   * Rename a `group` (admin role): a display-name change and nothing else —
+   * the id and every parent nesting it stay put. Names are not unique, so
+   * `to` may already be in use.
    */
-  async rename(name: string, to: string): Promise<boolean> {
-    const result = await this.client.requestJson("POST", `/groups/${encodeName(name)}/rename`, {
-      jsonBody: { to },
-      retry: "unsafe_on_ambiguous",
-    });
+  async rename(groupId: string, to: string): Promise<boolean> {
+    const result = await this.client.requestJson(
+      "POST",
+      `/groups/${encodeName(groupId)}/rename`,
+      {
+        jsonBody: { to },
+        retry: "unsafe_on_ambiguous",
+      },
+    );
     return Boolean(result);
   }
 
@@ -844,8 +875,8 @@ export class Groups {
    * The `group` as one import-stream record (a `group` JSON line);
    * `importBatches` restores it as a whole-record replace.
    */
-  async export(name: string): Promise<string> {
-    return (await this.client.send("GET", `/groups/${encodeName(name)}/export`)).text;
+  async export(groupId: string): Promise<string> {
+    return (await this.client.send("GET", `/groups/${encodeName(groupId)}/export`)).text;
   }
 }
 

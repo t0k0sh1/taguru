@@ -748,14 +748,20 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     }
     // sakaya bundles izakaya; nomiya bundles sakagura and nests sakaya.
     server.ok(
-        "PUT",
-        "/groups/sakaya",
-        Some(json!({"context_ids": [server.cx("izakaya")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "sakaya",
+            Some(json!({"context_ids": [server.cx("izakaya")]})),
+        ),
     );
     server.ok(
-        "PUT",
-        "/groups/nomiya",
-        Some(json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"]})),
+        "POST",
+        "/groups",
+        group_body(
+            "nomiya",
+            Some(json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"]})),
+        ),
     );
 
     // One group name reaches both contexts through the nesting.
@@ -808,7 +814,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     assert_eq!(hits[1]["context_name"], json!("izakaya"), "{hits:?}");
 
     // An empty group is an empty result, not an error…
-    server.ok("PUT", "/groups/kara", Some(json!({})));
+    server.ok("POST", "/groups", group_body("kara", Some(json!({}))));
     let empty = server.ok(
         "POST",
         "/recall",
@@ -1008,9 +1014,12 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
         assert_eq!(status, 200);
     }
     let (status, _) = call(
-        "PUT",
-        "/groups/zenbu",
-        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "zenbu",
+            Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        ),
         "atok",
     );
     assert_eq!(status, 200);
@@ -1035,9 +1044,9 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     // A group with nothing in the grant answers empty, exactly as an
     // empty group would — never a refusal naming the hidden member.
     let (status, _) = call(
-        "PUT",
-        "/groups/soto",
-        Some(json!({"context_ids": [server.cx("bunko")]})),
+        "POST",
+        "/groups",
+        group_body("soto", Some(json!({"context_ids": [server.cx("bunko")]}))),
         "atok",
     );
     assert_eq!(status, 200);

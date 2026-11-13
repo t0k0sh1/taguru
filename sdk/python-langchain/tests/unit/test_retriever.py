@@ -15,12 +15,13 @@ from taguru import (
     Attribution,
     Citation,
     Taguru,
+    TaguruError,
     TieredResolution,
 )
 
 from taguru_langchain import TaguruRetriever
 
-from .conftest import FakeServer
+from .conftest import GROUP_ROWS, FakeServer
 
 
 def make_retriever(
@@ -148,14 +149,33 @@ def test_groups_resolve_to_members_nested_children_included(
     retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
     documents = retriever.invoke("青嶺酒造")
 
-    # parent reaches sake directly and tea through its child group.
-    fetched = [path for path, _ in fake_server.calls if path.startswith("/groups/")]
-    assert set(fetched) == {"/groups/parent", "/groups/childg"}
+    # parent reaches sake directly and tea through its child group — walked
+    # over one read of the directory, never a per-group fetch by name (the
+    # single-row route takes ids, #995).
+    fetched = [path for path, _ in fake_server.calls if path.startswith("/groups")]
+    assert fetched == ["/groups", "/groups"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
         {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
     ]
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
+
+
+def test_a_child_name_several_groups_share_contributes_nothing(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Names are not unique (#995): a second "childg" makes the name
+    # ambiguous, which the server's own cross search refuses — the walk
+    # skips it rather than picking one, and parent's direct member stands.
+    twin = {"id": "gid-twin", "name": "childg", "description": "", "groups": []}
+    monkeypatch.setitem(GROUP_ROWS, "gid-twin", {**twin, "context_ids": ["id-tea"]})
+    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    retriever.invoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
 
 
 def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
@@ -178,6 +198,62 @@ async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fe
     )
     documents = await retriever.ainvoke("青嶺酒造")
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
+
+
+def test_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    # Nothing but groups to search: an unreadable directory is the
+    # caller's error, never an empty result that looks complete.
+    fake_server.fail_group_directory_after = 1
+    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    with pytest.raises(TaguruError):
+        retriever.invoke("青嶺酒造")
+    assert not [path for path, _ in fake_server.calls if path == "/sources/search"]
+
+
+async def test_async_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_group_directory_after = 0
+    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    with pytest.raises(TaguruError):
+        await retriever.ainvoke("青嶺酒造")
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_a_directory_failing_partway_keeps_the_rows_read_beside_direct_targets(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    # The first page reads (every row fits on it); the closing page
+    # fails. The rows already read still resolve, beside the direct
+    # target.
+    fake_server.fail_group_directory_after = 1
+    retriever = TaguruRetriever(
+        context_ids=["id-tea"], groups=["brewery"], client=sync_client, async_client=async_client
+    )
+    if lane == "sync":
+        retriever.invoke("青嶺酒造")
+    else:
+        await retriever.ainvoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [
+        {"context_ids": ["id-tea", "id-sake"], "query": "青嶺酒造", "limit": 5}
+    ]
+
+
+def test_the_group_walk_pages_through_rows_that_share_a_name(
+    sync_client: Taguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A page boundary between two rows named alike: the (name, id)
+    # cursor resumes after the first, never skipping the second.
+    monkeypatch.setitem(
+        GROUP_ROWS,
+        "gid-twin",
+        {"id": "gid-twin", "name": "childg", "description": "", "context_ids": [], "groups": []},
+    )
+    walked = [(row.name, row.id) for row in sync_client.groups.iter(limit=1)]
+    assert walked == sorted((row["name"], row["id"]) for row in GROUP_ROWS.values())
 
 
 def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(

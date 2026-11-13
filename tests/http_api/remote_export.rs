@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::support::{Server, batch_dir, run_cli, run_import};
+use crate::support::{Server, batch_dir, group_body, run_cli, run_import};
 
 /// A well-formed id no context carries — subset args are ids (#964),
 /// so "unknown context" means an unresolvable id, not an unknown name.
@@ -139,9 +139,12 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
         Some(json!({"name": "bunko", "description": "d"})),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+        ),
     );
 
     let out = std::env::temp_dir().join(format!(
@@ -173,8 +176,10 @@ fn a_subset_remote_export_skips_enumeration_and_writes_no_groups() {
     let metrics_text = metrics_body
         .as_str()
         .expect("metrics body is text, not JSON");
+    // `POST /groups` (the seed above) shares the route template, so
+    // the method is part of the check.
     assert!(
-        !metrics_text.contains("route=\"/groups\""),
+        !metrics_text.contains("method=\"GET\",route=\"/groups\""),
         "a subset export must never call GET /groups: {metrics_text}"
     );
 
@@ -471,14 +476,14 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: a valid record — for the WRONG
-            // group.
+            // GET /groups/{g's id}/export: a valid record — for the
+            // WRONG group.
             (
                 "HTTP/1.1 200 OK",
                 r#"{"type": "group", "id":"h","description":"x","context_ids":["cef2e28b-43f0-4b6c-8201-abab0785399f"]}"#.to_string(),
@@ -518,7 +523,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Issue #751: `GET /groups/{name}/export` answering something that is
+/// Issue #751: `GET /groups/{id}/export` answering something that is
 /// not a group record — here a well-formed JSON object with a 200
 /// status — is a per-item failure, and nothing lands on disk for it.
 /// "Parses as JSON" alone used to let any such body through as a
@@ -554,13 +559,14 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: valid JSON, but no group record.
+            // GET /groups/{g's id}/export: valid JSON, but no group
+            // record.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
         ];
         for (status_line, body) in responses {
@@ -754,18 +760,19 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups: two groups, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":2,"groups":[{"id":"g"},{"id":"h"}]}}"#.to_string(),
+                r#"{"result":{"total":2,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"},{"id":"00000000-0000-4000-9000-00000000000b","name":"h"}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":2,"groups":[]}}"#.to_string(),
             ),
-            // GET /groups/g/export: gone between enumeration and fetch.
+            // GET /groups/{g's id}/export: gone between enumeration and
+            // fetch.
             (
                 "HTTP/1.1 404 Not Found",
                 r#"{"status":"error","code":"no_context","error":"no such group"}"#.to_string(),
             ),
-            // GET /groups/h/export: the survivor still lands.
+            // GET /groups/{h's id}/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
                 r#"{"type": "group", "id":"h","description":"x","context_ids":[]}"#.to_string(),
@@ -814,6 +821,86 @@ fn per_item_failures_count_and_the_rest_still_lands() {
         !contents.contains_key("g.group.jsonl"),
         "a failed fetch must leave nothing on disk: {contents:?}"
     );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Two `groups` sharing a name would write one `{name}.group.jsonl`
+/// twice, so the remote export refuses each of them — one failure per
+/// group, counted in the summary — and still exports the rest, the
+/// same refusal the local export makes.
+#[test]
+fn groups_sharing_a_name_each_count_as_a_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"id":"cef2e28b-43f0-4b6c-8201-abab0785399f","name":"sake","description":"","pinned":false,"loaded":false,"dice_floor":null,"semantic_floor":null,"stats":{},"usage":{}}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            ("HTTP/1.1 200 OK", "not an export stream".to_string()),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":3,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"same"},{"id":"00000000-0000-4000-9000-00000000000b","name":"same"},{"id":"00000000-0000-4000-9000-00000000000c","name":"solo"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":3,"groups":[]}}"#.to_string(),
+            ),
+            // Only `solo` is fetched.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"type": "group", "id":"solo","description":"x","context_ids":[]}"#.to_string(),
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-shared-name");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    for id in [
+        "00000000-0000-4000-9000-00000000000a",
+        "00000000-0000-4000-9000-00000000000b",
+    ] {
+        assert!(
+            stderr.contains(&format!(
+                "group 'same' ({id}): several groups share this name"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        stdout.contains("export: 0 of 1 context(s) and 1 of 3 group(s)"),
+        "{stdout}"
+    );
+    let contents = dir_contents(&out);
+    assert!(!contents.contains_key("same.group.jsonl"), "{contents:?}");
+    assert!(contents.contains_key("solo.group.jsonl"), "{contents:?}");
     let _ = std::fs::remove_dir_all(&out);
 }
 

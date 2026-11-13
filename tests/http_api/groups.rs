@@ -18,30 +18,80 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
         );
     }
 
-    server.ok(
-        "PUT",
-        "/groups/fruit",
-        Some(json!({"description": "果物の文脈", "context_ids": [server.cx("banana"), server.cx("apple")]})),
+    // POST mints the id and answers the new row (#995).
+    let created = server.ok(
+        "POST",
+        "/groups",
+        group_body(
+            "fruit",
+            Some(json!({"description": "果物の文脈", "context_ids": [server.cx("banana"), server.cx("apple")]})),
+        ),
     );
-    // Create is PUT-once: a second landing answers already_exists.
-    let (status, dup) = server.call("PUT", "/groups/fruit", None);
-    assert_eq!(status, 409, "{dup}");
-    assert_eq!(dup["code"], json!("already_exists"));
-    // An absent body is a valid create (defaults) — an empty group is
-    // how "create first, fill later" starts.
-    server.ok("PUT", "/groups/empty", None);
+    let fruit = created["id"]
+        .as_str()
+        .expect("the row carries its id")
+        .to_string();
+    assert_eq!(created["name"], json!("fruit"));
+    assert_eq!(
+        created["context_ids"],
+        server.cx_sorted(&["apple", "banana"])
+    );
+    assert_eq!(fruit, server.gx("fruit"), "the id is the file's stem");
+    // A create is no longer keyed by name: the same name again mints a
+    // second group; the caller's own id, repeated with the same
+    // record, answers the standing row instead (a retry converges),
+    // and with a different record is refused.
+    let twin = server.create_group("fruit", None);
+    assert_ne!(twin, fruit);
+    let pinned = "00000000-0000-4000-9000-0000000000f1";
+    let mut body = group_body("pinned", None).unwrap();
+    body["id"] = json!(pinned);
+    let first = server.ok("POST", "/groups", Some(body.clone()));
+    assert_eq!(first["id"], json!(pinned));
+    assert_eq!(server.ok("POST", "/groups", Some(body.clone())), first);
+    body["description"] = json!("different");
+    let (status, taken) = server.call("POST", "/groups", Some(body));
+    assert_eq!(status, 409, "{taken}");
+    assert_eq!(taken["code"], json!("already_exists"));
+    // An id that is not a canonical UUID is a 400 — in the body and in
+    // the path alike — never a lookup.
+    for id in ["fruit", "00000000-0000-4000-9000-0000000000F1"] {
+        let mut body = group_body("x", None).unwrap();
+        body["id"] = json!(id);
+        let (status, refused) = server.call("POST", "/groups", Some(body));
+        assert_eq!(status, 400, "{id}: {refused}");
+        let (status, refused) = server.call("GET", &format!("/groups/{id}"), None);
+        assert_eq!(status, 400, "{id}: {refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("is not a group id"),
+            "{refused}"
+        );
+    }
+    // A create needs a name.
+    let (status, nameless) = server.call("POST", "/groups", None);
+    assert_eq!(status, 400, "{nameless}");
+    for id in [twin.as_str(), pinned] {
+        server.ok("DELETE", &format!("/groups/{id}"), None);
+    }
+    // A body with only the name is a valid create (defaults) — an empty
+    // group is how "create first, fill later" starts.
+    let empty = server.create_group("empty", None);
 
-    // The directory pages by name, `total` cursor-independent, exactly
-    // like /contexts.
+    // The directory pages by (name, id), `total` cursor-independent,
+    // exactly like /contexts.
     let page = server.ok("GET", "/groups", None);
     assert_eq!(page["total"], json!(2), "{page}");
     let names: Vec<&str> = page["groups"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|group| group["id"].as_str().unwrap())
+        .map(|group| group["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["empty", "fruit"], "name order");
+    assert_eq!(page["groups"][0]["id"], json!(empty));
     assert_eq!(
         page["groups"][1]["context_ids"],
         server.cx_sorted(&["apple", "banana"]),
@@ -49,13 +99,22 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
     );
     let page = server.ok("GET", "/groups?limit=1", None);
     assert_eq!(page["total"], json!(2));
-    assert_eq!(page["groups"][0]["id"], json!("empty"));
+    assert_eq!(page["groups"][0]["id"], json!(empty));
     let page = server.ok("GET", "/groups?limit=1&after=empty", None);
-    assert_eq!(page["groups"][0]["id"], json!("fruit"));
+    assert_eq!(page["groups"][0]["id"], json!(fruit));
+    let page = server.ok(
+        "GET",
+        &format!("/groups?limit=1&after=empty&after_id={empty}"),
+        None,
+    );
+    assert_eq!(page["groups"][0]["id"], json!(fruit));
+    let (status, alone) = server.call("GET", &format!("/groups?after_id={empty}"), None);
+    assert_eq!(status, 400, "after_id needs after: {alone}");
 
-    let single = server.ok("GET", "/groups/fruit", None);
+    let single = server.ok("GET", &format!("/groups/{fruit}"), None);
     assert_eq!(single["description"], json!("果物の文脈"));
-    let (status, missing) = server.call("GET", "/groups/nope", None);
+    assert_eq!(single["name"], json!("fruit"));
+    let (status, missing) = server.call("GET", &format!("/groups/{GHOST_GROUP_ID}"), None);
     assert_eq!(status, 404);
     assert_eq!(missing["code"], json!("no_group"));
 
@@ -63,7 +122,7 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
     // the updated row. Removing a non-member is an idempotent no-op.
     let updated = server.ok(
         "PATCH",
-        "/groups/fruit",
+        &format!("/groups/{fruit}"),
         Some(
             json!({"description": "更新後", "add_context_ids": [server.cx("cherry")],
                     "remove_context_ids": [server.cx("apple"), GHOST_ID]}),
@@ -74,23 +133,30 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
         updated["context_ids"],
         server.cx_sorted(&["banana", "cherry"])
     );
-    let (status, missing) = server.call("PATCH", "/groups/nope", Some(json!({"description": "x"})));
+    let (status, missing) = server.call(
+        "PATCH",
+        &format!("/groups/{GHOST_GROUP_ID}"),
+        Some(json!({"description": "x"})),
+    );
     assert_eq!(status, 404, "{missing}");
     assert_eq!(missing["code"], json!("no_group"));
 
     // Groups and contexts are separate namespaces: one name, both kinds.
-    server.ok("PUT", "/groups/apple", Some(json!({"description": "同名"})));
+    let apple = server.create_group("apple", Some(json!({"description": "同名"})));
     assert_eq!(
         server
             .call("GET", &format!("/contexts/{}", server.cx("apple")), None)
             .0,
         200
     );
-    assert_eq!(server.call("GET", "/groups/apple", None).0, 200);
+    assert_eq!(server.call("GET", &format!("/groups/{apple}"), None).0, 200);
 
     // DELETE removes the bundling alone; the members live on.
-    assert_eq!(server.ok("DELETE", "/groups/fruit", None), json!(true));
-    assert_eq!(server.call("GET", "/groups/fruit", None).0, 404);
+    assert_eq!(
+        server.ok("DELETE", &format!("/groups/{fruit}"), None),
+        json!(true)
+    );
+    assert_eq!(server.call("GET", &format!("/groups/{fruit}"), None).0, 404);
     for name in ["banana", "cherry"] {
         assert_eq!(
             server
@@ -99,7 +165,7 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
             200
         );
     }
-    let (status, gone) = server.call("DELETE", "/groups/fruit", None);
+    let (status, gone) = server.call("DELETE", &format!("/groups/{fruit}"), None);
     assert_eq!(status, 404, "{gone}");
     assert_eq!(gone["code"], json!("no_group"));
 }
@@ -111,30 +177,36 @@ fn groups_bundle_contexts_with_crud_paging_and_a_separate_namespace() {
 fn group_membership_is_strict_and_context_deletion_sweeps() {
     let server = Server::start("groups-strict");
     // A create naming a missing context refuses whole: no group.
-    let (status, refused) =
-        server.call("PUT", "/groups/g", Some(json!({"context_ids": [GHOST_ID]})));
+    let (status, refused) = server.call(
+        "POST",
+        "/groups",
+        group_body("g", Some(json!({"context_ids": [GHOST_ID]}))),
+    );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"));
-    assert_eq!(server.call("GET", "/groups/g", None).0, 404);
+    assert_eq!(server.ok("GET", "/groups", None)["total"], json!(0));
 
     server.ok("POST", "/contexts", Some(json!({"name": "a"})));
     server.ok("POST", "/contexts", Some(json!({"name": "b"})));
     server.ok(
-        "PUT",
-        "/groups/g",
-        Some(json!({"context_ids": [server.cx("a"), server.cx("b")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "g",
+            Some(json!({"context_ids": [server.cx("a"), server.cx("b")]})),
+        ),
     );
 
     // An add naming a missing context refuses whole: membership as was.
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         Some(json!({"add_context_ids": [GHOST_ID], "remove_context_ids": [server.cx("a")]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"));
     assert_eq!(
-        server.ok("GET", "/groups/g", None)["context_ids"],
+        server.ok("GET", &format!("/groups/{}", server.gx("g")), None)["context_ids"],
         server.cx_sorted(&["a", "b"]),
         "the refused delta must not half-apply"
     );
@@ -142,26 +214,29 @@ fn group_membership_is_strict_and_context_deletion_sweeps() {
     // Deleting a member context drops it from the group, immediately.
     server.ok("DELETE", &format!("/contexts/{}", server.cx("a")), None);
     assert_eq!(
-        server.ok("GET", "/groups/g", None)["context_ids"],
+        server.ok("GET", &format!("/groups/{}", server.gx("g")), None)["context_ids"],
         server.cx_sorted(&["b"])
     );
 
     // The write-boundary caps hold for groups too.
     let long_name = "x".repeat(65);
-    let (status, oversized) = server.call("PUT", &format!("/groups/{long_name}"), None);
+    let (status, oversized) = server.call("POST", "/groups", group_body(&long_name, None));
     assert_eq!(status, 400, "{oversized}");
     assert_eq!(oversized["code"], json!("invalid_argument"));
     let (status, oversized) = server.call(
-        "PUT",
-        "/groups/big",
-        Some(json!({"description": "x".repeat(5000)})),
+        "POST",
+        "/groups",
+        group_body("big", Some(json!({"description": "x".repeat(5000)}))),
     );
     assert_eq!(status, 400, "{oversized}");
     let over_cap: Vec<String> = (0..1001)
         .map(|i| format!("00000000-0000-4000-8000-{i:012x}"))
         .collect();
-    let (status, refused) =
-        server.call("PUT", "/groups/big", Some(json!({"context_ids": over_cap})));
+    let (status, refused) = server.call(
+        "POST",
+        "/groups",
+        group_body("big", Some(json!({"context_ids": over_cap}))),
+    );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"));
 }
@@ -176,12 +251,16 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     let server = Server::start("groups-total-cap");
     server.ok("POST", "/contexts", Some(json!({"name": "a"})));
     server.ok(
-        "PUT",
-        "/groups/g",
-        Some(json!({"context_ids": [server.cx("a")]})),
+        "POST",
+        "/groups",
+        group_body("g", Some(json!({"context_ids": [server.cx("a")]}))),
     );
-    server.ok("PUT", "/groups/kid", None);
-    server.ok("PATCH", "/groups/g", Some(json!({"add_groups": ["kid"]})));
+    server.ok("POST", "/groups", group_body("kid", None));
+    server.ok(
+        "PATCH",
+        &format!("/groups/{}", server.gx("g")),
+        Some(json!({"add_groups": ["kid"]})),
+    );
 
     // 1 member + 1,000 adds = one past the cap: refused whole.
     let ghosts: Vec<String> = (0..1000)
@@ -189,7 +268,7 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
         .collect();
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         Some(json!({"add_context_ids": ghosts})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -198,7 +277,7 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     let ghost_kids: Vec<String> = (0..1000).map(|i| format!("gg{i:04}")).collect();
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         Some(json!({"add_groups": ghost_kids})),
     );
     assert_eq!(status, 400, "{refused}");
@@ -212,14 +291,14 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
         .collect();
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         Some(json!({"add_context_ids": ghosts, "remove_context_ids": [server.cx("a")]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
 
     // Nothing half-applied anywhere along the way.
-    let row = server.ok("GET", "/groups/g", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("g")), None);
     assert_eq!(row["context_ids"], server.cx_sorted(&["a"]), "{row}");
     assert_eq!(row["groups"], json!(["kid"]), "{row}");
 }
@@ -234,55 +313,70 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
         server.ok("POST", "/contexts", Some(json!({"name": name})));
     }
     server.ok(
-        "PUT",
-        "/groups/leaf",
-        Some(json!({"context_ids": [server.cx("a")]})),
+        "POST",
+        "/groups",
+        group_body("leaf", Some(json!({"context_ids": [server.cx("a")]}))),
     );
     server.ok(
-        "PUT",
-        "/groups/mid",
-        Some(json!({"groups": ["leaf"], "context_ids": [server.cx("b")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "mid",
+            Some(json!({"groups": ["leaf"], "context_ids": [server.cx("b")]})),
+        ),
     );
-    server.ok("PUT", "/groups/top", Some(json!({"groups": ["mid"]})));
+    server.ok(
+        "POST",
+        "/groups",
+        group_body("top", Some(json!({"groups": ["mid"]}))),
+    );
 
     // Rows carry their children; members stay the direct ones.
-    let row = server.ok("GET", "/groups/mid", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("mid")), None);
     assert_eq!(row["groups"], json!(["leaf"]), "{row}");
     assert_eq!(row["context_ids"], server.cx_sorted(&["b"]));
     let page = server.ok("GET", "/groups", None);
-    assert_eq!(page["groups"][2]["id"], json!("top"), "{page}");
+    assert_eq!(page["groups"][2]["name"], json!("top"), "{page}");
     assert_eq!(page["groups"][2]["groups"], json!(["mid"]));
 
     // A fourth storey refuses as a cap, a cycle (the self-loop
     // included) as a bad argument, an unknown child in the group
     // namespace's own 404 — and nothing half-applies.
-    let (status, refused) = server.call("PUT", "/groups/over", Some(json!({"groups": ["top"]})));
+    let (status, refused) = server.call(
+        "POST",
+        "/groups",
+        group_body("over", Some(json!({"groups": ["top"]}))),
+    );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"));
-    assert_eq!(server.call("GET", "/groups/over", None).0, 404);
+    assert_eq!(
+        server.ok("GET", "/groups", None)["total"],
+        json!(3),
+        "nothing landed"
+    );
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/leaf",
+        &format!("/groups/{}", server.gx("leaf")),
         Some(json!({"add_groups": ["top"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"));
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/leaf",
+        &format!("/groups/{}", server.gx("leaf")),
         Some(json!({"add_groups": ["leaf"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"));
     let (status, refused) = server.call(
         "PATCH",
-        "/groups/top",
+        &format!("/groups/{}", server.gx("top")),
         Some(json!({"add_groups": ["ghost"], "remove_groups": ["mid"]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_group"));
     assert_eq!(
-        server.ok("GET", "/groups/top", None)["groups"],
+        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["groups"],
         json!(["mid"]),
         "the refused delta must not half-apply"
     );
@@ -291,20 +385,26 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     // under two parents at once: the shape is a DAG, not a tree.
     let updated = server.ok(
         "PATCH",
-        "/groups/top",
+        &format!("/groups/{}", server.gx("top")),
         Some(json!({"add_groups": ["leaf"], "remove_groups": ["mid"]})),
     );
     assert_eq!(updated["groups"], json!(["leaf"]));
     assert_eq!(
-        server.ok("GET", "/groups/mid", None)["groups"],
+        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["groups"],
         json!(["leaf"])
     );
 
     // Deleting a child sweeps it from every parent; its member
     // contexts live on untouched.
-    server.ok("DELETE", "/groups/leaf", None);
-    assert_eq!(server.ok("GET", "/groups/top", None)["groups"], json!([]));
-    assert_eq!(server.ok("GET", "/groups/mid", None)["groups"], json!([]));
+    server.ok("DELETE", &format!("/groups/{}", server.gx("leaf")), None);
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["groups"],
+        json!([])
+    );
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["groups"],
+        json!([])
+    );
     assert_eq!(
         server
             .call("GET", &format!("/contexts/{}", server.cx("a")), None)
@@ -314,7 +414,11 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
 
     // The children list rides the same input ceiling as contexts.
     let over_cap: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
-    let (status, refused) = server.call("PUT", "/groups/wide", Some(json!({"groups": over_cap})));
+    let (status, refused) = server.call(
+        "POST",
+        "/groups",
+        group_body("wide", Some(json!({"groups": over_cap}))),
+    );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"));
 }
@@ -326,9 +430,12 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     let server = Server::start("groups-restart");
     server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     server.ok(
-        "PUT",
-        "/groups/drinks",
-        Some(json!({"description": "飲料", "context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "drinks",
+            Some(json!({"description": "飲料", "context_ids": [server.cx("sake")]})),
+        ),
     );
 
     let sake = server.cx("sake");
@@ -349,7 +456,7 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
     .unwrap();
 
     let server = Server::start_on("groups-restart2", data_dir);
-    let survived = server.ok("GET", "/groups/drinks", None);
+    let survived = server.ok("GET", &format!("/groups/{}", server.gx("drinks")), None);
     assert_eq!(survived["description"], json!("飲料"));
     assert_eq!(
         survived["context_ids"],
@@ -392,9 +499,12 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     }
     assert_eq!(
         call(
-            "PUT",
-            "/groups/mixed",
-            Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]})),
+            "POST",
+            "/groups",
+            group_body(
+                "mixed",
+                Some(json!({"context_ids": [server.cx("sake"), server.cx("bunko")]}))
+            ),
             "atok"
         )
         .0,
@@ -402,9 +512,9 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     );
     assert_eq!(
         call(
-            "PUT",
-            "/groups/ours",
-            Some(json!({"context_ids": [server.cx("sake")]})),
+            "POST",
+            "/groups",
+            group_body("ours", Some(json!({"context_ids": [server.cx("sake")]}))),
             "atok"
         )
         .0,
@@ -417,7 +527,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     assert_eq!(status, 200);
     assert_eq!(listed["result"]["total"], json!(2), "{listed}");
     assert_eq!(
-        listed["result"]["groups"][0]["id"],
+        listed["result"]["groups"][0]["name"],
         json!("mixed"),
         "{listed}"
     );
@@ -426,7 +536,12 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         server.cx_sorted(&["sake"]),
         "bunko must be filtered from a sake-scoped view: {listed}"
     );
-    let (_, single) = call("GET", "/groups/mixed", None, "stok");
+    let (_, single) = call(
+        "GET",
+        &format!("/groups/{}", server.gx("mixed")),
+        None,
+        "stok",
+    );
     assert_eq!(
         single["result"]["context_ids"],
         server.cx_sorted(&["sake"]),
@@ -434,7 +549,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     );
 
     // Role gate: read keys read, nothing more.
-    let (status, refused) = call("PUT", "/groups/new", None, "rtok");
+    let (status, refused) = call("POST", "/groups", group_body("new", None), "rtok");
     assert_eq!(status, 403, "{refused}");
     assert!(
         refused["error"].as_str().unwrap().contains("needs 'write'"),
@@ -446,7 +561,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     // for a description-only change.
     let (status, refused) = call(
         "PATCH",
-        "/groups/mixed",
+        &format!("/groups/{}", server.gx("mixed")),
         Some(json!({"description": "mine now"})),
         "stok",
     );
@@ -463,19 +578,24 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     // whether it exists (bunko) or not (ghost) — never a revealing 404.
     let (status_real, real) = call(
         "PATCH",
-        "/groups/ours",
+        &format!("/groups/{}", server.gx("ours")),
         Some(json!({"add_context_ids": [server.cx("bunko")]})),
         "stok",
     );
     let (status_ghost, ghost) = call(
         "PATCH",
-        "/groups/ours",
+        &format!("/groups/{}", server.gx("ours")),
         Some(json!({"add_context_ids": [GHOST_ID]})),
         "stok",
     );
     assert_eq!((status_real, status_ghost), (403, 403), "{real} / {ghost}");
     assert_eq!(real["code"], ghost["code"], "{real} / {ghost}");
-    let (_, ours) = call("GET", "/groups/ours", None, "atok");
+    let (_, ours) = call(
+        "GET",
+        &format!("/groups/{}", server.gx("ours")),
+        None,
+        "atok",
+    );
     assert_eq!(
         ours["result"]["context_ids"],
         server.cx_sorted(&["sake"]),
@@ -486,7 +606,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     assert_eq!(
         call(
             "PATCH",
-            "/groups/ours",
+            &format!("/groups/{}", server.gx("ours")),
             Some(json!({"description": "陶工の棚"})),
             "stok"
         )
@@ -495,17 +615,35 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     );
     assert_eq!(
         call(
-            "PUT",
-            "/groups/mine",
-            Some(json!({"context_ids": [server.cx("sake")]})),
+            "POST",
+            "/groups",
+            group_body("mine", Some(json!({"context_ids": [server.cx("sake")]}))),
             "stok"
         )
         .0,
         200
     );
     // ...but deletion is an operator verb (admin), like contexts.
-    assert_eq!(call("DELETE", "/groups/mine", None, "stok").0, 403);
-    assert_eq!(call("DELETE", "/groups/mine", None, "atok").0, 200);
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("/groups/{}", server.gx("mine")),
+            None,
+            "stok"
+        )
+        .0,
+        403
+    );
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("/groups/{}", server.gx("mine")),
+            None,
+            "atok"
+        )
+        .0,
+        200
+    );
 
     // Nesting counts through: a child whose members sit beyond the
     // grant poisons every write on the parent — the child's NAME stays
@@ -513,9 +651,9 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     // is about, wherever they hang.
     assert_eq!(
         call(
-            "PUT",
-            "/groups/shelf",
-            Some(json!({"context_ids": [server.cx("bunko")]})),
+            "POST",
+            "/groups",
+            group_body("shelf", Some(json!({"context_ids": [server.cx("bunko")]}))),
             "atok"
         )
         .0,
@@ -524,14 +662,19 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     assert_eq!(
         call(
             "PATCH",
-            "/groups/ours",
+            &format!("/groups/{}", server.gx("ours")),
             Some(json!({"add_groups": ["shelf"]})),
             "atok"
         )
         .0,
         200
     );
-    let (_, nested) = call("GET", "/groups/ours", None, "stok");
+    let (_, nested) = call(
+        "GET",
+        &format!("/groups/{}", server.gx("ours")),
+        None,
+        "stok",
+    );
     assert_eq!(nested["result"]["groups"], json!(["shelf"]), "{nested}");
     assert_eq!(
         nested["result"]["context_ids"],
@@ -540,7 +683,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     );
     let (status, refused) = call(
         "PATCH",
-        "/groups/ours",
+        &format!("/groups/{}", server.gx("ours")),
         Some(json!({"description": "still mine"})),
         "stok",
     );
@@ -556,13 +699,16 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     // context-scoped key cannot create a parent over contexts it has
     // no grant on.
     let (status, refused) = call(
-        "PUT",
-        "/groups/annex",
-        Some(json!({"groups": ["shelf"]})),
+        "POST",
+        "/groups",
+        group_body("annex", Some(json!({"groups": ["shelf"]}))),
         "stok",
     );
     assert_eq!(status, 403, "{refused}");
-    assert_eq!(call("GET", "/groups/annex", None, "atok").0, 404);
+    assert!(
+        server.try_gx("annex").is_none(),
+        "the refused create landed nothing"
+    );
 }
 
 /// The changelog's other stated limitation, pinned: a DELETE whose
@@ -581,9 +727,12 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
         Some(json!({"name": "sake", "description": "d"})),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"description": "蔵元一式", "context_ids": [server.cx("sake")]})),
+        ),
     );
     // Nothing dirty may remain: the flusher must not collide with the
     // read-only window below.
@@ -594,7 +743,7 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
     let kura_stem = server.group_stem("kura");
     let frozen = std::fs::Permissions::from_mode(0o555);
     std::fs::set_permissions(&server.data_dir, frozen).expect("chmod must apply");
-    let (status, refusal) = server.call("DELETE", "/groups/kura", None);
+    let (status, refusal) = server.call("DELETE", &format!("/groups/{}", server.gx("kura")), None);
     let restored = std::fs::Permissions::from_mode(0o755);
     std::fs::set_permissions(&server.data_dir, restored).expect("chmod must restore");
     assert_eq!(status, 500, "{refusal}");
@@ -608,7 +757,7 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
     );
 
     // The live directory dropped the record, as the error admits…
-    let (status, missing) = server.call("GET", "/groups/kura", None);
+    let (status, missing) = server.call("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(status, 404, "{missing}");
 
     // …and the surviving file resurfaces it at the next boot.
@@ -618,7 +767,7 @@ fn a_failed_group_unlink_resurfaces_the_group_at_restart() {
         "the unlink must have failed"
     );
     let server = Server::start_on("group-unlink-reboot", data_dir);
-    let row = server.ok("GET", "/groups/kura", None);
+    let row = server.ok("GET", &format!("/groups/{}", server.gx("kura")), None);
     assert_eq!(row["context_ids"], server.cx_sorted(&["sake"]), "{row}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
@@ -644,17 +793,20 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
 
     // parent holds apple directly and banana only through a child.
     server.ok(
-        "PUT",
-        "/groups/child",
-        Some(json!({"context_ids": [server.cx("banana")]})),
+        "POST",
+        "/groups",
+        group_body("child", Some(json!({"context_ids": [server.cx("banana")]}))),
     );
     server.ok(
-        "PUT",
-        "/groups/parent",
-        Some(json!({"context_ids": [server.cx("apple")], "groups": ["child"]})),
+        "POST",
+        "/groups",
+        group_body(
+            "parent",
+            Some(json!({"context_ids": [server.cx("apple")], "groups": ["child"]})),
+        ),
     );
     let fingerprint = |server: &Server| {
-        server.ok("GET", "/groups/parent", None)["fingerprint"]
+        server.ok("GET", &format!("/groups/{}", server.gx("parent")), None)["fingerprint"]
             .as_str()
             .expect("every group row carries the token")
             .to_string()
@@ -709,7 +861,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
     // A membership edit moves it with no member written at all.
     server.ok(
         "PATCH",
-        "/groups/parent",
+        &format!("/groups/{}", server.gx("parent")),
         Some(json!({"add_context_ids": [server.cx("outside")]})),
     );
     let after_membership = fingerprint(&server);
@@ -743,9 +895,9 @@ fn a_context_name_where_an_id_belongs_is_a_400_everywhere_members_are_listed() {
     let server = Server::start("groups-names-refused");
     server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
     server.ok(
-        "PUT",
-        "/groups/g",
-        Some(json!({"context_ids": [server.cx("sake")]})),
+        "POST",
+        "/groups",
+        group_body("g", Some(json!({"context_ids": [server.cx("sake")]}))),
     );
 
     let refused_with_a_name = |method: &str, path: &str, body: Value, field: &str| {
@@ -759,20 +911,20 @@ fn a_context_name_where_an_id_belongs_is_a_400_everywhere_members_are_listed() {
         );
     };
     refused_with_a_name(
-        "PUT",
-        "/groups/named",
-        json!({"context_ids": ["sake"]}),
+        "POST",
+        "/groups",
+        group_body("named", Some(json!({"context_ids": ["sake"]}))).unwrap(),
         "context_ids",
     );
     refused_with_a_name(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         json!({"add_context_ids": ["sake"]}),
         "add_context_ids",
     );
     refused_with_a_name(
         "PATCH",
-        "/groups/g",
+        &format!("/groups/{}", server.gx("g")),
         json!({"remove_context_ids": ["sake"]}),
         "remove_context_ids",
     );
@@ -796,9 +948,9 @@ fn a_context_name_where_an_id_belongs_is_a_400_everywhere_members_are_listed() {
     );
 
     // Nothing applied: no `named` group, `g` unchanged.
-    assert_eq!(server.call("GET", "/groups/named", None).0, 404);
+    assert!(server.try_gx("named").is_none());
     assert_eq!(
-        server.ok("GET", "/groups/g", None)["context_ids"],
+        server.ok("GET", &format!("/groups/{}", server.gx("g")), None)["context_ids"],
         server.cx_sorted(&["sake"])
     );
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
@@ -820,11 +972,12 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
                      "weight": 1.0, "source": "a.md"}])),
     );
     server.ok(
-        "PUT",
-        "/groups/g",
-        Some(json!({"context_ids": [id.clone()]})),
+        "POST",
+        "/groups",
+        group_body("g", Some(json!({"context_ids": [id.clone()]}))),
     );
-    let fingerprint = server.ok("GET", "/groups/g", None)["fingerprint"].clone();
+    let fingerprint =
+        server.ok("GET", &format!("/groups/{}", server.gx("g")), None)["fingerprint"].clone();
 
     let recall = || {
         server.ok(
@@ -844,7 +997,7 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
         Some(json!({"to": "after"})),
     );
 
-    let group = server.ok("GET", "/groups/g", None);
+    let group = server.ok("GET", &format!("/groups/{}", server.gx("g")), None);
     assert_eq!(group["context_ids"], json!([id.clone()]), "{group}");
     assert_eq!(
         group["fingerprint"], fingerprint,
@@ -867,51 +1020,80 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
 
-/// #994's bridge: `group` names are not unique on file (ids are), but
-/// the wire still addresses `groups` by name. A name two `groups` share —
-/// only a hand-assembled data directory has one, the API never mints a
-/// duplicate — is a 409 `conflict` at every entrance that takes a
-/// `group` name, never a 404 and never an arbitrary one of the two.
+/// Names are labels (ADR 0050): two `groups` may share one, each
+/// addressed by its own id. Wherever the wire still names a `group` by
+/// name — a child in a nesting list, a cross-search target — a name two
+/// `groups` share is a 409 `conflict`, never a 404 and never an
+/// arbitrary one of the two.
 #[test]
-fn a_group_name_two_groups_share_is_a_conflict_at_every_entrance() {
+fn a_group_name_two_groups_share_is_a_conflict_where_groups_are_still_named() {
     let server = Server::start("groups-ambiguous");
-    server.ok("POST", "/contexts", Some(json!({"name": "sake"})));
-    server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"context_ids": [server.cx("sake")]})),
+    let sake = server.create_context("sake");
+    let first = server.create_group("kura", Some(json!({"context_ids": [sake]})));
+    let second = server.create_group("kura", Some(json!({"description": "twin"})));
+    assert_ne!(
+        first, second,
+        "a second create under one name mints a second group"
     );
-    let sake = server.cx("sake");
-    let data_dir = server.stop_gracefully();
-    let twin = "00000000-0000-4000-9000-00000000beef";
-    std::fs::write(
-        data_dir.join(format!("{twin}.group")),
-        serde_json::to_vec(&json!({"id": twin, "name": "kura", "context_ids": [sake]})).unwrap(),
-    )
-    .unwrap();
-
-    let server = Server::start_on("groups-ambiguous2", data_dir);
-    // Both rows list; only the name-addressed entrances refuse.
     let page = server.ok("GET", "/groups", None);
     assert_eq!(page["total"], json!(2), "{page}");
+    // Name first, then id — the twins sit side by side in id order.
+    let mut ids = [first.clone(), second.clone()];
+    ids.sort();
+    assert_eq!(
+        page["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!(ids[0]), json!(ids[1])],
+        "{page}"
+    );
+    // A page boundary between the twins: the (name, id) cursor resumes
+    // after the first, never skipping the second.
+    let head = server.ok("GET", "/groups?limit=1", None);
+    assert_eq!(head["groups"][0]["id"], json!(ids[0]), "{head}");
+    let tail = server.ok(
+        "GET",
+        &format!("/groups?limit=1&after=kura&after_id={}", ids[0]),
+        None,
+    );
+    assert_eq!(tail["groups"][0]["id"], json!(ids[1]), "{tail}");
+    let end = server.ok(
+        "GET",
+        &format!("/groups?limit=1&after=kura&after_id={}", ids[1]),
+        None,
+    );
+    assert_eq!(end["groups"], json!([]), "{end}");
+    // By id, each twin answers on its own.
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{first}"), None)["context_ids"],
+        json!([sake])
+    );
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{second}"), None)["description"],
+        json!("twin")
+    );
+    let parent = server.create_group("parent", None);
     for (method, path, body) in [
-        ("GET", "/groups/kura", None),
-        ("PATCH", "/groups/kura", Some(json!({"description": "x"}))),
-        ("DELETE", "/groups/kura", None),
         (
             "POST",
-            "/groups/kura/rename",
-            Some(json!({"to": "sakagura"})),
+            "/groups".to_string(),
+            group_body("p2", Some(json!({"groups": ["kura"]}))),
         ),
-        ("GET", "/groups/kura/export", None),
-        ("PUT", "/groups/parent", Some(json!({"groups": ["kura"]}))),
+        (
+            "PATCH",
+            format!("/groups/{parent}"),
+            Some(json!({"add_groups": ["kura"]})),
+        ),
         (
             "POST",
-            "/recall",
+            "/recall".to_string(),
             Some(json!({"groups": ["kura"], "cue": "蔵"})),
         ),
     ] {
-        let (status, refusal) = server.call(method, path, body);
+        let (status, refusal) = server.call(method, &path, body);
         assert_eq!(status, 409, "{method} {path}: {refusal}");
         assert_eq!(
             refusal["code"],
@@ -926,7 +1108,22 @@ fn a_group_name_two_groups_share_is_a_conflict_at_every_entrance() {
             "{method} {path}: {refusal}"
         );
     }
-    // A refused rename and delete moved nothing.
-    assert_eq!(server.ok("GET", "/groups", None)["total"], json!(2));
+    // The refusals moved nothing; renaming one twin apart lifts them.
+    assert_eq!(server.ok("GET", "/groups", None)["total"], json!(3));
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{parent}"), None)["groups"],
+        json!([])
+    );
+    server.ok(
+        "POST",
+        &format!("/groups/{second}/rename"),
+        Some(json!({"to": "sakagura"})),
+    );
+    let row = server.ok(
+        "PATCH",
+        &format!("/groups/{parent}"),
+        Some(json!({"add_groups": ["kura"]})),
+    );
+    assert_eq!(row["groups"], json!(["kura"]));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

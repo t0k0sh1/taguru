@@ -204,10 +204,12 @@ class GroupEntry:
     ``context_ids`` holds the ids (the ``id`` column of the directory), never
     names (#965). For a ``context``-scoped key it carries only the members the
     grant allows; ``groups`` (child names — labels, not content) is never filtered.
-    ``id`` is the ``group``'s name — the row's own key (#851).
+    ``id`` is the ``group``'s server-minted id, which every ``group`` call takes;
+    ``name`` is its display name — a label, not unique.
     """
 
     id: str
+    name: str
     description: str
     context_ids: list[str]
     groups: list[str]

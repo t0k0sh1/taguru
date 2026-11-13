@@ -99,7 +99,7 @@
             <td><code>group</code></td>
             <td>an organizational bundle of <code>contexts</code> and child <code>groups</code> — a shallow DAG, at most 3 <code>groups</code> tall</td>
             <td>cross-<code>context</code> search targets: <code>recall</code> / <code>query</code> / <code>sources/search</code> expand a <code>group</code> to every <code>context</code> it reaches, nested children included</td>
-            <td><code>PUT /groups/{name}</code></td>
+            <td><code>POST /groups</code></td>
           </tr>
           <tr>
             <td>source</td>
@@ -278,11 +278,10 @@
       structure.
     </p>
     <p class="note">
-      Bodies (a <code>recall</code> request, an import source's <code>context</code> field) carry a
-      slash-bearing name as-is. Only when the name itself sits in the URL path —
-      <code>PUT /groups/{name}</code> — does the slash need
-      percent-encoding (<code>paper%2Fbert</code>), the same as any other path segment; otherwise
-      it would split the route in two.
+      A slash-bearing name never sits in a URL path: <code>contexts</code> and <code>groups</code>
+      are addressed by their ids (<code>/contexts/{id}</code>, <code>/groups/{id}</code>), and a
+      name travels in a body (a <code>POST /groups</code> create, a <code>recall</code> request's
+      <code>groups</code> list) as-is, with no percent-encoding.
     </p>
   </section>
 

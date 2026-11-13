@@ -16,10 +16,9 @@ use crate::registry::{AccessError, AppState};
 
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
-    AppBytes, AppPath, AppQuery, ContextIdPath, ErrorCode, Issue, RefusalDetail, access_error,
-    access_error_noted, collected_validation_message, deadline_exceeded, error,
-    group_lookup_refusal, key_name, nesting_error_code, ok, ok_with_issues_total, truncate_issues,
-    validation_error,
+    AppBytes, AppQuery, ContextIdPath, ErrorCode, GroupIdPath, Issue, RefusalDetail, access_error,
+    access_error_noted, collected_validation_message, deadline_exceeded, error, group_not_found,
+    key_name, nesting_error_code, ok, ok_with_issues_total, truncate_issues, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -1312,25 +1311,27 @@ pub(super) fn export_response(
     }
 }
 
-/// `GET /groups/{name}/export` — the `group` back out as its import
+/// `GET /groups/{id}/export` — the `group` back out as its import
 /// record: one `group` line (JSON Lines body, not the JSON
 /// envelope), [`export_context`]'s twin one storey up. `POST /import`
 /// (or `taguru import`) restores it by replacing the whole record, so
 /// re-importing is idempotent; the members must exist at import time,
 /// and batches of the same stream apply first. For a `context`-scoped
 /// key the members are the grant's slice, exactly as
-/// `GET /groups/{name}` serves them — the export IS that key's view,
-/// and restoring it elsewhere carries only what the key could see.
+/// `GET /groups/{id}` serves them — the export IS that key's view,
+/// and restoring it elsewhere carries only what the key could see. The
+/// record line still names the `group` by name (import restores by
+/// name until #996).
 pub async fn export_group(
     State(state): State<AppState>,
-    AppPath(name): AppPath<String>,
+    GroupIdPath(id): GroupIdPath,
     grant: Option<axum::Extension<crate::auth::KeyGrant>>,
 ) -> Response {
     let started_at = Instant::now();
-    let record = match state.group(&name) {
-        Ok(view) => view.record,
-        Err(why) => return group_lookup_refusal(&name, why, started_at),
+    let Some(view) = state.group(&id) else {
+        return group_not_found(&id, started_at);
     };
+    let (name, record) = (view.name, view.record);
     let filtered = GroupRecord {
         description: record.description,
         context_ids: scoped_member_contexts(record.context_ids, &grant),

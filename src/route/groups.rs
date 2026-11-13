@@ -8,10 +8,13 @@ pub(super) async fn merge_groups(
     State(state): State<RouterState>,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
-    api::AppQuery(query): api::AppQuery<api::KeysetQuery>,
+    api::AppQuery(query): api::AppQuery<api::ListGroupsQuery>,
     request: Request,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = api::list_groups_query_refusal(&query, started_at) {
+        return refusal;
+    }
     let path = full_path(&request);
     let map = state.map();
     let shards: Vec<usize> = map.all().collect();
@@ -26,6 +29,8 @@ pub(super) async fn merge_groups(
             deadline,
         )
         .await;
+    // Keyed by id: every shard holds the same `group` under the same
+    // id (#995), and two `groups` merely sharing a name are two rows.
     let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
     let mut total = 0usize;
     for (shard, outcome) in outcomes {
@@ -58,12 +63,17 @@ pub(super) async fn merge_groups(
             }
         }
     }
-    // `clamp_page`, exactly as the single instance's `list_groups`
-    // cuts its own page: a keyset listing's empty page means "no more
-    // pages" to the SDK iterators, so an explicit `limit=0` must floor
-    // to one rather than answer a terminal-looking empty page.
-    let groups: Vec<api::GroupEntry> = rows
-        .into_values()
+    // Each shard paged past the same `(after, after_id)` cursor in the
+    // same `(name, id)` order, so the union re-sorted that way and cut
+    // to the limit is the single instance's page. `clamp_page`, exactly
+    // as the single instance's `list_groups` cuts its own page: a
+    // keyset listing's empty page means "no more pages" to the SDK
+    // iterators, so an explicit `limit=0` must floor to one rather than
+    // answer a terminal-looking empty page.
+    let mut ordered: Vec<api::GroupEntry> = rows.into_values().collect();
+    ordered.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+    let groups: Vec<api::GroupEntry> = ordered
+        .into_iter()
         .take(api::clamp_page(
             query.limit,
             api::MAX_MATCH_LIMIT,
@@ -73,16 +83,16 @@ pub(super) async fn merge_groups(
     router_ok(api::GroupPage { total, groups }, Vec::new(), started_at)
 }
 
-/// Unions one shard's row into the merged directory: member `context_ids`
-/// are per-shard projections (disjoint by the map), children are
-/// broadcast whole, the description is identical everywhere a
-/// non-drifted record lives. Fingerprints are folded together — each
+/// Unions one shard's row into the merged directory, by the row's id:
+/// member `context_ids` are per-shard projections (disjoint by the map),
+/// children are broadcast whole, the name and description are identical
+/// everywhere a non-drifted record lives. Fingerprints are folded together — each
 /// shard's token covers the members that shard holds, so the union's
 /// token must move whenever ANY shard's does; the fold order is the
 /// fan-out's shard order (stable across requests), so an unchanged
 /// fleet keeps an unchanged token.
 fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::GroupEntry) {
-    match rows.get_mut(&entry.name) {
+    match rows.get_mut(&entry.id) {
         Some(held) => {
             let mut members: BTreeSet<String> = held.context_ids.drain(..).collect();
             members.extend(entry.context_ids);
@@ -96,7 +106,7 @@ fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::G
             held.fingerprint = format!("{digest:016x}");
         }
         None => {
-            rows.insert(entry.name.clone(), entry);
+            rows.insert(entry.id.clone(), entry);
         }
     }
 }
@@ -112,10 +122,18 @@ pub(super) fn full_path(request: &Request) -> String {
 // ---------------------------------------------------------------------------
 // `group` verbs: projected broadcast
 
+/// A broadcast stopped by a refusal: the refusal, and the shards that
+/// had already applied the write before it.
+struct StoppedBroadcast {
+    refusal: Box<Response>,
+    applied: Vec<usize>,
+}
+
 /// Runs one `group` write against every shard IN ORDER, the request's
 /// member lists projected per shard by the map. The first refusal
-/// stops the broadcast and passes through as-is — shards before it
-/// have applied (deltas converge on retry; documented divergence).
+/// stops the broadcast — shards before it have applied (deltas converge
+/// on retry; a create converges when retried under the same id;
+/// documented divergence) — and comes back with which shards those are.
 #[allow(clippy::too_many_arguments)]
 async fn broadcast_group_write<F>(
     state: &RouterState,
@@ -126,11 +144,12 @@ async fn broadcast_group_write<F>(
     body_for: F,
     deadline: Deadline,
     started_at: Instant,
-) -> Result<Vec<Bytes>, Box<Response>>
+) -> Result<Vec<Bytes>, StoppedBroadcast>
 where
     F: Fn(usize) -> Option<Bytes>,
 {
     let mut answers = Vec::new();
+    let mut applied = Vec::new();
     for shard in map.all() {
         let outcome = state
             .call_shard(
@@ -143,15 +162,75 @@ where
                 deadline,
             )
             .await;
-        match merge_fate(map, shard, outcome, started_at) {
-            Ok(MergeFate::Success(answer)) => answers.push(answer.body),
+        let refusal = match merge_fate(map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(answer)) => {
+                answers.push(answer.body);
+                applied.push(shard);
+                continue;
+            }
             // Writes have no drift-healing 404 arm — a not-found stops
             // the broadcast and passes through like any other refusal.
-            Ok(MergeFate::NotFound(answer)) => return Err(Box::new(passthrough(answer))),
-            Err(refusal) => return Err(refusal),
-        }
+            Ok(MergeFate::NotFound(answer)) => Box::new(passthrough(answer)),
+            Err(refusal) => refusal,
+        };
+        return Err(StoppedBroadcast { refusal, applied });
     }
     Ok(answers)
+}
+
+/// A create broadcast that stopped after some shards had applied it
+/// (#995 decision 2): the shard's refusal — status, code and every
+/// other field kept — with its message extended by the id the router
+/// minted and the shards that hold the `group` under it, the two facts
+/// a caller needs to finish (POST again with that id) or clean up
+/// (DELETE it). A stop at the first shard applied nothing and passes
+/// through untouched, as does a refusal whose body is not the error
+/// envelope (nothing to extend).
+async fn stopped_create_refusal(
+    stopped: StoppedBroadcast,
+    map: &RouteMap,
+    id: &str,
+    minted: bool,
+) -> Response {
+    if stopped.applied.is_empty() {
+        return *stopped.refusal;
+    }
+    let (mut parts, body) = stopped.refusal.into_parts();
+    let bytes = axum::body::to_bytes(body, 1 << 20)
+        .await
+        .unwrap_or_default();
+    let mut envelope: Value = match serde_json::from_slice(&bytes) {
+        Ok(envelope @ Value::Object(_)) => envelope,
+        _ => return Response::from_parts(parts, axum::body::Body::from(bytes)),
+    };
+    let applied: Vec<&str> = stopped
+        .applied
+        .iter()
+        .map(|shard| map.url(*shard))
+        .collect();
+    let message = envelope
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("a shard refused the create")
+        .to_string();
+    // DELETE is a safe undo only for an id the router minted: a
+    // caller's id may name a `group` that stood before this create, and
+    // deleting it would remove that one.
+    let (held, undo) = if minted {
+        (
+            "was already created on",
+            format!(", or DELETE /groups/{id} to remove it"),
+        )
+    } else {
+        ("already stands on", String::new())
+    };
+    envelope["error"] = json!(format!(
+        "{message}; group '{id}' {held} {} before this refusal — POST /groups again with \
+         \"id\": \"{id}\" to finish{undo}",
+        applied.join(", ")
+    ));
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(envelope.to_string()))
 }
 
 /// Why a body could not be projected: a refusal the router answers
@@ -298,37 +377,62 @@ async fn project_body(
     })
 }
 
+/// `POST /groups`: the router mints the id (unless the caller brought
+/// one) and every shard creates the `group` under it (#995 decision 1),
+/// so the fleet agrees on one id with no shard-to-shard step. A retry
+/// under that id converges: a shard already holding the identical
+/// record answers it again.
 pub(super) async fn create_group_broadcast(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
     body: Bytes,
 ) -> Response {
     let started_at = Instant::now();
     let map = state.map();
-    let base: Value = if body.is_empty() {
-        json!({})
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(base) => base,
-            Err(_) => {
-                // Malformed bodies go to one shard untouched so the
-                // refusal is the shard's own extractor shape.
-                return forward_group_probe(
-                    &state,
-                    &map,
-                    Method::PUT,
-                    &name,
-                    headers,
-                    body,
-                    deadline,
-                )
-                .await;
-            }
+    let probe = |body: Bytes| {
+        // Malformed bodies go to one shard untouched so the refusal is
+        // the shard's own extractor shape; nothing lands.
+        let (state, map, headers) = (state.clone(), map.clone(), headers.clone());
+        async move {
+            forward_group_probe(
+                &state,
+                &map,
+                Method::POST,
+                "/groups",
+                headers,
+                body,
+                deadline,
+            )
+            .await
         }
     };
-    let path = format!("/groups/{}", urlencode(&name));
+    let mut base: Value = match serde_json::from_slice(&body) {
+        Ok(base) => base,
+        Err(_) => return probe(body).await,
+    };
+    // Whether the router minted the id: only then is every shard's copy
+    // certainly this create's own (a caller's id may name a `group`
+    // already standing), which decides the cleanup a stopped create
+    // may suggest.
+    let (id, minted) = match base.get("id") {
+        // `project_body` refuses a non-object body before any shard
+        // sees it; there is nothing to stamp an id onto.
+        _ if !base.is_object() => (String::new(), false),
+        None => {
+            let id = crate::groups::mint_group_id();
+            base["id"] = json!(id);
+            (id, true)
+        }
+        Some(Value::String(id)) => {
+            if let Some(refusal) = api::invalid_group_id("id", id, started_at) {
+                return refusal;
+            }
+            (id.clone(), false)
+        }
+        // An id that is not a string is the typed extractor's refusal.
+        Some(_) => return probe(body).await,
+    };
     let body_for = match project_body(
         &state,
         &map,
@@ -343,16 +447,13 @@ pub(super) async fn create_group_broadcast(
     {
         Ok(body_for) => body_for,
         Err(Unprojectable::Refusal(refusal)) => return *refusal,
-        Err(Unprojectable::Probe) => {
-            return forward_group_probe(&state, &map, Method::PUT, &name, headers, body, deadline)
-                .await;
-        }
+        Err(Unprojectable::Probe) => return probe(body).await,
     };
     match broadcast_group_write(
         &state,
         &map,
-        Method::PUT,
-        &path,
+        Method::POST,
+        "/groups",
         &headers,
         body_for,
         deadline,
@@ -360,20 +461,40 @@ pub(super) async fn create_group_broadcast(
     )
     .await
     {
-        Ok(_) => api::ok(true, started_at),
-        Err(refusal) => *refusal,
+        Ok(answers) => merged_entry(answers, "created", started_at),
+        Err(stopped) => stopped_create_refusal(stopped, &map, &id, minted).await,
+    }
+}
+
+/// The union of every shard's answer row for one `group` write — what a
+/// single instance would have answered for the whole `group`.
+fn merged_entry(answers: Vec<Bytes>, applied: &str, started_at: Instant) -> Response {
+    let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
+    for body in answers {
+        if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<api::GroupEntry>>(&body) {
+            merge_group_entry(&mut rows, envelope.result);
+        }
+    }
+    match rows.into_values().next() {
+        Some(entry) => api::ok(entry, started_at),
+        None => api::error(
+            ErrorCode::Internal,
+            format!("every shard {applied} the group but none answered a readable entry"),
+            started_at,
+        ),
     }
 }
 
 pub(super) async fn update_group_broadcast(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    api::GroupIdPath(id): api::GroupIdPath,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
     body: Bytes,
 ) -> Response {
     let started_at = Instant::now();
     let map = state.map();
+    let path = format!("/groups/{id}");
     let base: Value = match serde_json::from_slice(&body) {
         Ok(base) => base,
         Err(_) => {
@@ -381,7 +502,7 @@ pub(super) async fn update_group_broadcast(
                 &state,
                 &map,
                 Method::PATCH,
-                &name,
+                &path,
                 headers,
                 body,
                 deadline,
@@ -389,7 +510,6 @@ pub(super) async fn update_group_broadcast(
             .await;
         }
     };
-    let path = format!("/groups/{}", urlencode(&name));
     let body_for = match project_body(
         &state,
         &map,
@@ -409,7 +529,7 @@ pub(super) async fn update_group_broadcast(
                 &state,
                 &map,
                 Method::PATCH,
-                &name,
+                &path,
                 headers,
                 body,
                 deadline,
@@ -429,25 +549,8 @@ pub(super) async fn update_group_broadcast(
     )
     .await
     {
-        Ok(answers) => {
-            let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
-            for body in answers {
-                if let Ok(envelope) =
-                    serde_json::from_slice::<ShardEnvelope<api::GroupEntry>>(&body)
-                {
-                    merge_group_entry(&mut rows, envelope.result);
-                }
-            }
-            match rows.into_values().next() {
-                Some(entry) => api::ok(entry, started_at),
-                None => api::error(
-                    ErrorCode::Internal,
-                    "every shard applied the update but none answered a readable entry",
-                    started_at,
-                ),
-            }
-        }
-        Err(refusal) => *refusal,
+        Ok(answers) => merged_entry(answers, "updated", started_at),
+        Err(stopped) => *stopped.refusal,
     }
 }
 
@@ -461,15 +564,14 @@ async fn forward_group_probe(
     state: &RouterState,
     map: &RouteMap,
     method: Method,
-    name: &str,
+    path: &str,
     headers: HeaderMap,
     body: Bytes,
     deadline: Deadline,
 ) -> Response {
     let started_at = Instant::now();
-    let path = format!("/groups/{}", urlencode(name));
     match state
-        .call_shard(map, 0, method, &path, &headers, Some(body), deadline)
+        .call_shard(map, 0, method, path, &headers, Some(body), deadline)
         .await
     {
         Ok(answer) => passthrough(answer),
@@ -486,16 +588,24 @@ async fn forward_group_probe(
 
 pub(super) async fn delete_group_broadcast(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    api::GroupIdPath(id): api::GroupIdPath,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
-    group_broadcast_simple(state, Method::DELETE, name, None, headers, deadline).await
+    group_broadcast_simple(
+        state,
+        Method::DELETE,
+        format!("/groups/{id}"),
+        None,
+        headers,
+        deadline,
+    )
+    .await
 }
 
 pub(super) async fn rename_group_broadcast(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    api::GroupIdPath(id): api::GroupIdPath,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
     body: Bytes,
@@ -503,7 +613,7 @@ pub(super) async fn rename_group_broadcast(
     group_broadcast_simple(
         state,
         Method::POST,
-        format!("{name}/rename"),
+        format!("/groups/{id}/rename"),
         Some(body),
         headers,
         deadline,
@@ -517,17 +627,12 @@ pub(super) async fn rename_group_broadcast(
 async fn group_broadcast_simple(
     state: RouterState,
     method: Method,
-    name_path: String,
+    path: String,
     body: Option<Bytes>,
     headers: HeaderMap,
     deadline: Deadline,
 ) -> Response {
     let started_at = Instant::now();
-    let (encoded_name, suffix) = match name_path.split_once('/') {
-        Some((name, suffix)) => (urlencode(name), format!("/{suffix}")),
-        None => (urlencode(&name_path), String::new()),
-    };
-    let path = format!("/groups/{encoded_name}{suffix}");
     let map = state.map();
     let mut not_found: Option<ShardAnswer> = None;
     let mut succeeded = false;
@@ -558,12 +663,12 @@ async fn group_broadcast_simple(
 
 pub(super) async fn union_group(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    api::GroupIdPath(id): api::GroupIdPath,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    let path = format!("/groups/{}", urlencode(&name));
+    let path = format!("/groups/{id}");
     let map = state.map();
     let shards: Vec<usize> = map.all().collect();
     let outcomes = state
@@ -605,23 +710,23 @@ pub(super) async fn union_group(
         (None, Some(answer)) => passthrough(answer),
         (None, None) => api::error(
             ErrorCode::NoGroup,
-            format!("group '{name}' not found"),
+            format!("group '{id}' not found"),
             started_at,
         ),
     }
 }
 
-/// `GET /groups/{name}/export`: every shard's record line names its
+/// `GET /groups/{id}/export`: every shard's record line names its
 /// own projection; the union record — one line, importable — is what
 /// the `group` actually is.
 pub(super) async fn export_group_union(
     State(state): State<RouterState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    api::GroupIdPath(id): api::GroupIdPath,
     headers: HeaderMap,
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    let path = format!("/groups/{}/export", urlencode(&name));
+    let path = format!("/groups/{id}/export");
     let map = state.map();
     let shards: Vec<usize> = map.all().collect();
     let outcomes = state
@@ -635,12 +740,12 @@ pub(super) async fn export_group_union(
             deadline,
         )
         .await;
-    let mut merged: Option<crate::groups::GroupRecord> = None;
+    let mut merged: Option<(String, crate::groups::GroupRecord)> = None;
     let mut not_found: Option<ShardAnswer> = None;
     for (shard, outcome) in outcomes {
         match merge_fate(&map, shard, outcome, started_at) {
             Ok(MergeFate::Success(answer)) => {
-                let Some(record) = parse_group_export(&answer.body) else {
+                let Some((name, record)) = parse_group_export(&answer.body) else {
                     return api::error(
                         ErrorCode::Internal,
                         format!(
@@ -651,11 +756,11 @@ pub(super) async fn export_group_union(
                     );
                 };
                 match &mut merged {
-                    Some(held) => {
+                    Some((_, held)) => {
                         held.context_ids.extend(record.context_ids);
                         held.groups.extend(record.groups);
                     }
-                    None => merged = Some(record),
+                    None => merged = Some((name, record)),
                 }
             }
             Ok(MergeFate::NotFound(answer)) => not_found = Some(answer),
@@ -663,7 +768,7 @@ pub(super) async fn export_group_union(
         }
     }
     match (merged, not_found) {
-        (Some(record), _) => (
+        (Some((name, record)), _) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")],
             crate::export::render_group(&name, &record),
@@ -672,15 +777,16 @@ pub(super) async fn export_group_union(
         (None, Some(answer)) => passthrough(answer),
         (None, None) => api::error(
             ErrorCode::NoGroup,
-            format!("group '{name}' not found"),
+            format!("group '{id}' not found"),
             started_at,
         ),
     }
 }
 
-/// One shard's export body back into a record: a single
-/// `group` line, the same shape `parse_group` reads.
-fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
+/// One shard's export body back into its name and record: a single
+/// `group` line, the same shape `parse_group` reads (whose `id` field
+/// still carries the name, until #996).
+fn parse_group_export(body: &Bytes) -> Option<(String, crate::groups::GroupRecord)> {
     let text = std::str::from_utf8(body).ok()?;
     let line = text.lines().find(|line| !line.trim().is_empty())?;
     let value: Value = serde_json::from_str(line).ok()?;
@@ -698,15 +804,19 @@ fn parse_group_export(body: &Bytes) -> Option<crate::groups::GroupRecord> {
             })
             .unwrap_or_default()
     };
-    Some(crate::groups::GroupRecord {
-        description: object
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        context_ids: string_set("context_ids"),
-        groups: string_set("groups"),
-    })
+    let name = object.get("id")?.as_str()?.to_string();
+    Some((
+        name,
+        crate::groups::GroupRecord {
+            description: object
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            context_ids: string_set("context_ids"),
+            groups: string_set("groups"),
+        },
+    ))
 }
 
 #[cfg(test)]

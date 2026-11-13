@@ -1249,16 +1249,23 @@ fn group_traversal_derives_each_member_and_into_renames() {
     seed_two_cliques(&server, "m1");
     seed_two_cliques(&server, "m2");
     server.ok(
-        "PUT",
-        "/groups/child",
-        Some(json!({"context_ids": [server.cx("m2")]})),
+        "POST",
+        "/groups",
+        group_body("child", Some(json!({"context_ids": [server.cx("m2")]}))),
     );
     server.ok(
-        "PUT",
-        "/groups/kura",
-        Some(json!({"context_ids": [server.cx("m1")], "groups": ["child"]})),
+        "POST",
+        "/groups",
+        group_body(
+            "kura",
+            Some(json!({"context_ids": [server.cx("m1")], "groups": ["child"]})),
+        ),
     );
-    server.ok("PUT", "/groups/hollow", Some(json!({"context_ids": []})));
+    server.ok(
+        "POST",
+        "/groups",
+        group_body("hollow", Some(json!({"context_ids": []}))),
+    );
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let chat_url = stub_chat(Arc::clone(&requests));
@@ -1267,15 +1274,22 @@ fn group_traversal_derives_each_member_and_into_renames() {
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
 
+    // `--group` takes the id (#995); the children the row names by name
+    // resolve through the directory.
+    let hollow = server.gx("hollow");
     let (code, _stdout, stderr) =
-        run_communities(&["--group", "hollow", &server.base], &extract_env);
+        run_communities(&["--group", &hollow, &server.base], &extract_env);
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("group 'hollow' reaches no contexts"),
+        stderr.contains(&format!("group '{hollow}' reaches no contexts")),
         "{stderr}"
     );
+    let (code, _stdout, stderr) = run_communities(&["--group", "kura", &server.base], &extract_env);
+    assert_eq!(code, 1, "a name is not an id: {stderr}");
+    assert!(stderr.contains("is not a group id"), "{stderr}");
 
-    let (code, stdout, stderr) = run_communities(&["--group", "kura", &server.base], &extract_env);
+    let kura = server.gx("kura");
+    let (code, stdout, stderr) = run_communities(&["--group", &kura, &server.base], &extract_env);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("context 'm1'"), "{stdout}");
     assert!(stdout.contains("context 'm2'"), "{stdout}");
@@ -1310,6 +1324,17 @@ fn group_traversal_derives_each_member_and_into_renames() {
         row["name"],
         json!("m1::communities"),
         "the create block names it by default: {row}"
+    );
+
+    // A second `group` named "child": kura's row still names its child
+    // by name (until #996), which now picks out two groups — refused,
+    // never resolved to one of them.
+    server.ok("POST", "/groups", group_body("child", None));
+    let (code, _stdout, stderr) = run_communities(&["--group", &kura, &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("child group name 'child' is ambiguous: 2 groups share it"),
+        "{stderr}"
     );
 }
 

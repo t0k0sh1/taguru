@@ -1,0 +1,28 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "groups_create",
+  "request": {
+    "context_ids": [
+      "00000000-0000-4000-8000-000000000001"
+    ],
+    "description": "蔵元一式",
+    "name": "kura"
+  },
+  "response": {
+    "result": {
+      "context_ids": [
+        "00000000-0000-4000-8000-000000000001"
+      ],
+      "description": "蔵元一式",
+      "fingerprint": "d1907be234f33886",
+      "groups": [],
+      "id": "00000000-0000-4000-9000-000000000001",
+      "name": "kura"
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/groups",
+  "status": 200
+}

@@ -227,8 +227,10 @@ export interface ContextPage {
  * (child names — labels, not content) is never filtered.
  */
 export interface GroupEntry {
-  /** The `group`'s name — the row's own key (#851). */
+  /** The `group`'s server-minted id, which every `group` call takes. */
   id: string;
+  /** The `group`'s display name — a label, not unique. */
+  name: string;
   description: string;
   context_ids: string[];
   groups: string[];
