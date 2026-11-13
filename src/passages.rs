@@ -139,15 +139,11 @@ impl SourceFilter {
                 return false;
             }
         }
-        if !self.tags.is_empty()
-            && !self
+        self.tags.is_empty()
+            || self
                 .tags
                 .iter()
                 .any(|tag| record.meta.tags.binary_search(tag).is_ok())
-        {
-            return false;
-        }
-        true
     }
 }
 
