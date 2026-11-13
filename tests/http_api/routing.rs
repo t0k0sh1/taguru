@@ -1349,6 +1349,36 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
     );
 }
 
+/// A SCHEMA refusal after a batch landed on another shard: the schema
+/// loop's own rewrap carries the batch count too, so `durable_batches`
+/// and the landed message name the batch the refusing shard never saw.
+#[test]
+fn a_schema_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("schema-rewrap-a");
+    let shard_b = Server::start("schema-rewrap-b");
+    let router = Server::start_router(
+        "schema-rewrap",
+        &format!("ctx_a = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    // The schema names a context no shard holds, so it falls to the
+    // `*` shard, which refuses it on the real run — after shard A's
+    // batch landed.
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
+         {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
+         {{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
+    );
+    let (status, body) = post_import(&router, &stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("1 source(s) landed"), "{body}");
+}
+
 /// A shard that answers success with an envelope the router cannot
 /// read still LANDED its chunk — a later refusal's rewrap must count
 /// it from the chunk's own batch ranges, not from the parsed
