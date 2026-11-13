@@ -984,42 +984,12 @@ fn deadline_exceeded(started_at: Instant) -> Response {
     )
 }
 
-fn group_not_found(name: &str, started_at: Instant) -> Response {
+fn group_not_found(id: &str, started_at: Instant) -> Response {
     error(
         ErrorCode::NoGroup,
-        format!("group '{name}' not found"),
+        format!("group '{id}' not found"),
         started_at,
     )
-}
-
-/// A `group` NAME several `groups` share, where the wire still names a
-/// `group` by name — a child in a nesting list, a cross-search target,
-/// an import record (until #996) — served as an explicit conflict,
-/// never as "not found" and never resolved to one of the claimants.
-/// Names are not unique (ADR 0050), so any two `groups` created under
-/// one name reach it.
-pub(crate) fn ambiguous_group(name: &str, count: usize, started_at: Instant) -> Response {
-    error(
-        ErrorCode::Conflict,
-        format!(
-            "group name '{name}' is ambiguous: {count} groups share it; this field still \
-             names groups by name, so rename them apart (POST /groups/{{id}}/rename)"
-        ),
-        started_at,
-    )
-}
-
-/// [`group_not_found`] or [`ambiguous_group`], whichever a failed name
-/// lookup means.
-fn group_lookup_refusal(
-    name: &str,
-    why: crate::groups::GroupLookup,
-    started_at: Instant,
-) -> Response {
-    match why {
-        crate::groups::GroupLookup::NotFound => group_not_found(name, started_at),
-        crate::groups::GroupLookup::Ambiguous(count) => ambiguous_group(name, count, started_at),
-    }
 }
 
 /// The one place the two nesting violations map onto the error
@@ -1315,6 +1285,31 @@ pub(crate) fn invalid_context_ids<'a>(
         format!(
             "'{field}' value '{}' is not a context id: it takes the id column of GET /contexts \
              (a lowercase hyphenated UUID), not the context's name",
+            value
+                .chars()
+                .take(MAX_CONTEXT_NAME_BYTES)
+                .collect::<String>()
+        ),
+        started_at,
+    ))
+}
+
+/// [`invalid_context_ids`]' twin for the lists that name `groups` —
+/// child `group_ids`, their add/remove deltas, and the cross-search
+/// targets (#996): a name where an id belongs is refused by name, never
+/// looked up. `None` when every value passes.
+pub(crate) fn invalid_group_ids<'a>(
+    field: &str,
+    ids: impl IntoIterator<Item = &'a String>,
+    started_at: Instant,
+) -> Option<Response> {
+    let value = ids.into_iter().find(|id| !crate::groups::is_group_id(id))?;
+    Some(coded(
+        axum::http::StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidArgument,
+        format!(
+            "'{field}' value '{}' is not a group id: it takes the id column of GET /groups \
+             (a lowercase hyphenated UUID), not the group's name",
             value
                 .chars()
                 .take(MAX_CONTEXT_NAME_BYTES)

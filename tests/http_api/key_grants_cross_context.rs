@@ -760,7 +760,9 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         "/groups",
         group_body(
             "nomiya",
-            Some(json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"]})),
+            Some(
+                json!({"context_ids": [server.cx("sakagura")], "group_ids": [server.gx("sakaya")]}),
+            ),
         ),
     );
 
@@ -768,7 +770,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let recalled = server.ok(
         "POST",
         "/recall",
-        Some(json!({"groups": ["nomiya"], "cue": "蔵"})),
+        Some(json!({"group_ids": [server.gx("nomiya")], "cue": "蔵"})),
     );
     assert_eq!(recalled["total"], json!(2), "{recalled}");
 
@@ -776,7 +778,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let deduped = server.ok(
         "POST",
         "/recall",
-        Some(json!({"context_ids": [server.cx("izakaya")], "groups": ["nomiya", "sakaya"], "cue": "蔵"})),
+        Some(json!({"context_ids": [server.cx("izakaya")], "group_ids": [server.gx("nomiya"), server.gx("sakaya")], "cue": "蔵"})),
     );
     assert_eq!(deduped["total"], json!(2), "{deduped}");
 
@@ -784,7 +786,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let queried = server.ok(
         "POST",
         "/query",
-        Some(json!({"groups": ["nomiya"], "label": "杜氏"})),
+        Some(json!({"group_ids": [server.gx("nomiya")], "label": "杜氏"})),
     );
     assert_eq!(queried["total"], json!(1), "{queried}");
     assert_eq!(queried["matches"][0]["context_name"], json!("sakagura"));
@@ -805,7 +807,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         "POST",
         "/sources/search",
         Some(
-            json!({"context_ids": [server.cx("sakagura")], "groups": ["sakaya"], "query": "蔵元"}),
+            json!({"context_ids": [server.cx("sakagura")], "group_ids": [server.gx("sakaya")], "query": "蔵元"}),
         ),
     );
     let hits = hits["hits"].as_array().unwrap();
@@ -818,21 +820,22 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     let empty = server.ok(
         "POST",
         "/recall",
-        Some(json!({"groups": ["kara"], "cue": "蔵"})),
+        Some(json!({"group_ids": [server.gx("kara")], "cue": "蔵"})),
     );
     assert_eq!(empty["total"], json!(0), "{empty}");
     assert_eq!(empty["matches"], json!([]), "{empty}");
 
     // …an unknown group refuses before anything is searched…
+    const MABOROSHI: &str = "00000000-0000-4000-9000-6d61626f726f";
     let (status, ghost) = server.call(
         "POST",
         "/recall",
-        Some(json!({"groups": ["maboroshi"], "cue": "蔵"})),
+        Some(json!({"group_ids": [MABOROSHI], "cue": "蔵"})),
     );
     assert_eq!(status, 404, "{ghost}");
     assert_eq!(ghost["code"], json!("no_group"), "{ghost}");
     assert!(
-        ghost["error"].as_str().unwrap().contains("'maboroshi'"),
+        ghost["error"].as_str().unwrap().contains(MABOROSHI),
         "{ghost}"
     );
 
@@ -842,23 +845,25 @@ fn cross_context_search_resolves_groups_beside_contexts() {
     assert_eq!(nothing["code"], json!("invalid_argument"), "{nothing}");
 
     // …and the groups list shares the input-items cap.
-    let flood: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
+    let flood: Vec<String> = (0..1001)
+        .map(|i| format!("00000000-0000-4000-9000-{i:012x}"))
+        .collect();
     let (status, over) = server.call(
         "POST",
         "/recall",
-        Some(json!({"groups": flood, "cue": "蔵"})),
+        Some(json!({"group_ids": flood, "cue": "蔵"})),
     );
     assert_eq!(status, 400, "{over}");
     assert_eq!(over["code"], json!("over_limit"), "{over}");
 
-    // The MCP search tools take `groups` as a cross-context form…
+    // The MCP search tools take `group_ids` as a cross-context form…
     let (status, reply) = server.call(
         "POST",
         "/mcp",
         Some(json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "groups": ["nomiya"], "cue": "蔵",
+                "group_ids": [server.gx("nomiya")], "cue": "蔵",
             }},
         })),
     );
@@ -877,7 +882,7 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         Some(json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "recall", "arguments": {
-                "context_id": "izakaya", "groups": ["nomiya"], "cue": "蔵",
+                "context_id": "izakaya", "group_ids": [server.gx("nomiya")], "cue": "蔵",
             }},
         })),
     );
@@ -1026,7 +1031,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, sliced) = call(
         "POST",
         "/recall",
-        Some(json!({"groups": ["zenbu"], "cue": "蔵"})),
+        Some(json!({"group_ids": [server.gx("zenbu")], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 200, "{sliced}");
@@ -1053,7 +1058,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, outside) = call(
         "POST",
         "/recall",
-        Some(json!({"groups": ["soto"], "cue": "蔵"})),
+        Some(json!({"group_ids": [server.gx("soto")], "cue": "蔵"})),
         "stok",
     );
     assert_eq!(status, 200, "{outside}");
@@ -1065,7 +1070,9 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
     let (status, direct) = call(
         "POST",
         "/recall",
-        Some(json!({"context_ids": [server.cx("bunko")], "groups": ["zenbu"], "cue": "蔵"})),
+        Some(
+            json!({"context_ids": [server.cx("bunko")], "group_ids": [server.gx("zenbu")], "cue": "蔵"}),
+        ),
         "stok",
     );
     assert_eq!(status, 403, "{direct}");

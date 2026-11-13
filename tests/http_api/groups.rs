@@ -259,7 +259,7 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     server.ok(
         "PATCH",
         &format!("/groups/{}", server.gx("g")),
-        Some(json!({"add_groups": ["kid"]})),
+        Some(json!({"add_group_ids": [server.gx("kid")]})),
     );
 
     // 1 member + 1,000 adds = one past the cap: refused whole.
@@ -274,11 +274,13 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"), "{refused}");
     // Child groups ride the same cap on their own set.
-    let ghost_kids: Vec<String> = (0..1000).map(|i| format!("gg{i:04}")).collect();
+    let ghost_kids: Vec<String> = (0..1000)
+        .map(|i| format!("00000000-0000-4000-9000-{i:012x}"))
+        .collect();
     let (status, refused) = server.call(
         "PATCH",
         &format!("/groups/{}", server.gx("g")),
-        Some(json!({"add_groups": ghost_kids})),
+        Some(json!({"add_group_ids": ghost_kids})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"), "{refused}");
@@ -300,7 +302,7 @@ fn group_membership_cannot_be_grown_past_the_cap_by_deltas() {
     // Nothing half-applied anywhere along the way.
     let row = server.ok("GET", &format!("/groups/{}", server.gx("g")), None);
     assert_eq!(row["context_ids"], server.cx_sorted(&["a"]), "{row}");
-    assert_eq!(row["groups"], json!(["kid"]), "{row}");
+    assert_eq!(row["group_ids"], json!([server.gx("kid")]), "{row}");
 }
 
 /// Nesting: a group may hold child groups — at most three storeys,
@@ -322,22 +324,22 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
         "/groups",
         group_body(
             "mid",
-            Some(json!({"groups": ["leaf"], "context_ids": [server.cx("b")]})),
+            Some(json!({"group_ids": [server.gx("leaf")], "context_ids": [server.cx("b")]})),
         ),
     );
     server.ok(
         "POST",
         "/groups",
-        group_body("top", Some(json!({"groups": ["mid"]}))),
+        group_body("top", Some(json!({"group_ids": [server.gx("mid")]}))),
     );
 
     // Rows carry their children; members stay the direct ones.
     let row = server.ok("GET", &format!("/groups/{}", server.gx("mid")), None);
-    assert_eq!(row["groups"], json!(["leaf"]), "{row}");
+    assert_eq!(row["group_ids"], json!([server.gx("leaf")]), "{row}");
     assert_eq!(row["context_ids"], server.cx_sorted(&["b"]));
     let page = server.ok("GET", "/groups", None);
     assert_eq!(page["groups"][2]["name"], json!("top"), "{page}");
-    assert_eq!(page["groups"][2]["groups"], json!(["mid"]));
+    assert_eq!(page["groups"][2]["group_ids"], json!([server.gx("mid")]));
 
     // A fourth storey refuses as a cap, a cycle (the self-loop
     // included) as a bad argument, an unknown child in the group
@@ -345,7 +347,7 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     let (status, refused) = server.call(
         "POST",
         "/groups",
-        group_body("over", Some(json!({"groups": ["top"]}))),
+        group_body("over", Some(json!({"group_ids": [server.gx("top")]}))),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"));
@@ -357,27 +359,27 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     let (status, refused) = server.call(
         "PATCH",
         &format!("/groups/{}", server.gx("leaf")),
-        Some(json!({"add_groups": ["top"]})),
+        Some(json!({"add_group_ids": [server.gx("top")]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"));
     let (status, refused) = server.call(
         "PATCH",
         &format!("/groups/{}", server.gx("leaf")),
-        Some(json!({"add_groups": ["leaf"]})),
+        Some(json!({"add_group_ids": [server.gx("leaf")]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"));
     let (status, refused) = server.call(
         "PATCH",
         &format!("/groups/{}", server.gx("top")),
-        Some(json!({"add_groups": ["ghost"], "remove_groups": ["mid"]})),
+        Some(json!({"add_group_ids": ["ead6ef03-d61e-460c-933d-6d450c50a1e5"], "remove_group_ids": [server.gx("mid")]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_group"));
     assert_eq!(
-        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["groups"],
-        json!(["mid"]),
+        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["group_ids"],
+        json!([server.gx("mid")]),
         "the refused delta must not half-apply"
     );
 
@@ -386,23 +388,23 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     let updated = server.ok(
         "PATCH",
         &format!("/groups/{}", server.gx("top")),
-        Some(json!({"add_groups": ["leaf"], "remove_groups": ["mid"]})),
+        Some(json!({"add_group_ids": [server.gx("leaf")], "remove_group_ids": [server.gx("mid")]})),
     );
-    assert_eq!(updated["groups"], json!(["leaf"]));
+    assert_eq!(updated["group_ids"], json!([server.gx("leaf")]));
     assert_eq!(
-        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["groups"],
-        json!(["leaf"])
+        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["group_ids"],
+        json!([server.gx("leaf")])
     );
 
     // Deleting a child sweeps it from every parent; its member
     // contexts live on untouched.
     server.ok("DELETE", &format!("/groups/{}", server.gx("leaf")), None);
     assert_eq!(
-        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["groups"],
+        server.ok("GET", &format!("/groups/{}", server.gx("top")), None)["group_ids"],
         json!([])
     );
     assert_eq!(
-        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["groups"],
+        server.ok("GET", &format!("/groups/{}", server.gx("mid")), None)["group_ids"],
         json!([])
     );
     assert_eq!(
@@ -413,11 +415,13 @@ fn groups_nest_with_a_depth_cap_and_no_cycles() {
     );
 
     // The children list rides the same input ceiling as contexts.
-    let over_cap: Vec<String> = (0..1001).map(|i| format!("g{i}")).collect();
+    let over_cap: Vec<String> = (0..1001)
+        .map(|i| format!("00000000-0000-4000-9000-{i:012x}"))
+        .collect();
     let (status, refused) = server.call(
         "POST",
         "/groups",
-        group_body("wide", Some(json!({"groups": over_cap}))),
+        group_body("wide", Some(json!({"group_ids": over_cap}))),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"));
@@ -464,7 +468,7 @@ fn groups_survive_restart_and_boot_reconciles_dangling_members() {
         "boot must reconcile the planted dangling member: {survived}"
     );
     assert_eq!(
-        survived["groups"],
+        survived["group_ids"],
         json!([]),
         "boot must reconcile the planted dangling child: {survived}"
     );
@@ -663,7 +667,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         call(
             "PATCH",
             &format!("/groups/{}", server.gx("ours")),
-            Some(json!({"add_groups": ["shelf"]})),
+            Some(json!({"add_group_ids": [server.gx("shelf")]})),
             "atok"
         )
         .0,
@@ -675,7 +679,11 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         None,
         "stok",
     );
-    assert_eq!(nested["result"]["groups"], json!(["shelf"]), "{nested}");
+    assert_eq!(
+        nested["result"]["group_ids"],
+        json!([server.gx("shelf")]),
+        "{nested}"
+    );
     assert_eq!(
         nested["result"]["context_ids"],
         server.cx_sorted(&["sake"]),
@@ -701,7 +709,7 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
     let (status, refused) = call(
         "POST",
         "/groups",
-        group_body("annex", Some(json!({"groups": ["shelf"]}))),
+        group_body("annex", Some(json!({"group_ids": [server.gx("shelf")]}))),
         "stok",
     );
     assert_eq!(status, 403, "{refused}");
@@ -802,7 +810,7 @@ fn revision_and_group_fingerprint_move_exactly_with_member_changes() {
         "/groups",
         group_body(
             "parent",
-            Some(json!({"context_ids": [server.cx("apple")], "groups": ["child"]})),
+            Some(json!({"context_ids": [server.cx("apple")], "group_ids": [server.gx("child")]})),
         ),
     );
     let fingerprint = |server: &Server| {
@@ -1013,7 +1021,7 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
     let via_group = server.ok(
         "POST",
         "/recall",
-        Some(json!({"groups": ["g"], "cue": "蔵"})),
+        Some(json!({"group_ids": [server.gx("g")], "cue": "蔵"})),
     );
     assert_eq!(via_group["matches"][0]["context_name"], json!("after"));
     assert_eq!(via_group["plan"]["context_ids"], json!([id]), "{via_group}");
@@ -1021,12 +1029,10 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
 }
 
 /// Names are labels (ADR 0050): two `groups` may share one, each
-/// addressed by its own id. Wherever the wire still names a `group` by
-/// name — a child in a nesting list, a cross-search target — a name two
-/// `groups` share is a 409 `conflict`, never a 404 and never an
-/// arbitrary one of the two.
+/// addressed by its own id — in the path (#995) and in every list that
+/// names a `group` (#996).
 #[test]
-fn a_group_name_two_groups_share_is_a_conflict_where_groups_are_still_named() {
+fn groups_sharing_a_name_are_two_groups_at_every_entrance() {
     let server = Server::start("groups-ambiguous");
     let sake = server.create_context("sake");
     let first = server.create_group("kura", Some(json!({"context_ids": [sake]})));
@@ -1075,55 +1081,68 @@ fn a_group_name_two_groups_share_is_a_conflict_where_groups_are_still_named() {
         server.ok("GET", &format!("/groups/{second}"), None)["description"],
         json!("twin")
     );
-    let parent = server.create_group("parent", None);
+    // Every list names a group by id (#996), so the twins are two
+    // groups everywhere: nested, searched and removed one at a time, and
+    // a name where an id belongs is a 400, never a lookup.
+    let parent = server.create_group(
+        "parent",
+        Some(json!({"group_ids": [first.clone(), second.clone()]})),
+    );
+    let mut both = vec![first.clone(), second.clone()];
+    both.sort();
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{parent}"), None)["group_ids"],
+        json!(both)
+    );
+    let page = server.ok(
+        "POST",
+        "/recall",
+        Some(json!({"group_ids": [first.clone()], "cue": "蔵"})),
+    );
+    assert_eq!(page["plan"]["context_ids"], json!([sake]), "{page}");
+    let row = server.ok(
+        "PATCH",
+        &format!("/groups/{parent}"),
+        Some(json!({"remove_group_ids": [second.clone()]})),
+    );
+    assert_eq!(row["group_ids"], json!([first.clone()]));
     for (method, path, body) in [
         (
             "POST",
             "/groups".to_string(),
-            group_body("p2", Some(json!({"groups": ["kura"]}))),
+            group_body("p2", Some(json!({"group_ids": ["kura"]}))),
         ),
         (
             "PATCH",
             format!("/groups/{parent}"),
-            Some(json!({"add_groups": ["kura"]})),
+            Some(json!({"add_group_ids": ["kura"]})),
+        ),
+        (
+            "PATCH",
+            format!("/groups/{parent}"),
+            Some(json!({"remove_group_ids": ["kura"]})),
         ),
         (
             "POST",
             "/recall".to_string(),
-            Some(json!({"groups": ["kura"], "cue": "蔵"})),
+            Some(json!({"group_ids": ["kura"], "cue": "蔵"})),
         ),
     ] {
         let (status, refusal) = server.call(method, &path, body);
-        assert_eq!(status, 409, "{method} {path}: {refusal}");
+        assert_eq!(status, 400, "{method} {path}: {refusal}");
         assert_eq!(
             refusal["code"],
-            json!("conflict"),
+            json!("invalid_argument"),
             "{method} {path}: {refusal}"
         );
         assert!(
             refusal["error"]
                 .as_str()
                 .unwrap()
-                .contains("'kura' is ambiguous: 2 groups"),
+                .contains("'kura' is not a group id"),
             "{method} {path}: {refusal}"
         );
     }
-    // The refusals moved nothing; renaming one twin apart lifts them.
     assert_eq!(server.ok("GET", "/groups", None)["total"], json!(3));
-    assert_eq!(
-        server.ok("GET", &format!("/groups/{parent}"), None)["groups"],
-        json!([])
-    );
-    server.ok(
-        "POST",
-        &format!("/groups/{second}/rename"),
-        Some(json!({"to": "sakagura"})),
-    );
-    let row = server.ok(
-        "PATCH",
-        &format!("/groups/{parent}"),
-        Some(json!({"add_groups": ["kura"]})),
-    );
-    assert_eq!(row["groups"], json!(["kura"]));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }

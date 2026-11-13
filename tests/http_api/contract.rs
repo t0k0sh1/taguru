@@ -302,7 +302,7 @@ fn group_rows_and_operations() {
     http_fixture("groups_get", "GET", "/groups/{id}", None, status, body);
 
     server.ok("POST", "/groups", Some(json!({"name": "child"})));
-    let request = json!({"add_groups": ["child"], "remove_context_ids": [member]});
+    let request = json!({"add_group_ids": [server.gx("child")], "remove_context_ids": [member]});
     let (status, body) = server.call("PATCH", &format!("/groups/{id}"), Some(request.clone()));
     assert_eq!(status, 200, "{body}");
     http_fixture(

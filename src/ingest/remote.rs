@@ -473,20 +473,25 @@ pub(super) fn run_remote(
                     });
                     schema_count += 1;
                 }
-                for (name, record) in &stream.groups {
-                    if let Some(earlier) = group_owners.get(name) {
+                for record in &stream.groups {
+                    if let Some(earlier) = group_owners.get(&record.id) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_group_message(name, earlier)
+                            duplicate_group_message(&record.id, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
-                    group_owners.insert(name.clone(), path.clone());
+                    group_owners.insert(record.id.clone(), path.clone());
                     group_units.push(Unit {
-                        text: crate::export::render_group(name, record),
-                        label: format!("{}: group '{name}'", path.display()),
+                        text: crate::export::render_group(record),
+                        label: format!(
+                            "{}: group '{}' ({})",
+                            path.display(),
+                            record.name,
+                            record.id
+                        ),
                         kind: UnitKind::Group,
                     });
                     group_count += 1;
@@ -681,12 +686,13 @@ pub(super) fn run_remote(
                     }
                     for group in &groups {
                         let name = group.get("name").and_then(Value::as_str).unwrap_or("?");
+                        let id = group.get("id").and_then(Value::as_str).unwrap_or("?");
                         let outcome = group.get("outcome").and_then(Value::as_str).unwrap_or("?");
                         let member_contexts =
                             group.get("contexts").and_then(Value::as_u64).unwrap_or(0);
                         let child_groups = group.get("groups").and_then(Value::as_u64).unwrap_or(0);
                         println!(
-                            "group '{name}': {member_contexts} member context(s), \
+                            "group '{name}' ({id}): {member_contexts} member context(s), \
                              {child_groups} child group(s) — {outcome}"
                         );
                     }

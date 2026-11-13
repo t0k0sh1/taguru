@@ -97,7 +97,7 @@ fn merge_group_entry(rows: &mut BTreeMap<String, api::GroupEntry>, entry: api::G
             let mut members: BTreeSet<String> = held.context_ids.drain(..).collect();
             members.extend(entry.context_ids);
             held.context_ids = members.into_iter().collect();
-            held.groups.extend(entry.groups);
+            held.group_ids.extend(entry.group_ids);
             let mut digest = crate::hash::fnv1a_fold(
                 crate::hash::FNV1A_OFFSET,
                 held.fingerprint.bytes().chain([0xff]),
@@ -740,12 +740,12 @@ pub(super) async fn export_group_union(
             deadline,
         )
         .await;
-    let mut merged: Option<(String, crate::groups::GroupRecord)> = None;
+    let mut merged: Option<crate::groups::StoredGroup> = None;
     let mut not_found: Option<ShardAnswer> = None;
     for (shard, outcome) in outcomes {
         match merge_fate(&map, shard, outcome, started_at) {
             Ok(MergeFate::Success(answer)) => {
-                let Some((name, record)) = parse_group_export(&answer.body) else {
+                let Some(record) = parse_group_export(&answer.body) else {
                     return api::error(
                         ErrorCode::Internal,
                         format!(
@@ -756,11 +756,11 @@ pub(super) async fn export_group_union(
                     );
                 };
                 match &mut merged {
-                    Some((_, held)) => {
+                    Some(held) => {
                         held.context_ids.extend(record.context_ids);
-                        held.groups.extend(record.groups);
+                        held.group_ids.extend(record.group_ids);
                     }
-                    None => merged = Some((name, record)),
+                    None => merged = Some(record),
                 }
             }
             Ok(MergeFate::NotFound(answer)) => not_found = Some(answer),
@@ -768,10 +768,10 @@ pub(super) async fn export_group_union(
         }
     }
     match (merged, not_found) {
-        (Some((name, record)), _) => (
+        (Some(record), _) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")],
-            crate::export::render_group(&name, &record),
+            crate::export::render_group(&record),
         )
             .into_response(),
         (None, Some(answer)) => passthrough(answer),
@@ -783,10 +783,9 @@ pub(super) async fn export_group_union(
     }
 }
 
-/// One shard's export body back into its name and record: a single
-/// `group` line, the same shape `parse_group` reads (whose `id` field
-/// still carries the name, until #996).
-fn parse_group_export(body: &Bytes) -> Option<(String, crate::groups::GroupRecord)> {
+/// One shard's export body back into its record: a single `group`
+/// line, the same shape `parse_group` reads.
+fn parse_group_export(body: &Bytes) -> Option<crate::groups::StoredGroup> {
     let text = std::str::from_utf8(body).ok()?;
     let line = text.lines().find(|line| !line.trim().is_empty())?;
     let value: Value = serde_json::from_str(line).ok()?;
@@ -804,19 +803,17 @@ fn parse_group_export(body: &Bytes) -> Option<(String, crate::groups::GroupRecor
             })
             .unwrap_or_default()
     };
-    let name = object.get("id")?.as_str()?.to_string();
-    Some((
-        name,
-        crate::groups::GroupRecord {
-            description: object
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            context_ids: string_set("context_ids"),
-            groups: string_set("groups"),
-        },
-    ))
+    Some(crate::groups::StoredGroup {
+        id: object.get("id")?.as_str()?.to_string(),
+        name: object.get("name")?.as_str()?.to_string(),
+        description: object
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        context_ids: string_set("context_ids"),
+        group_ids: string_set("group_ids"),
+    })
 }
 
 #[cfg(test)]
@@ -1015,7 +1012,7 @@ mod tests {
     /// would refuse the connection).
     #[tokio::test]
     async fn a_remove_list_goes_whole_to_every_shard_without_a_probe() {
-        let base = json!({"remove_context_ids": [id(1), id(2)], "add_groups": ["g"]});
+        let base = json!({"remove_context_ids": [id(1), id(2)], "add_group_ids": ["g"]});
         let body_for = project(TWO_SHARDS, &base, &[], &["remove_context_ids"])
             .await
             .unwrap_or_else(|_| panic!("a remove list must project"));
@@ -1023,7 +1020,7 @@ mod tests {
             let body: serde_json::Value =
                 serde_json::from_slice(&body_for(shard).unwrap()).unwrap();
             assert_eq!(body["remove_context_ids"], json!([id(1), id(2)]));
-            assert_eq!(body["add_groups"], json!(["g"]));
+            assert_eq!(body["add_group_ids"], json!(["g"]));
         }
     }
 }

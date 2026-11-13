@@ -42,18 +42,18 @@ pub fn route_tool(
         Ok(format!("/groups/{}", segment(need(arguments, key)?)))
     };
     // The search tools target one context or several: `context_id`
-    // prefixes the per-context path; `context_ids` and/or `groups`
+    // prefixes the per-context path; `context_ids` and/or `group_ids`
     // (arrays, riding the body) mean the cross-context route — no
     // prefix. `context_id` beside either is ambiguous, and none at all
     // names no target.
     let search_base = || -> Result<String, String> {
         let given = |key: &str| arguments.get(key).is_some_and(|value| !value.is_null());
-        match (given("context_id"), given("context_ids") || given("groups")) {
+        match (given("context_id"), given("context_ids") || given("group_ids")) {
             (true, true) => {
-                Err("pass either 'context_id' or 'context_ids'/'groups', not both".to_string())
+                Err("pass either 'context_id' or 'context_ids'/'group_ids', not both".to_string())
             }
             (false, false) => Err(
-                "missing required argument 'context_id' (or 'context_ids'/'groups', to search several at once)"
+                "missing required argument 'context_id' (or 'context_ids'/'group_ids', to search several at once)"
                     .to_string(),
             ),
             (true, false) => context_path("context_id"),
@@ -149,7 +149,7 @@ pub fn route_tool(
                 "/groups".to_string(),
                 Some(pick(
                     arguments,
-                    &["name", "description", "context_ids", "groups"],
+                    &["name", "description", "context_ids", "group_ids"],
                 )),
             )
         }
@@ -162,8 +162,8 @@ pub fn route_tool(
                     "description",
                     "add_context_ids",
                     "remove_context_ids",
-                    "add_groups",
-                    "remove_groups",
+                    "add_group_ids",
+                    "remove_group_ids",
                 ],
             )),
         ),
@@ -283,7 +283,7 @@ pub fn route_tool(
                 arguments,
                 &[
                     "context_ids",
-                    "groups",
+                    "group_ids",
                     "subject",
                     "label",
                     "object",
@@ -306,7 +306,7 @@ pub fn route_tool(
                     arguments,
                     &[
                         "context_ids",
-                        "groups",
+                        "group_ids",
                         "cue",
                         "limit",
                         "after",
@@ -466,7 +466,7 @@ pub fn route_tool(
                     arguments,
                     &[
                         "context_ids",
-                        "groups",
+                        "group_ids",
                         "query",
                         "limit",
                         "semantic_floor",

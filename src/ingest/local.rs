@@ -24,7 +24,7 @@ pub(super) fn run_local(
     // either way each batch stands alone from here on.
     let mut batches = Vec::new();
     let mut schemas: Vec<(&PathBuf, String, schema::InstalledSchema)> = Vec::new();
-    let mut groups: Vec<(&PathBuf, String, GroupRecord)> = Vec::new();
+    let mut groups: Vec<(&PathBuf, StoredGroup)> = Vec::new();
     let mut broken = 0;
     // ADR 0038 §3.4: batches the gate refused — named on stderr as
     // they are met, skipped (the rest of their file still applies),
@@ -97,18 +97,18 @@ pub(super) fn run_local(
                     schema_owners.insert(context.clone(), path.clone());
                     schemas.push((path, context, installed));
                 }
-                for (name, record) in stream.groups {
-                    if let Some(earlier) = group_owners.get(&name) {
+                for record in stream.groups {
+                    if let Some(earlier) = group_owners.get(&record.id) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_group_message(&name, earlier)
+                            duplicate_group_message(&record.id, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
-                    group_owners.insert(name.clone(), path.clone());
-                    groups.push((path, name, record));
+                    group_owners.insert(record.id.clone(), path.clone());
+                    groups.push((path, record));
                 }
             }
             Err(message) => {
@@ -175,8 +175,8 @@ pub(super) fn run_local(
                 describe_schema(context, installed)
             );
         }
-        for (path, name, record) in &groups {
-            println!("{}: {}", path.display(), describe_group(name, record));
+        for (path, record) in &groups {
+            println!("{}: {}", path.display(), describe_group(record));
         }
         let mut summary = format!("dry run: {} source(s)", batches.len());
         if !schemas.is_empty() {
@@ -336,26 +336,18 @@ pub(super) fn run_local(
     // is, not a per-batch one `FailedBatch` would fit.
     let mut group_restore_error: Option<String> = None;
     if !groups.is_empty() {
-        let records: Vec<(String, GroupRecord)> = groups
-            .iter()
-            .map(|(_, name, record)| (name.clone(), record.clone()))
-            .collect();
+        let records: Vec<StoredGroup> = groups.iter().map(|(_, record)| record.clone()).collect();
         match state.restore_groups(&records, Deadline::unbounded()) {
             Ok(outcomes) => {
                 restored = outcomes.len();
-                for ((path, name, record), (_, outcome)) in groups.iter().zip(&outcomes) {
+                for ((path, record), (_, outcome)) in groups.iter().zip(&outcomes) {
                     if as_json {
-                        json_groups.push(crate::api::GroupImportOutcome {
-                            name: name.clone(),
-                            outcome: outcome.as_str(),
-                            contexts: record.context_ids.len(),
-                            groups: record.groups.len(),
-                        });
+                        json_groups.push(crate::api::GroupImportOutcome::of(record, *outcome));
                     } else {
                         println!(
                             "{}: {} — {}",
                             path.display(),
-                            describe_group(name, record),
+                            describe_group(record),
                             outcome.as_str()
                         );
                     }
@@ -369,9 +361,9 @@ pub(super) fn run_local(
                 // run-level.
                 match refusal
                     .group()
-                    .and_then(|name| groups.iter().find(|(_, held, _)| held == name))
+                    .and_then(|id| groups.iter().find(|(_, held)| held.id == id))
                 {
-                    Some((path, _, _)) => {
+                    Some((path, _)) => {
                         eprintln!("taguru: import: {}: {}", path.display(), refusal.text());
                     }
                     None => eprintln!("taguru: import: {}", refusal.text()),
@@ -589,11 +581,13 @@ fn describe_schema(context: &str, installed: &schema::InstalledSchema) -> String
 
 /// The dry-run and report line for one `group` record — what the batch's
 /// `describe` is to a batch.
-fn describe_group(name: &str, record: &GroupRecord) -> String {
+fn describe_group(record: &StoredGroup) -> String {
     format!(
-        "group '{name}': {} member context(s), {} child group(s)",
+        "group '{}' ({}): {} member context(s), {} child group(s)",
+        record.name,
+        record.id,
         record.context_ids.len(),
-        record.groups.len()
+        record.group_ids.len()
     )
 }
 
@@ -618,9 +612,9 @@ pub(super) fn duplicate_schema_message(context: &str, earlier: &Path) -> String 
 }
 
 /// [`duplicate_source_message`]'s `group`-record twin.
-pub(super) fn duplicate_group_message(name: &str, earlier: &Path) -> String {
+pub(super) fn duplicate_group_message(id: &str, earlier: &Path) -> String {
     format!(
-        "group '{name}' is already stated by an earlier file, {} — one record owns one \
+        "group '{id}' is already stated by an earlier file, {} — one record owns one \
          group's truth",
         earlier.display()
     )
@@ -633,18 +627,21 @@ mod tests {
     /// The dry-run line counts members by id and child groups apart.
     #[test]
     fn describe_group_counts_member_contexts_and_child_groups() {
-        let record = GroupRecord {
+        let record = StoredGroup {
+            id: "00000000-0000-4000-9000-000000000001".into(),
+            name: "kura".into(),
             description: "d".into(),
             context_ids: [
                 "cef2e28b-43f0-4b6c-8201-abab0785399f".to_string(),
                 "ead6ef03-d61e-460c-933d-6d450c50a1e5".to_string(),
             ]
             .into(),
-            groups: ["child".to_string()].into(),
+            group_ids: ["00000000-0000-4000-9000-000000000002".to_string()].into(),
         };
         assert_eq!(
-            describe_group("kura", &record),
-            "group 'kura': 2 member context(s), 1 child group(s)"
+            describe_group(&record),
+            "group 'kura' (00000000-0000-4000-9000-000000000001): 2 member context(s), \
+             1 child group(s)"
         );
     }
 }

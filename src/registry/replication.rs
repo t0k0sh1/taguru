@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].name, "parent");
         assert!(
-            groups[0].record.groups.is_empty(),
+            groups[0].record.group_ids.is_empty(),
             "the dangling child reference must be dropped, not carried into \
              repair_nesting: {groups:?}"
         );

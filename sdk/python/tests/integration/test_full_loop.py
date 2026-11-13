@@ -538,7 +538,7 @@ def test_analyze_communities_returns_ndjson_with_a_header_line(
     assert lines
     header = json.loads(lines[0])
     assert header["type"] == "communities"
-    assert header["version"] == "2026-10-01"
+    assert header["version"] == "2026-11-13"
     assert header["context_id"] == context_id
 
     client.contexts.delete(context_id)

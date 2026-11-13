@@ -321,13 +321,13 @@ fn granted_keys_share_claims_exactly_when_their_grants_resolve_alike() {
         group_body(
             "g",
             Some(
-                json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+                json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "group_ids": []}),
             ),
         ),
         "atok",
     );
 
-    let ask = |query: &str| json!({"groups": ["g"], "query": query});
+    let ask = |query: &str| json!({"group_ids": [server.gx("g")], "query": query});
     let wide_page = call(
         "POST",
         "/sources/search",

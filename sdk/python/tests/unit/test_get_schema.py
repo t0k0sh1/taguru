@@ -17,7 +17,7 @@ from .conftest import err_response, ok_response, sync_client
 
 SCHEMA_DOCUMENT: dict[str, Any] = {
     "type": "schema",
-    "version": "2026-10-01",
+    "version": "2026-11-13",
     "mode": "strict",
     "closed_labels": False,
     "types": {
@@ -37,7 +37,7 @@ def test_get_schema_decodes_into_reexported_models() -> None:
 
     assert isinstance(document, SchemaDocument)
     assert document.type == "schema"
-    assert document.version == "2026-10-01"
+    assert document.version == "2026-11-13"
     assert document.mode == "strict"
     assert document.closed_labels is False
 

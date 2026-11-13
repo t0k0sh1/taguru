@@ -7,18 +7,17 @@ use std::path::Path;
 
 use taguru::deadline::Deadline;
 
-use crate::groups::{self, GroupLookup, GroupRecord, GroupTable, StoredGroup};
+use crate::groups::{self, GroupRecord, GroupTable, StoredGroup};
 
 use super::{
     AppState, CreateGroupError, GroupRestoreOutcome, GroupView, RenameGroupError,
     RestoreGroupsError, UpdateGroupError,
 };
 
-// `groups` are addressed by id (#995): every entrance that names THE
-// `group` an operation is about takes its id. Child `groups` are still
-// named by name (until #996), so a child name resolves through the
-// table's index and one that several `groups` share is refused instead
-// of resolved to any one of them — names are not unique (ADR 0050).
+// `groups` are addressed by id: every entrance that names a `group` —
+// the one an operation is about (#995) and every child or search target
+// it lists (#996) — takes its id. Names are labels and may repeat
+// (ADR 0050), so nothing here resolves one.
 impl AppState {
     /// Registers a `group` under a freshly minted id and persists it
     /// immediately — the create twin for `groups`, without the
@@ -30,7 +29,7 @@ impl AppState {
     /// `registry` — the documented order): `contains_id` already
     /// answers false for a `context` mid-delete, because delete()
     /// removes it and reserves it in `pending.deletes` inside one
-    /// critical section. Child names are resolved against the same table
+    /// critical section. Child ids are checked against the same table
     /// the write lock already holds.
     ///
     /// The name is a label, not a key: another `group` may already
@@ -65,34 +64,22 @@ impl AppState {
                 return Err(CreateGroupError::NoSuchContext(missing.clone()));
             }
         }
-        let mut group_ids = BTreeSet::new();
-        for child in &children {
-            match groups.lookup(child) {
-                Ok(id) => group_ids.insert(id.clone()),
-                Err(GroupLookup::NotFound) => {
-                    return Err(CreateGroupError::NoSuchGroup(child.clone()));
-                }
-                Err(GroupLookup::Ambiguous(count)) => {
-                    return Err(CreateGroupError::AmbiguousGroup {
-                        name: child.clone(),
-                        count,
-                    });
-                }
-            };
+        if let Some(missing) = first_missing(&children, |child| groups.get(child).is_some()) {
+            return Err(CreateGroupError::NoSuchGroup(missing.clone()));
         }
         let requested = StoredGroup {
             id: id.map_or_else(groups::mint_group_id, str::to_string),
             name: name.to_string(),
             description,
             context_ids,
-            group_ids,
+            group_ids: children,
         };
         let id = requested.id.clone();
         if let Some(standing) = groups.get(&id) {
             if *standing != requested {
                 return Err(CreateGroupError::IdTaken);
             }
-            return Ok(group_view(&groups, standing));
+            return Ok(group_view(standing));
         }
         // The nesting validator wants the prospective map, so insert
         // first and unwind on refusal — nothing escapes the write lock
@@ -108,10 +95,7 @@ impl AppState {
             CreateGroupError::Nesting,
             CreateGroupError::Io,
         )?;
-        Ok(group_view(
-            &groups,
-            groups.get(&id).expect("committed above"),
-        ))
+        Ok(group_view(groups.get(&id).expect("committed above")))
     }
 
     /// Applies a delta to one `group` — `context` and child removals
@@ -121,18 +105,17 @@ impl AppState {
     /// nesting or a failed persist restores the previous record, the
     /// update twin of [`rollback_meta`].
     ///
-    /// A child to ADD resolves by name across every `group`; a child to
-    /// REMOVE resolves among this `group`'s own children only, so a
-    /// name nothing here bundles is the same idempotent no-op it always
-    /// was.
+    /// A child to ADD must be a standing `group`; a child to REMOVE that
+    /// this `group` does not bundle is an idempotent no-op — the
+    /// `context` rule, one namespace over.
     pub fn update_group(
         &self,
         id: &str,
         description: Option<String>,
         add_context_ids: BTreeSet<String>,
         remove_context_ids: BTreeSet<String>,
-        add_groups: BTreeSet<String>,
-        remove_groups: BTreeSet<String>,
+        add_group_ids: BTreeSet<String>,
+        remove_group_ids: BTreeSet<String>,
     ) -> Result<GroupView, UpdateGroupError> {
         let mut groups = self.0.groups.write();
         if groups.get(id).is_none() {
@@ -142,11 +125,9 @@ impl AppState {
         // The cap is judged on the delta's RESULT — removals first,
         // exactly as they will apply — and before the existence
         // lookups: counting needs none, and refusing here lets the
-        // membership tests speak in names that need not exist. Children
-        // are counted in the request's own terms (names).
+        // membership tests speak in ids that need not exist.
         {
             let record = &groups.get(&id).expect("looked up above");
-            let child_names = groups.view(record).groups;
             for (field, current, add, remove) in [
                 (
                     "member contexts",
@@ -154,7 +135,12 @@ impl AppState {
                     &add_context_ids,
                     &remove_context_ids,
                 ),
-                ("child groups", &child_names, &add_groups, &remove_groups),
+                (
+                    "child groups",
+                    &record.group_ids,
+                    &add_group_ids,
+                    &remove_group_ids,
+                ),
             ] {
                 // An empty delta cannot move a set past the cap the
                 // invariant already holds it under — skip the rebuild.
@@ -179,54 +165,11 @@ impl AppState {
                 return Err(UpdateGroupError::NoSuchContext(missing.clone()));
             }
         }
-        // The `group` itself IS registered, so adding its own name passes
+        // The `group` itself IS registered, so adding its own id passes
         // this gate — and lands in the validator's lap as the smallest
         // cycle.
-        let mut add_ids = BTreeSet::new();
-        for child in &add_groups {
-            match groups.lookup(child) {
-                Ok(child_id) => add_ids.insert(child_id.clone()),
-                Err(GroupLookup::NotFound) => {
-                    return Err(UpdateGroupError::NoSuchGroup(child.clone()));
-                }
-                Err(GroupLookup::Ambiguous(count)) => {
-                    return Err(UpdateGroupError::AmbiguousGroup {
-                        name: child.clone(),
-                        count,
-                    });
-                }
-            };
-        }
-        let mut remove_ids = BTreeSet::new();
-        {
-            let record = groups.get(&id).expect("looked up above");
-            for child in &remove_groups {
-                let matching: Vec<&String> = record
-                    .group_ids
-                    .iter()
-                    .filter(|child_id| groups.name_of(child_id) == child)
-                    .collect();
-                if matching.len() > 1 {
-                    return Err(UpdateGroupError::AmbiguousGroup {
-                        name: child.clone(),
-                        count: matching.len(),
-                    });
-                }
-                remove_ids.extend(matching.into_iter().cloned());
-            }
-            // The name count above folds children that share a name
-            // into one, so it can undercount the record: the cap holds
-            // on the ids it will actually carry.
-            let prospective = record
-                .group_ids
-                .iter()
-                .filter(|child| !remove_ids.contains(*child))
-                .chain(add_ids.iter())
-                .collect::<BTreeSet<_>>()
-                .len();
-            if prospective > groups::MAX_GROUP_MEMBERS {
-                return Err(UpdateGroupError::OverCap("child groups"));
-            }
+        if let Some(missing) = first_missing(&add_group_ids, |child| groups.get(child).is_some()) {
+            return Err(UpdateGroupError::NoSuchGroup(missing.clone()));
         }
         let record = groups.get_mut(&id).expect("looked up above");
         let previous = record.clone();
@@ -234,10 +177,10 @@ impl AppState {
             record.context_ids.remove(context);
         }
         record.context_ids.extend(add_context_ids);
-        for child in &remove_ids {
+        for child in &remove_group_ids {
             record.group_ids.remove(child);
         }
-        record.group_ids.extend(add_ids);
+        record.group_ids.extend(add_group_ids);
         if let Some(description) = description {
             record.description = description;
         }
@@ -251,26 +194,22 @@ impl AppState {
             UpdateGroupError::Nesting,
             UpdateGroupError::Io,
         )?;
-        Ok(group_view(
-            &groups,
-            groups.get(&id).expect("looked up above"),
-        ))
+        Ok(group_view(groups.get(&id).expect("looked up above")))
     }
 
     /// Restores a set of `group` records — import's create-or-replace
     /// twin of [`Self::create_group`]/[`Self::update_group`]: each
-    /// record replaces its whole row (description and both member
-    /// sets), and a `group` absent from the set is untouched, parents
-    /// naming a restored `group` included. A record whose name stands
-    /// replaces that `group` (its id is kept); any other is created
-    /// under a freshly minted id. The SET is judged before the first
-    /// write, under the `groups` write lock: every member `context`
-    /// registered, every child standing or in the set itself (a child
-    /// name the set carries means the set's record), both caps per
-    /// record, and the nesting that results — the standing map overlaid
-    /// with every record — acyclic and within
-    /// [`groups::MAX_GROUP_DEPTH`]. A validation refusal applies
-    /// nothing.
+    /// record replaces its whole row (name, description and both member
+    /// sets) under its own id, creating the `group` when no `group`
+    /// holds that id (#996 — records carry their id, so a restore lands
+    /// on the same `group` wherever it runs), and a `group` absent from
+    /// the set is untouched, parents bundling a restored `group`
+    /// included. The SET is judged before the first write, under the
+    /// `groups` write lock: every member `context` registered, every
+    /// child standing or in the set itself, both caps per record, and
+    /// the nesting that results — the standing map overlaid with every
+    /// record — acyclic and within [`groups::MAX_GROUP_DEPTH`]. A
+    /// validation refusal applies nothing.
     ///
     /// Writes land children-first (depth order over the prospective
     /// map), so a persist failure partway strands no record dangling
@@ -280,100 +219,57 @@ impl AppState {
     /// directory-wide fsync storm.
     pub fn restore_groups(
         &self,
-        records: &[(String, GroupRecord)],
+        records: &[StoredGroup],
         deadline: Deadline,
-    ) -> Result<Vec<(String, GroupRestoreOutcome)>, RestoreGroupsError> {
+    ) -> Result<Vec<(StoredGroup, GroupRestoreOutcome)>, RestoreGroupsError> {
         let mut groups = self.0.groups.write();
-        // Each record's id: the standing `group` its name addresses, or a
-        // fresh one. Minted before the set is judged, so a refused set
-        // burns ids — harmless, nothing ever saw them.
-        let mut incoming: BTreeMap<&str, String> = BTreeMap::new();
-        for (name, record) in records {
-            if name.is_empty() {
+        let mut incoming: BTreeSet<&str> = BTreeSet::new();
+        for record in records {
+            if record.name.is_empty() {
                 return Err(RestoreGroupsError::InvalidName);
             }
-            if incoming.contains_key(name.as_str()) {
-                return Err(RestoreGroupsError::Duplicate(name.clone()));
+            if !incoming.insert(record.id.as_str()) {
+                return Err(RestoreGroupsError::Duplicate(record.id.clone()));
             }
-            check_member_caps(&record.context_ids, &record.groups).map_err(|field| {
+            check_member_caps(&record.context_ids, &record.group_ids).map_err(|field| {
                 RestoreGroupsError::OverCap {
-                    group: name.clone(),
+                    group: record.id.clone(),
                     field,
                 }
             })?;
-            let id = match groups.lookup(name) {
-                Ok(id) => id.clone(),
-                Err(GroupLookup::NotFound) => groups::mint_group_id(),
-                Err(GroupLookup::Ambiguous(count)) => {
-                    return Err(RestoreGroupsError::Ambiguous {
-                        group: name.clone(),
-                        name: name.clone(),
-                        count,
-                    });
-                }
-            };
-            incoming.insert(name, id);
         }
-        let mut stored: Vec<StoredGroup> = Vec::with_capacity(records.len());
         {
             // Lock order: `groups` before `registry`, as documented on
             // the field.
             let registry = self.0.registry.read();
-            for (name, record) in records {
+            for record in records {
                 if let Some(missing) =
                     first_missing(&record.context_ids, |context| registry.contains_id(context))
                 {
                     return Err(RestoreGroupsError::NoSuchContext {
-                        group: name.clone(),
+                        group: record.id.clone(),
                         context: missing.clone(),
                     });
                 }
-                let mut group_ids = BTreeSet::new();
-                for child in &record.groups {
-                    let child_id = match incoming.get(child.as_str()) {
-                        Some(child_id) => child_id.clone(),
-                        None => match groups.lookup(child) {
-                            Ok(child_id) => child_id.clone(),
-                            Err(GroupLookup::NotFound) => {
-                                return Err(RestoreGroupsError::NoSuchChild {
-                                    group: name.clone(),
-                                    child: child.clone(),
-                                });
-                            }
-                            Err(GroupLookup::Ambiguous(count)) => {
-                                return Err(RestoreGroupsError::Ambiguous {
-                                    group: name.clone(),
-                                    name: child.clone(),
-                                    count,
-                                });
-                            }
-                        },
-                    };
-                    group_ids.insert(child_id);
+                if let Some(missing) = first_missing(&record.group_ids, |child| {
+                    incoming.contains(child) || groups.get(child).is_some()
+                }) {
+                    return Err(RestoreGroupsError::NoSuchChild {
+                        group: record.id.clone(),
+                        child: missing.clone(),
+                    });
                 }
-                stored.push(StoredGroup {
-                    id: incoming[name.as_str()].clone(),
-                    name: name.clone(),
-                    description: record.description.clone(),
-                    context_ids: record.context_ids.clone(),
-                    group_ids,
-                });
             }
         }
+        let stored = records;
         // The prospective map — what memory becomes if every write
         // lands — is what the validators judge.
         let mut prospective = groups.records().clone();
-        for record in &stored {
+        for record in stored {
             prospective.insert(record.id.clone(), record.clone());
         }
-        let depths = groups::nesting_depths(&prospective).map_err(|violation| {
-            RestoreGroupsError::Nesting(violation.rename(|id| {
-                prospective
-                    .get(id)
-                    .map_or_else(|| id.to_string(), |record| record.name.clone())
-            }))
-        })?;
-        let outcomes: Vec<(String, GroupRestoreOutcome)> = stored
+        let depths = groups::nesting_depths(&prospective).map_err(RestoreGroupsError::Nesting)?;
+        let outcomes: Vec<(StoredGroup, GroupRestoreOutcome)> = stored
             .iter()
             .map(|record| {
                 let outcome = match groups.get(&record.id) {
@@ -381,7 +277,7 @@ impl AppState {
                     Some(_) => GroupRestoreOutcome::Replaced,
                     None => GroupRestoreOutcome::Created,
                 };
-                (record.name.clone(), outcome)
+                (record.clone(), outcome)
             })
             .collect();
         // Depth order over the PROSPECTIVE map alone is not enough: it
@@ -486,7 +382,7 @@ impl AppState {
             let record = &stored[index];
             if let Err(error) = groups::write_group(&self.0.data_dir, record) {
                 return Err(RestoreGroupsError::Io {
-                    group: record.name.clone(),
+                    group: record.id.clone(),
                     applied,
                     error,
                 });
@@ -498,32 +394,19 @@ impl AppState {
     }
 
     /// Every `context` a scoped key must hold to restore `records`: the
-    /// closures of the named `groups` over the STANDING map (what the
+    /// closures of the restored `groups` over the STANDING map (what the
     /// replace would release) unioned with their closures over the
     /// prospective one (what it would address). The import gate judges
     /// `group` records with this — [`Self::group_context_closures`]'
-    /// twin for the restore path, where children may be names the set
+    /// twin for the restore path, where children may be ids the set
     /// itself brings.
-    ///
-    /// Judged in the stream's own terms, names: the standing table is
-    /// folded into a name-keyed map first, every `group` sharing a name
-    /// folded into one entry — a hand-assembled directory's duplicate
-    /// names can only make the gate ask for MORE of the grant, never
-    /// less. (The restore itself refuses such a name.)
-    pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
+    pub fn group_restore_involves(&self, records: &[StoredGroup]) -> BTreeSet<String> {
         let groups = self.0.groups.read();
-        let mut standing: BTreeMap<String, GroupRecord> = BTreeMap::new();
-        for record in groups.records().values() {
-            let view = groups.view(record);
-            let folded = standing.entry(record.name.clone()).or_default();
-            folded.context_ids.extend(view.context_ids);
-            folded.groups.extend(view.groups);
-        }
-        let roots: Vec<&str> = records.iter().map(|(name, _)| name.as_str()).collect();
-        let mut involved = groups::context_closure(&standing, roots.iter().copied());
-        let mut prospective = standing;
-        for (name, record) in records {
-            prospective.insert(name.clone(), record.clone());
+        let roots: Vec<&str> = records.iter().map(|record| record.id.as_str()).collect();
+        let mut involved = groups::context_closure(groups.records(), roots.iter().copied());
+        let mut prospective = groups.records().clone();
+        for record in records {
+            prospective.insert(record.id.clone(), record.clone());
         }
         involved.extend(groups::context_closure(&prospective, roots.iter().copied()));
         involved
@@ -590,39 +473,47 @@ impl AppState {
     /// One `group` by id.
     pub fn group(&self, id: &str) -> Option<GroupView> {
         let groups = self.0.groups.read();
-        groups.get(id).map(|record| group_view(&groups, record))
+        groups.get(id).map(group_view)
     }
 
-    /// One `group` by name, or why there is not exactly one — what a
-    /// test that planted the `group` by name looks it up by.
+    /// Every `group` called `name`, in id order — what a test that
+    /// planted a `group` by name finds it by.
     #[cfg(test)]
-    pub fn group_named(&self, name: &str) -> Result<GroupView, GroupLookup> {
+    pub fn groups_named(&self, name: &str) -> Vec<GroupView> {
         let groups = self.0.groups.read();
-        let id = groups.lookup(name)?;
-        Ok(group_view(
-            &groups,
-            groups.get(id).expect("the name index points at records"),
-        ))
+        groups
+            .ids_named(name)
+            .map(|id| group_view(groups.get(id).expect("the name index points at records")))
+            .collect()
     }
 
-    /// Union of every `context` reachable from the named `groups` — direct
-    /// members plus everything nested children bundle, transitively.
-    /// The scoped write gate judges a `group` by what it ADDRESSES, so
-    /// this is its view; unknown names contribute nothing, and a name
-    /// several `groups` share contributes all of them (the gate errs
-    /// toward asking for more of the grant; the write itself refuses the
-    /// name).
+    /// The one `group` called `name` — `None` when there is none or
+    /// several (see [`Self::groups_named`]).
+    #[cfg(test)]
+    pub fn group_named(&self, name: &str) -> Option<GroupView> {
+        let mut named = self.groups_named(name);
+        (named.len() == 1).then(|| named.remove(0))
+    }
+
+    /// The id of the one `group` called `name`; panics otherwise — the
+    /// tests' shorthand for building child-id sets by name.
+    #[cfg(test)]
+    pub fn group_id_named(&self, name: &str) -> String {
+        self.group_named(name)
+            .unwrap_or_else(|| panic!("exactly one group named '{name}'"))
+            .id
+    }
+
+    /// Union of every `context` reachable from the `groups` with these
+    /// ids — direct members plus everything nested children bundle,
+    /// transitively. The scoped write gate judges a `group` by what it
+    /// ADDRESSES, so this is its view; an unknown id contributes nothing
+    /// (the write itself refuses it).
     pub fn group_context_closures<'a>(
         &self,
-        names: impl IntoIterator<Item = &'a str>,
+        ids: impl IntoIterator<Item = &'a str>,
     ) -> BTreeSet<String> {
-        let groups = self.0.groups.read();
-        let roots: Vec<&str> = names
-            .into_iter()
-            .flat_map(|name| groups.ids_named(name))
-            .map(String::as_str)
-            .collect();
-        groups::context_closure(groups.records(), roots)
+        groups::context_closure(self.0.groups.read().records(), ids)
     }
 
     /// [`Self::group_context_closures`] for exactly one `group`, by id —
@@ -633,26 +524,22 @@ impl AppState {
     }
 
     /// [`Self::group_context_closures`] with existence semantics: the
-    /// first name that does not resolve to exactly one `group` comes back
-    /// as the error, with why, instead of contributing nothing. The
+    /// first id no `group` holds comes back as the error instead of
+    /// contributing nothing. The
     /// cross-`context` searches resolve their `groups` targets here — a
     /// caller who NAMES a `group` deserves a `no_group` refusal, not a
     /// silently empty search — checked and walked under one lock
     /// acquisition so a concurrent `group` delete cannot slip between
     /// the two.
-    pub fn resolve_groups(
-        &self,
-        names: &[String],
-    ) -> Result<BTreeSet<String>, (String, GroupLookup)> {
+    pub fn resolve_groups(&self, ids: &[String]) -> Result<BTreeSet<String>, String> {
         let groups = self.0.groups.read();
-        let mut roots: Vec<&str> = Vec::with_capacity(names.len());
-        for name in names {
-            match groups.lookup(name) {
-                Ok(id) => roots.push(id),
-                Err(why) => return Err((name.clone(), why)),
-            }
+        if let Some(missing) = first_missing(ids, |id| groups.get(id).is_some()) {
+            return Err(missing.clone());
         }
-        Ok(groups::context_closure(groups.records(), roots))
+        Ok(groups::context_closure(
+            groups.records(),
+            ids.iter().map(String::as_str),
+        ))
     }
 
     /// One name-ordered page of `groups` (ties by id) plus the
@@ -676,7 +563,7 @@ impl AppState {
         let page = groups
             .in_name_order(after, after_id)
             .take(limit)
-            .map(|record| group_view(&groups, record))
+            .map(group_view)
             .collect();
         (groups.len(), page)
     }
@@ -694,13 +581,16 @@ impl AppState {
     }
 }
 
-/// `record` as a [`GroupView`]: its id, its name, and the wire view of
-/// its record (child ids back to names).
-fn group_view(groups: &GroupTable, record: &StoredGroup) -> GroupView {
+/// `record` as a [`GroupView`]: its id, its name, and its membership.
+fn group_view(record: &StoredGroup) -> GroupView {
     GroupView {
         id: record.id.clone(),
         name: record.name.clone(),
-        record: groups.view(record),
+        record: GroupRecord {
+            description: record.description.clone(),
+            context_ids: record.context_ids.clone(),
+            group_ids: record.group_ids.clone(),
+        },
     }
 }
 
@@ -799,7 +689,6 @@ mod tests {
 
     use super::*;
     use crate::context_proptest::{GeneratedGroupOp, config as proptest_config, group_op_strategy};
-    use crate::groups::GroupLookup;
     use crate::registry::ContextMeta;
     use crate::registry::test_support::scratch_dir;
     use crate::storage::{clear_persistence_fault, fail_persistence_ops_after};
@@ -813,6 +702,20 @@ mod tests {
     fn fixed_id(name: &str) -> String {
         let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
         format!("00000000-0000-4000-9000-{hex:0<12}")
+    }
+
+    /// The id a test's `group` name stands for: the standing `group`
+    /// called `name` when there is exactly one, else [`fixed_id`] — so a
+    /// restore record or a child list can be written in names.
+    fn id_for(state: &AppState, name: &str) -> String {
+        state
+            .group_named(name)
+            .map_or_else(|| fixed_id(name), |view| view.id)
+    }
+
+    /// [`id_for`] over a list — a child-id set written in names.
+    fn ids_for(state: &AppState, names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| id_for(state, name)).collect()
     }
 
     /// The names recorded in the `.group` files on disk — what a refused
@@ -860,10 +763,7 @@ mod tests {
             .unwrap();
         assert_eq!(twin.name, "drinks");
         assert_ne!(twin.id, GROUP_A);
-        assert!(matches!(
-            state.group_named("drinks"),
-            Err(GroupLookup::Ambiguous(2))
-        ));
+        assert_eq!(state.groups_named("drinks").len(), 2);
         state.delete_group(&twin.id).unwrap().1.unwrap();
         // A caller's id: the identical record again answers the
         // standing row (a retried create converges), a different
@@ -927,7 +827,7 @@ mod tests {
             Err(CreateGroupError::NoSuchContext(missing)) if missing == "nope"
         ));
         // The refused create left nothing behind, in memory or on disk.
-        assert!(state.group_named("ghosts").is_err());
+        assert!(state.group_named("ghosts").is_none());
         assert!(!group_file_names(&dir).contains("ghosts"));
 
         // Deltas: removals first, then adds — and an unknown add
@@ -989,7 +889,7 @@ mod tests {
         let (removed, file) = state.delete_group(&drinks).unwrap();
         assert_eq!(removed, "drinks");
         file.unwrap();
-        assert!(state.group_named("drinks").is_err());
+        assert!(state.group_named("drinks").is_none());
         assert!(state.group(&drinks).is_none());
         assert!(state.delete_group(&drinks).is_none());
         assert!(!group_file_names(&dir).contains("drinks"));
@@ -1101,51 +1001,55 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Two children renamed alike read as one name, so the name count
-    /// a delta is judged on first falls one short of the record: the
-    /// cap still holds on the ids the record would carry.
+    /// The child cap counts the ids a record would carry — children
+    /// that share a name are still one id each.
     #[test]
     fn the_child_cap_counts_ids_where_children_share_a_name() {
         let dir = scratch_dir("groups-cap-ids");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         let children: BTreeSet<String> = (0..groups::MAX_GROUP_MEMBERS)
-            .map(|i| format!("c{i:04}"))
+            .map(|_| {
+                state
+                    .create_group(
+                        None,
+                        "twin",
+                        String::new(),
+                        BTreeSet::new(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap()
+                    .id
+            })
             .collect();
-        for child in &children {
-            state
-                .create_group(None, child, String::new(), BTreeSet::new(), BTreeSet::new())
-                .unwrap();
-        }
         let parent = state
             .create_group(None, "parent", String::new(), BTreeSet::new(), children)
             .unwrap()
             .id;
-        let twin = state.group_named("c0001").unwrap().id;
-        state.rename_group(&twin, "c0000").unwrap();
-        state
+        let extra = state
             .create_group(
                 None,
-                "extra",
+                "twin",
                 String::new(),
                 BTreeSet::new(),
                 BTreeSet::new(),
             )
-            .unwrap();
+            .unwrap()
+            .id;
         assert!(matches!(
             state.update_group(
                 &parent,
                 None,
                 BTreeSet::new(),
                 BTreeSet::new(),
-                BTreeSet::from(["extra".to_string()]),
+                BTreeSet::from([extra]),
                 BTreeSet::new()
             ),
             Err(UpdateGroupError::OverCap("child groups"))
         ));
         assert_eq!(
-            state.group(&parent).unwrap().record.groups.len(),
-            groups::MAX_GROUP_MEMBERS - 1,
-            "the view still folds the twins, and nothing landed"
+            state.group(&parent).unwrap().record.group_ids.len(),
+            groups::MAX_GROUP_MEMBERS,
+            "nothing landed"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -1169,7 +1073,7 @@ mod tests {
             state.create_group(None, "g", String::new(), BTreeSet::new(), over.clone()),
             Err(CreateGroupError::OverCap("child groups"))
         ));
-        assert!(state.group_named("g").is_err());
+        assert!(state.group_named("g").is_none());
 
         // A delta is judged on its RESULT: 1 member + cap-many adds is
         // one too many, but trading the member out in the same request
@@ -1244,21 +1148,23 @@ mod tests {
                 "parent",
                 String::new(),
                 BTreeSet::new(),
-                BTreeSet::from(["kura".to_string()]),
+                BTreeSet::from([state.group_id_named("kura")]),
             )
             .unwrap();
 
         let kura_id = state.group_named("kura").unwrap().id;
-        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+        let record = |name: &str, contexts: &[&str], children: &[&str]| StoredGroup {
+            id: id_for(&state, name),
+            name: name.to_string(),
             description: "new".to_string(),
             context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
-            groups: children.iter().map(|g| g.to_string()).collect(),
+            group_ids: ids_for(&state, children),
         };
         // The set references its own newcomer — parent listed first,
         // child later: order inside the set must not matter.
         let records = vec![
-            ("kura".to_string(), record(&["sake"], &["kid"])),
-            ("kid".to_string(), record(&["bunko"], &[])),
+            record("kura", &["sake"], &["kid"]),
+            record("kid", &["bunko"], &[]),
         ];
         let outcomes = state
             .restore_groups(&records, Deadline::unbounded())
@@ -1267,16 +1173,24 @@ mod tests {
         assert_eq!(outcomes[1].1.as_str(), "created");
         // The replace is the WHOLE record — bunko dropped, description
         // replaced — and parent still names kura.
-        assert_eq!(state.group_named("kura").unwrap().record, records[0].1);
+        let kura = state.group_named("kura").unwrap();
+        assert_eq!(kura.record.description, records[0].description);
+        assert_eq!(kura.record.context_ids, records[0].context_ids);
+        assert_eq!(kura.record.group_ids, records[0].group_ids);
         assert_eq!(
-            state.group_named("parent").unwrap().record.groups,
-            BTreeSet::from(["kura".to_string()])
+            state.group_named("parent").unwrap().record.group_ids,
+            BTreeSet::from([kura_id.clone()])
         );
-        // Disk agrees — in ids: the replaced kura kept its id, and its
-        // child reference is kid's freshly minted one.
+        // Disk agrees: the replaced kura kept its id, and its child
+        // reference is kid's id — the one its record carries.
         let kura = state.group_named("kura").unwrap();
         assert_eq!(kura.id, kura_id, "a replace keeps the standing id");
         let kid = state.group_named("kid").unwrap();
+        assert_eq!(
+            kid.id,
+            fixed_id("kid"),
+            "a new record lands under its own id"
+        );
         let on_disk: StoredGroup =
             serde_json::from_slice(&fs::read(groups::group_path(&dir, &kura.id)).unwrap()).unwrap();
         assert_eq!(on_disk.group_ids, BTreeSet::from([kid.id.clone()]));
@@ -1300,10 +1214,12 @@ mod tests {
     fn restore_groups_reports_how_many_landed_before_an_io_failure() {
         let dir = scratch_dir("groups-restore-io-failure");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+        let record = |name: &str, contexts: &[&str], children: &[&str]| StoredGroup {
+            id: id_for(&state, name),
+            name: name.to_string(),
             description: String::new(),
             context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
-            groups: children.iter().map(|g| g.to_string()).collect(),
+            group_ids: ids_for(&state, children),
         };
 
         // "a" and "b" are independent (no nesting), so equal depth keeps
@@ -1338,21 +1254,18 @@ mod tests {
         fail_persistence_ops_after(steps_per_write);
         let error = state
             .restore_groups(
-                &[
-                    ("a".to_string(), record(&[], &[])),
-                    ("b".to_string(), record(&[], &[])),
-                ],
+                &[record("a", &[], &[]), record("b", &[], &[])],
                 Deadline::unbounded(),
             )
             .unwrap_err();
         clear_persistence_fault();
         assert!(matches!(
             &error,
-            RestoreGroupsError::Io { group, .. } if group == "b"
+            RestoreGroupsError::Io { group, .. } if *group == id_for(&state, "b")
         ));
         assert_eq!(error.applied(), 1, "\"a\" already landed when \"b\" failed");
         assert!(
-            state.group_named("a").is_ok(),
+            state.group_named("a").is_some(),
             "\"a\"'s successful write must not be rolled back"
         );
 
@@ -1379,14 +1292,11 @@ mod tests {
     fn restore_groups_never_stitches_an_old_parent_to_a_freshly_deepened_child() {
         let dir = scratch_dir("groups-restore-depth-race");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let record = |children: &[&str]| GroupRecord {
-            description: String::new(),
-            context_ids: BTreeSet::new(),
-            groups: children.iter().map(|name| name.to_string()).collect(),
+        let record = |name: &str, children: &[&str]| StoredGroup {
+            group_ids: ids_for(&state, children),
+            ..StoredGroup::empty(&id_for(&state, name), name)
         };
-        let child_set = |names: &[&str]| -> BTreeSet<String> {
-            names.iter().map(|name| name.to_string()).collect()
-        };
+        let child_set = |names: &[&str]| -> BTreeSet<String> { ids_for(&state, names) };
 
         // Two independent depth-2 chains standing, plus "a" -> "b" —
         // everything comfortably within the depth cap before the batch.
@@ -1424,8 +1334,8 @@ mod tests {
         // "b" first in the list — the order a plain depth sort would
         // keep on a tie, since it matches the finding's own scenario.
         let batch = [
-            ("b".to_string(), record(&["mid"])), // b -> mid -> leaf: depth 3
-            ("a".to_string(), record(&["y"])),   // a -> y -> z: depth 3, drops "b"
+            record("b", &["mid"]), // b -> mid -> leaf: depth 3
+            record("a", &["y"]),   // a -> y -> z: depth 3, drops "b"
         ];
 
         fail_persistence_ops_after(0);
@@ -1437,7 +1347,7 @@ mod tests {
             "the fault must have fired, not run out of persistence steps first"
         );
         assert!(
-            matches!(&error, RestoreGroupsError::Io { group, .. } if group == "a"),
+            matches!(&error, RestoreGroupsError::Io { group, .. } if *group == id_for(&state, "a")),
             "the fix orders \"a\" first, so it is \"a\"'s write that hits the fault: {error:?}"
         );
         assert_eq!(error.applied(), 0, "\"a\" failed before anything landed");
@@ -1446,11 +1356,11 @@ mod tests {
         // pre-batch (valid, depth <= 3 everywhere) standing state
         // stands exactly as it was.
         assert_eq!(
-            state.group_named("a").unwrap().record.groups,
+            state.group_named("a").unwrap().record.group_ids,
             child_set(&["b"])
         );
         assert_eq!(
-            state.group_named("b").unwrap().record.groups,
+            state.group_named("b").unwrap().record.group_ids,
             BTreeSet::new()
         );
         let standing = state.0.groups.read().records().clone();
@@ -1464,20 +1374,19 @@ mod tests {
     fn restore_groups_counts_an_unchanged_record_as_already_landed() {
         let dir = scratch_dir("groups-restore-unchanged-then-io-failure");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+        let record = |name: &str, contexts: &[&str], children: &[&str]| StoredGroup {
+            id: id_for(&state, name),
+            name: name.to_string(),
             description: String::new(),
             context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
-            groups: children.iter().map(|g| g.to_string()).collect(),
+            group_ids: ids_for(&state, children),
         };
 
         // Land "a" first so the call below finds it standing exactly as
         // given and takes the `Unchanged` branch, which counts toward
         // `applied` without writing anything.
         state
-            .restore_groups(
-                &[("a".to_string(), record(&[], &[]))],
-                Deadline::unbounded(),
-            )
+            .restore_groups(&[record("a", &[], &[])], Deadline::unbounded())
             .unwrap();
 
         // "b" is new, so it takes the `write_group` branch; "a" writes
@@ -1486,10 +1395,7 @@ mod tests {
         fail_persistence_ops_after(0);
         let error = state
             .restore_groups(
-                &[
-                    ("a".to_string(), record(&[], &[])),
-                    ("b".to_string(), record(&[], &[])),
-                ],
+                &[record("a", &[], &[]), record("b", &[], &[])],
                 Deadline::unbounded(),
             )
             .unwrap_err();
@@ -1499,7 +1405,7 @@ mod tests {
         );
         assert!(matches!(
             &error,
-            RestoreGroupsError::Io { group, .. } if group == "b"
+            RestoreGroupsError::Io { group, .. } if *group == id_for(&state, "b")
         ));
         assert_eq!(
             error.applied(),
@@ -1516,11 +1422,7 @@ mod tests {
 
         let dir = scratch_dir("groups-restore-timeout");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let record = GroupRecord {
-            description: String::new(),
-            context_ids: BTreeSet::new(),
-            groups: BTreeSet::new(),
-        };
+        let record = StoredGroup::empty(&fixed_id("a"), "a");
 
         // A budget already spent must bound the fsync-per-record loop
         // before its first write, the way the batch loop bounds itself —
@@ -1528,15 +1430,13 @@ mod tests {
         // lock past the deadline every other group op honors.
         let deadline = Deadline::after(Duration::ZERO);
         std::thread::sleep(Duration::from_millis(1));
-        let error = state
-            .restore_groups(&[("a".to_string(), record)], deadline)
-            .unwrap_err();
+        let error = state.restore_groups(&[record], deadline).unwrap_err();
         assert!(matches!(&error, RestoreGroupsError::Timeout { applied: 0 }));
         assert_eq!(error.applied(), 0);
 
         // Nothing landed — not in memory, not on disk.
         assert!(
-            state.group_named("a").is_err(),
+            state.group_named("a").is_none(),
             "no record may land past the budget"
         );
         assert!(
@@ -1554,10 +1454,12 @@ mod tests {
         let dir = scratch_dir("groups-restore-refuse");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
-        let record = |contexts: &[&str], children: &[&str]| GroupRecord {
+        let record = |name: &str, contexts: &[&str], children: &[&str]| StoredGroup {
+            id: id_for(&state, name),
+            name: name.to_string(),
             description: String::new(),
             context_ids: contexts.iter().map(|c| state.id_of(c)).collect(),
-            groups: children.iter().map(|g| g.to_string()).collect(),
+            group_ids: ids_for(&state, children),
         };
 
         // A dangling member refuses the set — the valid record beside
@@ -1565,8 +1467,8 @@ mod tests {
         let refusal = state
             .restore_groups(
                 &[
-                    ("fine".to_string(), record(&["sake"], &[])),
-                    ("broken".to_string(), record(&["ghost"], &[])),
+                    record("fine", &["sake"], &[]),
+                    record("broken", &["ghost"], &[]),
                 ],
                 Deadline::unbounded(),
             )
@@ -1574,30 +1476,28 @@ mod tests {
         assert!(matches!(
             &refusal,
             RestoreGroupsError::NoSuchContext { group, context }
-                if group == "broken" && context == "ghost"
+                if *group == fixed_id("broken") && *context == state.id_of("ghost")
         ));
         assert_eq!(refusal.applied(), 0);
         assert!(
-            state.group_named("fine").is_err(),
+            state.group_named("fine").is_none(),
             "nothing applies on a refusal"
         );
 
         // A child neither standing nor in the set.
         assert!(matches!(
             state
-                .restore_groups(&[("a".to_string(), record(&[], &["nope"]))], Deadline::unbounded())
+                .restore_groups(&[record("a", &[], &["nope"])], Deadline::unbounded())
                 .unwrap_err(),
-            RestoreGroupsError::NoSuchChild { group, child } if group == "a" && child == "nope"
+            RestoreGroupsError::NoSuchChild { group, child }
+                if group == fixed_id("a") && child == fixed_id("nope")
         ));
 
         // A cycle the set closes with itself.
         assert!(matches!(
             state
                 .restore_groups(
-                    &[
-                        ("a".to_string(), record(&[], &["b"])),
-                        ("b".to_string(), record(&[], &["a"])),
-                    ],
+                    &[record("a", &[], &["b"]), record("b", &[], &["a"]),],
                     Deadline::unbounded(),
                 )
                 .unwrap_err(),
@@ -1615,36 +1515,36 @@ mod tests {
                 "top",
                 String::new(),
                 BTreeSet::new(),
-                BTreeSet::from(["mid".to_string()]),
+                BTreeSet::from([state.group_id_named("mid")]),
             )
             .unwrap();
         assert!(matches!(
             state
                 .restore_groups(
                     &[
-                        ("mid".to_string(), record(&[], &["deep"])),
-                        ("deep".to_string(), record(&[], &["deeper"])),
-                        ("deeper".to_string(), record(&[], &[])),
+                        record("mid", &[], &["deep"]),
+                        record("deep", &[], &["deeper"]),
+                        record("deeper", &[], &[]),
                     ],
                     Deadline::unbounded(),
                 )
                 .unwrap_err(),
             RestoreGroupsError::Nesting(NestingViolation::TooDeep(_))
         ));
-        assert!(state.group_named("deep").is_err());
+        assert!(state.group_named("deep").is_none());
 
         // One name twice is two truths for one group.
         assert!(matches!(
             state
                 .restore_groups(
                     &[
-                        ("dup".to_string(), record(&[], &[])),
-                        ("dup".to_string(), record(&["sake"], &[])),
+                        record("dup", &[], &[]),
+                        record("dup", &["sake"], &[]),
                     ],
                     Deadline::unbounded(),
                 )
                 .unwrap_err(),
-            RestoreGroupsError::Duplicate(name) if name == "dup"
+            RestoreGroupsError::Duplicate(id) if *id == fixed_id("dup")
         ));
 
         // The cap judges each record's sets.
@@ -1654,14 +1554,10 @@ mod tests {
         assert!(matches!(
             state
                 .restore_groups(
-                    &[(
-                        "wide".to_string(),
-                        GroupRecord {
-                            description: String::new(),
-                            context_ids: over,
-                            groups: BTreeSet::new(),
-                        },
-                    )],
+                    &[StoredGroup {
+                        context_ids: over,
+                        ..StoredGroup::empty(&fixed_id("wide"), "wide")
+                    }],
                     Deadline::unbounded(),
                 )
                 .unwrap_err(),
@@ -1683,7 +1579,7 @@ mod tests {
         for context in ["sake", "beer", "tea"] {
             state.create(context, ContextMeta::default()).unwrap();
         }
-        let one = |name: &str| BTreeSet::from([name.to_string()]);
+        let one = |name: &str| BTreeSet::from([id_for(&state, name)]);
         let one_ctx = |name: &str| BTreeSet::from([state.id_of(name)]);
         state
             .create_group(None, "leaf", String::new(), one_ctx("tea"), BTreeSet::new())
@@ -1697,7 +1593,7 @@ mod tests {
 
         // The closure reads through the nesting; the record stays flat.
         assert_eq!(
-            state.group_context_closures(["top"]),
+            state.group_context_closures([state.group_id_named("top").as_str()]),
             ["sake", "beer", "tea"]
                 .iter()
                 .map(|c| state.id_of(c))
@@ -1713,7 +1609,7 @@ mod tests {
             state.create_group(None, "over", String::new(), BTreeSet::new(), one("top")),
             Err(CreateGroupError::Nesting(NestingViolation::TooDeep(_)))
         ));
-        assert!(state.group_named("over").is_err());
+        assert!(state.group_named("over").is_none());
         assert!(!group_file_names(&dir).contains("over"));
 
         // Closing the chain into a cycle refuses — the self-loop
@@ -1750,10 +1646,10 @@ mod tests {
                 one("nope"),
                 BTreeSet::new()
             ),
-            Err(UpdateGroupError::NoSuchGroup(missing)) if missing == "nope"
+            Err(UpdateGroupError::NoSuchGroup(missing)) if missing == fixed_id("nope")
         ));
         assert_eq!(
-            state.group_named("leaf").unwrap().record.groups,
+            state.group_named("leaf").unwrap().record.group_ids,
             BTreeSet::new()
         );
 
@@ -1764,13 +1660,13 @@ mod tests {
             .1
             .unwrap();
         assert_eq!(
-            state.group_named("top").unwrap().record.groups,
+            state.group_named("top").unwrap().record.group_ids,
             BTreeSet::new()
         );
         drop(state);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         assert_eq!(
-            state.group_named("top").unwrap().record.groups,
+            state.group_named("top").unwrap().record.group_ids,
             BTreeSet::new()
         );
         assert_eq!(
@@ -1793,8 +1689,7 @@ mod tests {
         for (id, record) in groups {
             assert_eq!(&record.id, id, "every record sits under its own id");
             // Names are labels (ADR 0050): the index answers every id
-            // that carries one, and a lookup is unique or ambiguous
-            // exactly as the records say.
+            // that carries one.
             let named: BTreeSet<&String> = groups
                 .values()
                 .filter(|other| other.name == record.name)
@@ -1805,12 +1700,6 @@ mod tests {
                 named,
                 "the name index tracks the records"
             );
-            let expected = if named.len() == 1 {
-                Ok(id)
-            } else {
-                Err(GroupLookup::Ambiguous(named.len()))
-            };
-            assert_eq!(table.lookup(&record.name), expected);
             assert!(record.context_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(record.group_ids.len() <= groups::MAX_GROUP_MEMBERS);
             assert!(
@@ -1850,7 +1739,10 @@ mod tests {
                     .ids_named(name)
                     .next()
                     .cloned()
-                    .unwrap_or_else(|| name.to_string())
+                    .unwrap_or_else(|| fixed_id(name))
+            };
+            let group_ids = |names: Vec<&str>| -> BTreeSet<String> {
+                names.into_iter().map(group_id).collect()
             };
             let context_ids = |names: Vec<&str>| -> BTreeSet<String> {
                 names.into_iter().map(|name| state.id_of(name)).collect()
@@ -1868,7 +1760,7 @@ mod tests {
                             None, name,
                             String::new(),
                             context_ids(contexts),
-                            groups.into_iter().map(str::to_string).collect(),
+                            group_ids(groups),
                         ) {
                             prop_assert_eq!(view.name, name);
                         }
@@ -1888,8 +1780,8 @@ mod tests {
                             None,
                             added.clone(),
                             removed.clone(),
-                            add_groups.into_iter().map(str::to_string).collect(),
-                            remove_groups.into_iter().map(str::to_string).collect(),
+                            group_ids(add_groups),
+                            group_ids(remove_groups),
                         ) {
                             // Removals apply first, so every added
                             // member stands afterwards.
@@ -1904,17 +1796,14 @@ mod tests {
                         }
                     }
                     GeneratedGroupOp::RestoreGroups(records) => {
-                        let records: Vec<(String, GroupRecord)> = records
+                        let records: Vec<StoredGroup> = records
                             .into_iter()
-                            .map(|(name, contexts, groups)| {
-                                (
-                                    name.to_string(),
-                                    GroupRecord {
-                                        description: String::new(),
-                                        context_ids: context_ids(contexts),
-                                        groups: groups.into_iter().map(str::to_string).collect(),
-                                    },
-                                )
+                            .map(|(name, contexts, groups)| StoredGroup {
+                                id: group_id(name),
+                                name: name.to_string(),
+                                description: String::new(),
+                                context_ids: context_ids(contexts),
+                                group_ids: group_ids(groups),
                             })
                             .collect();
                         let _ = state.restore_groups(&records, Deadline::unbounded());
@@ -1995,7 +1884,7 @@ mod tests {
                 "drinks",
                 String::new(),
                 BTreeSet::new(),
-                BTreeSet::from(["liquor".to_string()]),
+                BTreeSet::from([state.group_id_named("liquor")]),
             )
             .unwrap();
 
@@ -2006,7 +1895,7 @@ mod tests {
             .rename_group(&state.group_named("liquor").unwrap().id, "spirits")
             .unwrap();
 
-        assert!(state.group_named("liquor").is_err());
+        assert!(state.group_named("liquor").is_none());
         let spirits = state.group_named("spirits").unwrap();
         assert_eq!(spirits.record.description, "d");
         assert_eq!(
@@ -2014,9 +1903,9 @@ mod tests {
             BTreeSet::from([state.id_of("sake")])
         );
         assert_eq!(
-            state.group_named("drinks").unwrap().record.groups,
-            BTreeSet::from(["spirits".to_string()]),
-            "the parent's child reference follows the rename"
+            state.group_named("drinks").unwrap().record.group_ids,
+            BTreeSet::from([liquor_id.clone()]),
+            "the parent's child reference is the id, which the rename leaves alone"
         );
         assert!(!group_file_names(&dir).contains("liquor"));
         assert!(group_file_names(&dir).contains("spirits"));
@@ -2036,10 +1925,14 @@ mod tests {
         // Persisted, not just in memory.
         drop(state);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-        assert!(state.group_named("liquor").is_err());
+        assert!(state.group_named("liquor").is_none());
         assert_eq!(
-            state.group_named("drinks").unwrap().record.groups,
-            BTreeSet::from(["spirits".to_string()])
+            state.group_named("drinks").unwrap().record.group_ids,
+            BTreeSet::from([liquor_id])
+        );
+        assert_eq!(
+            state.group_named("spirits").unwrap().record.description,
+            "d"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -2082,7 +1975,7 @@ mod tests {
             "drinks",
             "a self-rename answers the name it kept"
         );
-        assert!(state.group_named("drinks").is_ok());
+        assert!(state.group_named("drinks").is_some());
         // The `from == to` short-circuit must not mask a NotFound: a
         // self-rename of an id nothing holds is still a refusal.
         assert!(matches!(
@@ -2092,10 +1985,7 @@ mod tests {
         // A name is a label (ADR 0050): renaming onto another `group`'s
         // name is allowed, and both stand under it, apart by id.
         assert_eq!(state.rename_group(&drinks, "food").unwrap(), "drinks");
-        assert!(matches!(
-            state.group_named("food"),
-            Err(GroupLookup::Ambiguous(2))
-        ));
+        assert_eq!(state.groups_named("food").len(), 2);
         assert_eq!(state.group(&drinks).unwrap().name, "food");
 
         let _ = fs::remove_dir_all(dir);
@@ -2122,9 +2012,10 @@ mod tests {
                     "parent",
                     String::new(),
                     BTreeSet::new(),
-                    BTreeSet::from(["leaf".to_string()]),
+                    BTreeSet::from([state.group_id_named("leaf")]),
                 )
                 .unwrap();
+            let leaf = state.group_id_named("leaf");
 
             fail_persistence_ops_after(failure);
             let _ = state
@@ -2139,8 +2030,8 @@ mod tests {
                     .group_named("parent")
                     .unwrap()
                     .record
-                    .groups
-                    .contains("leaf"),
+                    .group_ids
+                    .contains(&leaf),
                 "failure at step {failure} left a dangling child after boot"
             );
             drop(state);
@@ -2312,12 +2203,12 @@ mod tests {
         // the cap — deterministically: edges re-admitted in name order,
         // so (cyc-b, cyc-a) and (n3, n4) are the ones that fall.
         let children = |name: &str| -> BTreeSet<String> {
-            state.group_named(name).unwrap().record.groups.clone()
+            state.group_named(name).unwrap().record.group_ids.clone()
         };
-        assert_eq!(children("n1"), BTreeSet::from(["n2".to_string()]));
-        assert_eq!(children("n2"), BTreeSet::from(["n3".to_string()]));
+        assert_eq!(children("n1"), BTreeSet::from([id("n2")]));
+        assert_eq!(children("n2"), BTreeSet::from([id("n3")]));
         assert_eq!(children("n3"), BTreeSet::new());
-        assert_eq!(children("cyc-a"), BTreeSet::from(["cyc-b".to_string()]));
+        assert_eq!(children("cyc-a"), BTreeSet::from([id("cyc-b")]));
         assert_eq!(children("cyc-b"), BTreeSet::new());
         // Disk is the source of truth: the repairs reached the files.
         for (group, dropped) in [("cyc-b", "cyc-a"), ("n3", "n4"), ("n1", "ghost")] {
@@ -2348,8 +2239,8 @@ mod tests {
     }
 
     /// Plants two `groups` named "kura" (ids differ) plus a parent "p"
-    /// bundling both, and boots — the shape every entrance that still
-    /// names a `group` by name must refuse rather than resolve.
+    /// bundling both, and boots — names are labels (ADR 0050), so this is
+    /// an ordinary directory.
     fn boot_with_twin_names(tag: &str) -> (std::path::PathBuf, AppState) {
         let dir = scratch_dir(tag);
         drop(AppState::boot(dir.clone(), 1 << 20, None).unwrap());
@@ -2368,73 +2259,112 @@ mod tests {
         (dir, state)
     }
 
+    /// Every entrance names a `group` by id (#996), so two `groups` that
+    /// share a name are simply two `groups`: each is added, removed,
+    /// searched and restored on its own, and nothing asks which one a
+    /// name means.
     #[test]
-    fn a_name_two_groups_share_is_refused_at_every_name_entrance() {
+    fn groups_that_share_a_name_stay_apart_at_every_entrance() {
         let (dir, state) = boot_with_twin_names("groups-twin-names");
-        let kura = || BTreeSet::from(["kura".to_string()]);
+        let (k1, k2, p) = (fixed_id("k1"), fixed_id("k2"), fixed_id("p"));
         let none = BTreeSet::<String>::new;
-        let p = fixed_id("p");
+        let only = |id: &str| BTreeSet::from([id.to_string()]);
+        assert_eq!(state.groups_named("kura").len(), 2);
         assert_eq!(
-            state.group_named("kura").map(|_| ()),
-            Err(GroupLookup::Ambiguous(2))
+            state.group(&p).unwrap().record.group_ids,
+            BTreeSet::from([k1.clone(), k2.clone()]),
+            "the parent's row lists both children, apart"
         );
-        // Addressed by id, each twin answers on its own.
-        for twin in [fixed_id("k1"), fixed_id("k2")] {
-            assert_eq!(state.group(&twin).unwrap().name, "kura");
-            assert!(
-                state
-                    .update_group(&twin, None, none(), none(), none(), none())
-                    .is_ok()
-            );
-        }
-        assert!(matches!(
-            state.update_group(&p, None, none(), none(), kura(), none()),
-            Err(UpdateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
-        ));
-        // Removing by name resolves among p's own children — both are
-        // called "kura", so that is ambiguous too, and nothing moves.
-        assert!(matches!(
-            state.update_group(&p, None, none(), none(), none(), kura()),
-            Err(UpdateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
-        ));
-        assert_eq!(state.group_named("p").unwrap().record.groups, kura());
-        assert!(matches!(
-            state.create_group(None, "q", String::new(), none(), kura()),
-            Err(CreateGroupError::AmbiguousGroup { name, count: 2 }) if name == "kura"
-        ));
+        // Removing one twin removes exactly that one.
+        let after = state
+            .update_group(&p, None, none(), none(), none(), only(&k1))
+            .unwrap();
+        assert_eq!(after.record.group_ids, only(&k2));
+        let after = state
+            .update_group(&p, None, none(), none(), only(&k1), none())
+            .unwrap();
         assert_eq!(
-            state.resolve_groups(&["kura".to_string()]),
-            Err(("kura".to_string(), GroupLookup::Ambiguous(2)))
+            after.record.group_ids,
+            BTreeSet::from([k1.clone(), k2.clone()])
         );
-        let record = |children: &[&str]| GroupRecord {
-            groups: children.iter().map(|child| child.to_string()).collect(),
-            ..GroupRecord::default()
-        };
-        assert!(matches!(
-            state
-                .restore_groups(&[("kura".to_string(), record(&[]))], Deadline::unbounded())
-                .unwrap_err(),
-            RestoreGroupsError::Ambiguous { group, name, count: 2 } if group == "kura" && name == "kura"
-        ));
-        assert!(matches!(
-            state
-                .restore_groups(&[("r".to_string(), record(&["kura"]))], Deadline::unbounded())
-                .unwrap_err(),
-            RestoreGroupsError::Ambiguous { group, name, count: 2 } if group == "r" && name == "kura"
-        ));
-        // The scoped gate's lenient read folds both in; the directory
-        // lists both, name first then id.
+        let q = state
+            .create_group(None, "q", String::new(), none(), only(&k2))
+            .unwrap();
+        assert_eq!(q.record.group_ids, only(&k2));
+        assert_eq!(
+            state.resolve_groups(std::slice::from_ref(&k1)),
+            Ok(BTreeSet::new())
+        );
+        // A restore under one twin's id replaces that twin alone.
+        let outcomes = state
+            .restore_groups(
+                &[StoredGroup {
+                    description: "restored".to_string(),
+                    ..StoredGroup::empty(&k1, "kura")
+                }],
+                Deadline::unbounded(),
+            )
+            .unwrap();
+        assert_eq!(outcomes[0].1, GroupRestoreOutcome::Replaced);
+        assert_eq!(state.group(&k1).unwrap().record.description, "restored");
+        assert_eq!(state.group(&k2).unwrap().record.description, "");
+        // The directory lists both, name first then id.
         let page = state.group_page(None, None, usize::MAX).1;
         assert_eq!(
             page.iter().map(|view| view.id.clone()).collect::<Vec<_>>(),
-            [fixed_id("k1"), fixed_id("k2"), fixed_id("p")]
+            [k1, k2, p, q.id]
         );
-        assert_eq!(state.group_page(None, None, usize::MAX).0, 3);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The #995 review case (#996): a parent bundles children `a` and
+    /// `b`, and `b` is renamed to `a`. The parent's row still lists two
+    /// children, and removing one by id removes exactly that one.
+    #[test]
+    fn a_rename_onto_a_sibling_name_keeps_both_children_apart() {
+        let dir = scratch_dir("groups-sibling-rename");
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let none = BTreeSet::<String>::new;
+        let a = state
+            .create_group(None, "a", String::new(), none(), none())
+            .unwrap()
+            .id;
+        let b = state
+            .create_group(None, "b", String::new(), none(), none())
+            .unwrap()
+            .id;
+        let parent = state
+            .create_group(
+                None,
+                "parent",
+                String::new(),
+                none(),
+                BTreeSet::from([a.clone(), b.clone()]),
+            )
+            .unwrap()
+            .id;
+        assert_eq!(state.rename_group(&b, "a").unwrap(), "b");
+        assert_eq!(
+            state.group(&parent).unwrap().record.group_ids,
+            BTreeSet::from([a.clone(), b.clone()]),
+            "two children named alike are still two ids"
+        );
+        let after = state
+            .update_group(
+                &parent,
+                None,
+                none(),
+                none(),
+                none(),
+                BTreeSet::from([b.clone()]),
+            )
+            .unwrap();
+        assert_eq!(after.record.group_ids, BTreeSet::from([a]));
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn the_scoped_gate_folds_every_group_a_shared_name_addresses() {
+    fn the_scoped_gate_walks_each_group_by_its_own_id() {
         let dir = scratch_dir("groups-twin-closure");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
@@ -2452,31 +2382,26 @@ mod tests {
             .unwrap();
         }
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let both = BTreeSet::from([sake.clone(), beer.clone()]);
-        assert_eq!(state.group_context_closures(["kura"]), both);
+        let (k1, k2) = (fixed_id("k1"), fixed_id("k2"));
         assert_eq!(
-            state.group_context_closure_of(&fixed_id("k1")),
+            state.group_context_closures([k1.as_str()]),
             BTreeSet::from([sake.clone()]),
-            "one id, one group"
+            "one id, one group, whatever its name"
         );
         assert_eq!(
-            state.group_restore_involves(&[("kura".to_string(), GroupRecord::default())]),
-            both,
-            "the standing twins both count toward what a restore releases"
+            state.group_context_closures([k1.as_str(), k2.as_str()]),
+            BTreeSet::from([sake.clone(), beer.clone()])
         );
-        // The restore gate walks through nesting in the stream's own
-        // terms (names): a standing parent's child bundles sake, so
-        // replacing the parent with an empty record still RELEASES sake.
-        state
-            .create_group(
-                None,
-                "parent",
-                String::new(),
-                BTreeSet::new(),
-                BTreeSet::from(["kid".to_string()]),
-            )
-            .unwrap_err();
-        state
+        assert_eq!(state.group_context_closures(["kura"]), BTreeSet::new());
+        assert_eq!(
+            state.group_restore_involves(&[StoredGroup::empty(&k1, "kura")]),
+            BTreeSet::from([sake.clone()]),
+            "the standing record counts toward what a restore releases"
+        );
+        // The restore gate walks through nesting: a standing parent's
+        // child bundles sake, so replacing the parent with an empty
+        // record still RELEASES sake.
+        let kid = state
             .create_group(
                 None,
                 "kid",
@@ -2484,108 +2409,153 @@ mod tests {
                 BTreeSet::from([sake.clone()]),
                 BTreeSet::new(),
             )
-            .unwrap();
-        state
+            .unwrap()
+            .id;
+        let parent = state
             .create_group(
                 None,
                 "parent",
                 String::new(),
                 BTreeSet::new(),
-                BTreeSet::from(["kid".to_string()]),
+                BTreeSet::from([kid]),
             )
-            .unwrap();
+            .unwrap()
+            .id;
         assert_eq!(
-            state.group_restore_involves(&[("parent".to_string(), GroupRecord::default())]),
+            state.group_restore_involves(&[StoredGroup::empty(&parent, "parent")]),
             BTreeSet::from([sake.clone()]),
             "a standing child's members count toward what the replace releases"
+        );
+        // And a record bringing a child of its own counts what that
+        // child addresses.
+        assert_eq!(
+            state.group_restore_involves(&[StoredGroup {
+                group_ids: BTreeSet::from([k2.clone()]),
+                ..StoredGroup::empty(&fixed_id("new"), "new")
+            }]),
+            BTreeSet::from([beer.clone()])
         );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn removing_a_child_by_name_resolves_among_the_parents_own_children() {
-        let dir = scratch_dir("groups-remove-by-name");
+    fn removing_a_child_the_parent_does_not_bundle_is_a_no_op() {
+        let dir = scratch_dir("groups-remove-by-id");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let one = |name: &str| BTreeSet::from([name.to_string()]);
         let none = BTreeSet::<String>::new;
-        for name in ["a", "b"] {
-            state
-                .create_group(None, name, String::new(), none(), none())
-                .unwrap();
-        }
-        state
-            .create_group(None, "p", String::new(), none(), one("a"))
-            .unwrap();
-        // A name p does not bundle (b) is the idempotent no-op it always
-        // was; one it does (a) leaves; an unknown name is no error.
+        let a = state
+            .create_group(None, "a", String::new(), none(), none())
+            .unwrap()
+            .id;
+        let b = state
+            .create_group(None, "b", String::new(), none(), none())
+            .unwrap()
+            .id;
+        let p = state
+            .create_group(
+                None,
+                "p",
+                String::new(),
+                none(),
+                BTreeSet::from([a.clone()]),
+            )
+            .unwrap()
+            .id;
+        // An id p does not bundle (b), or no `group` holds at all, is
+        // the idempotent no-op; one it does (a) leaves.
         let after = state
             .update_group(
-                &state.group_named("p").unwrap().id,
+                &p,
                 None,
                 none(),
                 none(),
                 none(),
-                BTreeSet::from(["b".into(), "ghost".into()]),
+                BTreeSet::from([b.clone(), fixed_id("ghost")]),
             )
             .unwrap();
-        assert_eq!(after.record.groups, one("a"));
+        assert_eq!(after.record.group_ids, BTreeSet::from([a.clone()]));
         let after = state
             .update_group(
-                &state.group_named("p").unwrap().id,
+                &p,
                 None,
                 none(),
                 none(),
-                one("b"),
-                one("a"),
+                BTreeSet::from([b.clone()]),
+                BTreeSet::from([a]),
             )
             .unwrap();
-        assert_eq!(after.record.groups, one("b"));
+        assert_eq!(after.record.group_ids, BTreeSet::from([b]));
         assert_eq!(after.name, "p");
-        assert_eq!(after.id, state.group_named("p").unwrap().id);
+        assert_eq!(after.id, p);
+        // An id no `group` holds is refused on the way IN.
+        assert!(matches!(
+            state.update_group(&p, None, none(), none(), BTreeSet::from([fixed_id("ghost")]), none()),
+            Err(UpdateGroupError::NoSuchGroup(missing)) if missing == fixed_id("ghost")
+        ));
+        assert!(matches!(
+            state.create_group(None, "q", String::new(), none(), BTreeSet::from([fixed_id("ghost")])),
+            Err(CreateGroupError::NoSuchGroup(missing)) if missing == fixed_id("ghost")
+        ));
+        assert_eq!(
+            state.resolve_groups(&[p.clone(), fixed_id("ghost")]),
+            Err(fixed_id("ghost"))
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// A create or update names the `group` its nesting refusal blames
+    /// by name (the request addresses one `group`, so the name reads
+    /// best); a restore names it by id, the column its records key on.
     #[test]
-    fn a_nesting_refusal_names_the_blamed_group_not_its_id() {
+    fn a_nesting_refusal_names_the_blamed_group() {
         let dir = scratch_dir("groups-nesting-names");
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
-        let one = |name: &str| BTreeSet::from([name.to_string()]);
         let none = BTreeSet::<String>::new;
-        state
+        let leaf = state
             .create_group(None, "leaf", String::new(), none(), none())
-            .unwrap();
-        state
-            .create_group(None, "mid", String::new(), none(), one("leaf"))
-            .unwrap();
-        state
-            .create_group(None, "top", String::new(), none(), one("mid"))
-            .unwrap();
+            .unwrap()
+            .id;
+        let mid = state
+            .create_group(
+                None,
+                "mid",
+                String::new(),
+                none(),
+                BTreeSet::from([leaf.clone()]),
+            )
+            .unwrap()
+            .id;
+        let top = state
+            .create_group(None, "top", String::new(), none(), BTreeSet::from([mid]))
+            .unwrap()
+            .id;
         assert!(matches!(
-            state.create_group(None, "over", String::new(), none(), one("top")),
+            state.create_group(None, "over", String::new(), none(), BTreeSet::from([top.clone()])),
             Err(CreateGroupError::Nesting(groups::NestingViolation::TooDeep(blamed))) if blamed == "over"
         ));
         assert!(matches!(
-            state.update_group(&state.group_named("leaf").unwrap().id, None, none(), none(), one("top"), none()),
+            state.update_group(&leaf, None, none(), none(), BTreeSet::from([top.clone()]), none()),
             Err(UpdateGroupError::Nesting(groups::NestingViolation::Cycle(blamed)))
                 if ["leaf", "mid", "top"].contains(&blamed.as_str())
         ));
-        let record = |children: &[&str]| GroupRecord {
-            groups: children.iter().map(|child| child.to_string()).collect(),
-            ..GroupRecord::default()
-        };
+        let fresh = fixed_id("fresh");
         assert!(matches!(
             state
-                .restore_groups(&[("fresh".to_string(), record(&["top"]))], Deadline::unbounded())
+                .restore_groups(
+                    &[StoredGroup {
+                        group_ids: BTreeSet::from([top]),
+                        ..StoredGroup::empty(&fresh, "fresh")
+                    }],
+                    Deadline::unbounded()
+                )
                 .unwrap_err(),
-            RestoreGroupsError::Nesting(groups::NestingViolation::TooDeep(blamed)) if blamed == "fresh"
+            RestoreGroupsError::Nesting(groups::NestingViolation::TooDeep(blamed)) if blamed == fresh
         ));
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The name stays unique among `groups` while the wire addresses them
-    /// by name: a rename onto another `group`'s name is refused, a rename
-    /// onto a free one leaves the old name free for a fresh create, and
-    /// that create mints a different id.
+    /// A rename leaves the old name to anyone: a fresh create under it
+    /// mints a different id, and the renamed `group` keeps its own.
     #[test]
     fn a_rename_frees_the_old_name_for_a_fresh_group_with_its_own_id() {
         let dir = scratch_dir("groups-rename-free-name");

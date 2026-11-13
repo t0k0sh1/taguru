@@ -659,15 +659,12 @@ fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManife
 
 /// A `group`'s transitive member `context` ids, child `groups` included —
 /// depth is server-capped, and cycles are refused at write time, so a
-/// plain walk cannot run away. The root is addressed by id; a row names
-/// its children by name (until #996), so those resolve through the
-/// directory, read once on the first child — and a child name several
-/// `groups` share is refused rather than resolved to one of them.
+/// plain walk cannot run away. The root and every child are addressed by
+/// id (#996), each read from its own row.
 fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
     let mut contexts = BTreeSet::new();
     let mut pending = vec![group.to_string()];
     let mut seen = BTreeSet::new();
-    let mut ids_by_name: Option<BTreeMap<String, Vec<String>>> = None;
     while let Some(id) = pending.pop() {
         if !seen.insert(id.clone()) {
             continue;
@@ -680,32 +677,14 @@ fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {
                 contexts.insert(context.to_string());
             }
         }
-        for child in entry["groups"].as_array().into_iter().flatten() {
-            let Some(child) = child.as_str() else {
-                continue;
-            };
-            if ids_by_name.is_none() {
-                let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                for (id, name) in api.list_group_rows()? {
-                    index.entry(name).or_default().push(id);
-                }
-                ids_by_name = Some(index);
-            }
-            match ids_by_name
-                .as_ref()
-                .and_then(|index| index.get(child))
-                .map(Vec::as_slice)
-            {
-                Some([child_id]) => pending.push(child_id.clone()),
-                Some(ids) if ids.len() > 1 => {
-                    return Err(format!(
-                        "child group name '{child}' is ambiguous: {} groups share it",
-                        ids.len()
-                    ));
-                }
-                _ => return Err(format!("child group '{child}' not found")),
-            }
-        }
+        pending.extend(
+            entry["group_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        );
     }
     Ok(contexts.into_iter().collect())
 }
@@ -906,7 +885,7 @@ mod tests {
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
-        let header = r#"{"type":"communities","version":"2026-10-01","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-11-13","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":3,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}"#;
 
         let parsed = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
@@ -918,7 +897,7 @@ mod tests {
         // earlier servers sent, and a null version are all refused: the
         // server and this CLI must be the same release.
         let other_version =
-            header.replace("\"version\":\"2026-10-01\"", "\"version\":\"2008-10-17\"");
+            header.replace("\"version\":\"2026-11-13\"", "\"version\":\"2008-10-17\"");
         let error = parse_analysis(&format!("{other_version}\n{line}\n"))
             .err()
             .expect("another format revision must be refused");
@@ -932,10 +911,10 @@ mod tests {
                 "\"type\":\"communities_manifest\"",
             ),
             header.replace(
-                "\"type\":\"communities\",\"version\":\"2026-10-01\"",
+                "\"type\":\"communities\",\"version\":\"2026-11-13\"",
                 "\"taguru_communities\":1",
             ),
-            header.replace("\"version\":\"2026-10-01\"", "\"version\":null"),
+            header.replace("\"version\":\"2026-11-13\"", "\"version\":null"),
         ] {
             assert!(
                 parse_analysis(&format!("{broken}\n{line}\n")).is_err(),
@@ -943,7 +922,7 @@ mod tests {
             );
         }
         // The version column is optional on read: absent is this build's own.
-        let unversioned = header.replace(",\"version\":\"2026-10-01\"", "");
+        let unversioned = header.replace(",\"version\":\"2026-11-13\"", "");
         parse_analysis(&format!("{unversioned}\n{line}\n")).expect("an absent version reads");
     }
 
@@ -978,7 +957,7 @@ mod tests {
     /// runaway positive strength is capped at 1e6.
     #[test]
     fn a_zero_strength_member_lands_at_the_singleton_weight() {
-        let header = r#"{"type":"communities","version":"2026-10-01","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let header = r#"{"type":"communities","version":"2026-11-13","context_id":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
         let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
         let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
         let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);

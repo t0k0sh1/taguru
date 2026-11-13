@@ -72,35 +72,44 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
  */
 /**
  * Every `context` id the `groups` named in `roots` reach, nested children
- * included, walked over one read of the directory (`rows`). A name no row
- * carries — or several rows share, which the server's own cross search
- * refuses — contributes nothing, and the rest of the walk still stands: one
- * unresolvable `group` must not blank out every other member.
+ * included, walked over one read of the directory (`rows`). A root name no
+ * row carries — or several rows share, which names cannot tell apart —
+ * contributes nothing, and the rest of the walk still stands: one
+ * unresolvable `group` must not blank out every other member. Children are
+ * ids (#996), followed through the same read.
  */
 function groupMembers(rows: GroupEntry[], roots: string[]): Set<string> {
   const byName = new Map<string, GroupEntry[]>();
+  const byId = new Map<string, GroupEntry>();
   for (const row of rows) {
     const named = byName.get(row.name) ?? [];
     named.push(row);
     byName.set(row.name, named);
+    byId.set(row.id, row);
   }
   const members = new Set<string>();
   const seen = new Set<string>();
-  const stack = [...roots];
-  while (stack.length > 0) {
-    const name = stack.pop()!;
-    if (seen.has(name)) {
-      continue;
-    }
-    seen.add(name);
+  const stack: string[] = [];
+  for (const name of roots) {
     const matching = byName.get(name) ?? [];
-    if (matching.length !== 1) {
+    if (matching.length === 1) {
+      stack.push(matching[0]!.id);
+    }
+  }
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) {
       continue;
     }
-    for (const member of matching[0]!.context_ids) {
+    seen.add(id);
+    const row = byId.get(id);
+    if (row === undefined) {
+      continue;
+    }
+    for (const member of row.context_ids) {
       members.add(member);
     }
-    stack.push(...matching[0]!.groups);
+    stack.push(...row.group_ids);
   }
   return members;
 }
@@ -176,9 +185,9 @@ export class TaguruRetriever extends BaseRetriever {
         targets.push(id);
       }
     }
-    // `groups` are names, and so are a row's children, while
-    // `groups.get` takes ids (#995): the walk reads the directory once
-    // and follows names through it. A directory that fails to read
+    // `groups` are names while `groups.get` takes ids (#995): the walk
+    // reads the directory once, finds each name's row, and follows the
+    // rows' child ids through it. A directory that fails to read
     // partway keeps the rows already read beside the direct targets —
     // and with no direct target, the failure is the caller's to hear,
     // never an empty search that looks complete.

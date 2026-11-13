@@ -19,6 +19,33 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire and file format) — every list that names a `group`
+  takes ids** (#996, ADR 0050 / 0053; `http_contract` 2, file format
+  `2026-11-13`). Nesting is `group_ids` on `POST /groups` and on the row,
+  and `add_group_ids` / `remove_group_ids` on `PATCH /groups/{id}`; the
+  cross-context searches (`POST /recall`, `/query`, `/sources/search`)
+  take `group_ids`. A name where a `group` id belongs is a 400 (`is not a
+  group id`), an unknown id is `no_group`, and the `conflict` refusal for
+  a name several `groups` share is gone — two `groups` that share a name
+  are simply two `groups`. A `group` import record is now `{type,
+  version, id, name, description?, context_ids?, group_ids?}`: `id` is
+  the `group`'s id and a restore lands under it wherever it is imported,
+  the import report rows gain `id`, and the format revision moves to
+  `2026-11-13`, so streams written by an earlier build are refused by
+  `version`. `taguru export` writes each `group` as `{id}.group.jsonl`,
+  so `groups` that share a name no longer fail the export. Behind
+  `taguru router` an import broadcasts the records as they are: the
+  empty `groups` the router used to create first, their removal after a
+  refusal, and the refusal of a name split across shards are removed.
+  `taguru communities --group` follows child ids. MCP's `create_group`,
+  `update_group`, `recall`, `query` and `search_passages` take the same
+  `group_ids` / `add_group_ids` / `remove_group_ids` fields. The Python
+  and TypeScript SDKs follow: `GroupEntry.groups` is `group_ids`,
+  `groups.create(group_ids=…)`, `groups.update(add_group_ids=…,
+  remove_group_ids=…)`, `recall`/`query`/`search_passages(group_ids=…)`,
+  and `GroupImportOutcome` gains `id`. `TaguruRetriever(groups=[...])`
+  still takes names (until #997) and follows child ids.
+
 - **Breaking (wire) — `groups` are addressed by id** (#995, ADR 0050 / 0052;
   `http_contract` 2). Every `/groups/{name}` route is now `/groups/{id}`
   (`GET`, `PATCH`, `DELETE`, `/export`, `/rename`), and a path that is

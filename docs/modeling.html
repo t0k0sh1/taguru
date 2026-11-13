@@ -230,12 +230,12 @@
     <p class="section-sub">A question that spans several papers names the papers' <code>groups</code> at search time — it never needs a <code>context</code> that contains them all.</p>
     <p>
       <code>POST /recall</code>, <code>POST /query</code>, and <code>POST /sources/search</code>
-      take <code>context_ids</code> and <code>groups</code> lists together and run one search across
+      take <code>context_ids</code> and <code>group_ids</code> lists together (both ids — look a <code>group</code> up in <code>GET /groups</code>) and run one search across
       every <code>context</code> reached, nested children included, every match tagged with the <code>context_id</code> (and display <code>context_name</code>) it
       came from:
     </p>
     <pre><code>curl -X POST localhost:8248/recall -H <span class="s">'Content-Type: application/json'</span> \
-  -d <span class="s">'{"groups": ["paper/bert", "paper/gpt"], "cue": "fine-tuning"}'</span></code></pre>
+  -d <span class="s">'{"group_ids": ["&lt;id of paper/bert&gt;", "&lt;id of paper/gpt&gt;"], "cue": "fine-tuning"}'</span></code></pre>
     <p>
       The response's <code>plan</code> names exactly which <code>contexts</code> the two <code>groups</code> expanded to, so
       "which paper answered" is never a guess. Deep dives — <code>activate</code>,

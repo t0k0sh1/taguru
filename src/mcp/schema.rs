@@ -5,9 +5,9 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
 }
 
 /// [`object_schema`] for the search tools, which target one `context` or
-/// several: `context_id`, `context_ids`, and `groups` join the given
+/// several: `context_id`, `context_ids`, and `group_ids` join the given
 /// properties, and an `anyOf` demands at least one (the `cite_passage`
-/// precedent). `context_ids` and `groups` combine — both are the
+/// precedent). `context_ids` and `group_ids` combine — both are the
 /// cross-`context` form — but `context_id` beside either is refused by
 /// `route_tool`, where the message can say so; a schema can only say
 /// "invalid".
@@ -17,17 +17,17 @@ pub(super) fn search_target_schema(properties: Value, required: &[&str]) -> Valu
     schema["properties"]["context_ids"] = json!({
         "type": "array",
         "items": { "type": "string" },
-        "description": "several contexts at once — ids (the id column of list_contexts); every match comes back tagged with its context_id and context_name. Combines with groups; don't pass context_id beside it."
+        "description": "several contexts at once — ids (the id column of list_contexts); every match comes back tagged with its context_id and context_name. Combines with group_ids; don't pass context_id beside it."
     });
-    schema["properties"]["groups"] = json!({
+    schema["properties"]["group_ids"] = json!({
         "type": "array",
         "items": { "type": "string" },
-        "description": "group names (from list_groups) — each resolves to every context it reaches, nested children included, deduped against context_ids and each other. Combines with context_ids; don't pass context_id beside it."
+        "description": "several groups at once — ids (the id column of list_groups; look a name up there) — each resolves to every context it reaches, nested children included, deduped against context_ids and each other. Combines with context_ids; don't pass context_id beside it."
     });
     schema["anyOf"] = json!([
         { "required": ["context_id"] },
         { "required": ["context_ids"] },
-        { "required": ["groups"] },
+        { "required": ["group_ids"] },
     ]);
     schema
 }
@@ -62,7 +62,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "subject": { "type": "string" },
             "label": { "type": "string" },
             "object": { "type": "string" },
-            "context_id": { "type": "string", "description": "required when targeting several contexts (context_ids/groups); omit for a single context" }
+            "context_id": { "type": "string", "description": "required when targeting several contexts (context_ids/group_ids); omit for a single context" }
         },
         "required": ["weight", "subject", "label", "object"]
     });
@@ -129,7 +129,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every `group`'s id, name, description, member `context` ids, and child `group` names. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. The row's id is what every other group tool's name argument takes; names are labels and need not be unique. A `group` and a `context` may share the same name without conflict.",
+            "Group directory: every `group`'s id, name, description, member `context` ids, and child `group` ids. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. The row's id is what every other group tool's name argument takes; names are labels and need not be unique. A `group` and a `context` may share the same name without conflict.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by (name, id) (default/ceiling 1000)" },
@@ -151,10 +151,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                         "items": { "type": "string" },
                         "description": "initial member context ids (the id column of list_contexts)"
                     },
-                    "groups": {
+                    "group_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "initial child group names (from list_groups)"
+                        "description": "initial child group ids (the id column of list_groups)"
                     }
                 }),
                 &["name"],
@@ -162,15 +162,15 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_group",
-            "Update a `group`'s description and/or membership. add_context_ids/remove_context_ids and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added `contexts` and child `groups` must exist; removing a non-member is a no-op; nesting stays at most 3 `groups` tall and acyclic, and the resulting membership at most 1000 member `contexts` and 1000 child `groups` (removals apply first, so one request can trade members within the cap).",
+            "Update a `group`'s description and/or membership. add_context_ids/remove_context_ids and add_group_ids/remove_group_ids are deltas against the current members, not a replacement list; an id in both ends up a member. Added `contexts` and child `groups` must exist; removing a non-member is a no-op; nesting stays at most 3 `groups` tall and acyclic, and the resulting membership at most 1000 member `contexts` and 1000 child `groups` (removals apply first, so one request can trade members within the cap).",
             object_schema(
                 json!({
                     "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" },
                     "description": { "type": "string", "description": "omit to leave unchanged" },
                     "add_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids (the id column of list_contexts) to add" },
                     "remove_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids to remove" },
-                    "add_groups": { "type": "array", "items": { "type": "string" } },
-                    "remove_groups": { "type": "array", "items": { "type": "string" } }
+                    "add_group_ids": { "type": "array", "items": { "type": "string" }, "description": "child group ids (the id column of list_groups) to add" },
+                    "remove_group_ids": { "type": "array", "items": { "type": "string" }, "description": "child group ids to remove" }
                 }),
                 &["name"],
             ),
@@ -381,7 +381,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. subject_types/object_types further narrow by declared entity type (is_a-expanded) when the `context` has an installed schema — a filter, never a substitute for pinning a position, and an empty result on a schema-free `context`. Outline with describe, then narrow by label. Targets one `context` (`context_id`) or several at once (`context_ids` and/or `groups`) — cross-`context` matches carry their `context_id` and `context_name`, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. subject_types/object_types further narrow by declared entity type (is_a-expanded) when the `context` has an installed schema — a filter, never a substitute for pinning a position, and an empty result on a schema-free `context`. Outline with describe, then narrow by label. Targets one `context` (`context_id`) or several at once (`context_ids` and/or `group_ids`) — cross-`context` matches carry their `context_id` and `context_name`, and past the limit the strongest |weight| survives (weights share one scale).",
             require_any_of(
                 search_target_schema(
                     json!({
@@ -406,7 +406,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "recall",
-            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one `context` (`context_id`) or several at once (`context_ids` and/or `groups`) — cross-`context` matches carry their `context_id` and `context_name`, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one `context` (`context_id`) or several at once (`context_ids` and/or `group_ids`) — cross-`context` matches carry their `context_id` and `context_name`, and past the limit the strongest |weight| survives (weights share one scale).",
             search_target_schema(
                 json!({
                     "cue": { "type": "string" },
@@ -547,7 +547,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context_id": context,
                     "type": { "type": "string", "enum": ["schema"], "description": "what this document is — always \"schema\"" },
-                    "version": { "type": "string", "description": "the format revision, a date (currently \"2026-10-01\"); omit it to mean the running server's own" },
+                    "version": { "type": "string", "description": "the format revision, a date (currently \"2026-11-13\"); omit it to mean the running server's own" },
                     "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
                     "closed_labels": { "type": "boolean", "description": "when true, an association whose label has no relation entry here refuses too, not just a domain/range mismatch" },
                     "types": {
@@ -621,7 +621,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Optional source filters run BEFORE the lanes: tags (any-of, on tags stored with the source) and a half-open time window [since, until) in epoch seconds over each source's date ?? stored_at — sources with neither timestamp, or no tags, never match the respective filter kind. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched `context` whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor and, under a filter, how many sources were eligible of how many stored; check it before reading empty hits as \"not in the corpus\". Targets one `context` (`context_id`) or several at once (`context_ids` and/or `groups`) — cross-`context` hits carry their `context_id` and `context_name` and interleave by per-`context` rank; scores compare within one `context` only.",
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Optional source filters run BEFORE the lanes: tags (any-of, on tags stored with the source) and a half-open time window [since, until) in epoch seconds over each source's date ?? stored_at — sources with neither timestamp, or no tags, never match the respective filter kind. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched `context` whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor and, under a filter, how many sources were eligible of how many stored; check it before reading empty hits as \"not in the corpus\". Targets one `context` (`context_id`) or several at once (`context_ids` and/or `group_ids`) — cross-`context` hits carry their `context_id` and `context_name` and interleave by per-`context` rank; scores compare within one `context` only.",
             search_target_schema(
                 json!({
                     "query": { "type": "string" },
@@ -874,7 +874,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                         "description": "the proposed schema document, same shape as put_schema's own arguments (type, version, mode, closed_labels, types, relations), never installed",
                         "properties": {
                             "type": { "type": "string", "enum": ["schema"], "description": "what this document is — always \"schema\"" },
-                            "version": { "type": "string", "description": "the format revision, a date (currently \"2026-10-01\"); omit it to mean the running server's own" },
+                            "version": { "type": "string", "description": "the format revision, a date (currently \"2026-11-13\"); omit it to mean the running server's own" },
                             "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
                             "closed_labels": { "type": "boolean" },
                             "types": {

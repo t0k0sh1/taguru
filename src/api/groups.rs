@@ -15,8 +15,8 @@ use super::aliases::MAX_CURSOR_BYTES;
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppQuery, ErrorCode, GroupIdPath, MAX_CONTEXT_NAME_BYTES,
-    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, ambiguous_group, clamp_page, deadline_exceeded, error,
-    group_not_found, invalid_context_ids, invalid_group_id, key_name, nesting_refusal, ok,
+    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found,
+    invalid_context_ids, invalid_group_id, invalid_group_ids, key_name, nesting_refusal, ok,
     optional_body, over_cap_refusal, overlong, oversized,
 };
 
@@ -58,11 +58,11 @@ pub struct GroupEntry {
     /// Member `context` ids, sorted (#965). For a `context`-scoped key
     /// this carries only the members its grant allows.
     pub context_ids: Vec<String>,
-    /// Child `group` names, sorted — never grant-filtered (so the set
-    /// moves straight from the record): like the row itself, a `group`'s
-    /// name is an organizational label, not `context` content, and the
+    /// Child `group` ids, sorted (#996) — never grant-filtered (so the
+    /// set moves straight from the record): like the row itself, a child
+    /// `group` is an organizational label, not `context` content, and the
     /// `context_ids` BEHIND a child stay filtered wherever they are served.
-    pub groups: BTreeSet<String>,
+    pub group_ids: BTreeSet<String>,
     /// Change token over the `group`'s transitive member `contexts`: a
     /// stable hash of each visible member's id and revision counters
     /// (see `ContextRevision`), so a `group`-level cache invalidates
@@ -118,7 +118,7 @@ fn group_entry(
         name: view.name,
         description: view.record.description,
         context_ids: scoped_member_contexts(view.record.context_ids, grant),
-        groups: view.record.groups,
+        group_ids: view.record.group_ids,
         fingerprint,
     })
 }
@@ -406,10 +406,10 @@ pub struct CreateGroupRequest {
     pub description: String,
     /// Initial member `context` ids (#965); every one must already exist.
     pub context_ids: Vec<String>,
-    /// Initial child `group` names; every one must already exist, and
-    /// the nesting that results must stay acyclic and at most
+    /// Initial child `group` ids (#996); every one must already exist,
+    /// and the nesting that results must stay acyclic and at most
     /// [`MAX_GROUP_DEPTH`] `groups` tall.
-    pub groups: Vec<String>,
+    pub group_ids: Vec<String>,
 }
 
 pub async fn create_group(
@@ -444,10 +444,13 @@ pub async fn create_group(
     if let Some(refusal) = overlong("context_ids", request.context_ids.len(), started_at) {
         return refusal;
     }
-    if let Some(refusal) = overlong("groups", request.groups.len(), started_at) {
+    if let Some(refusal) = overlong("group_ids", request.group_ids.len(), started_at) {
         return refusal;
     }
     if let Some(refusal) = invalid_context_ids("context_ids", &request.context_ids, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = invalid_group_ids("group_ids", &request.group_ids, started_at) {
         return refusal;
     }
     // A context-scoped key is judged against everything the new group would
@@ -458,7 +461,7 @@ pub async fn create_group(
         &grant,
         &key,
         None,
-        request.groups.iter().map(String::as_str),
+        request.group_ids.iter().map(String::as_str),
         &request.context_ids,
         started_at,
     ) {
@@ -476,7 +479,7 @@ pub async fn create_group(
             &name,
             request.description,
             request.context_ids.into_iter().collect(),
-            request.groups.into_iter().collect(),
+            request.group_ids.into_iter().collect(),
         )
     }) {
         // The create already committed; the row's fingerprint must not
@@ -510,9 +513,6 @@ pub async fn create_group(
             format!("group '{group}' not found; nothing was applied"),
             started_at,
         ),
-        Err(CreateGroupError::AmbiguousGroup { name, count }) => {
-            ambiguous_group(&name, count, started_at)
-        }
         Err(CreateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(CreateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(CreateGroupError::Io(io_error)) => {
@@ -529,10 +529,10 @@ pub async fn create_group(
 /// Membership updates are DELTAS, not a replacement list: two clients
 /// adding different `contexts` concurrently must both land, and "add
 /// this `context` here" is the natural operation for an LLM client —
-/// the add/remove split aliases already use. A name in both lists ends
+/// the add/remove split aliases already use. An id in both lists ends
 /// up a member (removals apply first). Removing a non-member is an
 /// idempotent no-op; only additions demand the `context` — or, for
-/// `add_groups`, the child `group` — exists. Child additions must also
+/// `add_group_ids`, the child `group` — exists. Child additions must also
 /// leave the nesting acyclic and within [`MAX_GROUP_DEPTH`] storeys.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -540,8 +540,8 @@ pub struct UpdateGroupRequest {
     pub description: Option<String>,
     pub add_context_ids: Vec<String>,
     pub remove_context_ids: Vec<String>,
-    pub add_groups: Vec<String>,
-    pub remove_groups: Vec<String>,
+    pub add_group_ids: Vec<String>,
+    pub remove_group_ids: Vec<String>,
 }
 
 pub async fn update_group(
@@ -581,15 +581,27 @@ pub async fn update_group(
             return refusal;
         }
     }
-    if let Some(refusal) = overlong("add_groups", request.add_groups.len(), started_at) {
+    if let Some(refusal) = overlong("add_group_ids", request.add_group_ids.len(), started_at) {
         return refusal;
     }
-    if let Some(refusal) = overlong("remove_groups", request.remove_groups.len(), started_at) {
+    if let Some(refusal) = overlong(
+        "remove_group_ids",
+        request.remove_group_ids.len(),
+        started_at,
+    ) {
         return refusal;
+    }
+    for (field, ids) in [
+        ("add_group_ids", &request.add_group_ids),
+        ("remove_group_ids", &request.remove_group_ids),
+    ] {
+        if let Some(refusal) = invalid_group_ids(field, ids, started_at) {
+            return refusal;
+        }
     }
     // A context-scoped key is judged against every context this update touches:
     // the group's transitive members plus everything the request
-    // carries — context ids directly, group names through their own
+    // carries — context ids directly, group ids through their own
     // closures.
     if let Some(refusal) = scoped_group_refusal(
         &state,
@@ -597,9 +609,9 @@ pub async fn update_group(
         &key,
         Some(&id),
         request
-            .add_groups
+            .add_group_ids
             .iter()
-            .chain(&request.remove_groups)
+            .chain(&request.remove_group_ids)
             .map(String::as_str),
         request
             .add_context_ids
@@ -620,8 +632,8 @@ pub async fn update_group(
             request.description,
             request.add_context_ids.into_iter().collect(),
             request.remove_context_ids.into_iter().collect(),
-            request.add_groups.into_iter().collect(),
-            request.remove_groups.into_iter().collect(),
+            request.add_group_ids.into_iter().collect(),
+            request.remove_group_ids.into_iter().collect(),
         )
     }) {
         Ok(view) => {
@@ -660,9 +672,6 @@ pub async fn update_group(
             format!("group '{group}' not found; nothing was applied"),
             started_at,
         ),
-        Err(UpdateGroupError::AmbiguousGroup { name, count }) => {
-            ambiguous_group(&name, count, started_at)
-        }
         Err(UpdateGroupError::Nesting(violation)) => nesting_refusal(violation, started_at),
         Err(UpdateGroupError::OverCap(field)) => over_cap_refusal(field, started_at),
         Err(UpdateGroupError::Io(io_error)) => {

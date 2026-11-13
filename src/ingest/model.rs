@@ -23,7 +23,8 @@ pub(crate) struct Stream {
     pub(crate) batches: Vec<Batch>,
     /// (`context` id, installed schema) — the id column of the record.
     pub(crate) schemas: Vec<(String, schema::InstalledSchema)>,
-    pub(crate) groups: Vec<(String, GroupRecord)>,
+    /// Each record whole, under its own id (#996).
+    pub(crate) groups: Vec<StoredGroup>,
 }
 
 /// The header's create block, parsed: the display name the `context`
@@ -300,9 +301,9 @@ struct CreateBlock {
 }
 
 /// The `group` record line: one `group`'s complete truth, the
-/// same fields `GET /groups/{id}` serves (the record names the `group`
-/// by name, in `id`, until #996). Absent fields read as
-/// empty — matching what export omits — so the round trip is exact.
+/// same fields `GET /groups/{id}` serves — its id, its display name,
+/// and every reference by id (#996). Absent lists read as empty —
+/// matching what export omits — so the round trip is exact.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GroupLine {
@@ -311,45 +312,52 @@ struct GroupLine {
     #[serde(default, deserialize_with = "crate::format::version_column")]
     version: Option<String>,
     id: String,
+    name: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
     context_ids: Vec<String>,
     #[serde(default)]
-    groups: Vec<String>,
+    group_ids: Vec<String>,
 }
 
-/// Validates one `group` record line into the shape the registry
+/// Validates one `group` record line into the record the registry
 /// restores. List duplicates fold into the set silently — membership
 /// is a set, exactly as over the API — but structural trouble
-/// (version, sizes, an over-cap SET) refuses with the line number.
-fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, GroupRecord), String> {
+/// (version, an id that is not one, sizes, an over-cap SET) refuses
+/// with the line number.
+fn parse_group(value: serde_json::Value, number: usize) -> Result<StoredGroup, String> {
     let line: GroupLine = serde_json::from_value(value)
         .map_err(|error| format!("line {number}: not a group record: {error}"))?;
     crate::format::check_version(line.version.as_deref())
         .map_err(|error| format!("line {number}: group record: {error}"))?;
     check_size(number, "id", &line.id, MAX_CONTEXT_NAME_BYTES)?;
-    check_nonempty(number, "id", &line.id)?;
+    check_group_id_in(number, "id", &line.id)?;
+    check_size(number, "name", &line.name, MAX_CONTEXT_NAME_BYTES)?;
+    check_nonempty(number, "name", &line.name)?;
     check_size(
         number,
         "description",
         &line.description,
         MAX_DESCRIPTION_BYTES,
     )?;
-    let mut record = GroupRecord {
+    let mut record = StoredGroup {
+        id: line.id,
+        name: line.name,
         description: line.description,
         context_ids: BTreeSet::new(),
-        groups: BTreeSet::new(),
+        group_ids: BTreeSet::new(),
     };
-    for (field, names, set) in [
+    for (field, ids, set) in [
         ("context_ids", line.context_ids, &mut record.context_ids),
-        ("groups", line.groups, &mut record.groups),
+        ("group_ids", line.group_ids, &mut record.group_ids),
     ] {
-        for member in names {
+        for member in ids {
             check_size(number, field, &member, MAX_CONTEXT_NAME_BYTES)?;
-            check_nonempty(number, field, &member)?;
             if field == "context_ids" {
                 check_context_id_in(number, field, &member)?;
+            } else {
+                check_group_id_in(number, field, &member)?;
             }
             set.insert(member);
         }
@@ -361,7 +369,7 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
             ));
         }
     }
-    Ok((line.id, record))
+    Ok(record)
 }
 
 /// The `schema` record line: one `context`'s whole schema
@@ -487,9 +495,10 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
              expected"
         ));
     }
-    if let Some((name, _)) = stream.groups.first() {
+    if let Some(record) = stream.groups.first() {
         return Err(format!(
-            "group record '{name}' in a file where exactly one source was expected"
+            "group record '{}' in a file where exactly one source was expected",
+            record.id
         ));
     }
     if stream.batches.len() > 1 {
@@ -517,7 +526,7 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
 pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     let mut batches: Vec<Batch> = Vec::new();
     let mut schemas: Vec<(String, schema::InstalledSchema)> = Vec::new();
-    let mut groups: Vec<(String, GroupRecord)> = Vec::new();
+    let mut groups: Vec<StoredGroup> = Vec::new();
     let mut current: Option<Batch> = None;
     // Each claim → the line that made it (#863): a duplicate names the
     // earlier line, not just "an earlier batch".
@@ -613,15 +622,16 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
             schema_owners.insert(context.clone(), number);
             schemas.push((context, installed));
         } else if is_group {
-            let (name, record) = parse_group(value, number)?;
-            if let Some(earlier) = group_owners.get(&name) {
+            let record = parse_group(value, number)?;
+            if let Some(earlier) = group_owners.get(&record.id) {
                 return Err(format!(
-                    "line {number}: group '{name}' is already stated by an earlier record \
-                     of this stream, at line {earlier} — one record owns one group's truth"
+                    "line {number}: group '{}' is already stated by an earlier record \
+                     of this stream, at line {earlier} — one record owns one group's truth",
+                    record.id
                 ));
             }
-            group_owners.insert(name.clone(), number);
-            groups.push((name, record));
+            group_owners.insert(record.id.clone(), number);
+            groups.push(record);
         } else {
             match &mut current {
                 None => {
@@ -1006,6 +1016,20 @@ fn check_context_id_in(number: usize, field: &str, value: &str) -> Result<(), St
         return Err(format!(
             "line {number}: '{value}' is not a context id: {field} takes lowercase hyphenated \
              UUIDs — the id column of GET /contexts — not the contexts' names"
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_context_id_in`]'s twin for a column that names a `group`
+/// (a group record's own `id` and its `group_ids`, #996). The caller
+/// already ran the size cap.
+fn check_group_id_in(number: usize, field: &str, value: &str) -> Result<(), String> {
+    if !crate::groups::is_group_id(value) {
+        return Err(format!(
+            "line {number}: '{value}' is not a group id: {field} takes lowercase hyphenated \
+             UUIDs — the id column of GET /groups, or a fresh one (e.g. from uuidgen) for a \
+             new group — not the groups' names"
         ));
     }
     Ok(())

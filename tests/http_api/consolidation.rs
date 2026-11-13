@@ -334,7 +334,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
     )
     .unwrap();
     assert_eq!(manifest["type"], json!("consolidation_manifest"));
-    assert_eq!(manifest["version"], json!("2026-10-01"));
+    assert_eq!(manifest["version"], json!("2026-11-13"));
     assert_eq!(manifest["detector"], json!("consolidation/1"));
     // The manifest names the source by id, and the artifact lives under
     // the id derived from the source's (#966) — no name is a key.

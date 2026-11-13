@@ -98,7 +98,7 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     assert entry.name == group
     assert entry.description == "蔵元一式"
     assert entry.context_ids == [sake_id]
-    assert entry.groups == []
+    assert entry.group_ids == []
 
     # Deltas: removals are idempotent no-ops, additions demand existence.
     entry = client.groups.update(group_id, add_context_ids=[tea_id], remove_context_ids=[GHOST_ID])
@@ -107,10 +107,17 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
         client.groups.update(group_id, add_context_ids=[GHOST_ID])
     assert missing_member.value.code == "no_context"
 
-    # Nesting: a child group rides the row's `groups` list (by name).
+    # Nesting: a child group rides the row's `group_ids` list (by id, #996);
+    # a name there is a 400, an unknown id a no_group.
     child_id = client.groups.create(child, context_ids=[tea_id]).id
-    entry = client.groups.update(group_id, add_groups=[child])
-    assert entry.groups == [child]
+    entry = client.groups.update(group_id, add_group_ids=[child_id])
+    assert entry.group_ids == [child_id]
+    with pytest.raises(ValidationError) as child_by_name:
+        client.groups.update(group_id, add_group_ids=[child])
+    assert child_by_name.value.code == "invalid_argument"
+    with pytest.raises(NotFoundError) as missing_child:
+        client.groups.update(group_id, add_group_ids=[GHOST_ID])
+    assert missing_child.value.code == "no_group"
 
     ids = [row.id for row in client.groups.iter(limit=2)]
     assert group_id in ids and child_id in ids
@@ -121,7 +128,7 @@ def test_group_lifecycle(client: Taguru, fresh_name: str) -> None:
     entry = client.groups.get(group_id)
     assert entry.name == renamed_group
     assert entry.context_ids == sorted([sake_id, tea_id])
-    assert entry.groups == [child]
+    assert entry.group_ids == [child_id]
 
     # Deleting the bundling leaves members (and the child group) alone.
     assert client.groups.delete(group_id)
@@ -158,7 +165,7 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
 
     # query: a group resolves to every context it reaches; overlaps with
     # directly named contexts dedupe silently.
-    page = client.query(label="代表銘柄", groups=[group], context_ids=[sake_id])
+    page = client.query(label="代表銘柄", group_ids=[group_id], context_ids=[sake_id])
     assert page.total == 2
     assert {match.context_id for match in page.matches} == {sake_id, tea_id}
     assert {match.context_name for match in page.matches} == {sake, tea}
@@ -170,12 +177,16 @@ def test_cross_context_search_tags_every_match(client: Taguru, fresh_name: str) 
     # The plan lists both targets in effective order (#151).
     assert [entry.context_id for entry in page.plan.contexts] == [sake_id, tea_id]
 
-    # An empty target list is refused, an unknown group answers no_group.
+    # An empty target list is refused, a group name where its id belongs
+    # is a 400 (#996), an unknown group id answers no_group.
     with pytest.raises(ValidationError) as empty:
         client.recall("青嶺", context_ids=[])
     assert empty.value.code == "invalid_argument"
+    with pytest.raises(ValidationError) as by_name:
+        client.recall("青嶺", group_ids=[group])
+    assert by_name.value.code == "invalid_argument"
     with pytest.raises(NotFoundError) as missing:
-        client.recall("青嶺", groups=[f"{fresh_name}-missing"])
+        client.recall("青嶺", group_ids=[GHOST_ID])
     assert missing.value.code == "no_group"
 
     client.groups.delete(group_id)
@@ -191,20 +202,22 @@ def test_group_export_import_round_trip(client: Taguru, fresh_name: str) -> None
     line = client.groups.export(group_id)
     record = json.loads(line)
     assert record["type"] == "group"
-    assert record["version"] == "2026-10-01"
-    assert record["id"] == group
+    assert record["version"] == "2026-11-13"
+    assert record["id"] == group_id
+    assert record["name"] == group
     assert record["context_ids"] == sorted([sake_id, tea_id])
 
-    # The record is the group's complete truth: import restores it whole.
+    # The record is the group's complete truth: import restores it whole,
+    # under the id it carries (#996).
     client.groups.delete(group_id)
     assert not client.groups.exists(group_id)
     result = client.import_batches(line)
     assert result.groups == [
-        GroupImportOutcome(name=group, outcome="created", contexts=2, groups=0)
+        GroupImportOutcome(id=group_id, name=group, outcome="created", contexts=2, groups=0)
     ]
-    restored = group_id_named(client, group)
-    assert client.groups.get(restored).context_ids == sorted([sake_id, tea_id])
+    assert group_id_named(client, group) == group_id
+    assert client.groups.get(group_id).context_ids == sorted([sake_id, tea_id])
 
-    client.groups.delete(restored)
+    client.groups.delete(group_id)
     client.contexts.delete(sake_id)
     client.contexts.delete(tea_id)

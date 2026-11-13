@@ -244,7 +244,7 @@ describe("checkpoint reuse", () => {
 
     server.schemaDocument = {
       type: "schema",
-      version: "2026-10-01",
+      version: "2026-11-13",
       mode: "warn",
       closed_labels: false,
       types: { Brewery: { is_a: [] } },

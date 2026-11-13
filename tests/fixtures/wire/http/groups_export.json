@@ -5,12 +5,13 @@
   "request": null,
   "response": {
     "description": "蔵元一式",
-    "groups": [
-      "child"
+    "group_ids": [
+      "00000000-0000-4000-9000-000000000002"
     ],
-    "id": "sakagura",
+    "id": "00000000-0000-4000-9000-000000000001",
+    "name": "sakagura",
     "type": "group",
-    "version": "2026-10-01"
+    "version": "2026-11-13"
   },
   "route": "/groups/{id}/export",
   "status": 200

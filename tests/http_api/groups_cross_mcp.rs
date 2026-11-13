@@ -32,7 +32,7 @@ fn groups_ride_the_mcp_transport() {
     let nested = tool(
         2,
         "create_group",
-        json!({"name": "bar", "groups": ["drinks"]}),
+        json!({"name": "bar", "group_ids": [server.gx("drinks")]}),
     );
     assert!(nested.get("isError").is_none(), "{nested}");
 
@@ -119,7 +119,7 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
         "POST",
         "/query",
         Some(json!({
-            "groups": ["kirisawa"],
+            "group_ids": [server.gx("kirisawa")],
             "subject": ["青嶺酒造", "霧沢町"],
             "label": ["所在地", "所在する県"],
         })),
@@ -146,7 +146,7 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
     let recalled = server.ok(
         "POST",
         "/recall",
-        Some(json!({"groups": ["kirisawa"], "cue": "蔵開きの祭り"})),
+        Some(json!({"group_ids": [server.gx("kirisawa")], "cue": "蔵開きの祭り"})),
     );
     assert_eq!(recalled["total"], json!(2), "{recalled}");
     let contexts: Vec<&str> = recalled["matches"]

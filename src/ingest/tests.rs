@@ -22,7 +22,7 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
         "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"s1\"}\n",
         "{\"assoc\": [\"a\", \"likes\", \"b\"]}\n",
         "\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
         "{\"type\": \"source\", \"context_id\": \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\", \"id\": \"s2\"}\n",
         "{\"assoc\": [\"c\", \"likes\", \"d\"]}",
     )
@@ -333,28 +333,34 @@ fn group_records_ride_a_stream_and_stand_alone() {
     let stream = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
-         {{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵\", \
-           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"cef2e28b-43f0-4b6c-8201-abab0785399f\"], \"groups\": [\"kid\"]}}\n\
-         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000b\", \"name\": \"kura\", \"description\": \"蔵\", \
+           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"cef2e28b-43f0-4b6c-8201-abab0785399f\"], \"group_ids\": [\"00000000-0000-4000-9000-00000000000c\", \"00000000-0000-4000-9000-00000000000c\"]}}\n\
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000c\", \"name\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
     assert_eq!(stream.groups.len(), 2);
-    let (name, record) = &stream.groups[0];
-    assert_eq!(name, "kura");
+    let record = &stream.groups[0];
+    assert_eq!(
+        (record.id.as_str(), record.name.as_str()),
+        ("00000000-0000-4000-9000-00000000000b", "kura")
+    );
     assert_eq!(record.description, "蔵");
     // List duplicates fold into the set — membership IS a set,
     // exactly as over the API.
     assert_eq!(record.context_ids.len(), 1);
-    assert_eq!(record.groups.len(), 1);
+    assert_eq!(record.group_ids.len(), 1);
     // Absent fields read as empty, the shape export omits.
-    assert_eq!(stream.groups[1].1, GroupRecord::default());
+    assert_eq!(
+        stream.groups[1],
+        crate::groups::StoredGroup::empty("00000000-0000-4000-9000-00000000000c", "kid")
+    );
 
     // A group record closes the batch before it: an op line after
     // one has no batch to join.
     let error = parse_stream(std::io::Cursor::new(format!(
         "{HEADER}\n\
-         {{\"type\": \"group\", \"id\": \"kura\"}}\n\
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000b\", \"name\": \"kura\"}}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
     )))
     .unwrap_err();
@@ -366,7 +372,7 @@ fn group_records_ride_a_stream_and_stand_alone() {
     // A groups-only stream is a legitimate restore; an empty one is
     // still a mistake.
     let alone = parse_stream(std::io::Cursor::new(
-        "{\"type\": \"group\", \"id\": \"kura\"}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000b\", \"name\": \"kura\"}\n",
     ))
     .unwrap();
     assert!(alone.batches.is_empty());
@@ -382,39 +388,83 @@ fn group_records_ride_a_stream_and_stand_alone() {
 fn group_records_validate_their_shape_with_line_numbers() {
     let case = |line: &str| parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
     assert!(
-        case("{\"type\": \"group\", \"version\": \"2008-10-17\", \"id\": \"g\"}")
+        case("{\"type\": \"group\", \"version\": \"2008-10-17\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\"}")
             .contains("group record: version '2008-10-17' is not a format")
     );
-    assert!(case("{\"type\": \"group\", \"id\": \"\"}").contains("must not be empty"));
-    assert!(case("{\"type\": \"group\", \"id\": \"g\", \"nope\": 1}").contains("unknown field"));
+    assert!(
+        case("{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"\"}")
+            .contains("name must not be empty")
+    );
+    // The record names its `group` by id, and its children too (#996):
+    // a name in either column, and the retired `groups` column, are
+    // refused by name.
+    let by_name = case("{\"type\": \"group\", \"id\": \"g\", \"name\": \"g\"}");
+    assert!(
+        by_name.contains("line 1: 'g' is not a group id: id takes"),
+        "{by_name}"
+    );
+    let child = case(
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \
+         \"group_ids\": [\"kid\"]}",
+    );
+    assert!(
+        child.contains("line 1: 'kid' is not a group id: group_ids takes"),
+        "{child}"
+    );
+    assert!(
+        case(
+            "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \
+             \"groups\": []}"
+        )
+        .contains("unknown field `groups`")
+    );
+    assert!(
+        case("{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\"}")
+            .contains("missing field `name`")
+    );
+    assert!(case("{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"nope\": 1}").contains("unknown field"));
     // The member list names contexts by id (#965): a name, a spelling
     // `Uuid` parses but the server never mints, and the retired
     // `contexts` column are each refused by name.
-    let named = case("{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"sake\"]}");
+    let named = case(
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [\"sake\"]}",
+    );
     assert!(
         named.contains("line 1: 'sake' is not a context id: context_ids takes"),
         "{named}"
     );
     let upper = case(&format!(
-        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{}\"]}}",
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [\"{}\"]}}",
         "CEF2E28B-43F0-4B6C-8201-ABAB0785399F"
     ));
     assert!(upper.contains("is not a context id"), "{upper}");
     assert!(
-        case("{\"type\": \"group\", \"id\": \"g\", \"contexts\": []}").contains("unknown field")
+        case("{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"contexts\": []}").contains("unknown field")
     );
     let long = "x".repeat(65);
-    assert!(case(&format!("{{\"type\": \"group\", \"id\": \"{long}\"}}")).contains("65 bytes"));
     assert!(
         case(&format!(
-            "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{long}\"]}}"
+            "{{\"type\": \"group\", \"id\": \"{long}\", \"name\": \"g\"}}"
+        ))
+        .contains("65 bytes")
+    );
+    assert!(
+        case(&format!(
+            "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \
+             \"name\": \"{long}\"}}"
+        ))
+        .contains("65 bytes")
+    );
+    assert!(
+        case(&format!(
+            "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [\"{long}\"]}}"
         ))
         .contains("65 bytes")
     );
 
     // Restating one group refuses the whole stream, by line.
     let error = parse_stream(std::io::Cursor::new(
-        "{\"type\": \"group\", \"id\": \"g\"}\n{\"type\": \"group\", \"id\": \"g\"}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\"}\n{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\"}\n",
     ))
     .unwrap_err();
     assert!(
@@ -428,7 +478,7 @@ fn group_records_validate_their_shape_with_line_numbers() {
         .collect::<Vec<_>>()
         .join(", ");
     let error = case(&format!(
-        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [{over_set}]}}"
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [{over_set}]}}"
     ));
     assert!(error.contains("split into nested child groups"), "{error}");
 }
@@ -439,7 +489,7 @@ fn group_records_validate_their_shape_with_line_numbers() {
 fn parse_batch_refuses_group_records() {
     let error = parse(
         "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-1\"}\n\
-         {\"type\": \"group\", \"id\": \"kura\"}\n",
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000b\", \"name\": \"kura\"}\n",
     )
     .unwrap_err();
     assert!(error.contains("exactly one source was expected"), "{error}");
@@ -459,7 +509,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
         "{HEADER}\n\
          {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
          {SCHEMA_LINE}\n\
-         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000c\", \"name\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.batches.len(), 1);
@@ -1925,12 +1975,12 @@ fn in_stream_duplicates_name_the_earlier_line() {
         ),
         "{schemas}"
     );
-    let group = "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}";
+    let group = "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000a\", \"name\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}";
     let groups = parse_stream(format!("{group}\n{group}\n").as_bytes()).unwrap_err();
     assert!(
         groups.starts_with(
-            "line 2: group 'g' is already stated by an earlier record of this \
-                            stream, at line 1"
+            "line 2: group '00000000-0000-4000-9000-00000000000a' is already stated by an \
+             earlier record of this stream, at line 1"
         ),
         "{groups}"
     );
@@ -2187,7 +2237,7 @@ fn the_pre_adr_0042_spellings_are_refused_not_read() {
         "{\"type\": \"group\", \"name\": \"kura\"}\n",
     ))
     .unwrap_err();
-    assert!(error.contains("unknown field `name`"), "{error}");
+    assert!(error.contains("missing field `id`"), "{error}");
 }
 
 /// The `version` column is optional on every stream-level record, and
@@ -2201,8 +2251,8 @@ fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
            \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
          {{\"type\": \"source\", \"version\": \"{version}\", \"id\": \"a.md\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\"}}\n\
          {{\"type\": \"source\", \"id\": \"b.md\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\"}}\n\
-         {{\"type\": \"group\", \"version\": \"{version}\", \"id\": \"kura\"}}\n\
-         {{\"type\": \"group\", \"id\": \"kid\"}}\n"
+         {{\"type\": \"group\", \"version\": \"{version}\", \"id\": \"00000000-0000-4000-9000-00000000000b\", \"name\": \"kura\"}}\n\
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-00000000000c\", \"name\": \"kid\"}}\n"
     )))
     .unwrap();
     assert_eq!(stream.schemas.len(), 1);
@@ -2219,7 +2269,7 @@ fn every_stream_level_record_accepts_the_current_version_and_its_absence() {
 fn an_explicit_null_version_is_refused_not_read_as_absent() {
     for line in [
         r#"{"type": "source", "version": null, "id": "s", "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5"}"#,
-        r#"{"type": "group", "version": null, "id": "kura"}"#,
+        r#"{"type": "group", "version": null, "id": "00000000-0000-4000-9000-00000000000b", "name": "kura"}"#,
         r#"{"type": "schema", "version": null, "context_id": "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
     ] {
         let error = parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();

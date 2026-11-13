@@ -351,7 +351,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     server.ok(
         "POST",
         "/groups",
-        group_body("minerals", Some(json!({"description": "", "context_ids": [server.cx("amber"), server.cx("quartz")], "groups": []}))),
+        group_body("minerals", Some(json!({"description": "", "context_ids": [server.cx("amber"), server.cx("quartz")], "group_ids": []}))),
     );
 
     let single = server.ok(
@@ -371,7 +371,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     let cross = server.ok(
         "POST",
         "/recall",
-        Some(json!({"context_ids": [server.cx("quartz")], "groups": ["minerals"], "cue": "何もない"})),
+        Some(json!({"context_ids": [server.cx("quartz")], "group_ids": [server.gx("minerals")], "cue": "何もない"})),
     );
     assert_eq!(
         cross["plan"],
@@ -382,7 +382,7 @@ fn graph_plans_list_the_resolved_targets_in_effective_order() {
     let queried = server.ok(
         "POST",
         "/query",
-        Some(json!({"context_ids": [server.cx("quartz")], "groups": ["minerals"], "subject": "誰か"})),
+        Some(json!({"context_ids": [server.cx("quartz")], "group_ids": [server.gx("minerals")], "subject": "誰か"})),
     );
     assert_eq!(
         queried["plan"],

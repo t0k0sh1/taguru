@@ -1026,27 +1026,20 @@ pub enum CreateGroupError {
     /// persist as a bare `.group` file the boot scan (keying on the
     /// extension) never rediscovers.
     InvalidName,
-    /// A listed member is not a registered `context` — carried by name so
+    /// A listed member is not a registered `context` — carried by id so
     /// the client hears WHICH one. Strict on purpose: an add must never
     /// mint a dangling reference.
     NoSuchContext(String),
-    /// A listed child is not a registered `group` — the same strictness,
-    /// one namespace over. A create can never trip the cycle check
-    /// through this gate: a child naming the `group` being created is
-    /// not registered yet, so it refuses here first.
+    /// A listed child id is not a registered `group` — the same
+    /// strictness, one namespace over. A create can never trip the cycle
+    /// check through this gate: a child naming the `group` being created
+    /// is not registered yet, so it refuses here first.
     NoSuchGroup(String),
-    /// A listed child name is shared by several `groups` (names are not
-    /// unique): refused rather than resolved to any one of them while
-    /// the wire still says children by name (until #996).
-    AmbiguousGroup {
-        name: String,
-        count: usize,
-    },
     /// The children exist but the shape is not allowed: a cycle, or a
     /// chain of more than [`groups::MAX_GROUP_DEPTH`] `groups`.
     Nesting(groups::NestingViolation),
     /// One of the two membership sets would hold more than
-    /// [`groups::MAX_GROUP_MEMBERS`] names; carries which one
+    /// [`groups::MAX_GROUP_MEMBERS`] ids; carries which one
     /// ("member `contexts`" / "child `groups`"). Judged before existence,
     /// like the request-list caps: a count needs no lookups.
     OverCap(&'static str),
@@ -1057,18 +1050,11 @@ pub enum CreateGroupError {
 pub enum UpdateGroupError {
     NotFound,
     /// Same strictness as [`CreateGroupError::NoSuchContext`], for
-    /// `add_contexts`. Removals are exempt — removing a name that is
+    /// `add_context_ids`. Removals are exempt — removing an id that is
     /// not a member is an idempotent no-op, never an error.
     NoSuchContext(String),
-    /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_groups`.
+    /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_group_ids`.
     NoSuchGroup(String),
-    /// [`CreateGroupError::AmbiguousGroup`]'s twin — for an
-    /// `add_groups` name, or a `remove_groups` name two of the `group`'s
-    /// children share.
-    AmbiguousGroup {
-        name: String,
-        count: usize,
-    },
     /// [`CreateGroupError::Nesting`]'s twin — and here the cycle arm is
     /// reachable: the `group` being updated IS registered, so adding it
     /// (or an ancestor) as its own child passes the existence gate and
@@ -1130,29 +1116,20 @@ pub enum RestoreGroupsError {
     /// [`CreateGroupError::InvalidName`]'s twin — the parse layers
     /// refuse it first, but the invariant is the registry's.
     InvalidName,
-    /// The same record name twice in one set: the set claims two
+    /// The same record id twice in one set: the set claims two
     /// truths for one `group`, and "last wins" would silently discard
     /// the other. The stream and file layers refuse duplicates with
     /// their line and path; this is the registry's own backstop.
     Duplicate(String),
-    /// A member of the named `group` is not a registered `context`. As
+    /// A member of the `group` (by id) is not a registered `context`. As
     /// strict as [`CreateGroupError::NoSuchContext`] — batches of the
     /// same run applied first, so "import `contexts` and `groups`
     /// together" satisfies it, and anything else deserves the refusal.
     NoSuchContext { group: String, context: String },
-    /// A child of the named `group` is neither registered nor in the
+    /// A child id of the `group` is neither registered nor in the
     /// restore set itself (records in one set may reference each other
     /// in any order — the set lands children-first).
     NoSuchChild { group: String, child: String },
-    /// A record's own name, or a child name it lists, is shared by
-    /// several standing `groups` — which one the record means cannot be
-    /// told while the stream names `groups` (#994; #996 moves the stream
-    /// to ids). `name` is the shared name, `group` the record naming it.
-    Ambiguous {
-        group: String,
-        name: String,
-        count: usize,
-    },
     /// [`CreateGroupError::OverCap`]'s twin, judged per record.
     OverCap { group: String, field: &'static str },
     /// The set's records plus the standing `groups` would close a cycle
@@ -1174,15 +1151,14 @@ pub enum RestoreGroupsError {
 }
 
 impl RestoreGroupsError {
-    /// The `group` the refusal is about, when it is about one (#863):
-    /// every validation arm and the persistence arm name theirs; an
-    /// empty name and the budget running out name none.
+    /// The id of the `group` the refusal is about, when it is about one
+    /// (#863): every validation arm and the persistence arm name theirs;
+    /// an empty name and the budget running out name none.
     pub fn group(&self) -> Option<&str> {
         match self {
             Self::Duplicate(group)
             | Self::NoSuchContext { group, .. }
             | Self::NoSuchChild { group, .. }
-            | Self::Ambiguous { group, .. }
             | Self::OverCap { group, .. }
             | Self::Nesting(groups::NestingViolation::Cycle(group))
             | Self::Nesting(groups::NestingViolation::TooDeep(group))
@@ -1219,10 +1195,6 @@ impl RestoreGroupsError {
                 "group '{group}' names child group '{child}', which neither exists nor \
                  rides this stream; no group was applied"
             ),
-            Self::Ambiguous { group, name, count } => format!(
-                "group '{group}' names group '{name}', which {count} groups share; \
-                 no group was applied (rename them apart first)"
-            ),
             Self::OverCap { group, field } => format!(
                 "group '{group}' would bundle more than {} {field}; no group was applied \
                  — split into nested child groups",
@@ -1253,9 +1225,8 @@ impl RestoreGroupsError {
     }
 }
 
-/// One `group` as a name-addressed caller sees it: its id (for the
-/// registry's own follow-up calls — the wire does not carry it yet,
-/// #995), its display name, and the wire view of its record.
+/// One `group` as a row serves it: its id, its display name, and its
+/// membership.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupView {
     pub id: String,

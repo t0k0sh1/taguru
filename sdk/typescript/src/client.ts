@@ -464,7 +464,7 @@ export class Taguru {
 
   /**
    * Recall across several `contexts` at once, every match tagged. `context_ids`
-   * takes context ids (never names, #965); each `groups` entry searches every `context` the `group`
+   * takes context ids (never names, #965); each `group_ids` entry (a `group` id, #996) searches every `context` the `group`
    * reaches (nested children included), overlaps deduped. At least one of
    * the two must name something. Weights share one scale, so past the limit
    * the strongest |weight| survives exactly as within one `context`. `after`
@@ -475,7 +475,7 @@ export class Taguru {
     cue: string,
     options: {
       context_ids?: string[];
-      groups?: string[];
+      group_ids?: string[];
       limit?: number;
       after?: CrossMatchCursor;
     } = {},
@@ -483,7 +483,7 @@ export class Taguru {
     const result = await this.requestJson("POST", "/recall", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
-        groups: options.groups,
+        group_ids: options.group_ids,
         cue,
         limit: options.limit,
         after: options.after ? crossMatchCursor(options.after) : undefined,
@@ -502,7 +502,7 @@ export class Taguru {
   async query(
     options: {
       context_ids?: string[];
-      groups?: string[];
+      group_ids?: string[];
       subject?: OneOrMany;
       label?: OneOrMany;
       object?: OneOrMany;
@@ -515,7 +515,7 @@ export class Taguru {
     const result = await this.requestJson("POST", "/query", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
-        groups: options.groups,
+        group_ids: options.group_ids,
         subject: options.subject,
         label: options.label,
         object: options.object,
@@ -542,7 +542,7 @@ export class Taguru {
     query: string,
     options: {
       context_ids?: string[];
-      groups?: string[];
+      group_ids?: string[];
       limit?: number;
       semantic_floor?: number;
       tags?: string[];
@@ -553,7 +553,7 @@ export class Taguru {
     const result = await this.requestJson("POST", "/sources/search", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
-        groups: options.groups,
+        group_ids: options.group_ids,
         query,
         limit: options.limit,
         semantic_floor: options.semantic_floor,
@@ -782,7 +782,7 @@ export class Groups {
    * Create a `group` and return its row — `id` included, which every other
    * `group` call takes. `name` is a label, not unique: creating a name again
    * makes a second `group`. Every listed member — a `context` (by id) or a
-   * child `group` (by name) — must already exist; a `group` and a `context`
+   * child `group` (each by id) — must already exist; a `group` and a `context`
    * may share the same name without conflict.
    *
    * `group_id` creates the `group` under that id (a canonical UUID) instead
@@ -797,7 +797,7 @@ export class Groups {
       group_id?: string;
       description?: string;
       context_ids?: string[];
-      groups?: string[];
+      group_ids?: string[];
     } = {},
   ): Promise<GroupEntry> {
     const result = await this.client.requestJson("POST", "/groups", {
@@ -806,7 +806,7 @@ export class Groups {
         id: options.group_id,
         description: options.description ?? "",
         context_ids: options.context_ids,
-        groups: options.groups,
+        group_ids: options.group_ids,
       }),
       // Under a caller's id a repeat converges, so an ambiguous failure
       // is safe to retry; a minted id is not.
@@ -827,8 +827,8 @@ export class Groups {
       description?: string;
       add_context_ids?: string[];
       remove_context_ids?: string[];
-      add_groups?: string[];
-      remove_groups?: string[];
+      add_group_ids?: string[];
+      remove_group_ids?: string[];
     } = {},
   ): Promise<GroupEntry> {
     const result = await this.client.requestJson("PATCH", `/groups/${encodeName(groupId)}`, {
@@ -836,8 +836,8 @@ export class Groups {
         description: options.description,
         add_context_ids: options.add_context_ids,
         remove_context_ids: options.remove_context_ids,
-        add_groups: options.add_groups,
-        remove_groups: options.remove_groups,
+        add_group_ids: options.add_group_ids,
+        remove_group_ids: options.remove_group_ids,
       }),
     });
     return result as GroupEntry;

@@ -45,20 +45,17 @@ pub(crate) const MAX_GROUP_DEPTH: usize = 3;
 /// into nested child `groups`.
 pub(crate) const MAX_GROUP_MEMBERS: usize = 1000;
 
-/// One `group` as the wire still speaks of it (#994 keeps the wire
-/// unchanged; #995/#996 move it to ids): the description, the member
-/// `context` ids, and the child `groups` by NAME. The registry
-/// translates between this view and [`StoredGroup`] at its edge — the
-/// import stream, the export renderer, the router's merge, and every
-/// HTTP row read and write this shape, and nothing below the registry
-/// does.
+/// One `group`'s membership as a row and a merge speak of it: the
+/// description, the member `context` ids, and the child `group` ids
+/// (#996) — a [`StoredGroup`] without its own id and name, which the
+/// row carries beside it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GroupRecord {
     pub description: String,
     pub context_ids: BTreeSet<String>,
-    /// Child `group` names — the wire's view of nesting.
-    pub groups: BTreeSet<String>,
+    /// Child `group` ids.
+    pub group_ids: BTreeSet<String>,
 }
 
 /// One `group` as it lives on file and in memory: its own id (equal to
@@ -125,20 +122,8 @@ pub(crate) fn mint_group_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Why a name-addressed `group` lookup found no single `group`. Names do
-/// not have to be unique (#993 decision 1), so a name can answer
-/// nothing, one `group`, or several; while the wire still addresses
-/// `groups` by name (#994's bridge, removed in #995) the several case is
-/// refused rather than resolved to an arbitrary one of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupLookup {
-    NotFound,
-    /// The count of `groups` sharing the name (always at least 2).
-    Ambiguous(usize),
-}
-
 /// The resident `group` collection: records by id, plus the name index
-/// the wire's name-addressed entrances resolve through. Every change of
+/// the directory pages through in name order. Every change of
 /// a record's NAME goes through [`GroupTable::insert`], which keeps the
 /// index in step; [`GroupTable::get_mut`] is for membership and
 /// description edits only.
@@ -212,22 +197,12 @@ impl GroupTable {
         }
     }
 
-    /// Every id recorded under `name`, in id order — none, one, or (in a
-    /// hand-assembled data directory) several.
+    /// Every id recorded under `name`, in id order — none, one, or
+    /// several (names are labels, ADR 0050): what a test that planted a
+    /// `group` by name finds it by.
+    #[cfg(test)]
     pub(crate) fn ids_named<'a>(&'a self, name: &str) -> impl Iterator<Item = &'a String> + 'a {
         self.by_name.get(name).into_iter().flatten()
-    }
-
-    /// The one `group` called `name`, or why there is not exactly one.
-    pub(crate) fn lookup(&self, name: &str) -> Result<&String, GroupLookup> {
-        let mut ids = self.ids_named(name);
-        match (ids.next(), ids.next()) {
-            (Some(id), None) => Ok(id),
-            (None, _) => Err(GroupLookup::NotFound),
-            (Some(_), Some(_)) => Err(GroupLookup::Ambiguous(
-                self.by_name.get(name).map_or(0, BTreeSet::len),
-            )),
-        }
     }
 
     /// The display name of the `group` holding `id`, falling back to the
@@ -238,19 +213,6 @@ impl GroupTable {
         self.records
             .get(id)
             .map_or(id, |record| record.name.as_str())
-    }
-
-    /// `record` as the wire sees it: child ids turned back into names.
-    pub(crate) fn view(&self, record: &StoredGroup) -> GroupRecord {
-        GroupRecord {
-            description: record.description.clone(),
-            context_ids: record.context_ids.clone(),
-            groups: record
-                .group_ids
-                .iter()
-                .map(|child| self.name_of(child).to_string())
-                .collect(),
-        }
     }
 
     /// Records in display order — by name, ties by id — starting after
@@ -464,8 +426,8 @@ pub(crate) fn trim_membership(groups: &mut BTreeMap<String, StoredGroup>, cap: u
 }
 
 /// The two sets a `group` bundles, whichever shape holds them — the
-/// stored record (children by id) or the wire view (children by name).
-/// [`context_closure`] walks either, keyed the way its children are.
+/// stored record or the row's membership view, both children by id.
+/// [`context_closure`] walks either.
 pub(crate) trait Bundle {
     fn member_contexts(&self) -> &BTreeSet<String>;
     fn child_groups(&self) -> &BTreeSet<String>;
@@ -485,7 +447,7 @@ impl Bundle for GroupRecord {
         &self.context_ids
     }
     fn child_groups(&self) -> &BTreeSet<String> {
-        &self.groups
+        &self.group_ids
     }
 }
 
@@ -1096,20 +1058,14 @@ mod tests {
             .into(),
         );
         assert_eq!(table.len(), 2);
-        assert_eq!(table.lookup("drinks"), Ok(&ID_A.to_string()));
-        assert_eq!(table.lookup("nope"), Err(GroupLookup::NotFound));
+        assert_eq!(table.ids_named("drinks").collect::<Vec<_>>(), [ID_A]);
+        assert_eq!(table.ids_named("nope").count(), 0);
         assert_eq!(table.name_of(ID_B), "beer");
         assert_eq!(table.name_of("unknown"), "unknown");
-        assert_eq!(
-            table.view(&table.get(ID_A).unwrap().clone()).groups,
-            ["beer".to_string()].into(),
-            "the wire view names children"
-        );
 
         // A rename through insert moves the index entry with it.
         table.insert(stored(ID_B, "drinks", &[]));
-        assert_eq!(table.lookup("beer"), Err(GroupLookup::NotFound));
-        assert_eq!(table.lookup("drinks"), Err(GroupLookup::Ambiguous(2)));
+        assert_eq!(table.ids_named("beer").count(), 0);
         assert_eq!(
             table.ids_named("drinks").collect::<Vec<_>>(),
             [ID_A, ID_B],
@@ -1129,7 +1085,7 @@ mod tests {
             Some("drinks".into())
         );
         assert_eq!(table.remove(ID_A), None);
-        assert_eq!(table.lookup("drinks"), Ok(&ID_B.to_string()));
+        assert_eq!(table.ids_named("drinks").collect::<Vec<_>>(), [ID_B]);
         table.remove(ID_B);
         assert_eq!(
             table.ids_named("drinks").count(),

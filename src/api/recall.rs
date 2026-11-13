@@ -21,7 +21,7 @@ use super::{
     AppJson, ContextIdPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT,
     MatchCursor, MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map,
     cache_and_serve, clamp, cross_associations_out, cross_job_panic, cross_search_concurrency,
-    deadline_exceeded, error, group_lookup_refusal, not_found, ok, overlong, page,
+    deadline_exceeded, error, group_not_found, invalid_group_ids, not_found, ok, overlong, page,
     replay_cached_search, search_log_enabled,
 };
 
@@ -159,7 +159,7 @@ pub async fn recall(
 }
 
 /// Vets a cross-`context` search's target list — the directly named
-/// `context_ids` plus every `context` the named `groups` reach, nested
+/// `context_ids` plus every `context` the listed `group_ids` reach, nested
 /// children included — and returns it deduped: direct ids lead in
 /// first-appearance order, `group`-resolved members follow in id
 /// order (the tie order the passage merge documents). Refused, in
@@ -170,9 +170,10 @@ pub async fn recall(
 /// grant ([`scope_refusal`] — whole-request, and before existence, so
 /// grants cannot probe ids); the first
 /// direct id that does not exist (`no_context`, before any `context` is
-/// searched); and the first `group` name that is not a `group`
-/// (`no_group` — `group` rows are visible to every key, so that refusal
-/// probes nothing). `group`-RESOLVED members beyond the grant are
+/// searched); a `group_ids` value that is not a group id (400, before
+/// any lookup); and the first `group` id no `group` holds (`no_group` —
+/// `group` rows are visible to every key, so that refusal probes
+/// nothing). `group`-RESOLVED members beyond the grant are
 /// dropped, not refused: a context-scoped key searches its slice of a
 /// `group` exactly as `GET /groups` shows it that slice
 /// ([`group_entry`]) — refusing would name out-of-grant members and
@@ -191,22 +192,28 @@ pub(super) fn cross_targets(
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
     context_ids: Vec<String>,
-    groups: Vec<String>,
+    group_ids: Vec<String>,
     started_at: Instant,
 ) -> Result<CrossTargets, Box<Response>> {
-    if context_ids.is_empty() && groups.is_empty() {
+    if context_ids.is_empty() && group_ids.is_empty() {
         return Err(Box::new(error(
             ErrorCode::InvalidArgument,
-            "'context_ids' or 'groups' must name at least one target",
+            "'context_ids' or 'group_ids' must name at least one target",
             started_at,
         )));
     }
-    for (field, count) in [("context_ids", context_ids.len()), ("groups", groups.len())] {
+    for (field, count) in [
+        ("context_ids", context_ids.len()),
+        ("group_ids", group_ids.len()),
+    ] {
         if let Some(refusal) = overlong(field, count, started_at) {
             return Err(Box::new(refusal));
         }
     }
     if let Some(refusal) = invalid_context_ids("context_ids", &context_ids, started_at) {
+        return Err(Box::new(refusal));
+    }
+    if let Some(refusal) = invalid_group_ids("group_ids", &group_ids, started_at) {
         return Err(Box::new(refusal));
     }
     let mut seen = BTreeSet::new();
@@ -232,12 +239,10 @@ pub(super) fn cross_targets(
     // Resolution is skipped outright when no groups were named: a
     // context-only search must never queue behind a group write's
     // fsync on the groups lock (see the registry field's doc).
-    if !groups.is_empty() {
-        let resolved = match state.resolve_groups(&groups) {
+    if !group_ids.is_empty() {
+        let resolved = match state.resolve_groups(&group_ids) {
             Ok(resolved) => resolved,
-            Err((name, why)) => {
-                return Err(Box::new(group_lookup_refusal(&name, why, started_at)));
-            }
+            Err(missing) => return Err(Box::new(group_not_found(&missing, started_at))),
         };
         for id in resolved {
             if scope_allows(grant, &id) && seen.insert(id.clone()) {
@@ -495,12 +500,12 @@ pub struct CrossRecallRequest {
     /// names, no patterns.
     #[serde(default)]
     pub context_ids: Vec<String>,
-    /// `group` names — each adds every `context` it reaches, nested
-    /// children included. Overlaps, with `context_ids` or between `groups`,
-    /// dedupe silently: a `context` is searched once however many ways
-    /// it was named.
+    /// `group` ids (the id column of `GET /groups`, #996) — each adds
+    /// every `context` it reaches, nested children included. Overlaps,
+    /// with `context_ids` or between `groups`, dedupe silently: a
+    /// `context` is searched once however many ways it was named.
     #[serde(default)]
-    pub groups: Vec<String>,
+    pub group_ids: Vec<String>,
     pub cue: String,
     /// Omitted means 100.
     pub limit: Option<usize>,
@@ -619,7 +624,7 @@ pub async fn cross_recall(
         &grant,
         &key,
         request.context_ids,
-        request.groups,
+        request.group_ids,
         started_at,
     ) {
         Ok(targets) => targets,
@@ -971,9 +976,9 @@ pub struct CrossQueryRequest {
     /// names, no patterns.
     #[serde(default)]
     pub context_ids: Vec<String>,
-    /// `group` names, resolved and deduped as in [`CrossRecallRequest`].
+    /// `group` ids, resolved and deduped as in [`CrossRecallRequest`].
     #[serde(default)]
-    pub groups: Vec<String>,
+    pub group_ids: Vec<String>,
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
@@ -1032,7 +1037,7 @@ pub async fn cross_query(
         &grant,
         &key,
         request.context_ids,
-        request.groups,
+        request.group_ids,
         started_at,
     ) {
         Ok(targets) => targets,
@@ -1204,7 +1209,7 @@ mod tests {
         let deadline = already_expired_deadline();
         let request = CrossRecallRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
-            groups: Vec::new(),
+            group_ids: Vec::new(),
             cue: "AAA".to_string(),
             limit: None,
             after: None,
@@ -1239,7 +1244,7 @@ mod tests {
         let deadline = already_expired_deadline();
         let request = CrossQueryRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
-            groups: Vec::new(),
+            group_ids: Vec::new(),
             subject: Some(OneOrMany::One("蔵".to_string())),
             label: None,
             object: None,
