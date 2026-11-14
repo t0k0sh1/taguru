@@ -1513,9 +1513,16 @@ mod tests {
         );
     }
 
+    /// The cap is 32 MiB exactly (taguru-mcp's frame cap is sized off
+    /// it): a stream of exactly 32 MiB routes, one byte more does not.
     #[test]
     fn import_refuses_a_stream_over_the_byte_limit() {
-        let oversized = "x".repeat(MAX_IMPORT_STREAM_BYTES + 1);
+        let at_cap = "x".repeat(32 * 1024 * 1024);
+        assert!(
+            route_tool("import", &json!({"stream": at_cap})).is_ok(),
+            "a stream of exactly the cap must route"
+        );
+        let oversized = "x".repeat(32 * 1024 * 1024 + 1);
         let routed = route_tool("import", &json!({"stream": oversized}));
         assert!(
             routed.is_err(),

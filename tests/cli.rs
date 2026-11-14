@@ -350,6 +350,86 @@ fn health_url_flag_does_not_swallow_a_following_flag() {
     );
 }
 
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// `health`'s argument refusals each name their own mistake: a second
+/// `--config`, an unknown flag (never mistaken for a URL), and a
+/// positional URL followed by `--url` (the "not both" refusal, not
+/// "--url needs a server URL").
+#[test]
+fn health_names_each_argument_mistake() {
+    for (args, expected) in [
+        (
+            vec!["health", "--config", "a.env", "--config", "b.env"],
+            "--config given twice",
+        ),
+        (
+            vec!["health", "--bogus"],
+            "'health' does not take '--bogus'",
+        ),
+        (
+            vec![
+                "health",
+                "http://127.0.0.1:1",
+                "--url",
+                "http://127.0.0.1:2",
+            ],
+            "either --url or a positional URL, not both",
+        ),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(
+            stderr_of(&output).contains(expected),
+            "{args:?}: {output:?}"
+        );
+    }
+}
+
+/// Only a literal 200 is healthy: a 204 from something sitting in
+/// front of the port is not this server answering.
+#[test]
+fn health_refuses_a_non_200_success_status() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let responder = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut buffer);
+        let _ = std::io::Write::write_all(
+            &mut stream,
+            b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n",
+        );
+    });
+    let output = run(&["health", &format!("http://{addr}")]);
+    responder.join().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr_of(&output).contains("answered 204"), "{output:?}");
+}
+
+/// `router` and `serve` take `--config` once: a second one is refused
+/// by name, and a single one is applied (here: an unreadable file is
+/// reported as such, never as a repeat).
+#[test]
+fn router_and_serve_take_config_exactly_once() {
+    for verb in ["router", "serve"] {
+        let output = run(&[verb, "--config", "a.env", "--config", "b.env"]);
+        assert_eq!(output.status.code(), Some(2), "{verb}: {output:?}");
+        assert!(
+            stderr_of(&output).contains("--config given twice"),
+            "{verb}: {output:?}"
+        );
+    }
+    let missing = common::scratch_dir("cli-router-config-missing").join("absent.env");
+    let output = run(&["router", "--config", &missing.display().to_string()]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("cannot read config"), "{stderr}");
+    assert!(!stderr.contains("given twice"), "{stderr}");
+}
+
 #[test]
 fn calibrate_url_flag_does_not_swallow_a_following_flag() {
     let dir = std::env::temp_dir().join(format!(
@@ -4568,5 +4648,49 @@ fn groups_sharing_a_name_export_apart_and_inspect_tells_them_apart() {
             "each group exports to its own file: {id}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `context` whose stream cannot be written is a failure the offline
+/// export counts: the run exits 1 and the summary says one of two
+/// landed, while the other `context` still writes.
+#[test]
+fn an_offline_export_counts_a_context_it_cannot_write() {
+    let dir = common::scratch_dir("cli-export-write-failure");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+         {\"type\": \"source\", \"context_id\": \"cba06b57-36fa-467e-94b0-7b561eae9439\", \"id\": \"b.md\", \
+         \"create\": {\"name\": \"beer\", \"description\": \"b\"}}\n\
+         {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    // A non-empty directory where `sake.jsonl` belongs: the atomic
+    // rename onto it fails.
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("sake.jsonl")).unwrap();
+    std::fs::write(out.join("sake.jsonl").join("keep"), "x").unwrap();
+    let output = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr_of(&output).contains("context 'sake'"), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("export: 1 of 2 context(s)"), "{stdout}");
+    assert!(out.join("beer.jsonl").is_file(), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
