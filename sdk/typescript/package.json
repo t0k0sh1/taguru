@@ -64,7 +64,7 @@
     "@types/node": "^26.6.6",
     "@typescript/typescript6": "^6.0.2",
     "oxlint": "^1.93.0",
-    "tsup": "^8.2.0",
+    "tsup": "^9.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12",
