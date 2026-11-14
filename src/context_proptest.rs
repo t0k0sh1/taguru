@@ -169,7 +169,7 @@ pub(crate) enum GeneratedGroupOp {
     },
     DeleteGroup(&'static str),
     /// `(name, contexts, groups)` per record — `AppState::restore_groups`'s
-    /// own shape without pulling `GroupRecord` into this module; the
+    /// own shape without pulling `StoredGroup` into this module; the
     /// dispatch site builds the record.
     RestoreGroups(Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)>),
     RenameGroup {

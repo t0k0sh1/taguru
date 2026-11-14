@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use taguru::context::AliasError;
 use taguru::deadline::Deadline;
 
-use crate::groups::GroupRecord;
 use crate::ingest::AliasRejection;
 use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
@@ -117,6 +116,8 @@ pub(crate) fn schema_import_outcome(
 /// replace of the whole record; the label says what it replaced.
 #[derive(Serialize)]
 pub struct GroupImportOutcome {
+    /// The record's id — the `group` it restored (#996).
+    pub id: String,
     pub name: String,
     /// `"created"` | `"replaced"` | `"unchanged"` — the last says the
     /// standing record already matched, so nothing was rewritten.
@@ -124,6 +125,23 @@ pub struct GroupImportOutcome {
     /// Member counts of the record as restored.
     pub contexts: usize,
     pub groups: usize,
+}
+
+impl GroupImportOutcome {
+    /// The report row for one restored record — `POST /import` and
+    /// `import --json` both build it here, so the two cannot drift.
+    pub(crate) fn of(
+        record: &crate::groups::StoredGroup,
+        outcome: crate::registry::GroupRestoreOutcome,
+    ) -> Self {
+        GroupImportOutcome {
+            id: record.id.clone(),
+            name: record.name.clone(),
+            outcome: outcome.as_str(),
+            contexts: record.context_ids.len(),
+            groups: record.group_ids.len(),
+        }
+    }
 }
 
 /// `pub(crate)`: `import --json` (issue #371) reuses this to build the
@@ -395,7 +413,6 @@ pub(super) fn restore_refusal(
         }
         RestoreGroupsError::NoSuchContext { .. } => ErrorCode::NoContext,
         RestoreGroupsError::NoSuchChild { .. } => ErrorCode::NoGroup,
-        RestoreGroupsError::Ambiguous { .. } => ErrorCode::Conflict,
         RestoreGroupsError::OverCap { .. } => ErrorCode::OverLimit,
         RestoreGroupsError::Nesting(violation) => nesting_error_code(violation),
         RestoreGroupsError::Io { .. } => {
@@ -1137,25 +1154,21 @@ pub async fn import_batch(
         if !stream.groups.is_empty() && !query.dry_run {
             match state.restore_groups(&stream.groups, deadline) {
                 Ok(restored) => {
-                    for ((name, record), (_, applied)) in stream.groups.iter().zip(&restored) {
+                    for (record, applied) in &restored {
                         // A restore replaces the whole record —
                         // destructive like the batches above, and just
                         // as far out of the access log's reach.
                         tracing::info!(
                             target: "taguru::audit",
                             key = %key_name(&key),
-                            group = %name,
+                            group = %record.name,
+                            group_id = %record.id,
                             outcome = applied.as_str(),
                             contexts = record.context_ids.len(),
-                            children = record.groups.len(),
+                            children = record.group_ids.len(),
                             "import group record applied",
                         );
-                        group_outcomes.push(GroupImportOutcome {
-                            name: name.clone(),
-                            outcome: applied.as_str(),
-                            contexts: record.context_ids.len(),
-                            groups: record.groups.len(),
-                        });
+                        group_outcomes.push(GroupImportOutcome::of(record, *applied));
                     }
                 }
                 Err(refusal) => {
@@ -1320,8 +1333,8 @@ pub(super) fn export_response(
 /// key the members are the grant's slice, exactly as
 /// `GET /groups/{id}` serves them — the export IS that key's view,
 /// and restoring it elsewhere carries only what the key could see. The
-/// record line still names the `group` by name (import restores by
-/// name until #996).
+/// record carries the `group`'s id, so restoring it lands on the same
+/// `group` (#996).
 pub async fn export_group(
     State(state): State<AppState>,
     GroupIdPath(id): GroupIdPath,
@@ -1331,12 +1344,13 @@ pub async fn export_group(
     let Some(view) = state.group(&id) else {
         return group_not_found(&id, started_at);
     };
-    let (name, record) = (view.name, view.record);
-    let filtered = GroupRecord {
-        description: record.description,
-        context_ids: scoped_member_contexts(record.context_ids, &grant),
-        // Child names stay whole, as on the row: labels, not content.
-        groups: record.groups,
+    let filtered = crate::groups::StoredGroup {
+        id: view.id,
+        name: view.name,
+        description: view.record.description,
+        context_ids: scoped_member_contexts(view.record.context_ids, &grant),
+        // Children stay whole, as on the row: labels, not content.
+        group_ids: view.record.group_ids,
     };
     (
         StatusCode::OK,
@@ -1344,7 +1358,7 @@ pub async fn export_group(
             axum::http::header::CONTENT_TYPE,
             "application/x-ndjson; charset=utf-8",
         )],
-        crate::export::render_group(&name, &filtered),
+        crate::export::render_group(&filtered),
     )
         .into_response()
 }

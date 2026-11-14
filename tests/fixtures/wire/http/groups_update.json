@@ -3,8 +3,8 @@
   "method": "PATCH",
   "operation": "groups_update",
   "request": {
-    "add_groups": [
-      "child"
+    "add_group_ids": [
+      "00000000-0000-4000-9000-000000000002"
     ],
     "remove_context_ids": [
       "00000000-0000-4000-8000-000000000001"
@@ -15,8 +15,8 @@
       "context_ids": [],
       "description": "蔵元一式",
       "fingerprint": "cbf29ce484222325",
-      "groups": [
-        "child"
+      "group_ids": [
+        "00000000-0000-4000-9000-000000000002"
       ],
       "id": "00000000-0000-4000-9000-000000000001",
       "name": "kura"

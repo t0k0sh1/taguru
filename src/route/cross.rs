@@ -26,7 +26,7 @@ pub(super) async fn cross_recall(
 ) -> Response {
     let limit = request.limit;
     let context_ids = request.context_ids.clone();
-    let groups = request.groups.clone();
+    let group_ids = request.group_ids.clone();
     let base = match reserialize(&request) {
         Ok(base) => base,
         Err(refusal) => return *refusal,
@@ -37,7 +37,7 @@ pub(super) async fn cross_recall(
         deadline,
         "/recall",
         context_ids,
-        groups,
+        group_ids,
         limit,
         base,
     )
@@ -52,7 +52,7 @@ pub(super) async fn cross_query(
 ) -> Response {
     let limit = request.limit;
     let context_ids = request.context_ids.clone();
-    let groups = request.groups.clone();
+    let group_ids = request.group_ids.clone();
     let base = match reserialize(&request) {
         Ok(base) => base,
         Err(refusal) => return *refusal,
@@ -63,7 +63,7 @@ pub(super) async fn cross_query(
         deadline,
         "/query",
         context_ids,
-        groups,
+        group_ids,
         limit,
         base,
     )
@@ -82,7 +82,7 @@ async fn merge_matches(
     deadline: Deadline,
     path: &str,
     context_ids: Vec<String>,
-    groups: Vec<String>,
+    group_ids: Vec<String>,
     limit: Option<usize>,
     base: Value,
 ) -> Response {
@@ -92,7 +92,7 @@ async fn merge_matches(
         &state,
         &map,
         &context_ids,
-        &groups,
+        &group_ids,
         &headers,
         deadline,
         started_at,
@@ -204,7 +204,7 @@ pub(super) async fn cross_search_passages(
         &state,
         &map,
         &request.context_ids,
-        &request.groups,
+        &request.group_ids,
         &headers,
         deadline,
         started_at,

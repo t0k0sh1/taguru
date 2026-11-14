@@ -10,7 +10,7 @@
           "context_ids": [],
           "description": "",
           "fingerprint": "cbf29ce484222325",
-          "groups": [],
+          "group_ids": [],
           "id": "00000000-0000-4000-9000-000000000002",
           "name": "child"
         },
@@ -18,8 +18,8 @@
           "context_ids": [],
           "description": "蔵元一式",
           "fingerprint": "cbf29ce484222325",
-          "groups": [
-            "child"
+          "group_ids": [
+            "00000000-0000-4000-9000-000000000002"
           ],
           "id": "00000000-0000-4000-9000-000000000001",
           "name": "kura"

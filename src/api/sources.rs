@@ -1606,10 +1606,10 @@ pub struct CrossSearchPassagesRequest {
     /// names, no patterns.
     #[serde(default)]
     pub context_ids: Vec<String>,
-    /// `group` names, resolved and deduped as in
+    /// `group` ids, resolved and deduped as in
     /// [`super::CrossRecallRequest`].
     #[serde(default)]
-    pub groups: Vec<String>,
+    pub group_ids: Vec<String>,
     pub query: String,
     /// Omitted means 5.
     pub limit: Option<usize>,
@@ -1659,7 +1659,7 @@ pub async fn cross_search_passages(
         &grant,
         &key,
         request.context_ids,
-        request.groups,
+        request.group_ids,
         started_at,
     ) {
         Ok(targets) => targets,
@@ -2810,7 +2810,7 @@ mod tests {
 
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
-            groups: Vec::new(),
+            group_ids: Vec::new(),
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,
@@ -2846,7 +2846,7 @@ mod tests {
 
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
-            groups: Vec::new(),
+            group_ids: Vec::new(),
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,

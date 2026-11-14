@@ -159,25 +159,35 @@ describe("TaguruRetriever cross-context", () => {
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 
-  it("skips a child name several groups share, keeping the rest of the walk", async () => {
-    // Names are not unique (#995): a second "childg" makes the name
-    // ambiguous, which the server's own cross search refuses — the walk
-    // skips it rather than picking one, and parent's direct member stands.
+  it("skips a root name several groups share, keeping the rest of the walk", async () => {
+    // Names are not unique (#995): a second "childg" makes the root name
+    // ambiguous — the walk skips it rather than picking one, and the
+    // direct target stands. A child is an id (#996), so parent's child
+    // stays the one row it names, twin or no twin.
     GROUP_ROWS["gid-twin"] = {
       id: "gid-twin",
       name: "childg",
       description: "",
-      context_ids: ["id-tea"],
-      groups: [],
+      context_ids: ["id-other"],
+      group_ids: [],
     };
     try {
       const server = new FakeServer();
-      const retriever = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      const retriever = new TaguruRetriever({
+        context_ids: ["id-sake"],
+        groups: ["childg"],
+        client: server.client(),
+      });
       await retriever.invoke("青嶺酒造");
-      const crossSearches = server.calls
-        .filter(([path]) => path === "/sources/search")
-        .map(([, body]) => body);
-      expect(crossSearches).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
+      const crossSearches = () =>
+        server.calls.filter(([path]) => path === "/sources/search").map(([, body]) => body);
+      expect(crossSearches()).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
+      server.calls.length = 0;
+      const byParent = new TaguruRetriever({ groups: ["parent"], client: server.client() });
+      await byParent.invoke("青嶺酒造");
+      expect(crossSearches()).toEqual([
+        { context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 },
+      ]);
     } finally {
       delete GROUP_ROWS["gid-twin"];
     }
@@ -227,7 +237,7 @@ describe("TaguruRetriever cross-context", () => {
   it("pages the group walk through rows that share a name", async () => {
     // A page boundary between two rows named alike: the (name, id) cursor
     // resumes after the first, never skipping the second.
-    GROUP_ROWS["gid-twin"] = { id: "gid-twin", name: "childg", description: "", context_ids: [], groups: [] };
+    GROUP_ROWS["gid-twin"] = { id: "gid-twin", name: "childg", description: "", context_ids: [], group_ids: [] };
     try {
       const server = new FakeServer();
       const walked: string[] = [];

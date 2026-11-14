@@ -77,7 +77,7 @@ export function matchCursor(match: MatchCursor): MatchCursor {
 
 /**
  * `MatchCursor` plus `context_id`, for cross-`context` `recall`/`query`
- * (`context_ids`/`groups`). `context_id` is the tiebreak two different target
+ * (`context_ids`/`group_ids`). `context_id` is the tiebreak two different target
  * `contexts` can't share on their own: each can independently hold an edge at
  * the identical `(subject, label, object)`.
  */
@@ -223,8 +223,8 @@ export interface ContextPage {
 /**
  * One `group` row: member `context` ids bundled many-to-many, plus child `groups`.
  * `context_ids` holds ids (the directory's `id` column), never names (#965). For a
- * `context`-scoped key it carries only the members the grant allows; `groups`
- * (child names — labels, not content) is never filtered.
+ * `context`-scoped key it carries only the members the grant allows;
+ * `group_ids` (child `group` ids, #996 — labels, not content) is never filtered.
  */
 export interface GroupEntry {
   /** The `group`'s server-minted id, which every `group` call takes. */
@@ -233,7 +233,7 @@ export interface GroupEntry {
   name: string;
   description: string;
   context_ids: string[];
-  groups: string[];
+  group_ids: string[];
   /**
    * Change token over the transitive member contexts' revisions — same
    * equality-only contract as {@link ContextRevision}. Absent only from a
@@ -1069,6 +1069,8 @@ export interface ImportOutcome {
  * replace of the whole record; `outcome` says what it replaced.
  */
 export interface GroupImportOutcome {
+  /** The restored `group`'s id, which the record carried (#996). */
+  id: string;
   name: string;
   outcome: Open<"created" | "replaced" | "unchanged">;
   /** Member counts of the record as restored. */

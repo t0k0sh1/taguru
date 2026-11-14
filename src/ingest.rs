@@ -72,7 +72,7 @@ use crate::api::{
     MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES,
 };
 use crate::env::DEFAULT_MAX_BODY_BYTES;
-use crate::groups::{GroupRecord, MAX_GROUP_MEMBERS};
+use crate::groups::{MAX_GROUP_MEMBERS, StoredGroup};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 use crate::remote::{Api, ImportFailure};
 use crate::schema;

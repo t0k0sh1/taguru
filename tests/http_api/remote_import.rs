@@ -529,7 +529,7 @@ fn groups_ride_after_every_batch_chunk_and_restore_remotely() {
     let group_file = batches.join("00-group.jsonl");
     std::fs::write(
         &group_file,
-        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\"]}\n",
     )
     .expect("fixture must be writable");
     let batch_file = batches.join("01-batches.jsonl");
@@ -591,7 +591,7 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
          {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
          {\"type\": \"schema\", \"context_id\": \"ca978112-ca1b-4dca-bac2-31b39a23dc4d\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-         {\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"ca978112-ca1b-4dca-bac2-31b39a23dc4d\"]}\n",
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"ca978112-ca1b-4dca-bac2-31b39a23dc4d\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -843,7 +843,7 @@ fn spawn_mismatched_health_stub() -> String {
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
             // /version: this build's record format, so the preflight
             // passes and the import itself is what fails below.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-11-13"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -921,7 +921,7 @@ fn spawn_413_then_drop_stub() -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0u8; 2048];
             let _ = stream.read(&mut buffer);
-            let body = r#"{"record_formats":["2026-10-01"]}"#;
+            let body = r#"{"record_formats":["2026-11-13"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -984,7 +984,7 @@ fn spawn_413_twice_then_drop_stub() -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0u8; 2048];
             let _ = stream.read(&mut buffer);
-            let body = r#"{"record_formats":["2026-10-01"]}"#;
+            let body = r#"{"record_formats":["2026-11-13"]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()

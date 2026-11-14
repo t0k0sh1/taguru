@@ -28,16 +28,16 @@ export const GROUP_ROWS: Record<string, unknown> = {
     name: "brewery",
     description: "蔵元一式",
     context_ids: ["id-sake", "id-tea"],
-    groups: [],
+    group_ids: [],
   },
   "gid-parent": {
     id: "gid-parent",
     name: "parent",
     description: "",
     context_ids: ["id-sake"],
-    groups: ["childg"],
+    group_ids: ["gid-childg"],
   },
-  "gid-childg": { id: "gid-childg", name: "childg", description: "", context_ids: ["id-tea"], groups: [] },
+  "gid-childg": { id: "gid-childg", name: "childg", description: "", context_ids: ["id-tea"], group_ids: [] },
 };
 
 const ok = (result: unknown): Response =>

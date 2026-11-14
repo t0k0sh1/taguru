@@ -17,7 +17,7 @@
 //! `context`.
 //!
 //! A FULL export (no CONTEXT arguments) also writes every `group` as
-//! `{out}/{group}.group.jsonl` — one `group` record each, the
+//! `{out}/{id}.group.jsonl` — one `group` record each, the
 //! `group`'s complete truth the way a batch is a source's. Import
 //! applies `group` records after every batch of its run, so the files
 //! restore in any order; re-importing one REPLACES the record, the
@@ -60,7 +60,7 @@ use serde_json::Value;
 use taguru::context::{Association, UNSOURCED_SOURCE};
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
-use crate::groups::GroupRecord;
+use crate::groups::StoredGroup;
 use crate::passages::PassageRecord;
 use crate::registry::{AccessError, AppState, ContextMeta};
 use crate::remote::Api;
@@ -74,7 +74,8 @@ Writes each context back out as a JSONL source stream —
 that same stream as one schema record — no separate file —
 when the context has one installed and its mode is not \"off\". No
 CONTEXT arguments means every context, plus every group as
-{out}/{group}.group.jsonl (one group record each; import
+{out}/{id}.group.jsonl (one group record each, named by the group's
+id; import
 restores groups after every source and schema, so the files re-apply
 in any order). A full export owns DIR's *.jsonl files: one left by a
 previous export whose context or group no longer exists is removed,
@@ -282,28 +283,31 @@ struct GroupLine<'a> {
     record_type: &'static str,
     version: &'static str,
     id: &'a str,
+    name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     context_ids: &'a BTreeSet<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    groups: &'a BTreeSet<String>,
+    group_ids: &'a BTreeSet<String>,
 }
 
 /// Renders one `group` as its import-stream record: one `group`
 /// line, newline-terminated — the `group`'s complete truth, so
-/// re-importing REPLACES the record (a restore, never a merge).
-pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
+/// re-importing REPLACES the record (a restore, never a merge) — under
+/// the record's own id, wherever it is imported (#996).
+pub(crate) fn render_group(record: &StoredGroup) -> String {
     let mut line = String::new();
     push_line(
         &mut line,
         &GroupLine {
             record_type: "group",
             version: crate::format::FORMAT_VERSION,
-            id: name,
+            id: &record.id,
+            name: &record.name,
             description: &record.description,
             context_ids: &record.context_ids,
-            groups: &record.groups,
+            group_ids: &record.group_ids,
         },
     );
     line
@@ -887,34 +891,29 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     if !explicit {
         let (_, all_groups) = state.group_page(None, None, usize::MAX);
         group_count = all_groups.len();
-        // Until #996 names the files by id, two `groups` sharing a name
-        // (a hand-assembled data directory) would write one
-        // `{name}.group.jsonl` twice, the second silently replacing the
-        // first — a backup missing a `group` that still reports success.
-        // Every such `group` is refused instead, and the export fails.
-        let shared = shared_group_names(&all_groups);
+        // Files are named by id (#993 decision 4), so two `groups` that
+        // share a name write two files.
         for view in &all_groups {
-            if shared.contains(view.name.as_str()) {
-                eprintln!(
-                    "taguru: export: group '{}' ({}): several groups share this name and \
-                     would overwrite one export file — rename them apart, then export again",
-                    view.name, view.id
-                );
-                group_failures += 1;
-                continue;
-            }
-            match export_group_file(&view.name, &view.record, out) {
+            let record = StoredGroup {
+                id: view.id.clone(),
+                name: view.name.clone(),
+                description: view.record.description.clone(),
+                context_ids: view.record.context_ids.clone(),
+                group_ids: view.record.group_ids.clone(),
+            };
+            match export_group_file(&record, out) {
                 Ok(report) => println!("{report}"),
                 Err(message) => {
-                    eprintln!("taguru: export: group '{}': {message}", view.name);
+                    eprintln!(
+                        "taguru: export: group '{}' ({}): {message}",
+                        view.name, view.id
+                    );
                     group_failures += 1;
                 }
             }
         }
-        let expected = expected_file_names(
-            &file_names,
-            all_groups.iter().map(|view| view.name.as_str()),
-        );
+        let expected =
+            expected_file_names(&file_names, all_groups.iter().map(|view| view.id.as_str()));
         stale_failures = prune_stale_streams(out, &expected);
     }
 
@@ -927,17 +926,6 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     } else {
         0
     }
-}
-
-/// The names more than one `group` in `groups` carries — the ones whose
-/// `{name}.group.jsonl` export files would collide.
-fn shared_group_names(groups: &[crate::registry::GroupView]) -> BTreeSet<&str> {
-    let mut seen = BTreeSet::new();
-    groups
-        .iter()
-        .map(|view| view.name.as_str())
-        .filter(|name| !seen.insert(*name))
-        .collect()
 }
 
 /// The remote twin of [`run_local`]: enumerates a running server's
@@ -1043,26 +1031,7 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
         match api.list_group_rows() {
             Ok(group_rows) => {
                 group_count = group_rows.len();
-                // The same shared-name refusal `run_local` makes: two
-                // `groups` under one name would write one
-                // `{name}.group.jsonl` twice until #996 names the files
-                // by id.
-                let mut seen = BTreeSet::new();
-                let shared: BTreeSet<&str> = group_rows
-                    .iter()
-                    .map(|(_, name)| name.as_str())
-                    .filter(|name| !seen.insert(*name))
-                    .collect();
                 for (id, name) in &group_rows {
-                    if shared.contains(name.as_str()) {
-                        eprintln!(
-                            "taguru: export: group '{name}' ({id}): several groups share this \
-                             name and would overwrite one export file — rename them apart, \
-                             then export again"
-                        );
-                        group_failures += 1;
-                        continue;
-                    }
                     match remote_export_group(&api, id, name, out) {
                         Ok(report) => println!("{report}"),
                         Err(message) => {
@@ -1071,10 +1040,8 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
                         }
                     }
                 }
-                let expected = expected_file_names(
-                    &file_names,
-                    group_rows.iter().map(|(_, name)| name.as_str()),
-                );
+                let expected =
+                    expected_file_names(&file_names, group_rows.iter().map(|(id, _)| id.as_str()));
                 stale_failures = prune_stale_streams(out, &expected);
             }
             Err(error) => {
@@ -1187,9 +1154,8 @@ fn remote_export_one(
 }
 
 /// One `group`'s record, fetched from `GET /groups/{id}/export` — the
-/// remote twin of [`export_group_file`]. `name` is the directory row's,
-/// which the record line must carry (it names the `group` by name until
-/// #996).
+/// remote twin of [`export_group_file`]. `id` is the directory row's,
+/// which the record line must carry; `name` labels the report.
 fn remote_export_group(
     api: &Api,
     id: &str,
@@ -1208,14 +1174,15 @@ fn remote_export_group(
     let parsed = crate::ingest::parse_stream(stream.as_bytes())
         .map_err(|error| format!("group '{name}': not a taguru group record: {error}"))?;
     let record = match (&parsed.batches[..], &parsed.schemas[..], &parsed.groups[..]) {
-        ([], [], [(record_name, record)]) if record_name == name => record,
-        // A record for a DIFFERENT group written under this name would
-        // make a later directory import restore the wrong truth as
-        // `name` — refused like any other wrong shape.
-        ([], [], [(record_name, _)]) => {
+        ([], [], [record]) if record.id == id => record,
+        // A record for a DIFFERENT group written under this id's file
+        // would make a later directory import restore the wrong truth —
+        // refused like any other wrong shape.
+        ([], [], [record]) => {
             return Err(format!(
                 "group '{name}': not a taguru group record: the response names group \
-                 '{record_name}'"
+                 '{}'",
+                record.id
             ));
         }
         _ => {
@@ -1225,14 +1192,14 @@ fn remote_export_group(
             ));
         }
     };
-    let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
+    let path = out.join(group_file_name(id));
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
         "{}: group '{name}' → {} member context(s), {} child group(s)",
         path.display(),
         record.context_ids.len(),
-        record.groups.len()
+        record.group_ids.len()
     ))
 }
 
@@ -1259,19 +1226,27 @@ fn stream_counts(stream: &str) -> (usize, usize) {
 }
 
 /// The file names a full export claims in `--out`: every `context`'s
-/// `{stem}.jsonl` plus every `group`'s `{stem}.group.jsonl` — the set
+/// `{stem}.jsonl` plus every `group`'s `{id}.group.jsonl` — the set
 /// [`prune_stale_streams`] preserves. Built from the run's full name
 /// lists (attempted, not just succeeded), so a `context` whose fetch
 /// failed keeps whatever file a previous run left for it.
 fn expected_file_names<'a>(
     context_files: &[String],
-    groups: impl Iterator<Item = &'a str>,
+    group_ids: impl Iterator<Item = &'a str>,
 ) -> BTreeSet<String> {
     context_files
         .iter()
         .cloned()
-        .chain(groups.map(|name| format!("{}.group.jsonl", crate::registry::file_stem(name))))
+        .chain(group_ids.map(group_file_name))
         .collect()
+}
+
+/// The export file of the `group` with `id`: `{id}.group.jsonl` (#993
+/// decision 4) — an id never holds a `.`, so it cannot be mistaken for
+/// a `context` stream's `{stem}.jsonl` or `{stem}.{id}.jsonl`, and two
+/// `groups` that share a name never share a file.
+fn group_file_name(id: &str) -> String {
+    format!("{id}.group.jsonl")
 }
 
 /// A FULL export owns its `--out` directory's stream files: a `context`
@@ -1355,22 +1330,17 @@ fn summary_line(
 }
 
 /// Writes one `group`'s `group` record beside the `context`
-/// streams, `{out}/{stem}.group.jsonl` — a name a `context` stream can
-/// never claim (stems percent-encode `.`), exactly the collision
-/// argument the data directory's own `.group` extension makes.
-fn export_group_file(
-    name: &str,
-    record: &GroupRecord,
-    out: &std::path::Path,
-) -> Result<String, String> {
-    let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
-    crate::storage::write_atomic(&path, render_group(name, record).as_bytes())
+/// streams, `{out}/{id}.group.jsonl` ([`group_file_name`]).
+fn export_group_file(record: &StoredGroup, out: &std::path::Path) -> Result<String, String> {
+    let path = out.join(group_file_name(&record.id));
+    crate::storage::write_atomic(&path, render_group(record).as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     Ok(format!(
-        "{}: group '{name}' → {} member context(s), {} child group(s)",
+        "{}: group '{}' → {} member context(s), {} child group(s)",
         path.display(),
+        record.name,
         record.context_ids.len(),
-        record.groups.len()
+        record.group_ids.len()
     ))
 }
 
@@ -1509,13 +1479,13 @@ mod tests {
     fn expected_file_names_match_the_writers_stem_encoding() {
         let expected = expected_file_names(
             &["%E9%85%92.jsonl".to_string(), "plain.jsonl".to_string()],
-            std::iter::once("k.g"),
+            std::iter::once("00000000-0000-4000-9000-000000000001"),
         );
         assert_eq!(
             expected.iter().cloned().collect::<Vec<_>>(),
             vec![
                 "%E9%85%92.jsonl".to_string(),
-                "k%2Eg.group.jsonl".to_string(),
+                "00000000-0000-4000-9000-000000000001.group.jsonl".to_string(),
                 "plain.jsonl".to_string(),
             ]
         );
@@ -2217,7 +2187,9 @@ mod tests {
     /// stream's fixed point.
     #[test]
     fn a_group_renders_as_one_record_and_round_trips() {
-        let record = GroupRecord {
+        let record = StoredGroup {
+            id: "00000000-0000-4000-9000-000000000001".to_string(),
+            name: "kura".to_string(),
             description: "蔵まとめ".to_string(),
             context_ids: [
                 "cef2e28b-43f0-4b6c-8201-abab0785399f",
@@ -2226,25 +2198,28 @@ mod tests {
             .iter()
             .map(|c| c.to_string())
             .collect(),
-            groups: ["kid"].iter().map(|g| g.to_string()).collect(),
+            group_ids: ["00000000-0000-4000-9000-000000000002".to_string()].into(),
         };
-        let line = render_group("kura", &record);
+        let line = render_group(&record);
         assert_eq!(
             line,
-            "{\"type\":\"group\",\"version\":\"2026-10-01\",\"id\":\"kura\",\
+            "{\"type\":\"group\",\"version\":\"2026-11-13\",\
+             \"id\":\"00000000-0000-4000-9000-000000000001\",\"name\":\"kura\",\
              \"description\":\"蔵まとめ\",\"context_ids\":[\"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\",\"cef2e28b-43f0-4b6c-8201-abab0785399f\"],\
-             \"groups\":[\"kid\"]}\n"
+             \"group_ids\":[\"00000000-0000-4000-9000-000000000002\"]}\n"
         );
         let stream = ingest::parse_stream(line.as_bytes()).unwrap();
-        assert_eq!(stream.groups, vec![("kura".to_string(), record)]);
+        assert_eq!(stream.groups, vec![record]);
 
-        let bare = render_group("kid", &GroupRecord::default());
+        let empty = StoredGroup::empty("00000000-0000-4000-9000-000000000002", "kid");
+        let bare = render_group(&empty);
         assert_eq!(
             bare,
-            "{\"type\":\"group\",\"version\":\"2026-10-01\",\"id\":\"kid\"}\n"
+            "{\"type\":\"group\",\"version\":\"2026-11-13\",\
+             \"id\":\"00000000-0000-4000-9000-000000000002\",\"name\":\"kid\"}\n"
         );
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
-        assert_eq!(stream.groups[0].1, GroupRecord::default());
+        assert_eq!(stream.groups, vec![empty]);
     }
 
     fn warn_schema_document() -> crate::schema::SchemaDocument {
@@ -2279,7 +2254,7 @@ mod tests {
         let line = render_schema("cef2e28b-43f0-4b6c-8201-abab0785399f", &document);
         assert_eq!(
             line,
-            "{\"type\":\"schema\",\"version\":\"2026-10-01\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"mode\":\"warn\",\
+            "{\"type\":\"schema\",\"version\":\"2026-11-13\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\",\"mode\":\"warn\",\
              \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
              \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
         );
@@ -2348,7 +2323,7 @@ mod tests {
         let first_line = rendered.stream.lines().next().unwrap();
         assert!(
             first_line.starts_with(
-                "{\"type\":\"schema\",\"version\":\"2026-10-01\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\""
+                "{\"type\":\"schema\",\"version\":\"2026-11-13\",\"context_id\":\"cef2e28b-43f0-4b6c-8201-abab0785399f\""
             ),
             "the schema record must ride first — {}",
             rendered.stream

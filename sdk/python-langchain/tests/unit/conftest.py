@@ -32,28 +32,28 @@ FACT_ONLY_ASSOCIATION = {
     ],
 }
 
-# Keyed by id (#995); rows name their children by name, as the server's do.
+# Keyed by id (#995); rows name their children by id, as the server's do (#996).
 GROUP_ROWS = {
     "gid-brewery": {
         "id": "gid-brewery",
         "name": "brewery",
         "description": "蔵元一式",
         "context_ids": ["id-sake", "id-tea"],
-        "groups": [],
+        "group_ids": [],
     },
     "gid-parent": {
         "id": "gid-parent",
         "name": "parent",
         "description": "",
         "context_ids": ["id-sake"],
-        "groups": ["childg"],
+        "group_ids": ["gid-childg"],
     },
     "gid-childg": {
         "id": "gid-childg",
         "name": "childg",
         "description": "",
         "context_ids": ["id-tea"],
-        "groups": [],
+        "group_ids": [],
     },
 }
 

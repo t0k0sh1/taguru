@@ -64,7 +64,7 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
          {\"type\": \"source\", \"context_id\": \"e13aa81d-4ce5-4637-818f-e3b241d28629\", \"id\": \"c.md\", \
           \"create\": {\"name\": \"酒蔵\", \"description\": \"蔵元台帳\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"e13aa81d-4ce5-4637-818f-e3b241d28629\"]}\n",
     )
     .expect("fixture must be writable");
@@ -454,7 +454,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+                r#"{"record_formats":["2026-11-13"]}"#.to_string(),
             ),
             // GET /contexts, one page then the terminator.
             (
@@ -486,7 +486,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // WRONG group.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"type": "group", "id":"h","description":"x","context_ids":["cef2e28b-43f0-4b6c-8201-abab0785399f"]}"#.to_string(),
+                r#"{"type": "group", "id":"00000000-0000-4000-9000-680000000000","name":"h","description":"x","context_ids":["cef2e28b-43f0-4b6c-8201-abab0785399f"]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -514,10 +514,14 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
         stderr.contains("the response carries context 'd9298a10-d1b0-4358-b7dc-4bd85dac641b'"),
         "{stderr}"
     );
-    assert!(stderr.contains("the response names group 'h'"), "{stderr}");
+    assert!(
+        stderr.contains("the response names group '00000000-0000-4000-9000-680000000000'"),
+        "{stderr}"
+    );
     let contents = dir_contents(&out);
     assert!(
-        !contents.contains_key("sake.jsonl") && !contents.contains_key("g.group.jsonl"),
+        !contents.contains_key("sake.jsonl")
+            && !contents.contains_key("00000000-0000-4000-9000-00000000000a.group.jsonl"),
         "a wrong-name response must never land on disk: {contents:?}"
     );
     let _ = std::fs::remove_dir_all(&out);
@@ -538,7 +542,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+                r#"{"record_formats":["2026-11-13"]}"#.to_string(),
             ),
             // GET /contexts, first page then the terminating empty one.
             (
@@ -597,7 +601,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
     let contents = dir_contents(&out);
     assert!(contents.contains_key("sake.jsonl"), "{contents:?}");
     assert!(
-        !contents.contains_key("g.group.jsonl"),
+        !contents.contains_key("00000000-0000-4000-9000-00000000000a.group.jsonl"),
         "a refused response must never land on disk: {contents:?}"
     );
     let _ = std::fs::remove_dir_all(&out);
@@ -618,7 +622,7 @@ fn spawn_mismatched_health_stub() -> String {
             ("HTTP/1.1 200 OK", r#"{"status":"ok","version":"0.1.0"}"#),
             // /version: this build's record format, so the preflight
             // passes silently and the skew line is the only warning.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-11-13"]}"#),
             (
                 "HTTP/1.1 500 Internal Server Error",
                 r#"{"status":"error","code":"internal","error":"stub"}"#,
@@ -676,7 +680,7 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
             // /health: no version key, no skew warning.
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
             // /version: this build's record format, so no refusal.
-            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-10-01"]}"#),
+            ("HTTP/1.1 200 OK", r#"{"record_formats":["2026-11-13"]}"#),
             // GET /contexts, first page then the terminating empty one.
             (
                 "HTTP/1.1 200 OK",
@@ -744,7 +748,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+                r#"{"record_formats":["2026-11-13"]}"#.to_string(),
             ),
             // GET /contexts: one context, then the terminator.
             (
@@ -775,7 +779,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups/{h's id}/export: the survivor still lands.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"type": "group", "id":"h","description":"x","context_ids":[]}"#.to_string(),
+                r#"{"type": "group", "id":"00000000-0000-4000-9000-00000000000b","name":"h","description":"x","context_ids":[]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -814,22 +818,21 @@ fn per_item_failures_count_and_the_rest_still_lands() {
     let contents = dir_contents(&out);
     assert!(!contents.contains_key("sake.jsonl"), "{contents:?}");
     assert!(
-        contents.contains_key("h.group.jsonl"),
+        contents.contains_key("00000000-0000-4000-9000-00000000000b.group.jsonl"),
         "the survivor must land: {contents:?}"
     );
     assert!(
-        !contents.contains_key("g.group.jsonl"),
+        !contents.contains_key("00000000-0000-4000-9000-00000000000a.group.jsonl"),
         "a failed fetch must leave nothing on disk: {contents:?}"
     );
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Two `groups` sharing a name would write one `{name}.group.jsonl`
-/// twice, so the remote export refuses each of them — one failure per
-/// group, counted in the summary — and still exports the rest, the
-/// same refusal the local export makes.
+/// Two `groups` sharing a name are two `groups`: the remote export
+/// fetches each and writes each to its own `{id}.group.jsonl` (#996),
+/// the same layout the local export makes.
 #[test]
-fn groups_sharing_a_name_each_count_as_a_failure() {
+fn groups_sharing_a_name_each_export_to_their_own_file() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -837,7 +840,7 @@ fn groups_sharing_a_name_each_count_as_a_failure() {
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"record_formats":["2026-10-01"]}"#.to_string(),
+                r#"{"record_formats":["2026-11-13"]}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -856,10 +859,18 @@ fn groups_sharing_a_name_each_count_as_a_failure() {
                 "HTTP/1.1 200 OK",
                 r#"{"result":{"total":3,"groups":[]}}"#.to_string(),
             ),
-            // Only `solo` is fetched.
+            // Each group is fetched by its id.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"type": "group", "id":"solo","description":"x","context_ids":[]}"#.to_string(),
+                r#"{"type": "group", "id":"00000000-0000-4000-9000-00000000000a","name":"same","context_ids":[]}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"type": "group", "id":"00000000-0000-4000-9000-00000000000b","name":"same","context_ids":[]}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"type": "group", "id":"00000000-0000-4000-9000-00000000000c","name":"solo","context_ids":[]}"#.to_string(),
             ),
         ];
         for (status_line, body) in responses {
@@ -882,25 +893,25 @@ fn groups_sharing_a_name_each_count_as_a_failure() {
         &["export", "--url", &base, "--out", out.to_str().unwrap()],
         &[],
     );
-    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    for id in [
-        "00000000-0000-4000-9000-00000000000a",
-        "00000000-0000-4000-9000-00000000000b",
-    ] {
-        assert!(
-            stderr.contains(&format!(
-                "group 'same' ({id}): several groups share this name"
-            )),
-            "{stderr}"
-        );
-    }
+    assert_eq!(
+        code, 1,
+        "the context fails: stdout: {stdout}\nstderr: {stderr}"
+    );
     assert!(
-        stdout.contains("export: 0 of 1 context(s) and 1 of 3 group(s)"),
+        stdout.contains("export: 0 of 1 context(s) and 3 of 3 group(s)"),
         "{stdout}"
     );
     let contents = dir_contents(&out);
-    assert!(!contents.contains_key("same.group.jsonl"), "{contents:?}");
-    assert!(contents.contains_key("solo.group.jsonl"), "{contents:?}");
+    for id in [
+        "00000000-0000-4000-9000-00000000000a",
+        "00000000-0000-4000-9000-00000000000b",
+        "00000000-0000-4000-9000-00000000000c",
+    ] {
+        assert!(
+            contents.contains_key(&format!("{id}.group.jsonl")),
+            "{contents:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -951,7 +962,7 @@ fn a_row_without_a_name_is_a_counted_resolve_failure() {
     std::thread::spawn(move || {
         let responses = [
             r#"{"status":"ok"}"#,
-            r#"{"record_formats":["2026-10-01"]}"#,
+            r#"{"record_formats":["2026-11-13"]}"#,
             r#"{"result":{"id":"00000000-0000-4000-8000-000000000001"}}"#,
         ];
         for body in responses {

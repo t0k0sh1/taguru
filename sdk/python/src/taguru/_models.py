@@ -203,7 +203,8 @@ class GroupEntry:
 
     ``context_ids`` holds the ids (the ``id`` column of the directory), never
     names (#965). For a ``context``-scoped key it carries only the members the
-    grant allows; ``groups`` (child names — labels, not content) is never filtered.
+    grant allows; ``group_ids`` (child ``group`` ids, #996 — labels, not
+    content) is never filtered.
     ``id`` is the ``group``'s server-minted id, which every ``group`` call takes;
     ``name`` is its display name — a label, not unique.
     """
@@ -212,7 +213,7 @@ class GroupEntry:
     name: str
     description: str
     context_ids: list[str]
-    groups: list[str]
+    group_ids: list[str]
     #: Change token over the transitive member ``context_ids``' revisions —
     #: same equality-only contract as ``ContextRevision``. Empty only
     #: from a server that predates the field.
@@ -1091,9 +1092,11 @@ class GroupImportOutcome:
 
     A restore is a replace of the whole record; ``outcome`` is one of
     ``"created"``, ``"replaced"``, or ``"unchanged"``. ``contexts``/``groups``
-    are the member counts of the record as restored.
+    are the member counts of the record as restored; ``id`` is the
+    restored ``group``'s id, which the record carried (#996).
     """
 
+    id: str
     name: str
     outcome: str
     contexts: int

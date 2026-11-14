@@ -336,14 +336,28 @@ def test_import_carries_group_restore_outcomes() -> None:
         lambda _req: ok_response(
             {
                 "batches": [outcome],
-                "groups": [{"name": "brewers", "outcome": "created", "contexts": 2, "groups": 0}],
+                "groups": [
+                    {
+                        "id": "00000000-0000-4000-9000-000000000001",
+                        "name": "brewers",
+                        "outcome": "created",
+                        "contexts": 2,
+                        "groups": 0,
+                    }
+                ],
             }
         )
     )
     result = client.import_batches('{"type": "source"}')
     assert len(result.batches) == 1
     assert result.groups == [
-        GroupImportOutcome(name="brewers", outcome="created", contexts=2, groups=0)
+        GroupImportOutcome(
+            id="00000000-0000-4000-9000-000000000001",
+            name="brewers",
+            outcome="created",
+            contexts=2,
+            groups=0,
+        )
     ]
 
 
@@ -627,7 +641,15 @@ def test_import_result_threads_schemas_issues_and_violations_through() -> None:
     result = normalize_import_outcomes(
         {
             "batches": [outcome],
-            "groups": [{"name": "g", "outcome": "created", "contexts": 1, "groups": 0}],
+            "groups": [
+                {
+                    "id": "00000000-0000-4000-9000-000000000001",
+                    "name": "g",
+                    "outcome": "created",
+                    "contexts": 1,
+                    "groups": 0,
+                }
+            ],
             "schemas": [{"context_id": "sake", "mode": "warn", "types": 2, "relations": 1}],
         },
         issues=[issue],

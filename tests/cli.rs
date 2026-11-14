@@ -1481,7 +1481,7 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
     let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
     let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
     assert_eq!(measurements["type"], "benchmark_measurements");
-    assert_eq!(measurements["version"], "2026-10-01");
+    assert_eq!(measurements["version"], "2026-11-13");
     assert_eq!(measurements["percentile_method"], "nearest-rank");
     assert!(measurements["cells"]["m.run01"].is_object());
     assert!(measurements["models"]["m"].is_object());
@@ -1722,7 +1722,7 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
 
     let lines = read_differences_lines(&dir);
     assert_eq!(lines[0]["type"], "benchmark_differences");
-    assert_eq!(lines[0]["version"], "2026-10-01");
+    assert_eq!(lines[0]["version"], "2026-11-13");
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],
@@ -2213,7 +2213,7 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     // batch of the run, so the file order never matters.
     std::fs::write(
         dir.join("batches/kura.jsonl"),
-        "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2253,8 +2253,9 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
         stream.contains("\"description\":\"酒蔵の知識\""),
         "{stream}"
     );
-    let group_stream = std::fs::read_to_string(exports.join("kura.group.jsonl"))
-        .expect("the group record must exist");
+    let group_stream =
+        std::fs::read_to_string(exports.join("00000000-0000-4000-9000-6b7572610000.group.jsonl"))
+            .expect("the group record must exist");
     assert!(
         group_stream.contains("\"type\":\"group\"") && group_stream.contains("蔵まとめ"),
         "{group_stream}"
@@ -2302,8 +2303,10 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
         stream, re_stream,
         "a restore must re-export byte-identically"
     );
-    let re_group_stream = std::fs::read_to_string(re_exports.join("kura.group.jsonl"))
-        .expect("the group record must exist");
+    let re_group_stream = std::fs::read_to_string(
+        re_exports.join("00000000-0000-4000-9000-6b7572610000.group.jsonl"),
+    )
+    .expect("the group record must exist");
     assert_eq!(
         group_stream, re_group_stream,
         "the group record must re-export byte-identically"
@@ -2395,9 +2398,9 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
          {\"type\": \"source\", \"context_id\": \"cba06b57-36fa-467e-94b0-7b561eae9439\", \"id\": \"b.md\", \
          \"create\": {\"name\": \"old\", \"description\": \"o\"}}\n\
          {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
-         {\"type\": \"group\", \"id\": \"kura\", \"description\": \"k\", \
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"description\": \"k\", \
          \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n\
-         {\"type\": \"group\", \"id\": \"dead\", \"description\": \"x\", \
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-646561640000\", \"name\": \"dead\", \"description\": \"x\", \
          \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2421,7 +2424,10 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
         out.join("old.jsonl").exists(),
         "the first export must land it"
     );
-    assert!(out.join("dead.group.jsonl").exists());
+    assert!(
+        out.join("00000000-0000-4000-9000-646561640000.group.jsonl")
+            .exists()
+    );
     std::fs::write(out.join("notes.txt"), b"keep me").expect("bystander must be writable");
 
     // Delete one context and one group from the data directory, the
@@ -2451,11 +2457,15 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
         "stale context stream must go"
     );
     assert!(
-        !out.join("dead.group.jsonl").exists(),
+        !out.join("00000000-0000-4000-9000-646561640000.group.jsonl")
+            .exists(),
         "stale group stream must go"
     );
     assert!(out.join("sake.jsonl").exists());
-    assert!(out.join("kura.group.jsonl").exists());
+    assert!(
+        out.join("00000000-0000-4000-9000-6b7572610000.group.jsonl")
+            .exists()
+    );
     assert!(
         out.join("notes.txt").exists(),
         "non-stream files are never touched"
@@ -2552,7 +2562,7 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     .expect("fixture must be writable");
     std::fs::write(
         dir.join("kura.jsonl"),
-        "{\"type\": \"group\", \"id\": \"kura\", \"description\": \"蔵まとめ\", \
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"description\": \"蔵まとめ\", \
           \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
@@ -2572,7 +2582,8 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
     }
 
     let out = dir.join("out");
-    std::fs::create_dir_all(out.join("kura.group.jsonl")).expect("the decoy must be creatable");
+    std::fs::create_dir_all(out.join("00000000-0000-4000-9000-6b7572610000.group.jsonl"))
+        .expect("the decoy must be creatable");
     let output = run_in(&["export", "--out", &out.display().to_string()]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4173,8 +4184,8 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     // judging the set would be exactly the defect this pins.
     std::fs::write(
         &group,
-        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n\
-         {\"type\": \"group\", \"id\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n\
+         {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-76616c696400\", \"name\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4194,7 +4205,7 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: group 'kura' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
+            "taguru: import: {}: group '00000000-0000-4000-9000-6b7572610000' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
             group.display()
         )),
         "{stderr}"
@@ -4383,7 +4394,7 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     let first = dir.join("first.jsonl");
     let records = "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
                    \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
-                   {\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
+                   {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
     std::fs::write(&first, records).expect("fixture must be writable");
     let second = dir.join("second.jsonl");
     std::fs::write(&second, records).expect("fixture must be writable");
@@ -4407,7 +4418,7 @@ fn restated_schema_and_group_records_name_the_earlier_file() {
     );
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: group 'kura' is already stated by an earlier file, {} — \
+            "taguru: import: {}: group '00000000-0000-4000-9000-6b7572610000' is already stated by an earlier file, {} — \
              one record owns one group's truth",
             second.display(),
             first.display()
@@ -4438,13 +4449,13 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let valid = dir.join("valid.jsonl");
     std::fs::write(
         &valid,
-        "{\"type\": \"group\", \"id\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-76616c696400\", \"name\": \"valid\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n",
     )
     .expect("fixture must be writable");
     let ghost = dir.join("ghost.jsonl");
     std::fs::write(
         &ghost,
-        "{\"type\": \"group\", \"id\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610000\", \"name\": \"kura\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -4462,24 +4473,25 @@ fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
         stderr.contains(&format!(
-            "taguru: import: {}: group 'kura' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
+            "taguru: import: {}: group '00000000-0000-4000-9000-6b7572610000' names member context 'ead6ef03-d61e-460c-933d-6d450c50a1e5'",
             ghost.display()
         )),
         "{stderr}"
     );
     assert!(
-        !stderr.contains(&format!("{}: group 'kura'", valid.display())),
+        !stderr.contains(&format!(
+            "{}: group '00000000-0000-4000-9000-6b7572610000'",
+            valid.display()
+        )),
         "the valid sibling's file must not be blamed: {stderr}"
     );
 }
 
-/// Two `groups` sharing a name (a hand-assembled data directory — #994
-/// keeps the API from minting one) would write one `{name}.group.jsonl`
-/// twice until #996 names the files by id. A full export refuses both
-/// and fails instead of reporting a backup that is missing one of them;
+/// Two `groups` sharing a name are two `groups` (ADR 0050): a full
+/// export writes each to its own `{id}.group.jsonl` (#996), and
 /// `taguru inspect` labels each with its id so neither line is ambiguous.
 #[test]
-fn groups_sharing_a_name_fail_the_export_and_inspect_tells_them_apart() {
+fn groups_sharing_a_name_export_apart_and_inspect_tells_them_apart() {
     let dir = common::scratch_dir("cli-groups-shared-name");
     std::fs::create_dir_all(&dir).unwrap();
     let data = dir.join("data");
@@ -4535,22 +4547,12 @@ fn groups_sharing_a_name_fail_the_export_and_inspect_tells_them_apart() {
     let out = dir.join("out");
     let output = taguru(&["export", "--out", &out.display().to_string()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    for id in [&first, &second] {
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    for id in [&first, &second, &cli_group_id("solo")] {
         assert!(
-            stderr.contains(&format!(
-                "group 'same' ({id}): several groups share this name"
-            )),
-            "{stderr}"
+            out.join(format!("{id}.group.jsonl")).exists(),
+            "each group exports to its own file: {id}"
         );
     }
-    assert!(
-        !out.join("same.group.jsonl").exists(),
-        "neither may be written"
-    );
-    assert!(
-        out.join("solo.group.jsonl").exists(),
-        "an unshared group still exports"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }

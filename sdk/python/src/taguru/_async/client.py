@@ -396,16 +396,16 @@ class AsyncTaguru:
         cue: str,
         *,
         context_ids: Sequence[str] | None = None,
-        groups: Sequence[str] | None = None,
+        group_ids: Sequence[str] | None = None,
         limit: int | None = None,
         after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
         """Recall across several ``contexts`` at once, every match tagged.
 
         ``context_ids`` takes context ids (the ``id`` column of the directory,
-        never names — #965); each ``groups`` entry searches every
-        ``context`` the ``group`` reaches (nested children included), overlaps
-        deduped. At least one of the two must name something. Weights share
+        never names — #965); each ``group_ids`` entry (a ``group`` id, #996)
+        searches every ``context`` the ``group`` reaches (nested children
+        included), overlaps deduped. At least one of the two must name something. Weights share
         one scale, so past the limit the strongest |weight| survives exactly
         as within one ``context``. ``after`` resumes past the previous page's
         last match; ``total`` stays constant across pages.
@@ -413,7 +413,7 @@ class AsyncTaguru:
         body = drop_none(
             {
                 "context_ids": list(context_ids) if context_ids is not None else None,
-                "groups": list(groups) if groups is not None else None,
+                "group_ids": list(group_ids) if group_ids is not None else None,
                 "cue": cue,
                 "limit": limit,
                 "after": after,
@@ -426,7 +426,7 @@ class AsyncTaguru:
         self,
         *,
         context_ids: Sequence[str] | None = None,
-        groups: Sequence[str] | None = None,
+        group_ids: Sequence[str] | None = None,
         subject: str | Sequence[str] | None = None,
         label: str | Sequence[str] | None = None,
         object: str | Sequence[str] | None = None,
@@ -443,7 +443,7 @@ class AsyncTaguru:
         body = drop_none(
             {
                 "context_ids": list(context_ids) if context_ids is not None else None,
-                "groups": list(groups) if groups is not None else None,
+                "group_ids": list(group_ids) if group_ids is not None else None,
                 "subject": subject,
                 "label": label,
                 "object": object,
@@ -461,7 +461,7 @@ class AsyncTaguru:
         query: str,
         *,
         context_ids: Sequence[str] | None = None,
-        groups: Sequence[str] | None = None,
+        group_ids: Sequence[str] | None = None,
         limit: int | None = None,
         semantic_floor: float | None = None,
         tags: Sequence[str] | None = None,
@@ -485,7 +485,7 @@ class AsyncTaguru:
         body = drop_none(
             {
                 "context_ids": list(context_ids) if context_ids is not None else None,
-                "groups": list(groups) if groups is not None else None,
+                "group_ids": list(group_ids) if group_ids is not None else None,
                 "query": query,
                 "limit": limit,
                 "semantic_floor": semantic_floor,
@@ -707,14 +707,14 @@ class AsyncGroups:
         group_id: str | None = None,
         description: str = "",
         context_ids: Sequence[str] | None = None,
-        groups: Sequence[str] | None = None,
+        group_ids: Sequence[str] | None = None,
     ) -> GroupEntry:
         """Create a ``group`` and return its row — ``id`` included, which every
         other ``group`` call takes.
 
         ``name`` is a label, not unique: creating a name again makes a second
-        ``group``. Every listed member — a ``context`` (by id) or a child
-        ``group`` (by name) — must already exist; a ``group`` and a
+        ``group``. Every listed member — a ``context`` or a child ``group``, each by
+        id — must already exist; a ``group`` and a
         ``context`` may share the same name without conflict.
 
         ``group_id`` creates the ``group`` under that id (a canonical UUID)
@@ -729,7 +729,7 @@ class AsyncGroups:
                 "id": group_id,
                 "description": description,
                 "context_ids": list(context_ids) if context_ids is not None else None,
-                "groups": list(groups) if groups is not None else None,
+                "group_ids": list(group_ids) if group_ids is not None else None,
             }
         )
         result = await self._client._request_json(
@@ -749,8 +749,8 @@ class AsyncGroups:
         description: str | None = None,
         add_context_ids: Sequence[str] | None = None,
         remove_context_ids: Sequence[str] | None = None,
-        add_groups: Sequence[str] | None = None,
-        remove_groups: Sequence[str] | None = None,
+        add_group_ids: Sequence[str] | None = None,
+        remove_group_ids: Sequence[str] | None = None,
     ) -> GroupEntry:
         """Delta membership update (removals first); returns the updated row.
 
@@ -765,8 +765,10 @@ class AsyncGroups:
                 "remove_context_ids": (
                     list(remove_context_ids) if remove_context_ids is not None else None
                 ),
-                "add_groups": list(add_groups) if add_groups is not None else None,
-                "remove_groups": list(remove_groups) if remove_groups is not None else None,
+                "add_group_ids": list(add_group_ids) if add_group_ids is not None else None,
+                "remove_group_ids": (
+                    list(remove_group_ids) if remove_group_ids is not None else None
+                ),
             }
         )
         result = await self._client._request_json(

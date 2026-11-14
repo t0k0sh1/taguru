@@ -361,13 +361,13 @@ fn granted_keys_share_entries_exactly_when_their_grants_resolve_alike() {
         group_body(
             "g",
             Some(
-                json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "groups": []}),
+                json!({"description": "", "context_ids": [server.cx("x"), server.cx("y")], "group_ids": []}),
             ),
         ),
         "atok",
     );
 
-    let cross = json!({"groups": ["g"], "cue": "蔵"});
+    let cross = json!({"group_ids": [server.gx("g")], "cue": "蔵"});
     let wide_page = call("POST", "/recall", Some(cross.clone()), "wtok");
     assert_eq!(wide_page["total"], 2, "the wide grant reaches both members");
     let narrow_page = call("POST", "/recall", Some(cross.clone()), "ntok");

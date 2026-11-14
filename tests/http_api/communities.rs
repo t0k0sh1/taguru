@@ -84,7 +84,7 @@ fn the_analysis_stream_carries_the_partition_and_its_revision_snapshot() {
         .collect();
     let header = &lines[0];
     assert_eq!(header["type"], "communities");
-    assert_eq!(header["version"], "2026-10-01");
+    assert_eq!(header["version"], "2026-11-13");
     // The header names the analyzed context by id (#966).
     assert_eq!(header["context_id"], json!(server.cx("corpus")));
     assert!(header.get("context").is_none(), "{header}");
@@ -1258,7 +1258,7 @@ fn group_traversal_derives_each_member_and_into_renames() {
         "/groups",
         group_body(
             "kura",
-            Some(json!({"context_ids": [server.cx("m1")], "groups": ["child"]})),
+            Some(json!({"context_ids": [server.cx("m1")], "group_ids": [server.gx("child")]})),
         ),
     );
     server.ok(
@@ -1274,8 +1274,8 @@ fn group_traversal_derives_each_member_and_into_renames() {
         ("TAGURU_EXTRACT_MODEL", "stub-model"),
     ];
 
-    // `--group` takes the id (#995); the children the row names by name
-    // resolve through the directory.
+    // `--group` takes the id (#995), and the row's children are ids
+    // too (#996).
     let hollow = server.gx("hollow");
     let (code, _stdout, stderr) =
         run_communities(&["--group", &hollow, &server.base], &extract_env);
@@ -1326,16 +1326,13 @@ fn group_traversal_derives_each_member_and_into_renames() {
         "the create block names it by default: {row}"
     );
 
-    // A second `group` named "child": kura's row still names its child
-    // by name (until #996), which now picks out two groups — refused,
-    // never resolved to one of them.
+    // A second `group` named "child" changes nothing: kura's row names
+    // its child by id (#996), so the walk reaches exactly the one it
+    // bundles.
     server.ok("POST", "/groups", group_body("child", None));
-    let (code, _stdout, stderr) = run_communities(&["--group", &kura, &server.base], &extract_env);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("child group name 'child' is ambiguous: 2 groups share it"),
-        "{stderr}"
-    );
+    let (code, stdout, stderr) = run_communities(&["--group", &kura, &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("context 'm2'"), "{stdout}");
 }
 
 /// `--json` serializes the reports themselves — one object per

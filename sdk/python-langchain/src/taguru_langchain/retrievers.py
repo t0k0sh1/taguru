@@ -55,26 +55,30 @@ def _rrf(rank: int) -> float:
 
 def _group_members(rows: list[GroupEntry], roots: list[str]) -> set[str]:
     """Every ``context`` id the ``group`` names in ``roots`` reach, nested children
-    included, walked over one read of the directory (``rows``). A name no row
-    carries — or several rows share, which the server's own cross search
-    refuses — contributes nothing, and the rest of the walk still stands: one
-    unresolvable ``group`` must not blank out every other member."""
+    included, walked over one read of the directory (``rows``). A root name no
+    row carries — or several rows share, which names cannot tell apart —
+    contributes nothing, and the rest of the walk still stands: one
+    unresolvable ``group`` must not blank out every other member. Children are
+    ids (#996), followed through the same read."""
     by_name: dict[str, list[GroupEntry]] = {}
+    by_id: dict[str, GroupEntry] = {}
     for row in rows:
         by_name.setdefault(row.name, []).append(row)
+        by_id[row.id] = row
     members: set[str] = set()
     seen: set[str] = set()
-    stack = list(roots)
+    named = (by_name.get(name, []) for name in roots)
+    stack = [matching[0].id for matching in named if len(matching) == 1]
     while stack:
-        name = stack.pop()
-        if name in seen:
+        group_id = stack.pop()
+        if group_id in seen:
             continue
-        seen.add(name)
-        matching = by_name.get(name, [])
-        if len(matching) != 1:
+        seen.add(group_id)
+        entry = by_id.get(group_id)
+        if entry is None:
             continue
-        members.update(matching[0].context_ids)
-        stack.extend(matching[0].groups)
+        members.update(entry.context_ids)
+        stack.extend(entry.group_ids)
     return members
 
 
@@ -166,9 +170,9 @@ class TaguruRetriever(BaseRetriever):
     def _resolve_targets(self, client: Taguru) -> list[str]:
         if not self.groups:
             return self._direct_targets()
-        # ``groups`` are names, and so are a row's children, while
-        # ``groups.get`` takes ids (#995): the walk reads the directory
-        # once and follows names through it. A directory that fails to
+        # ``groups`` are names while ``groups.get`` takes ids (#995): the
+        # walk reads the directory once, finds each name's row, and
+        # follows the rows' child ids through it. A directory that fails to
         # read partway keeps the rows already read beside the direct
         # targets — and with no direct target, the failure is the
         # caller's to hear, never an empty search that looks complete.

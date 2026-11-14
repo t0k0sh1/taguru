@@ -86,7 +86,7 @@ class MatchCursor(TypedDict):
 
 class CrossMatchCursor(TypedDict):
     """:class:`MatchCursor` plus ``context_id``, for cross-``context``
-    ``recall``/``query`` (``context_ids``/``groups``). ``context_id`` is the
+    ``recall``/``query`` (``context_ids``/``group_ids``). ``context_id`` is the
     tiebreak two different target ``contexts`` can't share on their own: each
     can independently hold an edge at the identical ``(subject, label,
     object)``."""

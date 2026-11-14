@@ -719,21 +719,18 @@ mod tests {
                     "drinks",
                     String::new(),
                     BTreeSet::new(),
-                    BTreeSet::from(["liquor".to_string()]),
+                    BTreeSet::from([state.group_id_named("liquor")]),
                 )
                 .unwrap();
             state
-                .rename_group(&state.group_named("liquor").unwrap().id, "spirits")
+                .rename_group(&state.group_id_named("liquor"), "spirits")
                 .unwrap();
         }
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.group_named("liquor").is_none());
         assert_eq!(
-            state.group_named("liquor").map(|_| ()),
-            Err(crate::groups::GroupLookup::NotFound)
-        );
-        assert_eq!(
-            state.group_named("drinks").unwrap().record.groups,
-            BTreeSet::from(["spirits".to_string()]),
+            state.group_named("drinks").unwrap().record.group_ids,
+            BTreeSet::from([state.group_id_named("spirits")]),
             "the parent's edge follows the child's id, not its old name"
         );
         assert_eq!(

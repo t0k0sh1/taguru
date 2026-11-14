@@ -861,7 +861,13 @@ describe("dropUndefined", () => {
 
 describe("normalizeImportOutcomes", () => {
   const BATCH = { context: "sake", source: "a", created: true };
-  const GROUP = { name: "brewers", outcome: "created", contexts: 2, groups: 0 };
+  const GROUP = {
+    id: "00000000-0000-4000-9000-000000000001",
+    name: "brewers",
+    outcome: "created",
+    contexts: 2,
+    groups: 0,
+  };
   const SCHEMA = { context: "sake", outcome: "applied" };
 
   it("takes the structured shape, defaulting missing groups and schemas to []", () => {

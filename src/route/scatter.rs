@@ -26,24 +26,30 @@ pub(super) async fn plan_scatter(
     state: &RouterState,
     map: &RouteMap,
     context_ids: &[String],
-    groups: &[String],
+    group_ids: &[String],
     headers: &HeaderMap,
     deadline: Deadline,
     started_at: Instant,
 ) -> Result<Scatter, Box<Response>> {
-    if context_ids.is_empty() && groups.is_empty() {
+    if context_ids.is_empty() && group_ids.is_empty() {
         return Err(Box::new(api::error(
             ErrorCode::InvalidArgument,
-            "'context_ids' or 'groups' must name at least one target",
+            "'context_ids' or 'group_ids' must name at least one target",
             started_at,
         )));
     }
-    for (field, count) in [("context_ids", context_ids.len()), ("groups", groups.len())] {
+    for (field, count) in [
+        ("context_ids", context_ids.len()),
+        ("group_ids", group_ids.len()),
+    ] {
         if let Some(refusal) = api::overlong(field, count, started_at) {
             return Err(Box::new(refusal));
         }
     }
     if let Some(refusal) = api::invalid_context_ids("context_ids", context_ids, started_at) {
+        return Err(Box::new(refusal));
+    }
+    if let Some(refusal) = api::invalid_group_ids("group_ids", group_ids, started_at) {
         return Err(Box::new(refusal));
     }
     let mut seen = BTreeSet::new();
@@ -75,7 +81,7 @@ pub(super) async fn plan_scatter(
             }
         }
     }
-    let shards: Vec<usize> = if groups.is_empty() {
+    let shards: Vec<usize> = if group_ids.is_empty() {
         per_shard.keys().copied().collect()
     } else {
         // Groups live on every shard (the projected-broadcast

@@ -167,15 +167,25 @@ def test_a_child_name_several_groups_share_contributes_nothing(
     fake_server: FakeServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Names are not unique (#995): a second "childg" makes the name
-    # ambiguous, which the server's own cross search refuses — the walk
-    # skips it rather than picking one, and parent's direct member stands.
-    twin = {"id": "gid-twin", "name": "childg", "description": "", "groups": []}
-    monkeypatch.setitem(GROUP_ROWS, "gid-twin", {**twin, "context_ids": ["id-tea"]})
-    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    # Names are not unique (#995): a second "childg" makes the root name
+    # ambiguous — the walk skips it rather than picking one, and the
+    # direct target stands. A child is an id (#996), so parent's child
+    # stays the one row it names, twin or no twin.
+    twin = {"id": "gid-twin", "name": "childg", "description": "", "group_ids": []}
+    monkeypatch.setitem(GROUP_ROWS, "gid-twin", {**twin, "context_ids": ["id-other"]})
+    retriever = TaguruRetriever(
+        context_ids=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
+    )
     retriever.invoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
+    fake_server.calls.clear()
+    by_parent = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    by_parent.invoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [
+        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+    ]
 
 
 def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
@@ -250,7 +260,7 @@ def test_the_group_walk_pages_through_rows_that_share_a_name(
     monkeypatch.setitem(
         GROUP_ROWS,
         "gid-twin",
-        {"id": "gid-twin", "name": "childg", "description": "", "context_ids": [], "groups": []},
+        {"id": "gid-twin", "name": "childg", "description": "", "context_ids": [], "group_ids": []},
     )
     walked = [(row.name, row.id) for row in sync_client.groups.iter(limit=1)]
     assert walked == sorted((row["name"], row["id"]) for row in GROUP_ROWS.values())

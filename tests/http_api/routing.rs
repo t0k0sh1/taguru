@@ -20,6 +20,10 @@ use crate::support::*;
 const SAKE_ID: &str = "cef2e28b-43f0-4b6c-8201-abab0785399f";
 const GLOSSARY_ID: &str = "3f5dcb46-d438-4c49-bd38-6708b01a8d0a";
 const BREWERIES_ID: &str = "96ba89e7-84ee-4b65-b772-bdf9ae741e0d";
+/// The seeded `group` ids — fixed, so the single instance and the
+/// router hold each `group` under the same id (#996).
+const JP_ID: &str = "00000000-0000-4000-9000-6a7000000000";
+const ALL_ID: &str = "00000000-0000-4000-9000-616c6c000000";
 /// Canonical ids no test creates, distinct from each other.
 const ABSENT_A: &str = "00000000-0000-4000-8000-0000000000a1";
 const ABSENT_B: &str = "00000000-0000-4000-8000-0000000000a2";
@@ -151,7 +155,7 @@ fn seed(server: &Server) {
         // batch chunk happened to land on.
         "{\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
           \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
-        "{\"type\": \"group\", \"id\": \"jp\", \"description\": \"日本酒\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6a7000000000\", \"name\": \"jp\", \"description\": \"日本酒\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"3f5dcb46-d438-4c49-bd38-6708b01a8d0a\"]}\n",
     );
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
@@ -161,12 +165,14 @@ fn seed(server: &Server) {
         "the router's own schema-routing table must land the record and report it: {outcome}"
     );
     // A nested group whose direct member and child live on different
-    // shards: `contexts` needs projection, `groups` broadcasts whole.
+    // shards: `context_ids` needs projection, `group_ids` broadcasts
+    // whole. Both front doors take the same ids, so their answers
+    // compare as they are.
     server.ok(
         "POST",
         "/groups",
         Some(
-            json!({"name": "all", "description": "全部", "context_ids": [BREWERIES_ID], "groups": ["jp"]}),
+            json!({"id": ALL_ID, "name": "all", "description": "全部", "context_ids": [BREWERIES_ID], "group_ids": [JP_ID]}),
         ),
     );
 }
@@ -260,8 +266,8 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // and mixed.
     for body in [
         json!({"context_ids": [SAKE_ID, BREWERIES_ID, GLOSSARY_ID], "cue": "青嶺"}),
-        json!({"groups": ["all"], "cue": "辛口"}),
-        json!({"context_ids": [BREWERIES_ID], "groups": ["jp"], "cue": "青嶺"}),
+        json!({"group_ids": [ALL_ID], "cue": "辛口"}),
+        json!({"context_ids": [BREWERIES_ID], "group_ids": [JP_ID], "cue": "青嶺"}),
     ] {
         let answer = assert_equivalent(&single, &router, "POST", "/recall", Some(body));
         assert!(
@@ -273,7 +279,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // Cross query, paged: 4 known matches (glossary 2.0 → sake 1.0 →
     // the 0.5 tie broken by context name), cut at 2, resumed with a
     // cursor built from the last match exactly as a client builds it.
-    let page_body = json!({"groups": ["all"], "subject": ["共通", "辛口"], "limit": 2});
+    let page_body = json!({"group_ids": [ALL_ID], "subject": ["共通", "辛口"], "limit": 2});
     let page1 = assert_equivalent(&single, &router, "POST", "/query", Some(page_body));
     let matches = page1["result"]["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 2, "{page1}");
@@ -290,7 +296,9 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "POST",
         "/query",
-        Some(json!({"groups": ["all"], "subject": ["共通", "辛口"], "limit": 2, "after": after})),
+        Some(
+            json!({"group_ids": [ALL_ID], "subject": ["共通", "辛口"], "limit": 2, "after": after}),
+        ),
     );
     let matches = page2["result"]["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 2, "{page2}");
@@ -307,7 +315,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // per-context, both shard splits and the group path.
     for body in [
         json!({"context_ids": [SAKE_ID, GLOSSARY_ID, BREWERIES_ID], "query": "麹"}),
-        json!({"groups": ["all"], "query": "麹", "limit": 2}),
+        json!({"group_ids": [ALL_ID], "query": "麹", "limit": 2}),
     ] {
         let answer = assert_equivalent(&single, &router, "POST", "/sources/search", Some(body));
         assert!(
@@ -476,7 +484,7 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         &router,
         "POST",
         "/query",
-        Some(json!({"groups": ["nogroup"], "subject": "x"})),
+        Some(json!({"group_ids": ["00000000-0000-4000-9000-6e6f67726f75"], "subject": "x"})),
     );
 
     // Per-context verbs proxy byte-for-byte — a routed read and a
@@ -640,7 +648,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
     let stream = format!(
         "{{\"type\": \"source\", \"context_id\": \"{sake_id}\", \"id\": \"scoped-doc\"}}\n\
          {{\"subject\": \"密造\", \"label\": \"は\", \"object\": \"だめ\", \"weight\": 1.0}}\n\
-         {{\"type\": \"group\", \"id\": \"overreach\", \"context_ids\": [\"{sake_id}\", \"{glossary_id}\"]}}\n",
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6f7665727265\", \"name\": \"overreach\", \"context_ids\": [\"{sake_id}\", \"{glossary_id}\"]}}\n",
     );
     let (status, body) = post_import(&router, &stream, Some("hush"));
     assert_eq!(status, 403, "{body}");
@@ -914,8 +922,9 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     // A record NO shard holds answers "created" — every projection is
     // created, and a created projection carrying members must not slip
     // into the "replaced" arm (this pins the branch order too).
-    let stream =
-        &format!("{{\"type\": \"group\", \"id\": \"g0\", \"context_ids\": [\"{ctx_a}\"]}}\n");
+    let stream = &format!(
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-673000000000\", \"name\": \"g0\", \"context_ids\": [\"{ctx_a}\"]}}\n"
+    );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -926,13 +935,19 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
 
     // Shard A already holds g's projection; shard B has never heard of
     // it — the drifted state a re-import heals.
-    let g = shard_a.create_group("g", Some(json!({"context_ids": [ctx_a]})));
+    let g = "00000000-0000-4000-9000-670000000000";
+    shard_a.ok(
+        "POST",
+        "/groups",
+        Some(json!({"id": g, "name": "g", "context_ids": [ctx_a]})),
+    );
 
     // The same membership shard A already holds: A answers
     // "unchanged", B "created" with an empty projection — nothing in
     // the union changed.
-    let stream =
-        &format!("{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n");
+    let stream = &format!(
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n"
+    );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -940,12 +955,12 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         json!("unchanged"),
         "an empty created projection beside unchanged siblings replaced nothing: {body}"
     );
-    // The drift healed under shard A's id: shard B now holds `g` under
-    // it too, so the router lists one row, not one per shard (#995).
+    // The drift healed under the record's id: shard B now holds `g`
+    // under it too, so the router lists one row, not one per shard.
     assert_eq!(
         shard_b.gx("g"),
         g,
-        "the missing shard adopts the standing id"
+        "the missing shard restores the record's id"
     );
     assert_eq!(router.gx_http("g"), g);
     // A record new to the fleet landed under ONE id on every shard.
@@ -954,7 +969,7 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     // The record gains ctx_b: shard B's projection now carries a
     // member, so the union's row really changed.
     let stream = &format!(
-        "{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\", \"{ctx_b}\"]}}\n"
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"{ctx_a}\", \"{ctx_b}\"]}}\n"
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
@@ -978,9 +993,14 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     );
     let ctx_c = router.create_context("ctx_c");
     let ctx_d = router.create_context("ctx_d");
-    let g2 = shard_c.create_group("g2", Some(json!({"context_ids": [ctx_c]})));
+    let g2 = "00000000-0000-4000-9000-673200000000";
+    shard_c.ok(
+        "POST",
+        "/groups",
+        Some(json!({"id": g2, "name": "g2", "context_ids": [ctx_c]})),
+    );
     let stream = &format!(
-        "{{\"type\": \"group\", \"id\": \"g2\", \"context_ids\": [\"{ctx_c}\", \"{ctx_d}\"]}}\n"
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-673200000000\", \"name\": \"g2\", \"context_ids\": [\"{ctx_c}\", \"{ctx_d}\"]}}\n"
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 200, "{body}");
@@ -1217,7 +1237,7 @@ fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
         "no batch and no schema landed before this refusal: {body}"
     );
 
-    let group_only = "{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n";
+    let group_only = "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}\n";
     let (status, body) = post_import(&router, group_only, None);
     assert_eq!(status, 404, "{body}");
     assert_ne!(
@@ -1251,7 +1271,7 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
          {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
          {{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1282,7 +1302,7 @@ fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
     let stream = format!(
         "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
          {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1312,7 +1332,7 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
     let stream = format!(
         "{{\"type\": \"schema\", \"context_id\": {ctx_a}, \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n\
-         {{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
+         {{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"context_ids\": [\"189ac1bb-03ba-433b-b379-89fabbe4757c\", \"ead6ef03-d61e-460c-933d-6d450c50a1e5\"]}}\n"
     );
     let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1327,6 +1347,36 @@ fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
             .is_some_and(|error| error.contains("1 schema record(s)")),
         "{body}"
     );
+}
+
+/// A SCHEMA refusal after a batch landed on another shard: the schema
+/// loop's own rewrap carries the batch count too, so `durable_batches`
+/// and the landed message name the batch the refusing shard never saw.
+#[test]
+fn a_schema_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("schema-rewrap-a");
+    let shard_b = Server::start("schema-rewrap-b");
+    let router = Server::start_router(
+        "schema-rewrap",
+        &format!("ctx_a = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let ctx_a = router.ok("POST", "/contexts", Some(json!({"name": "ctx_a", })))["id"].clone();
+    // The schema names a context no shard holds, so it falls to the
+    // `*` shard, which refuses it on the real run — after shard A's
+    // batch landed.
+    let stream = format!(
+        "{{\"type\": \"source\", \"context_id\": {ctx_a}, \"id\": \"a.md\"}}\n\
+         {{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}}\n\
+         {{\"type\": \"schema\", \"context_id\": \"ead6ef03-d61e-460c-933d-6d450c50a1e5\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
+    );
+    let (status, body) = post_import(&router, &stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("1 source(s) landed"), "{body}");
 }
 
 /// A shard that answers success with an envelope the router cannot
@@ -1350,7 +1400,7 @@ fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
     let stream = concat!(
         "{\"type\": \"source\", \"context_id\": \"6030dd60-5e04-40cb-8aae-bd67951549b7\", \"id\": \"doc\", \"create\": {\"name\": \"stubbed\"}}\n",
         "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
-        "{\"type\": \"group\", \"id\": \"g\", \"groups\": [\"nowhere\"]}\n",
+        "{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-670000000000\", \"name\": \"g\", \"group_ids\": [\"00000000-0000-4000-9000-6e6f77686572\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
     assert_eq!(status, 404, "{body}");
@@ -1666,59 +1716,64 @@ fn group_rename_broadcasts_to_every_shard() {
     );
 }
 
-/// A router import that the FIRST shard refuses leaves no `group`
-/// behind: the empty groups made for the stream's new names (so every
-/// shard restores them under one id) are removed again, as a single
-/// instance's whole-set refusal would leave nothing.
+/// A router import restores a record under the id it carries on every
+/// shard (#996), so a `group` new to the fleet is one row behind the
+/// router, and importing it again converges.
 #[test]
-fn a_first_shard_import_refusal_removes_the_groups_made_for_it() {
-    let shard_a = Server::start("gimp-undo-a");
-    let shard_b = Server::start("gimp-undo-b");
+fn a_router_import_lands_a_new_group_under_its_records_id_on_every_shard() {
+    let shard_a = Server::start("gimp-id-a");
+    let shard_b = Server::start("gimp-id-b");
     let router = Server::start_router(
-        "gimp-undo",
+        "gimp-id",
         &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    // A member no shard holds lands in the first shard's projection,
-    // which refuses it.
-    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": \
-                  [\"189ac1bb-03ba-433b-b379-89fabbe4757c\"]}\n";
-    let (status, body) = post_import(&router, stream, None);
-    assert_eq!(status, 404, "{body}");
+    let fresh = "00000000-0000-4000-9000-667265736800";
+    let stream = format!(
+        "{{\"type\": \"group\", \"id\": \"{fresh}\", \"name\": \"fresh\", \"context_ids\": []}}\n"
+    );
+    let (status, body) = post_import(&router, &stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["groups"][0]["id"], json!(fresh), "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("created"),
+        "{body}"
+    );
     for shard in [&shard_a, &shard_b] {
-        assert!(
-            shard.try_gx("fresh").is_none(),
-            "the empty group made for the import must go again"
-        );
+        assert_eq!(shard.gx("fresh"), fresh);
     }
-}
-
-/// A router dry run makes no `group`: the empty groups a real import
-/// creates first (so every shard restores a new name under one id) are
-/// skipped, since the dry run restores nothing into them.
-#[test]
-fn a_router_dry_run_import_makes_no_group() {
-    let shard_a = Server::start("gimp-dry-a");
-    let shard_b = Server::start("gimp-dry-b");
-    let router = Server::start_router(
-        "gimp-dry",
-        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
-        &[],
+    let listing = router.ok("GET", "/groups", None);
+    assert_eq!(listing["total"], json!(1), "{listing}");
+    let (status, again) = post_import(&router, &stream, None);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(
+        again["result"]["groups"][0]["outcome"],
+        json!("unchanged"),
+        "{again}"
     );
-    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": []}\n";
-    let (status, body) = post_import_dry_run(&router, stream, None);
+    // A dry run restores nothing anywhere.
+    let other = "00000000-0000-4000-9000-6f7468657200";
+    let (status, body) = post_import_dry_run(
+        &router,
+        &format!(
+            "{{\"type\": \"group\", \"id\": \"{other}\", \"name\": \"other\", \"context_ids\": []}}\n"
+        ),
+        None,
+    );
     assert_eq!(status, 200, "{body}");
     for shard in [&shard_a, &shard_b] {
-        assert_eq!(shard.ok("GET", "/groups", None)["total"], json!(0));
+        assert!(shard.try_gx("other").is_none());
     }
 }
 
 /// A router import a LATER shard refuses: the shards before it keep
-/// the restored record, and the empty groups made for the stream go
-/// again from the refusing shard on — the one that refused and the
-/// ones the records never reached.
+/// the restored record (the documented divergence), the refusing shard
+/// and the ones after never restored it, and the refusal keeps the
+/// shard's own code while reporting what the earlier shard made
+/// durable — never the refusing shard's "nothing written".
 #[test]
-fn a_later_shard_import_refusal_removes_the_groups_made_from_there_on() {
+fn a_later_shard_import_refusal_leaves_the_earlier_shards_restore_in_place() {
     let shard_a = Server::start("gimp-later-a");
     let shard_b = Server::start("gimp-later-b");
     let shard_c = Server::start("gimp-later-c");
@@ -1732,29 +1787,39 @@ fn a_later_shard_import_refusal_removes_the_groups_made_from_there_on() {
     );
     // A child only shard A holds (drift): A restores the record, B is
     // the first to refuse it.
-    shard_a.create_group("kid", None);
-    let stream = "{\"type\": \"group\", \"id\": \"fresh\", \"context_ids\": [], \
-                  \"groups\": [\"kid\"]}\n";
-    let (status, body) = post_import(&router, stream, None);
+    let kid = "00000000-0000-4000-9000-6b6964000000";
+    shard_a.ok("POST", "/groups", Some(json!({"id": kid, "name": "kid"})));
+    let stream = format!(
+        "{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-667265736800\", \"name\": \"fresh\", \
+         \"context_ids\": [], \"group_ids\": [\"{kid}\"]}}\n"
+    );
+    let (status, body) = post_import(&router, &stream, None);
     assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], json!("no_group"), "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert!(body.get("durable_batches").is_none(), "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with("1 group record(s) on 1 shard(s) landed durably on earlier shards"),
+        "{body}"
+    );
+    assert!(
+        message.contains(kid),
+        "the shard's own reason stays: {body}"
+    );
     assert!(
         shard_a.try_gx("fresh").is_some(),
         "the shard before keeps it"
     );
     for shard in [&shard_b, &shard_c] {
-        assert!(
-            shard.try_gx("fresh").is_none(),
-            "an empty group made for the import must go again"
-        );
+        assert!(shard.try_gx("fresh").is_none(), "never restored there");
     }
 }
 
-/// A name the shards hold under different ids between them is a name
-/// two `groups` share: a router import naming it refuses as a single
-/// instance does, with nothing applied, instead of each shard restoring
-/// its own copy.
+/// Two records that share a name are two `groups`: each lands on every
+/// shard under its own id, and the router lists both.
 #[test]
-fn a_router_import_refuses_a_name_the_shards_hold_under_different_ids() {
+fn a_router_import_restores_groups_sharing_a_name_apart() {
     let shard_a = Server::start("gimp-split-a");
     let shard_b = Server::start("gimp-split-b");
     let router = Server::start_router(
@@ -1763,36 +1828,28 @@ fn a_router_import_refuses_a_name_the_shards_hold_under_different_ids() {
         &[],
     );
     let ctx_a = router.create_context("ctx_a");
-    let on_a = shard_a.create_group("g", None);
-    let on_b = shard_b.create_group("g", None);
-    assert_ne!(on_a, on_b);
-    let stream =
-        format!("{{\"type\": \"group\", \"id\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n");
-    for dry_run in [false, true] {
-        let (status, body) = if dry_run {
-            post_import_dry_run(&router, &stream, None)
-        } else {
-            post_import(&router, &stream, None)
-        };
-        assert_eq!(status, 409, "{body}");
-        assert_eq!(body["code"], json!("conflict"), "{body}");
-        assert!(
-            body["error"].as_str().is_some_and(
-                |error| error.contains("group name 'g' is ambiguous: 2 groups share it")
-            ),
-            "{body}"
-        );
-    }
-    // A child name split the same way refuses too.
-    let stream = "{\"type\": \"group\", \"id\": \"parent\", \"context_ids\": [], \
-                  \"groups\": [\"g\"]}\n";
-    let (status, body) = post_import(&router, stream, None);
-    assert_eq!(status, 409, "{body}");
-    for (shard, id) in [(&shard_a, &on_a), (&shard_b, &on_b)] {
-        let row = shard.ok("GET", &format!("/groups/{id}"), None);
-        assert_eq!(row["context_ids"], json!([]), "nothing applied: {row}");
-        assert!(shard.try_gx("parent").is_none());
-    }
+    let (one, two) = (
+        "00000000-0000-4000-9000-000000000001",
+        "00000000-0000-4000-9000-000000000002",
+    );
+    let stream = format!(
+        "{{\"type\": \"group\", \"id\": \"{one}\", \"name\": \"g\", \"context_ids\": [\"{ctx_a}\"]}}\n\
+         {{\"type\": \"group\", \"id\": \"{two}\", \"name\": \"g\"}}\n"
+    );
+    let (status, body) = post_import(&router, &stream, None);
+    assert_eq!(status, 200, "{body}");
+    let listing = router.ok("GET", "/groups", None);
+    let ids: Vec<&str> = listing["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [one, two], "{listing}");
+    assert_eq!(
+        router.ok("GET", &format!("/groups/{one}"), None)["context_ids"],
+        json!([ctx_a])
+    );
 }
 
 /// One HTTP/1.1 request over a bare socket, the request-target sent

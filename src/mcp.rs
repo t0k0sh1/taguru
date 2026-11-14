@@ -111,7 +111,7 @@ mod tests {
     }
 
     /// The search tools target one `context` or several: `contexts`
-    /// and/or `groups` route to the cross-`context` path with the arrays
+    /// and/or `group_ids` route to the cross-`context` path with the arrays
     /// in the body; `context_id` keeps the historical per-`context` route,
     /// body unchanged.
     #[test]
@@ -140,20 +140,21 @@ mod tests {
             json!({"context_ids": ["a"], "query": "q", "semantic_floor": 0.5})
         );
 
-        // `groups` alone reaches the same route, and beside `contexts`
+        // `group_ids` alone reaches the same route, and beside `contexts`
         // both ride the body.
-        let (_, path, body) = route_tool("recall", &json!({"groups": ["g"], "cue": "x"})).unwrap();
+        let (_, path, body) =
+            route_tool("recall", &json!({"group_ids": ["g"], "cue": "x"})).unwrap();
         assert_eq!(path, "/recall");
-        assert_eq!(body.unwrap(), json!({"groups": ["g"], "cue": "x"}));
+        assert_eq!(body.unwrap(), json!({"group_ids": ["g"], "cue": "x"}));
         let (_, path, body) = route_tool(
             "search_passages",
-            &json!({"context_ids": ["a"], "groups": ["g"], "query": "q"}),
+            &json!({"context_ids": ["a"], "group_ids": ["g"], "query": "q"}),
         )
         .unwrap();
         assert_eq!(path, "/sources/search");
         assert_eq!(
             body.unwrap(),
-            json!({"context_ids": ["a"], "groups": ["g"], "query": "q"})
+            json!({"context_ids": ["a"], "group_ids": ["g"], "query": "q"})
         );
 
         // The single-context form is untouched, and the body never
@@ -170,7 +171,7 @@ mod tests {
     /// `pick` rule).
     #[test]
     fn search_tools_refuse_an_ambiguous_or_absent_target() {
-        let ambiguous = "pass either 'context_id' or 'context_ids'/'groups', not both";
+        let ambiguous = "pass either 'context_id' or 'context_ids'/'group_ids', not both";
         assert_eq!(
             route_tool(
                 "recall",
@@ -181,11 +182,11 @@ mod tests {
         assert_eq!(
             route_tool(
                 "recall",
-                &json!({"context_id": "a", "groups": ["g"], "cue": "x"})
+                &json!({"context_id": "a", "group_ids": ["g"], "cue": "x"})
             ),
             Err(ambiguous.to_string())
         );
-        let missing = "missing required argument 'context_id' (or 'context_ids'/'groups', to search several at once)";
+        let missing = "missing required argument 'context_id' (or 'context_ids'/'group_ids', to search several at once)";
         assert_eq!(
             route_tool("search_passages", &json!({"query": "q"})),
             Err(missing.to_string())
@@ -1018,7 +1019,7 @@ mod tests {
                     "anyOf": [
                         { "required": ["context_id"] },
                         { "required": ["context_ids"] },
-                        { "required": ["groups"] },
+                        { "required": ["group_ids"] },
                     ]
                 },
                 {

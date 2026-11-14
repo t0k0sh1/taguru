@@ -239,7 +239,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       its name: names are display labels, free-form and not unique, so a name cannot address
       anything. A value that is not a UUID is refused by name.
       <code>version</code> is optional: it names the file format's revision as a date
-      (<code>"2026-10-01"</code> is the one this build reads and writes), a file that omits it is
+      (<code>"2026-11-13"</code> is the one this build reads and writes), a file that omits it is
       read as the running build's own revision, and any other date is refused by name. Everything
       taguru writes carries it; a hand-written file may leave it out. <code>create</code> is optional
       and carries the same fields as the <code>POST /contexts</code> body (<code>name</code>,
@@ -379,13 +379,13 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 
     <h3><code>group</code> records</h3>
     <p>
-      <code>{"type": "group", "id": "…", "description": "…", "context_ids": […], "groups": […]}</code>
+      <code>{"type": "group", "id": "…", "name": "…", "description": "…", "context_ids": […], "group_ids": […]}</code>
       — one line states one <b><code>group</code>'s</b> complete truth, the way a source file states a source's:
       applying it is a create-or-replace of the whole record, never a delta, so re-importing
-      stays idempotent. Members are listed by <code>context</code> <b>id</b> (the canonical UUID), never by name — a name in <code>context_ids</code> refuses the record. Only <code>type</code> and <code>id</code> are required; absent fields read as empty. A <code>group</code>
+      stays idempotent. The record names its <code>group</code> by <b>id</b> (the canonical UUID, the <code>id</code> column of <code>GET /groups</code>), with the display <code>name</code> beside it, and its members the same way: member <code>contexts</code> in <code>context_ids</code>, child <code>groups</code> in <code>group_ids</code> — a name in any of the three refuses the record. A restore lands under the record's own id wherever it is imported; a new <code>group</code> takes a fresh id (e.g. from <code>uuidgen</code>). Only <code>type</code>, <code>id</code> and <code>name</code> are required; absent fields read as empty. A <code>group</code>
       record stands alone between sources (it closes the source before it — operation lines after
       one need a fresh header), and <code>taguru export</code> writes each <code>group</code> as its own
-      <code>{group}.group.jsonl</code> beside the <code>context</code> streams.
+      <code>{id}.group.jsonl</code> beside the <code>context</code> streams, named by the <code>group</code>'s id.
     </p>
     <p>
       <code>groups</code> apply <b>after every source and every schema record of the run</b> — one CLI

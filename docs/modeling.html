@@ -230,12 +230,12 @@
     <p class="section-sub">A question that spans several papers names the papers' <code>groups</code> at search time — it never needs a <code>context</code> that contains them all.</p>
     <p>
       <code>POST /recall</code>, <code>POST /query</code>, and <code>POST /sources/search</code>
-      take <code>context_ids</code> and <code>groups</code> lists together and run one search across
+      take <code>context_ids</code> and <code>group_ids</code> lists together (both ids — look a <code>group</code> up in <code>GET /groups</code>) and run one search across
       every <code>context</code> reached, nested children included, every match tagged with the <code>context_id</code> (and display <code>context_name</code>) it
       came from:
     </p>
     <pre><code>curl -X POST localhost:8248/recall -H <span class="s">'Content-Type: application/json'</span> \
-  -d <span class="s">'{"groups": ["paper/bert", "paper/gpt"], "cue": "fine-tuning"}'</span></code></pre>
+  -d <span class="s">'{"group_ids": ["&lt;id of paper/bert&gt;", "&lt;id of paper/gpt&gt;"], "cue": "fine-tuning"}'</span></code></pre>
     <p>
       The response's <code>plan</code> names exactly which <code>contexts</code> the two <code>groups</code> expanded to, so
       "which paper answered" is never a guess. Deep dives — <code>activate</code>,
@@ -272,16 +272,16 @@
     </p>
     <p class="note warn">
       <b>Membership is the only hierarchy.</b> A name that looks like a path is a naming
-      convention for humans reading a list. A <code>group</code> whose <code>contexts</code> or
-      <code>groups</code> field names something is a fact the server enforces — referential
+      convention for humans reading a list. A <code>group</code> whose <code>context_ids</code> or
+      <code>group_ids</code> field names something is a fact the server enforces — referential
       integrity, nesting depth, cycle checks all apply to it. Only the second kind of statement is
       structure.
     </p>
     <p class="note">
       A slash-bearing name never sits in a URL path: <code>contexts</code> and <code>groups</code>
       are addressed by their ids (<code>/contexts/{id}</code>, <code>/groups/{id}</code>), and a
-      name travels in a body (a <code>POST /groups</code> create, a <code>recall</code> request's
-      <code>groups</code> list) as-is, with no percent-encoding.
+      name travels in a body (the <code>name</code> of a <code>POST /groups</code> create or a
+      rename) as-is, with no percent-encoding.
     </p>
   </section>
 
