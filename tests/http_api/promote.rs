@@ -510,9 +510,13 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
         r#"{{"{}": {{"storage_bytes": 1, "cache_bytes": 1048576}}}}"#,
         fixed_id("perm")
     );
+    // The periodic flush is held off (NO_FLUSH): a flush that lands
+    // the empty `perm` image before the setup write below would put
+    // the destination over its 1-byte ceiling already, and the setup
+    // write itself would be refused.
     let server = Server::start_with_env(
         "promote-quota",
-        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str())],
+        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str()), NO_FLUSH],
     );
     seed(&server);
     // Put the destination at its ceiling before the promotion — the
@@ -557,6 +561,12 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
     assert!(message.contains("storage quota"), "{message}");
 }
 
+/// Holds the periodic flush off for the length of a test. The quota
+/// tests read disk usage, which a flush changes — it writes the image
+/// and truncates the WAL — so with the harness's 1-second interval the
+/// usage a test sees would depend on how long its setup took.
+const NO_FLUSH: (&str, &str) = ("TAGURU_FLUSH_SECS", "3600");
+
 /// Sums the five on-disk lanes `AppState::storage_quota_excess` gates
 /// on (`src/registry/engine.rs`) straight off `/metrics`, requiring
 /// `TAGURU_METRICS_PER_CONTEXT`.
@@ -584,15 +594,16 @@ fn disk_total_bytes(server: &Server, context: &str) -> u64 {
 /// from the `nothing_written` path both this file's earlier test and
 /// `quotas.rs` already cover. `storage_quota_refusal` is a pure
 /// function of the destination's CURRENT disk usage, never wall-clock
-/// time, so the boundary is fully deterministic: measure what landing
-/// batch 0 alone costs on an uncapped probe server, then reproduce the
+/// time, so the boundary is deterministic once the periodic flush is
+/// held off on both servers (NO_FLUSH): measure what landing batch 0
+/// alone costs on an uncapped probe server, then reproduce the
 /// identical scenario on a fresh server whose ceiling sits exactly at
 /// that measured usage.
 #[test]
 fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_ceiling() {
     let probe = Server::start_with_env(
         "promote-quota-probe",
-        &[("TAGURU_METRICS_PER_CONTEXT", "1")],
+        &[("TAGURU_METRICS_PER_CONTEXT", "1"), NO_FLUSH],
     );
     seed(&probe);
     probe.ok(
@@ -612,7 +623,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     );
     let server = Server::start_with_env(
         "promote-quota-durable",
-        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str())],
+        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str()), NO_FLUSH],
     );
     seed(&server);
 
@@ -1051,10 +1062,11 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
 /// interrupts it long before parse is ever reached.
 #[test]
 fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
-    let server = Server::start_with_env(
-        "promote-render-timeout",
-        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
-    );
+    // The seed runs under the default budget: a 10k-item chunk takes
+    // ~150ms locally but has exceeded 2s on a loaded CI runner. Only
+    // the promotion below runs under the tight budget, on a restart of
+    // the same data directory.
+    let server = Server::start("promote-render-timeout");
     server.ok(
         "POST",
         "/contexts",
@@ -1085,6 +1097,12 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
         );
         k = end;
     }
+    let data_dir = server.stop_gracefully();
+    let server = Server::start_on_with_env(
+        "promote-render-timeout",
+        data_dir,
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
+    );
 
     let (status, refused) = server.call(
         "POST",
