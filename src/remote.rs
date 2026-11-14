@@ -183,6 +183,16 @@ impl ImportFailure {
     }
 }
 
+/// One `GET /groups` row, the fields a CLI verb reads off it — the
+/// membership lists stay behind (`export --url` fetches each `group`'s
+/// whole record through its own export endpoint).
+#[derive(Debug, PartialEq)]
+pub(crate) struct GroupRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+}
+
 /// The one HTTP door: bearer attached when the environment holds one,
 /// 200 unwrapped to `result`, anything else an error message carrying
 /// the server's own words.
@@ -320,11 +330,12 @@ impl Api {
         finish(request.call(), &url).map_err(ApiFailure::into_message)
     }
 
-    /// Every `group` of `GET /groups` as `(id, name)`, keyset-walked
+    /// Every `group` of `GET /groups` as a [`GroupRow`], keyset-walked
     /// with the server's own page size — the enumeration step
     /// `export --url` needs before it can call each `group`'s own
-    /// export endpoint (`/groups/{id}/export`, #995).
-    pub(crate) fn list_group_rows(&self) -> Result<Vec<(String, String)>, String> {
+    /// export endpoint (`/groups/{id}/export`, #995), and the listing
+    /// `taguru groups` prints (#997).
+    pub(crate) fn list_group_rows(&self) -> Result<Vec<GroupRow>, String> {
         self.list_group_rows_paged(LIST_PAGE_LIMIT)
     }
 
@@ -336,7 +347,7 @@ impl Api {
     ///
     /// The directory sorts by `(name, id)` — names are not unique (ADR
     /// 0050) — so the cursor is the pair, as for `GET /contexts`.
-    fn list_group_rows_paged(&self, page: usize) -> Result<Vec<(String, String)>, String> {
+    fn list_group_rows_paged(&self, page: usize) -> Result<Vec<GroupRow>, String> {
         let mut rows = Vec::new();
         let mut after: Option<(String, String)> = None;
         loop {
@@ -357,7 +368,11 @@ impl Api {
                         format!("{}: a groups entry is missing its {key}", self.base)
                     })
                 };
-                page_rows.push((field("id")?, field("name")?));
+                page_rows.push(GroupRow {
+                    id: field("id")?,
+                    name: field("name")?,
+                    description: field("description")?,
+                });
             }
             let page_len = page_rows.len();
             // Checked against the FIRST row, not the last: a page is
@@ -366,9 +381,9 @@ impl Api {
             // the last row would miss a page that partially overlaps
             // the previous one (cursor "b", page ["a", "c"]) — first >
             // cursor fails there, catching the would-be duplicate "a".
-            if let (Some((cursor_name, cursor_id)), Some((first_id, first_name))) =
+            if let (Some((cursor_name, cursor_id)), Some(first)) =
                 (after.as_ref(), page_rows.first())
-                && (first_name.as_str(), first_id.as_str())
+                && (first.name.as_str(), first.id.as_str())
                     <= (cursor_name.as_str(), cursor_id.as_str())
             {
                 return Err(format!(
@@ -377,7 +392,7 @@ impl Api {
             }
             after = page_rows
                 .last()
-                .map(|(id, name)| (name.clone(), id.clone()));
+                .map(|row| (row.name.clone(), row.id.clone()));
             rows.extend(page_rows);
             // Only an EMPTY page marks the end — `after` is left
             // behind by every non-empty page. A page shorter than
@@ -947,7 +962,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        Api, IMPORT_CHUNK_BYTES, ImportFailure, REMOTE_RESPONSE_CAP_BYTES, RecordFormats,
+        Api, GroupRow, IMPORT_CHUNK_BYTES, ImportFailure, REMOTE_RESPONSE_CAP_BYTES, RecordFormats,
         base_url_for, loopback_of, pack_import_chunks, reject_unusable_base, reject_userinfo,
         skew_warning, token_from_ring,
     };
@@ -1281,7 +1296,7 @@ mod tests {
     }
 
     fn group_row(id: &str, name: &str) -> serde_json::Value {
-        json!({"id": id, "name": name})
+        json!({"id": id, "name": name, "description": format!("about {name}")})
     }
 
     #[test]
@@ -1304,14 +1319,18 @@ mod tests {
         let rows = api
             .list_group_rows_paged(2)
             .expect("three pages should walk cleanly to an empty-page end");
-        let pair = |id: &str, name: &str| (id.to_string(), name.to_string());
+        let row = |id: &str, name: &str| GroupRow {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("about {name}"),
+        };
         assert_eq!(
             rows,
             vec![
-                pair("i1", "a"),
-                pair("i2", "b"),
-                pair("i3", "b"),
-                pair("i4", "d")
+                row("i1", "a"),
+                row("i2", "b"),
+                row("i3", "b"),
+                row("i4", "d")
             ]
         );
 
@@ -1400,17 +1419,18 @@ mod tests {
         }
     }
 
-    /// A row without `id` or `name` — including a pre-#995 server's row,
-    /// whose `id` was the name and which had no `name` — is refused,
-    /// never silently skipped.
+    /// A row without `id`, `name`, or `description` — including a
+    /// pre-#995 server's row, whose `id` was the name and which had no
+    /// `name` — is refused, never silently skipped.
     #[test]
-    fn list_group_rows_refuses_a_row_without_an_id_or_a_name() {
+    fn list_group_rows_refuses_a_row_missing_a_field() {
         for (row, missing) in [
-            (json!({"name": "a"}), "missing its id"),
+            (json!({"name": "a", "description": ""}), "missing its id"),
             (
                 json!({"id": "a", "description": "the old row"}),
                 "missing its name",
             ),
+            (json!({"id": "a", "name": "a"}), "missing its description"),
         ] {
             let base = respond_once(
                 "HTTP/1.1 200 OK",

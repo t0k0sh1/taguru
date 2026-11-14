@@ -210,13 +210,13 @@
 {<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/part-2"</span>, <span class="k">"context_id"</span>: <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>}
 {<span class="k">"passage"</span>: <span class="s">"…the second task jointly pre-trains text-pair representations."</span>}
 {<span class="k">"subject"</span>: <span class="s">"BERT"</span>, <span class="k">"label"</span>: <span class="s">"pre-training task"</span>, <span class="k">"object"</span>: <span class="s">"next sentence prediction"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
-{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"context_ids"</span>: [<span class="s">"3c1d9a52-6e47-4f08-b2a1-0d8e5f7c4a19"</span>, <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>, <span class="s">"a94e2f60-1b3d-4d75-8c0e-6f2a7b9d1e34"</span>]}
-{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"paper/bert"</span>, <span class="k">"context_ids"</span>: [<span class="s">"e0b7c8d3-52a1-4f96-a3c4-9d1e6b8f2a75"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
+{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"5d2e8a41-9c63-4b17-a0f5-3e7b1c9d6f28"</span>, <span class="k">"name"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"context_ids"</span>: [<span class="s">"3c1d9a52-6e47-4f08-b2a1-0d8e5f7c4a19"</span>, <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>, <span class="s">"a94e2f60-1b3d-4d75-8c0e-6f2a7b9d1e34"</span>]}
+{<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"c81f4b07-2a5e-4d39-96c8-0b7e3a1f5d62"</span>, <span class="k">"name"</span>: <span class="s">"paper/bert"</span>, <span class="k">"context_ids"</span>: [<span class="s">"e0b7c8d3-52a1-4f96-a3c4-9d1e6b8f2a75"</span>], <span class="k">"group_ids"</span>: [<span class="s">"5d2e8a41-9c63-4b17-a0f5-3e7b1c9d6f28"</span>, <span class="s">"9a3c6e15-7f2b-4e80-b4d1-8c5a0e2f7b93"</span>]}</code></pre>
     <p class="note">
-      The <code>contexts</code> (named by id, as a <code>group</code> record always does) and the <code>chapter/bert/3</code> <code>group</code> that these two records name
+      The <code>contexts</code> and child <code>groups</code> (named by id, as a <code>group</code> record always does — <code>9a3c…</code> is <code>chapter/bert/3</code>) that these two records name
       but this file does not create come from the paper's other files in the same
       <code>taguru import</code> run: <code>groups</code> restore after every source and every other record of
-      the run, and a member still missing at that point refuses the record by name.
+      the run, and a member still missing at that point refuses the record, naming the missing id.
       The second source's <code>create</code> block is left out on purpose — the <code>context</code> already
       exists from the first source, and importing into an absent <code>context</code> without a create block is
       refused, so this is also how the parser confirms both parts land in the same <code>context</code> rather
@@ -245,7 +245,7 @@
       across with a cross call, then pull the thread inside whichever <code>context</code> answered. Reaching
       for <code>retrieve</code> against one <code>context</code> after deliberately splitting a corpus into
       several undoes the split; a LangChain retriever crossing the same set is
-      <code>TaguruRetriever(groups=["paper/bert", "paper/gpt"])</code>, not a loop of per-<code>context</code>
+      <code>TaguruRetriever(group_ids=["&lt;id of paper/bert&gt;", "&lt;id of paper/gpt&gt;"])</code>, not a loop of per-<code>context</code>
       retrievers. Run end to end against real PDFs — extraction, this cross-<code>group</code> retriever, and
       a local answer model — in the <a href="local-rag-walkthrough.html">local RAG
       walkthrough</a>.

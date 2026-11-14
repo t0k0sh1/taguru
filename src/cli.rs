@@ -206,6 +206,13 @@ USAGE:
                                         takes — or with --name only those
                                         named exactly NAME (names are not
                                         unique; see: taguru contexts --help)
+  taguru groups [--name NAME] [--json] [--url URL] [URL]
+                                        list a running server's groups as
+                                        ID<TAB>NAME — the id every --group
+                                        and group_ids list takes — or with
+                                        --name only those named exactly
+                                        NAME (names are not unique; see:
+                                        taguru groups --help)
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -476,7 +483,14 @@ pub fn dispatch() -> Command {
         Some("benchmark") => exit(crate::benchmark::run(&args[1..])),
         Some("evaluate") => exit(crate::evaluate::run(&args[1..])),
         Some("health") => exit(health(&args[1..])),
-        Some("contexts") => exit(crate::lookup::run(&args[1..])),
+        Some("contexts") => exit(crate::lookup::run(
+            crate::lookup::Directory::Contexts,
+            &args[1..],
+        )),
+        Some("groups") => exit(crate::lookup::run(
+            crate::lookup::Directory::Groups,
+            &args[1..],
+        )),
         Some("inspect") => exit(crate::inspect::run(&args[1..])),
         Some("estimate") => exit(crate::estimate::run(&args[1..])),
         Some("import") => exit(crate::ingest::run(&args[1..])),

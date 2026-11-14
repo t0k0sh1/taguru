@@ -146,12 +146,13 @@ def test_cross_contexts_tag_documents_and_share_one_text_call(
 def test_groups_resolve_to_members_nested_children_included(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    retriever = TaguruRetriever(
+        group_ids=["gid-parent"], client=sync_client, async_client=async_client
+    )
     documents = retriever.invoke("青嶺酒造")
 
     # parent reaches sake directly and tea through its child group — walked
-    # over one read of the directory, never a per-group fetch by name (the
-    # single-row route takes ids, #995).
+    # over one read of the directory, never a per-group fetch.
     fetched = [path for path, _ in fake_server.calls if path.startswith("/groups")]
     assert fetched == ["/groups", "/groups"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
@@ -161,38 +162,45 @@ def test_groups_resolve_to_members_nested_children_included(
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
-def test_a_child_name_several_groups_share_contributes_nothing(
+def test_a_group_id_names_one_group_and_a_name_names_none(
     sync_client: Taguru,
     async_client: AsyncTaguru,
     fake_server: FakeServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Names are not unique (#995): a second "childg" makes the root name
-    # ambiguous — the walk skips it rather than picking one, and the
-    # direct target stands. A child is an id (#996), so parent's child
-    # stays the one row it names, twin or no twin.
+    # Names are not unique (#995): a second "childg" leaves the id
+    # unambiguous — gid-childg reaches tea only, never the twin's member.
     twin = {"id": "gid-twin", "name": "childg", "description": "", "group_ids": []}
     monkeypatch.setitem(GROUP_ROWS, "gid-twin", {**twin, "context_ids": ["id-other"]})
-    retriever = TaguruRetriever(
-        context_ids=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
+    by_id = TaguruRetriever(
+        context_ids=["id-sake"],
+        group_ids=["gid-childg"],
+        client=sync_client,
+        async_client=async_client,
     )
-    retriever.invoke("青嶺酒造")
-    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
-    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
-    fake_server.calls.clear()
-    by_parent = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
-    by_parent.invoke("青嶺酒造")
+    by_id.invoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
         {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
     ]
+    # A display name in group_ids is not an id (#997): it resolves nothing,
+    # and the direct target stands alone.
+    fake_server.calls.clear()
+    by_name = TaguruRetriever(
+        context_ids=["id-sake"], group_ids=["childg"], client=sync_client, async_client=async_client
+    )
+    by_name.invoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
 
 
 def test_still_resolves_the_groups_it_can_when_one_group_fails_to_fetch(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
     retriever = TaguruRetriever(
-        groups=["parent", "no-such-group"], client=sync_client, async_client=async_client
+        group_ids=["gid-parent", "gid-no-such-group"],
+        client=sync_client,
+        async_client=async_client,
     )
     documents = retriever.invoke("青嶺酒造")
     # parent's members (sake, tea) still come back even though the
@@ -204,7 +212,9 @@ async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fe
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
     retriever = TaguruRetriever(
-        groups=["parent", "no-such-group"], client=sync_client, async_client=async_client
+        group_ids=["gid-parent", "gid-no-such-group"],
+        client=sync_client,
+        async_client=async_client,
     )
     documents = await retriever.ainvoke("青嶺酒造")
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
@@ -216,7 +226,9 @@ def test_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
     # Nothing but groups to search: an unreadable directory is the
     # caller's error, never an empty result that looks complete.
     fake_server.fail_group_directory_after = 1
-    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    retriever = TaguruRetriever(
+        group_ids=["gid-parent"], client=sync_client, async_client=async_client
+    )
     with pytest.raises(TaguruError):
         retriever.invoke("青嶺酒造")
     assert not [path for path, _ in fake_server.calls if path == "/sources/search"]
@@ -226,7 +238,9 @@ async def test_async_a_group_directory_that_fails_to_read_refuses_a_groups_only_
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
     fake_server.fail_group_directory_after = 0
-    retriever = TaguruRetriever(groups=["parent"], client=sync_client, async_client=async_client)
+    retriever = TaguruRetriever(
+        group_ids=["gid-parent"], client=sync_client, async_client=async_client
+    )
     with pytest.raises(TaguruError):
         await retriever.ainvoke("青嶺酒造")
 
@@ -240,7 +254,10 @@ async def test_a_directory_failing_partway_keeps_the_rows_read_beside_direct_tar
     # target.
     fake_server.fail_group_directory_after = 1
     retriever = TaguruRetriever(
-        context_ids=["id-tea"], groups=["brewery"], client=sync_client, async_client=async_client
+        context_ids=["id-tea"],
+        group_ids=["gid-brewery"],
+        client=sync_client,
+        async_client=async_client,
     )
     if lane == "sync":
         retriever.invoke("青嶺酒造")
@@ -537,7 +554,10 @@ async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
 
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     retriever = TaguruRetriever(
-        context_ids=["id-sake"], groups=["childg"], client=sync_client, async_client=async_client
+        context_ids=["id-sake"],
+        group_ids=["gid-childg"],
+        client=sync_client,
+        async_client=async_client,
     )
     sync_documents = retriever.invoke("青嶺酒造")
     async_documents = await retriever.ainvoke("青嶺酒造")

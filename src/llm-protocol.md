@@ -32,11 +32,16 @@ answers back into prose are your job.
    which answers the new row with its `id`. Torn between a
    few candidates? Search them together: `POST /recall`, `/query`, and
    `/sources/search` take `context_ids: [context ids]` and/or
-   `group_ids: [group ids]` (the id column of `GET /groups`; a group
+   `group_ids: [group ids]` (a group
    searches every context it reaches,
    nested children included; overlaps dedupe) and tag every match with
    its context — shortlist, search once, then continue inside the
-   context that answered.
+   context that answered. Groups follow the same id rule: create one with
+   `POST /groups` `{name, context_ids?, group_ids?}`, which answers the
+   new row with its `id`; every `/groups/{id}` path, every `group_ids`
+   list, and MCP's `group_id` argument take that id, and a group is found
+   by name by reading the `name` column of `GET /groups` (MCP:
+   `list_groups`; CLI: `taguru groups --name NAME`).
 2. **Resolve cues**: extract entity and relation candidates from the
    question; `resolve` (concepts) / `resolve_label` (relations). The
    entry is normalized — width, case, katakana/hiragana, light typos

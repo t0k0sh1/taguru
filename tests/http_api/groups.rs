@@ -1146,3 +1146,68 @@ fn groups_sharing_a_name_are_two_groups_at_every_entrance() {
     assert_eq!(server.ok("GET", "/groups", None)["total"], json!(3));
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// `taguru groups` (#997): the CLI bridge from a group's display name
+/// to the id every `--group` and `group_ids` list takes — the group
+/// twin of `taguru contexts`. Names are not unique, so `--name` lists
+/// every exact match, and matching is byte-for-byte.
+#[test]
+fn the_groups_verb_finds_ids_by_exact_name_and_lists_twins() {
+    let server = Server::start("groups-verb");
+    let papers_a = fixed_id("groups-verb-papers-a");
+    let papers_b = fixed_id("groups-verb-papers-b");
+    let notes = server.create_group("notes", Some(json!({"description": "loose"})));
+    for (id, description) in [(&papers_a, "first"), (&papers_b, "second")] {
+        server.ok(
+            "POST",
+            "/groups",
+            Some(json!({"name": "papers", "id": id, "description": description})),
+        );
+    }
+    let padded = server.create_group("Papers ", None);
+
+    // The whole directory, `ID<TAB>NAME`, in the directory's (name, id) order.
+    let (code, stdout, stderr) = run_cli(&["groups", "--url", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (low, high) = if papers_a < papers_b {
+        (&papers_a, &papers_b)
+    } else {
+        (&papers_b, &papers_a)
+    };
+    assert_eq!(
+        stdout,
+        format!("{padded}\tPapers \n{notes}\tnotes\n{low}\tpapers\n{high}\tpapers\n"),
+        "{stdout}"
+    );
+
+    // `--name` keeps exact matches only — both twins, never `Papers `.
+    let (code, stdout, stderr) = run_cli(&["groups", "--name", "papers", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout, format!("{low}\tpapers\n{high}\tpapers\n"));
+
+    let (code, stdout, stderr) = run_cli(
+        &["groups", "--name", "notes", "--json", "--url", &server.base],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let rows: Value = serde_json::from_str(&stdout).expect("--json is one document");
+    assert_eq!(
+        rows,
+        json!([{"id": notes, "name": "notes", "description": "loose"}])
+    );
+
+    // No match is a failure the shell can branch on, worded for groups.
+    let (code, stdout, stderr) = run_cli(&["groups", "--name", "ghost", &server.base], &[]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("taguru: groups: no group is named 'ghost'"),
+        "stderr: {stderr}"
+    );
+
+    // A usage error is 2, like every other verb.
+    let (code, _, stderr) = run_cli(&["groups", "--bogus"], &[]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("unknown argument '--bogus'"), "{stderr}");
+    let _ = std::fs::remove_dir_all(server.stop_gracefully());
+}

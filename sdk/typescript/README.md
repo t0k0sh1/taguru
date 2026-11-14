@@ -19,6 +19,9 @@ const row = await client.contexts.create("sake", { description: "青嶺酒造と
 
 const ctx = client.context(row.id); // contexts are addressed by the minted id
 // only know the name? names are not unique, so iterate `client.contexts.iter()` and keep the rows whose `name` matches
+// groups work the same way: `(await client.groups.create("drinks", { context_ids: [row.id] })).id` is the
+// minted id every `groups.*` call and `group_ids` list takes (create answers the row, a `GroupEntry`);
+// find one by name by iterating `client.groups.iter()`
 await ctx.addAssociations([
   { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md" },
 ]);

@@ -17,7 +17,27 @@ Entries that change an on-disk format or a response shape say so.
   other verb's `--context` takes. It is a client-side filter over the
   paged `GET /contexts`, so the wire is unchanged.
 
+- **`taguru groups` — find a group's id by its name** (#997): the `group`
+  twin of `taguru contexts`. Lists a running server's `groups` as
+  `ID<TAB>NAME` lines (or `--json` `[{id, name, description}]`), and with
+  `--name NAME` keeps only the exact matches — names are not unique, so
+  several lines can come back; no match exits 1. The id it prints is
+  what `/groups/{id}`, every `group_ids` list, and `taguru communities
+  --group` take. A client-side filter over the paged `GET /groups`; the
+  wire is unchanged.
+
 ### Changed
+
+- **Breaking (MCP and LangChain) — the last `group` arguments take ids**
+  (#997, closes #993). MCP's `get_group`, `update_group`, `delete_group`,
+  `rename_group` and `export_group` take `group_id` (a `group` id — the
+  id column of `list_groups`) where they took `name`; `create_group`
+  keeps `name` for the display name. LangChain's
+  `TaguruRetriever(groups=[...])` (Python and TypeScript) is
+  `TaguruRetriever(group_ids=[...])`: `group` ids, never names — a name
+  there resolves to nothing. `examples/langchain/local_rag` keeps the ids
+  its `groups.create` / `groups.update` answer and hands those to the
+  retriever.
 
 - **Breaking (wire and file format) — every list that names a `group`
   takes ids** (#996, ADR 0050 / 0053; `http_contract` 2, file format
@@ -46,8 +66,8 @@ Entries that change an on-disk format or a response shape say so.
   and TypeScript SDKs follow: `GroupEntry.groups` is `group_ids`,
   `groups.create(group_ids=…)`, `groups.update(add_group_ids=…,
   remove_group_ids=…)`, `recall`/`query`/`search_passages(group_ids=…)`,
-  and `GroupImportOutcome` gains `id`. `TaguruRetriever(groups=[...])`
-  still takes names (until #997) and follows child ids.
+  and `GroupImportOutcome` gains `id`. `TaguruRetriever` follows child
+  ids (and takes `group_ids` itself since #997, above).
 
 - **Breaking (wire) — `groups` are addressed by id** (#995, ADR 0050 / 0052;
   `http_contract` 2). Every `/groups/{name}` route is now `/groups/{id}`
@@ -74,8 +94,8 @@ Entries that change an on-disk format or a response shape say so.
   `groups.get/exists/update/delete/rename/export` take the id,
   `groups.create` takes an optional id and returns the row, `GroupEntry`
   gains `name`, and
-  `groups.list` takes `after_id`. `TaguruRetriever(groups=[...])` still
-  takes names and resolves them through one read of the directory.
+  `groups.list` takes `after_id`. `TaguruRetriever` resolves its `groups`
+  through one read of the directory (by id since #997, above).
 
 - **Breaking (on-disk format) — a `group`'s file is named by its own id**
   (#994, ADR 0050). Each `group` gets a minted UUID. Its file is

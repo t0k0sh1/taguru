@@ -4,15 +4,16 @@
  * see that module for the full design rationale (opaque cue, both lanes by
  * default, RRF merge, graph-only facts as Documents).
  *
- * The retriever addresses one `context_id`, several `context_ids`, or `groups`
+ * The retriever addresses one `context_id`, several `context_ids`, or `group_ids`
  * (each `group` reaches every member `context`, nested children included).
  * Across several `contexts` the graph lane runs per `context` and interleaves by
  * per-`context` rank — the posture the server itself takes for passage scores —
  * and the text lane rides the server's own cross-`context` search.
  *
- * `context_id`/`context_ids` take context IDs (the `id` column of `contexts.list()`,
- * #964/#965/#967; `taguru contexts --name NAME` looks one up by name); `groups` take group names, whose members are ids already.
- * Every Document's `context` metadata is that id.
+ * Every target is an id: `context_id`/`context_ids` take the `id` column of
+ * `contexts.list()` (#964/#965/#967) and `group_ids` the `id` column of
+ * `groups.list()` (#997); `taguru contexts --name NAME` / `taguru groups --name NAME`
+ * look one up by name. Every Document's `context` metadata is a context id.
  */
 
 import type { CallbackManagerForRetrieverRun } from "@langchain/core/callbacks/manager";
@@ -33,12 +34,12 @@ const RRF_K = 60;
 const rrf = (rank: number): number => 1.0 / (RRF_K + rank);
 
 export interface TaguruRetrieverFields extends BaseRetrieverInput {
-  /** One target `context` id (the `id` column of `contexts.list()`); name at least one of context_id/context_ids/groups. */
+  /** One target `context` id (the `id` column of `contexts.list()`); name at least one of context_id/context_ids/group_ids. */
   context_id?: string;
   /** Several target `context` ids. Display names are not accepted (#965). */
   context_ids?: string[];
-  /** `group` names — each searches every `context` it reaches, nested children included. */
-  groups?: string[];
+  /** `group` ids (the `id` column of `groups.list()`) — each searches every `context` it reaches, nested children included. Display names are not accepted (#997). */
+  group_ids?: string[];
   client?: Taguru;
   base_url?: string;
   api_key?: string;
@@ -71,31 +72,20 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
  * is on.
  */
 /**
- * Every `context` id the `groups` named in `roots` reach, nested children
- * included, walked over one read of the directory (`rows`). A root name no
- * row carries — or several rows share, which names cannot tell apart —
- * contributes nothing, and the rest of the walk still stands: one
- * unresolvable `group` must not blank out every other member. Children are
- * ids (#996), followed through the same read.
+ * Every `context` id the `group` ids in `roots` reach, nested children
+ * included, walked over one read of the directory (`rows`). A root id no row
+ * carries (a deleted `group`) contributes nothing, and the rest of the walk
+ * still stands: one unresolvable `group` must not blank out every other
+ * member. Children are ids too (#996), followed through the same read.
  */
 function groupMembers(rows: GroupEntry[], roots: string[]): Set<string> {
-  const byName = new Map<string, GroupEntry[]>();
   const byId = new Map<string, GroupEntry>();
   for (const row of rows) {
-    const named = byName.get(row.name) ?? [];
-    named.push(row);
-    byName.set(row.name, named);
     byId.set(row.id, row);
   }
   const members = new Set<string>();
   const seen = new Set<string>();
-  const stack: string[] = [];
-  for (const name of roots) {
-    const matching = byName.get(name) ?? [];
-    if (matching.length === 1) {
-      stack.push(matching[0]!.id);
-    }
-  }
+  const stack = [...roots];
   while (stack.length > 0) {
     const id = stack.pop()!;
     if (seen.has(id)) {
@@ -123,7 +113,7 @@ export class TaguruRetriever extends BaseRetriever {
 
   readonly context_id: string | undefined;
   readonly context_ids: string[] | undefined;
-  readonly groups: string[] | undefined;
+  readonly group_ids: string[] | undefined;
   readonly k: number;
   readonly include_graph: boolean;
   readonly include_text: boolean;
@@ -148,13 +138,13 @@ export class TaguruRetriever extends BaseRetriever {
       });
     this.context_id = fields.context_id;
     this.context_ids = fields.context_ids;
-    this.groups = fields.groups;
+    this.group_ids = fields.group_ids;
     if (
       this.context_id === undefined &&
       (this.context_ids?.length ?? 0) === 0 &&
-      (this.groups?.length ?? 0) === 0
+      (this.group_ids?.length ?? 0) === 0
     ) {
-      throw new Error("name a target: context_id, context_ids, or groups");
+      throw new Error("name a target: context_id, context_ids, or group_ids");
     }
     this.k = fields.k ?? 8;
     this.include_graph = fields.include_graph ?? true;
@@ -170,7 +160,7 @@ export class TaguruRetriever extends BaseRetriever {
 
   /** Whether retrieval spans several `contexts` (or a `group`'s worth). */
   private isCross(): boolean {
-    return (this.context_ids?.length ?? 0) > 0 || (this.groups?.length ?? 0) > 0;
+    return (this.context_ids?.length ?? 0) > 0 || (this.group_ids?.length ?? 0) > 0;
   }
 
   /**
@@ -185,14 +175,13 @@ export class TaguruRetriever extends BaseRetriever {
         targets.push(id);
       }
     }
-    // `groups` are names while `groups.get` takes ids (#995): the walk
-    // reads the directory once, finds each name's row, and follows the
-    // rows' child ids through it. A directory that fails to read
-    // partway keeps the rows already read beside the direct targets —
-    // and with no direct target, the failure is the caller's to hear,
-    // never an empty search that looks complete.
+    // One directory read resolves every `group` id and its nested
+    // children, instead of a `groups.get` per storey. A directory that
+    // fails to read partway keeps the rows already read beside the
+    // direct targets — and with no direct target, the failure is the
+    // caller's to hear, never an empty search that looks complete.
     let members = new Set<string>();
-    if ((this.groups?.length ?? 0) > 0) {
+    if ((this.group_ids?.length ?? 0) > 0) {
       const rows: GroupEntry[] = [];
       try {
         for await (const row of this.client.groups.iter()) {
@@ -203,7 +192,7 @@ export class TaguruRetriever extends BaseRetriever {
           throw error;
         }
       }
-      members = groupMembers(rows, this.groups ?? []);
+      members = groupMembers(rows, this.group_ids ?? []);
     }
     for (const id of [...members].sort()) {
       if (!targets.includes(id)) {

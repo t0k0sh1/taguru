@@ -68,9 +68,9 @@ pub fn route_tool(
             format!("{}/export", context_path("context_id")?),
             None,
         ),
-        "export_group" => ("GET", format!("{}/export", group_path("name")?), None),
+        "export_group" => ("GET", format!("{}/export", group_path("group_id")?), None),
         "get_context" => ("GET", context_path("context_id")?, None),
-        "get_group" => ("GET", group_path("name")?, None),
+        "get_group" => ("GET", group_path("group_id")?, None),
         "compact" => (
             "POST",
             format!("{}/compact", context_path("context_id")?),
@@ -155,7 +155,7 @@ pub fn route_tool(
         }
         "update_group" => (
             "PATCH",
-            group_path("name")?,
+            group_path("group_id")?,
             Some(pick(
                 arguments,
                 &[
@@ -167,9 +167,9 @@ pub fn route_tool(
                 ],
             )),
         ),
-        "delete_group" => ("DELETE", group_path("name")?, None),
+        "delete_group" => ("DELETE", group_path("group_id")?, None),
         "rename_group" => {
-            let path = format!("{}/rename", group_path("name")?);
+            let path = format!("{}/rename", group_path("group_id")?);
             need(arguments, "to")?;
             ("POST", path, Some(pick(arguments, &["to"])))
         }

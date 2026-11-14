@@ -11,17 +11,17 @@ and search's ``score`` are each meaningful only within one call, so ranks are
 the only comparable currency. Hits landing in both lanes collapse into one
 Document tagged ``lane: "graph+text"``.
 
-The retriever addresses one ``context_id``, several ``context_ids``, or ``groups``
+The retriever addresses one ``context_id``, several ``context_ids``, or ``group_ids``
 (each ``group`` reaches every member ``context``, nested children included). Across
 several ``contexts`` the graph lane runs per ``context`` and interleaves by
 per-``context`` rank — the posture the server itself takes for passage scores —
 and the text lane rides the server's own cross-``context`` search.
 
-``context_id``/``context_ids`` take context IDS — the ``id`` column of
-``client.contexts.list()`` (#964, #965, #967); look a name up with ``taguru contexts --name NAME``
-or filter ``client.contexts.list()`` on ``name``. ``groups`` take group names; a
-group's members are ids already, so nothing is resolved through the
-directory. Every Document's ``context`` metadata is that id.
+Every target is an id: ``context_id``/``context_ids`` take the ``id`` column of
+``client.contexts.list()`` (#964, #965, #967) and ``group_ids`` the ``id`` column of
+``client.groups.list()`` (#997). Look a name up with ``taguru contexts --name NAME`` /
+``taguru groups --name NAME``, or filter the listing on ``name``. Every Document's
+``context`` metadata is a context id.
 """
 
 from __future__ import annotations
@@ -54,21 +54,15 @@ def _rrf(rank: int) -> float:
 
 
 def _group_members(rows: list[GroupEntry], roots: list[str]) -> set[str]:
-    """Every ``context`` id the ``group`` names in ``roots`` reach, nested children
-    included, walked over one read of the directory (``rows``). A root name no
-    row carries — or several rows share, which names cannot tell apart —
-    contributes nothing, and the rest of the walk still stands: one
-    unresolvable ``group`` must not blank out every other member. Children are
-    ids (#996), followed through the same read."""
-    by_name: dict[str, list[GroupEntry]] = {}
-    by_id: dict[str, GroupEntry] = {}
-    for row in rows:
-        by_name.setdefault(row.name, []).append(row)
-        by_id[row.id] = row
+    """Every ``context`` id the ``group`` ids in ``roots`` reach, nested children
+    included, walked over one read of the directory (``rows``). A root id no row
+    carries (a deleted ``group``) contributes nothing, and the rest of the walk
+    still stands: one unresolvable ``group`` must not blank out every other
+    member. Children are ids too (#996), followed through the same read."""
+    by_id = {row.id: row for row in rows}
     members: set[str] = set()
     seen: set[str] = set()
-    named = (by_name.get(name, []) for name in roots)
-    stack = [matching[0].id for matching in named if len(matching) == 1]
+    stack = list(roots)
     while stack:
         group_id = stack.pop()
         if group_id in seen:
@@ -93,8 +87,9 @@ class TaguruRetriever(BaseRetriever):
 
     Name at least one target: ``context_id`` (one context id — the ``id``
     column of ``contexts.list()``), ``context_ids`` (several context ids), or
-    ``groups`` (``group`` names — each searches every ``context`` it
-    reaches). Display names are not accepted anywhere (#965).
+    ``group_ids`` (``group`` ids — the ``id`` column of ``groups.list()``; each
+    searches every ``context`` it reaches). Display names are not accepted
+    anywhere (#965, #997).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -103,7 +98,7 @@ class TaguruRetriever(BaseRetriever):
     async_client: AsyncTaguru | None = None
     context_id: str | None = None
     context_ids: list[str] | None = None
-    groups: list[str] | None = None
+    group_ids: list[str] | None = None
     k: int = 8
     include_graph: bool = True
     include_text: bool = True
@@ -137,13 +132,13 @@ class TaguruRetriever(BaseRetriever):
 
     @model_validator(mode="after")
     def _require_a_target(self) -> TaguruRetriever:
-        if self.context_id is None and not self.context_ids and not self.groups:
-            raise ValueError("name a target: context_id, context_ids, or groups")
+        if self.context_id is None and not self.context_ids and not self.group_ids:
+            raise ValueError("name a target: context_id, context_ids, or group_ids")
         return self
 
     def _is_cross(self) -> bool:
         """Whether retrieval spans several ``contexts`` (or a ``group``'s worth)."""
-        return bool(self.context_ids) or bool(self.groups)
+        return bool(self.context_ids) or bool(self.group_ids)
 
     def _direct_targets(self) -> list[str]:
         targets: list[str] = []
@@ -168,12 +163,11 @@ class TaguruRetriever(BaseRetriever):
     # -- sync lane ---------------------------------------------------------
 
     def _resolve_targets(self, client: Taguru) -> list[str]:
-        if not self.groups:
+        if not self.group_ids:
             return self._direct_targets()
-        # ``groups`` are names while ``groups.get`` takes ids (#995): the
-        # walk reads the directory once, finds each name's row, and
-        # follows the rows' child ids through it. A directory that fails to
-        # read partway keeps the rows already read beside the direct
+        # One directory read resolves every ``group`` id and its nested
+        # children, instead of a ``groups.get`` per storey. A directory that
+        # fails to read partway keeps the rows already read beside the direct
         # targets — and with no direct target, the failure is the
         # caller's to hear, never an empty search that looks complete.
         direct = self._direct_targets()
@@ -184,7 +178,7 @@ class TaguruRetriever(BaseRetriever):
         except Exception:
             if not direct:
                 raise
-        members = _group_members(rows, self.groups)
+        members = _group_members(rows, self.group_ids)
         return self._with_members(direct, members)
 
     def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
@@ -302,7 +296,7 @@ class TaguruRetriever(BaseRetriever):
         """:meth:`_resolve_targets`' async twin. ``except Exception`` lets a
         BaseException that is NOT an Exception — CancelledError above all —
         propagate, never swallowed as an unreadable directory."""
-        if not self.groups:
+        if not self.group_ids:
             return self._direct_targets()
         direct = self._direct_targets()
         rows: list[GroupEntry] = []
@@ -312,7 +306,7 @@ class TaguruRetriever(BaseRetriever):
         except Exception:
             if not direct:
                 raise
-        members = _group_members(rows, self.groups)
+        members = _group_members(rows, self.group_ids)
         return self._with_members(direct, members)
 
     async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:

@@ -192,11 +192,13 @@ async function pdfToSections(pdfPath: string, paperId: PaperId): Promise<Section
 }
 
 /**
- * Create the group, or fold new contexts into the existing one. Group names
- * are not unique — creating a name again makes a second group — so a rerun
- * looks the name up first and updates that group by its id.
+ * Create the group, or fold new contexts into the existing one, and return
+ * its id — the handle every later call holds (the retriever takes group ids,
+ * never names). Group names are not unique — creating a name again makes a
+ * second group — so a rerun looks the name up once here and keeps the id
+ * from then on.
  */
-async function ensureGroup(client: Taguru, name: string, description: string, contextIds: string[]): Promise<void> {
+async function ensureGroup(client: Taguru, name: string, description: string, contextIds: string[]): Promise<string> {
   const existing: string[] = [];
   for await (const row of client.groups.iter()) {
     if (row.name === name) {
@@ -204,15 +206,14 @@ async function ensureGroup(client: Taguru, name: string, description: string, co
     }
   }
   // Several groups under the name leave no one group to update, so that
-  // stops the run (the retriever would skip the name too).
+  // stops the run.
   if (existing.length > 1) {
     throw new Error(`${existing.length} groups are named '${name}'; rename them apart (groups.rename) and run again`);
   }
   if (existing.length === 1) {
-    await client.groups.update(existing[0]!, { add_context_ids: contextIds });
-    return;
+    return (await client.groups.update(existing[0]!, { add_context_ids: contextIds })).id;
   }
-  await client.groups.create(name, { description, context_ids: contextIds });
+  return (await client.groups.create(name, { description, context_ids: contextIds })).id;
 }
 
 /** A real local Ollama model when OLLAMA_MODEL is set, else a canned fake. */
@@ -291,12 +292,15 @@ async function main(): Promise<void> {
       paperContexts[section.paper].push(sectionId);
     }
 
+    const groupIds: string[] = [];
     for (const paperId of paperIds) {
-      await ensureGroup(client, `paper/${paperId}`, `${PAPERS[paperId]}, full paper`, paperContexts[paperId]);
+      groupIds.push(
+        await ensureGroup(client, `paper/${paperId}`, `${PAPERS[paperId]}, full paper`, paperContexts[paperId]),
+      );
     }
 
     // -- read: one retriever across both papers' groups, an independent answer model --
-    const retriever = new TaguruRetriever({ client, groups: paperIds.map((p) => `paper/${p}`), k: 8 });
+    const retriever = new TaguruRetriever({ client, group_ids: groupIds, k: 8 });
     const answerLlm = await makeLlm([FAKE_ANSWER]);
     const chain = RunnableSequence.from([
       {

@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_routes_to_a_request() {
         let arguments = json!({
-            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn schema_required_body_arguments_are_refused_when_omitted() {
         let base = json!({
-            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
@@ -1513,9 +1513,16 @@ mod tests {
         );
     }
 
+    /// The cap is 32 MiB exactly (taguru-mcp's frame cap is sized off
+    /// it): a stream of exactly 32 MiB routes, one byte more does not.
     #[test]
     fn import_refuses_a_stream_over_the_byte_limit() {
-        let oversized = "x".repeat(MAX_IMPORT_STREAM_BYTES + 1);
+        let at_cap = "x".repeat(32 * 1024 * 1024);
+        assert!(
+            route_tool("import", &json!({"stream": at_cap})).is_ok(),
+            "a stream of exactly the cap must route"
+        );
+        let oversized = "x".repeat(32 * 1024 * 1024 + 1);
         let routed = route_tool("import", &json!({"stream": oversized}));
         assert!(
             routed.is_err(),
