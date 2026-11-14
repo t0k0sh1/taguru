@@ -54,21 +54,17 @@ Entries that change an on-disk format or a response shape say so.
   (`GET`, `PATCH`, `DELETE`, `/export`, `/rename`), and a path that is
   not a canonical UUID answers 400 instead of a lookup. A `group` is
   created with `POST /groups {name, id?, description?, context_ids?,
-  groups?}`, which answers the new row; `PUT /groups/{name}` is gone. The
+  group_ids?}`, which answers the new row; `PUT /groups/{name}` is gone. The
   server mints the id unless the request brings one: a create under a
   standing id answers that row when the record is identical (a retry
   converges) and `already_exists` when it differs. Names are no longer
   unique — a create or rename under a taken name makes or keeps two
   `groups` apart by id. A row is `{id, name, description, context_ids,
-  groups, fingerprint}`; `GET /groups` sorts by `(name, id)` and pages
-  with `after` + `after_id`, as `GET /contexts` does. Child `groups`,
-  cross-search `groups`, and import records still name `groups` by name
-  (until #996), and a name several `groups` share is refused there with
-  `conflict`. Behind `taguru router` the router mints the id and every
-  shard creates the `group` under it; an import record new to a shard
-  is created there under the id the rest of the fleet uses, and an
-  import naming a `group` the shards hold under different ids is
-  refused with `conflict`. A create that stops partway names the id and
+  group_ids, fingerprint}`; `GET /groups` sorts by `(name, id)` and
+  pages with `after` + `after_id`, as `GET /contexts` does. The lists
+  in a body and the import records take ids as well (#996, above).
+  Behind `taguru router` the router mints the id and every shard
+  creates the `group` under it. A create that stops partway names the id and
   the shards that hold it, so it can be finished (`POST` again with the
   id) or, when the router minted the id, removed. MCP's group tools
   take the id in their `name` argument (except `create_group`, whose
@@ -90,10 +86,7 @@ Entries that change an on-disk format or a response shape say so.
   resume are removed. A data directory whose `.group` files predate ids
   refuses to boot, and the error names the migration (export with the
   release that wrote it, import here). `taguru inspect` reports such a
-  file as a FAILURE. The wire is unchanged: every route still addresses
-  a `group` by name until #995. A name shared by several `groups`,
-  which only a hand-assembled data directory can produce, is answered
-  with a 409 `conflict`.
+  file as a FAILURE. The wire follows in #995 and #996 (above).
 
 - **Breaking (Python SDKs) — Python 3.10 is no longer supported**:
   `taguru` and `langchain-taguru` now require Python 3.11 or later.
