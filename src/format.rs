@@ -10,6 +10,20 @@
 /// not about one of them.
 pub(crate) const FORMAT_VERSION: &str = "2026-11-13";
 
+/// How to move a data directory this build refuses to boot: the tail
+/// every pre-id refusal (boot and `taguru inspect`) ends with. A stream
+/// the release that wrote the directory exports is in that release's
+/// format, which this build does not import, so the data has to be
+/// carried through the builds in between (ADR 0053 §3).
+pub(crate) fn migration_hint() -> String {
+    format!(
+        "export it with the release that wrote it and carry that stream forward through \
+         the builds in between, each importing what the one before exports or booting the \
+         data directory it leaves — this build imports format '{FORMAT_VERSION}' only \
+         (ADR 0053 §3)"
+    )
+}
+
 /// Judges a record's `version` column. Absent means "whatever the
 /// running build reads" — the courtesy a hand-written file gets, and
 /// the opposite of reading it as the oldest revision. Present means
@@ -109,6 +123,22 @@ pub(crate) fn record_type(value: &serde_json::Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hint names the only revision this build imports, so a
+    /// reader can tell the old release's export will not import as is.
+    #[test]
+    fn the_migration_hint_names_the_revision_this_build_imports() {
+        let hint = migration_hint();
+        assert!(
+            hint.starts_with("export it with the release that wrote it"),
+            "{hint}"
+        );
+        assert!(hint.contains("the builds in between"), "{hint}");
+        assert!(
+            hint.contains(&format!("imports format '{FORMAT_VERSION}' only")),
+            "{hint}"
+        );
+    }
 
     #[test]
     fn an_absent_version_reads_as_the_running_builds_own() {

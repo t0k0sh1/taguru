@@ -648,15 +648,17 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                     context_rows.push(ContextRow::corrupt(
                         stem.clone(),
                         "pre_id_sidecar",
-                        "sidecar records no context id: written before ADR 0045 — the server \
-                         refuses this directory; export with the release that wrote it, then \
-                         import here"
-                            .to_string(),
+                        format!(
+                            "sidecar records no context id: written before ADR 0045 — the \
+                             server refuses this directory; {}",
+                            crate::format::migration_hint()
+                        ),
                     ));
                 } else {
                     println!(
                         "{stem}.meta.json: FAILURE — records no context id (pre-ADR 0045 \
-                         directory); export with the release that wrote it, then import here"
+                         directory); {}",
+                        crate::format::migration_hint()
                     );
                 }
                 failures += 1;

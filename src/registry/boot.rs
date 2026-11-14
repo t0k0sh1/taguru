@@ -291,8 +291,8 @@ fn scanned_meta_or_refuse(data_dir: &Path, stem: &str) -> io::Result<MetaFile> {
             format!(
                 "sidecar '{stem}.meta.json' records no context id: this data \
                  directory was written before contexts had ids (ADR 0045) and \
-                 this build does not read it — export with the release that \
-                 wrote it, then import here"
+                 this build does not read it — {}",
+                crate::format::migration_hint()
             ),
         )),
         ScannedMeta::ForeignId(id) => Err(io::Error::new(
@@ -982,7 +982,9 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.to_string().contains("export"),
+            error
+                .to_string()
+                .ends_with(&crate::format::migration_hint()),
             "the refusal must name the migration path: {error}"
         );
         let _ = fs::remove_dir_all(&dir);

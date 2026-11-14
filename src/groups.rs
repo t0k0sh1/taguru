@@ -496,8 +496,8 @@ pub(crate) enum ScannedGroup {
     /// (it was a percent-encoded name), or the record is a JSON object
     /// with no `id`. Refused, never half-read — and never reset as
     /// "corrupt", which would overwrite a `group` that only needs the
-    /// documented migration (export with the release that wrote it,
-    /// import here; §2.7: no compatibility).
+    /// documented migration ([`crate::format::migration_hint`]; §2.7:
+    /// no compatibility).
     PreId,
     /// Parsed, but records an `id` other than its stem: the file was
     /// copied or hand-edited. Refused — trusting either value would
@@ -547,8 +547,8 @@ pub(crate) fn classify_group(stem: &str, bytes: &[u8]) -> ScannedGroup {
 pub(crate) fn pre_id_refusal(file: &str) -> String {
     format!(
         "group file '{file}' records no group id: this data directory was written \
-         before groups had ids (ADR 0045) and this build does not read it — export \
-         with the release that wrote it, then import here"
+         before groups had ids (ADR 0050) and this build does not read it — {}",
+        crate::format::migration_hint()
     )
 }
 
@@ -964,7 +964,12 @@ mod tests {
         let error = scan_groups(&dir).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("records no group id"), "{error}");
-        assert!(error.to_string().contains("export"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .ends_with(&crate::format::migration_hint()),
+            "{error}"
+        );
         assert_eq!(
             fs::read(dir.join("drinks.group")).unwrap(),
             pre_id,
