@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_routes_to_a_request() {
         let arguments = json!({
-            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn schema_required_body_arguments_are_refused_when_omitted() {
         let base = json!({
-            "name": "ctx", "context_id": "ctx", "cue": "x", "concept": "x",
+            "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",

@@ -7,7 +7,7 @@ on every section. A plain LCEL chain then answers across both papers' groups at
 once:
 
 ```
-{context: TaguruRetriever(groups=[paper/tanaka2024, paper/sato2023]) | format_docs,
+{context: TaguruRetriever(group_ids=[<id of paper/tanaka2024>, <id of paper/sato2023>]) | format_docs,
  question: passthrough} | ChatPromptTemplate | chat model | string parser
 ```
 

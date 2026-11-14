@@ -1031,7 +1031,8 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
         match api.list_group_rows() {
             Ok(group_rows) => {
                 group_count = group_rows.len();
-                for (id, name) in &group_rows {
+                for row in &group_rows {
+                    let (id, name) = (&row.id, &row.name);
                     match remote_export_group(&api, id, name, out) {
                         Ok(report) => println!("{report}"),
                         Err(message) => {
@@ -1041,7 +1042,7 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
                     }
                 }
                 let expected =
-                    expected_file_names(&file_names, group_rows.iter().map(|(id, _)| id.as_str()));
+                    expected_file_names(&file_names, group_rows.iter().map(|row| row.id.as_str()));
                 stale_failures = prune_stale_streams(out, &expected);
             }
             Err(error) => {

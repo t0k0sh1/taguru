@@ -476,7 +476,7 @@ fn a_response_naming_a_different_context_or_group_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g","description":""}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -563,7 +563,7 @@ fn a_group_export_response_that_is_not_a_group_record_is_refused() {
             // GET /groups, one page then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"}]}}"#.to_string(),
+                r#"{"result":{"total":1,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g","description":""}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -764,7 +764,7 @@ fn per_item_failures_count_and_the_rest_still_lands() {
             // GET /groups: two groups, then the terminator.
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":2,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g"},{"id":"00000000-0000-4000-9000-00000000000b","name":"h"}]}}"#.to_string(),
+                r#"{"result":{"total":2,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"g","description":""},{"id":"00000000-0000-4000-9000-00000000000b","name":"h","description":""}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -853,7 +853,7 @@ fn groups_sharing_a_name_each_export_to_their_own_file() {
             ("HTTP/1.1 200 OK", "not an export stream".to_string()),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"result":{"total":3,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"same"},{"id":"00000000-0000-4000-9000-00000000000b","name":"same"},{"id":"00000000-0000-4000-9000-00000000000c","name":"solo"}]}}"#.to_string(),
+                r#"{"result":{"total":3,"groups":[{"id":"00000000-0000-4000-9000-00000000000a","name":"same","description":""},{"id":"00000000-0000-4000-9000-00000000000b","name":"same","description":""},{"id":"00000000-0000-4000-9000-00000000000c","name":"solo","description":""}]}}"#.to_string(),
             ),
             (
                 "HTTP/1.1 200 OK",

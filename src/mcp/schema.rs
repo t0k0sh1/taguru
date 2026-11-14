@@ -54,6 +54,7 @@ fn require_any_of(mut schema: Value, alternatives: Value) -> Value {
 /// difference gets stated, not silently dropped.
 pub(super) fn tool_definitions() -> Vec<Value> {
     let context = json!({ "type": "string", "description": "Context id: a UUID — the id column of list_contexts (look a name up there)" });
+    let group = json!({ "type": "string", "description": "Group id: a UUID — the id column of list_groups (look a name up there)" });
     let match_after = json!({
         "type": "object",
         "description": "resume past the previous page's last match: copy {weight, subject, label, object} verbatim from it, plus context_id too when targeting several contexts. total stays constant across pages",
@@ -129,7 +130,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every `group`'s id, name, description, member `context` ids, and child `group` ids. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. The row's id is what every other group tool's name argument takes; names are labels and need not be unique. A `group` and a `context` may share the same name without conflict.",
+            "Group directory: every `group`'s id, name, description, member `context` ids, and child `group` ids. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. The row's id is what every other group tool's group_id argument takes; names are labels and need not be unique. A `group` and a `context` may share the same name without conflict.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by (name, id) (default/ceiling 1000)" },
@@ -165,33 +166,30 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             "Update a `group`'s description and/or membership. add_context_ids/remove_context_ids and add_group_ids/remove_group_ids are deltas against the current members, not a replacement list; an id in both ends up a member. Added `contexts` and child `groups` must exist; removing a non-member is a no-op; nesting stays at most 3 `groups` tall and acyclic, and the resulting membership at most 1000 member `contexts` and 1000 child `groups` (removals apply first, so one request can trade members within the cap).",
             object_schema(
                 json!({
-                    "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" },
+                    "group_id": group,
                     "description": { "type": "string", "description": "omit to leave unchanged" },
                     "add_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids (the id column of list_contexts) to add" },
                     "remove_context_ids": { "type": "array", "items": { "type": "string" }, "description": "context ids to remove" },
                     "add_group_ids": { "type": "array", "items": { "type": "string" }, "description": "child group ids (the id column of list_groups) to add" },
                     "remove_group_ids": { "type": "array", "items": { "type": "string" }, "description": "child group ids to remove" }
                 }),
-                &["name"],
+                &["group_id"],
             ),
         ),
         (
             "delete_group",
             "Delete a `group` (irreversible). Only the bundling goes; the member `contexts`, the child `groups`, and their data are untouched — parents naming the `group` just drop the child.",
-            object_schema(
-                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
-                &["name"],
-            ),
+            object_schema(json!({ "group_id": group }), &["group_id"]),
         ),
         (
             "rename_group",
             "Rename a `group` (admin role): a display-name change and nothing else — the id, the file, and every parent bundling it stay put. Names are not unique, so the destination may already be in use.",
             object_schema(
                 json!({
-                    "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" },
+                    "group_id": group,
                     "to": { "type": "string", "description": "the new name" }
                 }),
-                &["name", "to"],
+                &["group_id", "to"],
             ),
         ),
         (
@@ -926,10 +924,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         (
             "export_group",
             "One `group` as its import-stream record (a single `group` JSON line — the `group`'s complete truth); importing it restores the `group` as a whole-record replace. A `context`-scoped key exports exactly the slice its grant can read.",
-            object_schema(
-                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
-                &["name"],
-            ),
+            object_schema(json!({ "group_id": group }), &["group_id"]),
         ),
         (
             "get_context",
@@ -939,10 +934,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         (
             "get_group",
             "One `group`'s name, description, member `contexts`, and child `groups`.",
-            object_schema(
-                json!({ "name": { "type": "string", "description": "the group's id (the id column of list_groups), not its name" } }),
-                &["name"],
-            ),
+            object_schema(json!({ "group_id": group }), &["group_id"]),
         ),
         (
             "compact",

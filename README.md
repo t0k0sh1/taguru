@@ -70,7 +70,9 @@ name? `taguru contexts --name sake` prints the matching `ID<TAB>NAME` lines
 (or filter `GET /contexts` / MCP `list_contexts` on `name`).
 
 `contexts` can be bundled into **`groups`** (`POST /groups` answers the new
-row and its `id`, which every `/groups/{id}` path takes; nesting allowed),
+row and its `id`, which every `/groups/{id}` path, `group_ids` list, and MCP
+`group_id` takes; nesting allowed; `taguru groups --name NAME` looks a group's
+id up by name, like `taguru contexts`),
 and the searches — `POST /recall`, `POST /query`,
 `POST /sources/search` — take `context_ids` / `group_ids` lists to run one
 search across several `contexts` at once, every match tagged with the

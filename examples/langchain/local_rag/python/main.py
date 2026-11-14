@@ -168,13 +168,14 @@ def pdf_to_sections(pdf_path: Path, paper_id: str):
         }
 
 
-def ensure_group(client: Taguru, name: str, description: str, context_ids: list[str]) -> None:
-    """Create the group, or fold new contexts into the existing one. Group
-    names are not unique — creating a name again makes a second group — so a
-    rerun looks the name up first and updates that group by its id. Several
-    groups under the name leave no one group to update, so that stops the run
-    (the retriever would skip the name too). Members are context IDs, never
-    names."""
+def ensure_group(client: Taguru, name: str, description: str, context_ids: list[str]) -> str:
+    """Create the group, or fold new contexts into the existing one, and
+    return its id — the handle every later call holds (the retriever takes
+    group ids, never names). Group names are not unique — creating a name
+    again makes a second group — so a rerun looks the name up once here
+    and keeps the id from then on. Several groups under the name leave no
+    one group to update, so that stops the run. Members are context IDs,
+    never names."""
     existing = [row.id for row in client.groups.iter() if row.name == name]
     if len(existing) > 1:
         raise SystemExit(
@@ -182,9 +183,8 @@ def ensure_group(client: Taguru, name: str, description: str, context_ids: list[
             "(groups.rename) and run again"
         )
     if existing:
-        client.groups.update(existing[0], add_context_ids=context_ids)
-    else:
-        client.groups.create(name, description=description, context_ids=context_ids)
+        return client.groups.update(existing[0], add_context_ids=context_ids).id
+    return client.groups.create(name, description=description, context_ids=context_ids).id
 
 
 def make_llm(fake_responses: list[str]) -> BaseChatModel:
@@ -258,12 +258,18 @@ def main() -> int:
         # Groups hold context ids; this demo's section names are unique, so
         # one directory walk maps them (names are display labels, #965).
         ids_by_name = {row.name: row.id for row in client.contexts.iter()}
-        for paper_id, byline in PAPERS.items():
-            member_ids = [ids_by_name[name] for name in paper_contexts[paper_id]]
-            ensure_group(client, f"paper/{paper_id}", f"{byline}, full paper", member_ids)
+        group_ids = [
+            ensure_group(
+                client,
+                f"paper/{paper_id}",
+                f"{byline}, full paper",
+                [ids_by_name[name] for name in paper_contexts[paper_id]],
+            )
+            for paper_id, byline in PAPERS.items()
+        ]
 
         # -- read: one retriever across both papers' groups, an independent answer model --
-        retriever = TaguruRetriever(client=client, groups=[f"paper/{p}" for p in PAPERS], k=8)
+        retriever = TaguruRetriever(client=client, group_ids=group_ids, k=8)
         answer_llm = make_llm([FAKE_ANSWER])
         chain = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}

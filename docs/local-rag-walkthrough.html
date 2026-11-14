@@ -287,7 +287,9 @@ group: paper/sato2023
       <code>groups.create</code> under a name that already exists makes a second <code>group</code>.
       A rerun looks the name up first and switches to a delta update on that <code>group</code>'s id.
       Several <code>groups</code> under the name leave no one <code>group</code> to update, so the
-      script stops there instead of picking one:
+      script stops there instead of picking one. Either way <code>ensure_group</code> hands back the
+      <code>group</code>'s id — the handle the retriever takes below, since names are never accepted
+      where an id is expected (<code>taguru groups --name NAME</code> looks one up from a shell):
     </p>
     <pre><code><span class="k">from</span> taguru <span class="k">import</span> Taguru
 
@@ -298,9 +300,8 @@ client = Taguru()
     <span class="k">if</span> len(existing) &gt; 1:
         <span class="k">raise</span> SystemExit(f<span class="s">"{len(existing)} groups are named {name!r}; rename them apart"</span>)
     <span class="k">if</span> existing:
-        client.groups.update(existing[0], add_context_ids=context_ids)
-    <span class="k">else</span>:
-        client.groups.create(name, description=description, context_ids=context_ids)</code></pre>
+        <span class="k">return</span> client.groups.update(existing[0], add_context_ids=context_ids).id
+    <span class="k">return</span> client.groups.create(name, description=description, context_ids=context_ids).id</code></pre>
     <p>
       <code>context</code> creation gets the same idempotence for free from <code>TaguruIngester</code>
       itself — <code>create_context=True</code> stamps a create block that only takes effect
@@ -339,8 +340,9 @@ section_contexts = []
 
 <span class="c"># groups hold context ids, never names: map this demo's (unique) section names once</span>
 ids_by_name = {row.name: row.id <span class="k">for</span> row <span class="k">in</span> client.contexts.iter()}
-ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka et al. 2024, full paper"</span>,
-             [ids_by_name[name] <span class="k">for</span> name <span class="k">in</span> section_contexts])</code></pre>
+tanaka2024 = ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka et al. 2024, full paper"</span>,
+                          [ids_by_name[name] <span class="k">for</span> name <span class="k">in</span> section_contexts])
+<span class="c"># ... and sato2023 = ensure_group("paper/sato2023", ...) the same way</span></code></pre>
     <p>
       <code>metadata["source"]</code> is the retract-then-apply idempotency unit —
       <code>tanaka2024/3</code> here — chosen by this pipeline, not handed out by the server.
@@ -353,13 +355,13 @@ ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka 
   </section>
 
   <section id="retrieve">
-    <h2>One retriever, both papers, named by <code>group</code></h2>
-    <p class="section-sub">No super-<code>context</code> was ever created — the <code>group</code> names in <code>groups=</code> are the entire cross-paper search target.</p>
+    <h2>One retriever, both papers, named by <code>group</code> id</h2>
+    <p class="section-sub">No super-<code>context</code> was ever created — the two <code>group</code> ids in <code>group_ids=</code> are the entire cross-paper search target.</p>
     <pre><code><span class="k">from</span> taguru_langchain <span class="k">import</span> TaguruRetriever
 
 retriever = TaguruRetriever(
     client=client,
-    groups=[<span class="s">"paper/tanaka2024"</span>, <span class="s">"paper/sato2023"</span>],
+    group_ids=[tanaka2024, sato2023],
     k=<span class="nu">8</span>,
 )
 
