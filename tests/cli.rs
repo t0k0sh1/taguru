@@ -1224,6 +1224,20 @@ fn inspect_fails_a_pre_id_sidecar_with_the_migration_message() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(1), "{stdout}");
     assert!(stdout.contains("records no context id"), "{stdout}");
+    assert!(
+        stdout.contains("carry that stream forward through the builds in between"),
+        "the FAILURE line names the migration: {stdout}"
+    );
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["contexts"][0]["status"], "pre_id_sidecar");
+    let error = report["contexts"][0]["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("carry that stream forward through the builds in between"),
+        "{report}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
