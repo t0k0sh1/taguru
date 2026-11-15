@@ -31,7 +31,7 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
         Some(json!({"query": "精米歩合はどこまで磨く?", "limit": 3})),
     );
     let hit = &page["hits"][0];
-    assert_eq!(hit["source"], "docs/aomine.md");
+    assert_eq!(hit["source_id"], "docs/aomine.md");
     assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     assert!(hit["text"].as_str().unwrap().starts_with("原料米"), "{hit}");
     assert_eq!(hit["lanes"]["bm25"]["rank"], 1, "{hit}");
@@ -100,13 +100,13 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
     let citation = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "docs/aomine.md", "paragraph": 1})),
+        Some(json!({"source_id": "docs/aomine.md", "paragraph": 1})),
     );
     assert_eq!(
         citation["text"], "原料米には山田錦を使い、精米歩合は50パーセントまで磨く。",
         "{citation}"
     );
-    assert_eq!(citation["source"], "docs/aomine.md");
+    assert_eq!(citation["source_id"], "docs/aomine.md");
     let object = citation.as_object().unwrap();
     assert!(
         object.contains_key("section") && citation["section"].is_null(),
@@ -116,6 +116,47 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
         object.contains_key("locator") && citation["locator"].is_null(),
         "locator is present and null, never omitted: {citation}"
     );
+}
+
+/// #1040: the citation body names its source as `source_id`; the old
+/// `{source, paragraph}` body is refused (no compatibility alias), and
+/// the corrective body answers with `source_id` in the response.
+#[test]
+fn citation_refuses_the_old_source_body_and_answers_source_id() {
+    let server = Server::start("citation-source-id");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake")),
+        Some(json!({"passages": {"docs/aomine.md": "一段落だけ。"}})),
+    );
+
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/citations", server.cx("sake")),
+        Some(json!({"source": "docs/aomine.md", "paragraph": 0})),
+    );
+    // Well-formed JSON missing a required field: the server-wide 422
+    // `malformed_request` shape (see errors.rs), not a 400.
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], json!("malformed_request"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("source_id"),
+        "the refusal names the missing field: {body}"
+    );
+
+    let citation = server.ok(
+        "POST",
+        &format!("/contexts/{}/citations", server.cx("sake")),
+        Some(json!({"source_id": "docs/aomine.md", "paragraph": 0})),
+    );
+    assert_eq!(citation["source_id"], "docs/aomine.md", "{citation}");
+    assert_eq!(citation["text"], "一段落だけ。", "{citation}");
+    assert!(citation.get("source").is_none(), "{citation}");
 }
 
 /// A locator (ADR 0007 §7) stored via `store_passages` resolves on
@@ -141,7 +182,7 @@ fn a_locator_stored_via_store_passages_resolves_on_citation() {
     let citation = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "manual.pdf", "paragraph": 1})),
+        Some(json!({"source_id": "manual.pdf", "paragraph": 1})),
     );
     assert_eq!(
         citation["locator"],
@@ -155,7 +196,7 @@ fn a_locator_stored_via_store_passages_resolves_on_citation() {
     let citation0 = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "manual.pdf", "paragraph": 0})),
+        Some(json!({"source_id": "manual.pdf", "paragraph": 0})),
     );
     assert!(citation0["locator"].is_null(), "{citation0}");
 }
@@ -180,7 +221,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "docs/ghost.md", "paragraph": 0})),
+        Some(json!({"source_id": "docs/ghost.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -192,7 +233,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "docs/aomine.md", "paragraph": 9})),
+        Some(json!({"source_id": "docs/aomine.md", "paragraph": 9})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -207,7 +248,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
             "/contexts/{}/citations",
             "00000000-0000-4000-8000-00000000dead"
         ),
-        Some(json!({"source": "docs/aomine.md", "paragraph": 0})),
+        Some(json!({"source_id": "docs/aomine.md", "paragraph": 0})),
     );
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["status"], json!("error"), "{body}");
@@ -243,7 +284,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
     let before = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc-sections", "paragraph": 0})),
+        Some(json!({"source_id": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
     assert!(
@@ -254,7 +295,7 @@ fn citation_resolves_the_section_governing_its_paragraph() {
     let after = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc-sections", "paragraph": 1})),
+        Some(json!({"source_id": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
     assert_eq!(after["section"], json!("沿革"), "{after}");
@@ -397,7 +438,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
     let before = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc-sections", "paragraph": 0})),
+        Some(json!({"source_id": "doc-sections", "paragraph": 0})),
     );
     assert_eq!(before["text"], "蔵の杜氏は高瀬。", "{before}");
     assert!(
@@ -408,7 +449,7 @@ fn a_section_stored_via_store_passages_resolves_on_citation() {
     let after = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc-sections", "paragraph": 1})),
+        Some(json!({"source_id": "doc-sections", "paragraph": 1})),
     );
     assert_eq!(after["text"], "創業は1907年。", "{after}");
     assert_eq!(after["section"], json!("沿革"), "{after}");
@@ -553,7 +594,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     );
     assert_eq!(page["hits"].as_array().unwrap().len(), 1, "{page}");
     let hit = &page["hits"][0];
-    assert_eq!(hit["source"], "docs/apple.md");
+    assert_eq!(hit["source_id"], "docs/apple.md");
     assert!(hit["lanes"].get("bm25").is_none(), "no shared term: {hit}");
     let cosine = hit["lanes"]["vector"]["score"].as_f64().unwrap();
     assert!((cosine - 0.28).abs() < 1e-4, "{hit}");
@@ -567,7 +608,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
     let explained = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("fruit")),
-        Some(json!({"query": "みかん", "source": "docs/apple.md", "semantic_floor": 0.2})),
+        Some(json!({"query": "みかん", "source_id": "docs/apple.md", "semantic_floor": 0.2})),
     );
     assert_eq!(explained["verdict"], json!("served"), "{explained}");
     assert_eq!(explained["vector"]["ran"], json!(true), "{explained}");
@@ -590,7 +631,7 @@ fn search_semantic_floor_override_rides_every_search_surface() {
         "{across}"
     );
     assert_eq!(
-        across["hits"][0]["source"],
+        across["hits"][0]["source_id"],
         json!("docs/apple.md"),
         "{across}"
     );

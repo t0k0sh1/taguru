@@ -792,7 +792,7 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
         Some(json!({"query": "伏流水", "limit": 3})),
     );
     assert!(!hits["hits"].as_array().unwrap().is_empty(), "{hits}");
-    assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
+    assert_eq!(hits["hits"][0]["source_id"], "第2段落", "{hits}");
 
     // The successor owns the lineage: once every family settles, its
     // own generation completes — the manifest gate in action.
@@ -1048,7 +1048,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         &format!("/contexts/{}/sources/search", replica.cx("sake")),
         Some(json!({"query": "伏流水", "limit": 3})),
     );
-    assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
+    assert_eq!(hits["hits"][0]["source_id"], "第2段落", "{hits}");
     let groups = replica.ok("GET", "/groups", None);
     assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
     // `GET /schema` is a read (ADR 0009 §12.5) — it passes the replica

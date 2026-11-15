@@ -24,7 +24,7 @@ MIXED_LANES_RESULT: dict[str, Any] = {
         {
             "citation": {
                 "section": None,
-                "source": "docs/kura.md",
+                "source_id": "docs/kura.md",
                 "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。",
             },
             "paragraph": 0,
@@ -39,7 +39,7 @@ MIXED_LANES_RESULT: dict[str, Any] = {
                         "count": 1,
                         "paragraph": 0,
                         "section": None,
-                        "source": "docs/kura.md",
+                        "source_id": "docs/kura.md",
                         "weight": 1.0,
                     }
                 ],
@@ -73,7 +73,7 @@ MIXED_LANES_RESULT: dict[str, Any] = {
                 "lanes": {"bm25": {"rank": 1, "score": 0.86304635}},
                 "paragraph": 0,
                 "score": 0.86304635,
-                "source": "docs/kura.md",
+                "source_id": "docs/kura.md",
                 "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。",
             },
         },
@@ -205,7 +205,7 @@ def test_assemble_evidence_decodes_a_minimal_response_with_every_optional_field_
                     "lanes": {"bm25": {"rank": 1, "score": 1.0}},
                     "paragraph": 0,
                     "score": 1.0,
-                    "source": "s",
+                    "source_id": "s",
                     "text": "hello",
                 },
                 # no "corroboration", no "contradicts" — both skipped on the wire.

@@ -19,7 +19,7 @@ const RESOLVE_EXPLANATION = {
 const SEARCH_EXPLANATION = {
   verdict: "no_term_overlap",
   summary: "query says 酒造, the paragraph spells 酒蔵.",
-  source: "docs/aomine.md",
+  source_id: "docs/aomine.md",
   paragraph: 1,
   paragraphs: 3,
   paragraph_named: true,
@@ -66,7 +66,7 @@ describe("resolve/search explain endpoints", () => {
     expect(JSON.parse(seen!.body!)).toEqual({ cue: "杜氏", expected: "杜氏長" });
   });
 
-  it("explainSearchPassages posts query and source, and decodes the lane evidence", async () => {
+  it("explainSearchPassages posts query and source_id, and decodes the lane evidence", async () => {
     let seen: StubRequest | undefined;
     const client = stubClient((req) => {
       seen = req;
@@ -82,7 +82,7 @@ describe("resolve/search explain endpoints", () => {
     expect(seen!.path).toBe("/contexts/aomine/sources/search/explain");
     expect(JSON.parse(seen!.body!)).toEqual({
       query: "青嶺酒造の酒造",
-      source: "docs/aomine.md",
+      source_id: "docs/aomine.md",
       paragraph: 1,
       semantic_floor: 0.2,
     });

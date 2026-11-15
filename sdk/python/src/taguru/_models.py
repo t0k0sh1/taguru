@@ -247,7 +247,7 @@ class Locator:
 class Attribution:
     """One source's contribution to an association. ``weight`` is raw cumulative."""
 
-    source: str
+    source_id: str
     weight: float
     count: int
     paragraph: int | None = None
@@ -681,7 +681,7 @@ class PassageLanes:
 class PassageHit:
     """One paragraph hit from ``search_passages``. ``text`` is that paragraph alone."""
 
-    source: str
+    source_id: str
     paragraph: int
     score: float
     text: str
@@ -880,7 +880,7 @@ class SearchExplanation:
 
     verdict: str
     summary: str
-    source: str
+    source_id: str
     paragraph: int | None = None
     paragraphs: int | None = None
     paragraph_named: bool | None = None
@@ -896,7 +896,7 @@ class Citation:
     """One verbatim paragraph. ``section``/``locator`` are null when absent."""
 
     text: str
-    source: str
+    source_id: str
     section: str | None = None
     locator: Locator | None = None
 

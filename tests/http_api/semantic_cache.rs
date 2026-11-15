@@ -259,7 +259,7 @@ fn a_write_turns_the_claim_stale_and_the_next_fill_recanonicalizes() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|hit| hit["source"] == "docs/news.md"),
+            .any(|hit| hit["source_id"] == "docs/news.md"),
         "the stale fall-through recomputed against the new corpus: {refreshed}"
     );
 

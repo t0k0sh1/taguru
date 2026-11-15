@@ -165,7 +165,7 @@ fn oversized_input_lists_are_refused_before_any_work() {
         ),
         (
             format!("/contexts/{caps}/sources/lookup"),
-            json!({"sources": over.clone()}),
+            json!({"source_ids": over.clone()}),
         ),
     ] {
         let path = path.as_str();

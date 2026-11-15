@@ -171,7 +171,7 @@
       at the same time, the original text itself is registered with the sources API
       (source id → passage). The server splits the passage into paragraphs at blank-line
       boundaries, and every association's attribution can point at a paragraph via
-      <code>source</code> and <code>paragraph</code> — which is what lets the <code>citations</code>
+      <code>source_id</code> and <code>paragraph</code> — which is what lets the <code>citations</code>
       API pull back the original sentence for verification. Give paragraphs a
       <code>section</code> (heading) and the resolved section name rides along on the
       attributions of every graph read. A paragraph can also carry a typed

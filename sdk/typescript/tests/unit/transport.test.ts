@@ -657,8 +657,8 @@ describe("retrieve loop", () => {
     weight: 2.0,
     count: 2,
     attributions: [
-      { source: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
-      { source: "unstored.md", weight: 1.0, count: 1, paragraph: 0, section: null },
+      { source_id: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
+      { source_id: "unstored.md", weight: 1.0, count: 1, paragraph: 0, section: null },
     ],
   };
 
@@ -683,10 +683,10 @@ describe("retrieve loop", () => {
         });
       }
       if (req.path.endsWith("/citations")) {
-        if (body["source"] === "unstored.md") {
+        if (body["source_id"] === "unstored.md") {
           return errBody(404, "no stored passage");
         }
-        return okBody({ text: "杜氏は高瀬。", source: body["source"], section: "人物" });
+        return okBody({ text: "杜氏は高瀬。", source_id: body["source_id"], section: "人物" });
       }
       if (req.path.endsWith("/sources/search")) {
         return okBody({
@@ -704,7 +704,7 @@ describe("retrieve loop", () => {
           },
           hits: [
             {
-              source: "docs/aomine.md",
+              source_id: "docs/aomine.md",
               paragraph: 1,
               score: 3.2,
               text: "杜氏は高瀬。",

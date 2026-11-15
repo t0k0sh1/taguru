@@ -351,7 +351,7 @@ fn full_retrieval_loop_over_http() {
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["第2段落", "第9段落"]})),
+        Some(json!({"source_ids": ["第2段落", "第9段落"]})),
     );
     assert!(
         passages["passages"]["第2段落"]
@@ -365,7 +365,7 @@ fn full_retrieval_loop_over_http() {
         &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "仕込み水はどこの水?"})),
     );
-    assert_eq!(hits["hits"][0]["source"], json!("第2段落"));
+    assert_eq!(hits["hits"][0]["source_id"], json!("第2段落"));
     let retracted = server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),

@@ -1333,9 +1333,9 @@ class Context:
         result = self._post("/sources", body)
         return decode(StoredPassages, result)  # type: ignore[no-any-return]
 
-    def lookup_passages(self, sources: Sequence[str]) -> PassageLookup:
+    def lookup_passages(self, source_ids: Sequence[str]) -> PassageLookup:
         """Fetch whole passages by source id."""
-        result = self._post("/sources/lookup", {"sources": list(sources)})
+        result = self._post("/sources/lookup", {"source_ids": list(source_ids)})
         return decode(PassageLookup, result)  # type: ignore[no-any-return]
 
     def search_passages(
@@ -1420,7 +1420,7 @@ class Context:
     def explain_search_passages(
         self,
         query: str,
-        source: str,
+        source_id: str,
         *,
         paragraph: int | None = None,
         limit: int | None = None,
@@ -1429,7 +1429,7 @@ class Context:
         since: int | None = None,
         until: int | None = None,
     ) -> SearchExplanation:
-        """Why ``source`` did (or didn't) appear for ``query``. ``paragraph``
+        """Why ``source_id`` did (or didn't) appear for ``query``. ``paragraph``
         (0-based) picks which of the source's paragraphs to account for;
         omitted means its best showing. Pass the ``semantic_floor`` — and
         the ``tags``/``since``/``until`` filter — of the search call being
@@ -1439,7 +1439,7 @@ class Context:
         body = drop_none(
             {
                 "query": query,
-                "source": source,
+                "source_id": source_id,
                 "paragraph": paragraph,
                 "limit": limit,
                 "semantic_floor": semantic_floor,
@@ -1493,9 +1493,9 @@ class Context:
             # shorten it while later rows remain, so page until an empty page.
             after = page.entries[-1].id
 
-    def cite_passage(self, source: str, paragraph: int) -> Citation:
-        """One verbatim paragraph by source and paragraph locator."""
-        result = self._post("/citations", {"source": source, "paragraph": paragraph})
+    def cite_passage(self, source_id: str, paragraph: int) -> Citation:
+        """One verbatim paragraph by source id and paragraph locator."""
+        result = self._post("/citations", {"source_id": source_id, "paragraph": paragraph})
         return decode(Citation, result)  # type: ignore[no-any-return]
 
     # -- aliases -----------------------------------------------------------------
@@ -1915,7 +1915,7 @@ class Context:
                         for attribution in association.attributions:
                             if attribution.paragraph is None:
                                 continue
-                            key = (attribution.source, attribution.paragraph)
+                            key = (attribution.source_id, attribution.paragraph)
                             if key not in citations and key not in wanted:
                                 wanted.append(key)
                     for source, paragraph in wanted:

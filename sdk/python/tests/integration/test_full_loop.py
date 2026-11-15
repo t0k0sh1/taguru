@@ -122,7 +122,7 @@ def test_associations_accumulate_weight_and_validate(client: Taguru, fresh_name:
     # Two 1.0 assertions: averaged weight 1.0, count 2, two attributions.
     assert match.weight == 1.0
     assert match.count == 2
-    assert {a.source for a in match.attributions} == {"a", "b"}
+    assert {a.source_id for a in match.attributions} == {"a", "b"}
 
     with pytest.raises(ValidationError) as bad_weight:
         ctx.add_associations([{**op, "weight": float("1e300")}])
@@ -277,7 +277,7 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
     page = ctx.search_passages("杜氏は高瀬である", limit=3)
     assert page.hits
     top = page.hits[0]
-    assert top.source == "docs/aomine.md"
+    assert top.source_id == "docs/aomine.md"
     assert "高瀬" in top.text
     assert top.lanes.bm25 is not None  # lexical lane evidence
     assert top.lanes.vector is None  # no embedding provider in tests
@@ -289,7 +289,7 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
 
     cited = ctx.cite_passage("docs/aomine.md", 1)
     assert "杜氏は高瀬" in cited.text
-    assert cited.source == "docs/aomine.md"
+    assert cited.source_id == "docs/aomine.md"
     with pytest.raises(NotFoundError):
         ctx.cite_passage("missing.md", 0)
     with pytest.raises(NotFoundError):
@@ -323,7 +323,7 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
     assert entries["b.md"].tags == [] and entries["b.md"].date is None
 
     page = ctx.search_passages("共通語の資料", tags=["酒"])
-    assert {hit.source for hit in page.hits} == {"a.md"}
+    assert {hit.source_id for hit in page.hits} == {"a.md"}
     plan = page.plan.contexts[0].filter
     assert plan is not None
     assert (plan.eligible_sources, plan.total_sources) == (1, 2)
@@ -332,7 +332,7 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
     # The half-open window over date ?? stored_at: b.md's only
     # timestamp is the stamp (now), far past the fixture date.
     dated = ctx.search_passages("共通語の資料", until=1500)
-    assert {hit.source for hit in dated.hits} == {"a.md"}
+    assert {hit.source_id for hit in dated.hits} == {"a.md"}
     unfiltered = ctx.search_passages("共通語の資料")
     assert len(unfiltered.hits) == 2
     assert unfiltered.plan.contexts[0].filter is None
@@ -341,7 +341,7 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
     assert explained.verdict == "filtered_out"
 
     cross = client.search_passages("共通語の資料", context_ids=[context_id], tags=["酒"])
-    assert {hit.source for hit in cross.hits} == {"a.md"}
+    assert {hit.source_id for hit in cross.hits} == {"a.md"}
     cross_plan = cross.plan.contexts[0].filter
     assert cross_plan is not None and cross_plan.eligible_sources == 1
     client.contexts.delete(context_id)

@@ -260,9 +260,9 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         .expect("tools/list must advertise cite_passage");
     assert_eq!(
         manifest["inputSchema"]["required"],
-        json!(["context_id", "source"])
+        json!(["context_id", "source_id"])
     );
-    assert!(manifest["inputSchema"]["properties"]["source"].is_object());
+    assert!(manifest["inputSchema"]["properties"]["source_id"].is_object());
     assert!(manifest["inputSchema"]["properties"]["paragraph"].is_object());
     // Deprecated alias for pre-#35 callers: still advertised, so the
     // schema and `paragraph`/`index` `anyOf` requirement agree that
@@ -278,12 +278,12 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context_id": server.cx("sake"), "source": "docs/aomine.md", "paragraph": 1}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source_id": "docs/aomine.md", "paragraph": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(reply["result"].get("isError").is_none(), "{reply}");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("\"source\":\"docs/aomine.md\""), "{text}");
+    assert!(text.contains("\"source_id\":\"docs/aomine.md\""), "{text}");
     assert!(text.contains("\"section\":null"), "{text}");
 
     // Same failure convention as the `describe` case above: the tool
@@ -293,7 +293,7 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context_id": server.cx("sake"), "source": "docs/ghost.md", "paragraph": 0}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source_id": "docs/ghost.md", "paragraph": 0}}})),
     );
     assert_eq!(status, 200);
     assert_eq!(failed["result"]["isError"], true);
@@ -307,12 +307,12 @@ fn cite_passage_tool_executes_end_to_end_through_mcp() {
         "/mcp",
         Some(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                     "params": {"name": "cite_passage",
-                               "arguments": {"context_id": server.cx("sake"), "source": "docs/aomine.md", "index": 1}}})),
+                               "arguments": {"context_id": server.cx("sake"), "source_id": "docs/aomine.md", "index": 1}}})),
     );
     assert_eq!(status, 200);
     assert!(via_index["result"].get("isError").is_none(), "{via_index}");
     let text = via_index["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("\"source\":\"docs/aomine.md\""), "{text}");
+    assert!(text.contains("\"source_id\":\"docs/aomine.md\""), "{text}");
 }
 
 /// issue #182: a rejected ingestion tool call carries the same

@@ -649,7 +649,7 @@ fn resolve_citations(
                     (source.clone(), paragraph),
                     Citation {
                         text,
-                        source,
+                        source_id: source,
                         section,
                         locator,
                     },

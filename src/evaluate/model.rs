@@ -359,7 +359,7 @@ pub(crate) struct HitLocator {
 impl From<PassageHit> for HitLocator {
     fn from(hit: PassageHit) -> Self {
         HitLocator {
-            source: hit.source,
+            source: hit.source_id,
             paragraph: hit.paragraph,
             score: hit.score,
             lanes: hit.lanes,
@@ -378,7 +378,7 @@ impl From<PassageHit> for HitLocator {
 /// names, and its own `.paragraph`).
 fn evidence_item_locator(item: &EvidenceItem) -> Option<(String, u32)> {
     if let Some(passage) = &item.passage {
-        return Some((passage.source.clone(), passage.paragraph));
+        return Some((passage.source_id.clone(), passage.paragraph));
     }
     if let Some(community) = &item.community {
         return Some((

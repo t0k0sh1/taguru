@@ -1389,8 +1389,8 @@ export class Context {
   }
 
   /** Fetch whole passages by source id. */
-  async lookupPassages(sources: string[]): Promise<PassageLookup> {
-    const result = await this.post("/sources/lookup", { sources });
+  async lookupPassages(sourceIds: string[]): Promise<PassageLookup> {
+    const result = await this.post("/sources/lookup", { source_ids: sourceIds });
     return result as PassageLookup;
   }
 
@@ -1471,7 +1471,7 @@ export class Context {
   }
 
   /**
-   * Why `source` did (or didn't) surface for `query`. Omit `paragraph` to
+   * Why `sourceId` did (or didn't) surface for `query`. Omit `paragraph` to
    * explain the source's best showing; name one (0-based) to interrogate it.
    * Pass the `semantic_floor` — and the `tags`/`since`/`until` filter — of
    * the search call being explained, or the explanation accounts for a call
@@ -1480,7 +1480,7 @@ export class Context {
    */
   async explainSearchPassages(
     query: string,
-    source: string,
+    sourceId: string,
     options: {
       paragraph?: number;
       limit?: number;
@@ -1494,7 +1494,7 @@ export class Context {
       "/sources/search/explain",
       dropUndefined({
         query,
-        source,
+        source_id: sourceId,
         paragraph: options.paragraph,
         limit: options.limit,
         semantic_floor: options.semantic_floor,
@@ -1551,9 +1551,9 @@ export class Context {
     }
   }
 
-  /** One verbatim paragraph by source and paragraph locator. */
-  async citePassage(source: string, paragraph: number): Promise<Citation> {
-    const result = await this.post("/citations", { source, paragraph });
+  /** One verbatim paragraph by source id and paragraph locator. */
+  async citePassage(sourceId: string, paragraph: number): Promise<Citation> {
+    const result = await this.post("/citations", { source_id: sourceId, paragraph });
     return result as Citation;
   }
 
@@ -2053,10 +2053,10 @@ export class Context {
               if (attribution.paragraph === null) {
                 continue;
               }
-              const key = citationKey(attribution.source, attribution.paragraph);
+              const key = citationKey(attribution.source_id, attribution.paragraph);
               if (!wantedKeys.has(key)) {
                 wantedKeys.add(key);
-                wanted.push([attribution.source, attribution.paragraph]);
+                wanted.push([attribution.source_id, attribution.paragraph]);
               }
             }
           }

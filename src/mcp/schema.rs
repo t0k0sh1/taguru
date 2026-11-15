@@ -293,9 +293,9 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context_id": context,
-                    "sources": { "type": "array", "items": { "type": "string" } }
+                    "source_ids": { "type": "array", "items": { "type": "string" }, "description": "source ids — the source_id of an attribution or hit" }
                 }),
-                &["context_id", "sources"],
+                &["context_id", "source_ids"],
             ),
         ),
         (
@@ -697,7 +697,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context_id": context,
                     "query": { "type": "string" },
-                    "source": { "type": "string", "description": "the source you expected among the hits" },
+                    "source_id": { "type": "string", "description": "the source you expected among the hits" },
                     "paragraph": { "type": "integer", "description": "zero-based paragraph position; omitted picks the source's best showing" },
                     "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" },
                     "semantic_floor": { "type": "number", "description": "the floor override of the search call being explained — pass the same value" },
@@ -705,7 +705,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "since": { "type": "integer", "minimum": 0, "description": "the time window's inclusive start (epoch seconds) of the search call being explained" },
                     "until": { "type": "integer", "minimum": 0, "description": "the time window's exclusive end (epoch seconds) of the search call being explained" }
                 }),
-                &["context_id", "query", "source"],
+                &["context_id", "query", "source_id"],
             ),
         ),
         (
@@ -715,11 +715,11 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "context_id": context,
-                    "source": { "type": "string" },
+                    "source_id": { "type": "string", "description": "the source id — an attribution's or hit's source_id" },
                     "paragraph": { "type": "integer", "description": "zero-based paragraph position" },
                     "index": { "type": "integer", "description": "deprecated alias for `paragraph`; kept for pre-#35 callers, prefer `paragraph`" }
                 },
-                "required": ["context_id", "source"],
+                "required": ["context_id", "source_id"],
                 "anyOf": [
                     { "required": ["paragraph"] },
                     { "required": ["index"] }

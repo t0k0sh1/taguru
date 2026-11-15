@@ -441,7 +441,7 @@ mod tests {
             ("rename_context", "to"),
             ("rename_group", "to"),
             ("store_passages", "passages"),
-            ("lookup_passages", "sources"),
+            ("lookup_passages", "source_ids"),
             ("resolve", "cue"),
             ("resolve_label", "cue"),
             ("explain_resolve", "cue"),
@@ -460,8 +460,8 @@ mod tests {
             ("retract_association", "object"),
             ("search_passages", "query"),
             ("explain_search", "query"),
-            ("explain_search", "source"),
-            ("cite_passage", "source"),
+            ("explain_search", "source_id"),
+            ("cite_passage", "source_id"),
             ("audit_coverage", "origins"),
             ("put_schema", "type"),
             ("put_schema", "mode"),
@@ -508,7 +508,7 @@ mod tests {
     fn cite_passage_without_paragraph_or_index_is_refused() {
         let routed = route_tool(
             "cite_passage",
-            &json!({"context_id": "sake", "source": "docs/aomine.md"}),
+            &json!({"context_id": "sake", "source_id": "docs/aomine.md"}),
         );
         assert_eq!(
             routed,
@@ -887,19 +887,29 @@ mod tests {
 
     #[test]
     fn pick_with_alias_falls_back_to_the_old_key_name() {
-        let arguments = json!({"source": "s", "index": 3});
+        let arguments = json!({"source_id": "s", "index": 3});
         assert_eq!(
-            pick_with_alias(&arguments, &["source", "paragraph"], "paragraph", "index"),
-            json!({"source": "s", "paragraph": 3})
+            pick_with_alias(
+                &arguments,
+                &["source_id", "paragraph"],
+                "paragraph",
+                "index"
+            ),
+            json!({"source_id": "s", "paragraph": 3})
         );
     }
 
     #[test]
     fn pick_with_alias_prefers_the_canonical_key_when_both_are_present() {
-        let arguments = json!({"source": "s", "paragraph": 1, "index": 99});
+        let arguments = json!({"source_id": "s", "paragraph": 1, "index": 99});
         assert_eq!(
-            pick_with_alias(&arguments, &["source", "paragraph"], "paragraph", "index"),
-            json!({"source": "s", "paragraph": 1})
+            pick_with_alias(
+                &arguments,
+                &["source_id", "paragraph"],
+                "paragraph",
+                "index"
+            ),
+            json!({"source_id": "s", "paragraph": 1})
         );
     }
 
@@ -907,14 +917,14 @@ mod tests {
     fn cite_passage_routes_to_the_citations_endpoint() {
         let (method, path, body) = route_tool(
             "cite_passage",
-            &json!({"context_id": "sake", "source": "docs/aomine.md", "paragraph": 1}),
+            &json!({"context_id": "sake", "source_id": "docs/aomine.md", "paragraph": 1}),
         )
         .unwrap();
         assert_eq!(method, "POST");
         assert_eq!(path, "/contexts/sake/citations");
         assert_eq!(
             body,
-            Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
+            Some(json!({"source_id": "docs/aomine.md", "paragraph": 1}))
         );
     }
 
@@ -925,7 +935,7 @@ mod tests {
     fn explain_tools_route_beside_their_parents() {
         let (method, path, body) = route_tool(
             "explain_search",
-            &json!({"context_id": "sake", "query": "酒造", "source": "docs/kura.md",
+            &json!({"context_id": "sake", "query": "酒造", "source_id": "docs/kura.md",
                     "paragraph": 1, "limit": 5, "semantic_floor": 0.2}),
         )
         .unwrap();
@@ -934,7 +944,7 @@ mod tests {
         assert_eq!(
             body,
             Some(
-                json!({"query": "酒造", "source": "docs/kura.md", "paragraph": 1, "limit": 5,
+                json!({"query": "酒造", "source_id": "docs/kura.md", "paragraph": 1, "limit": 5,
                         "semantic_floor": 0.2})
             )
         );
@@ -968,12 +978,12 @@ mod tests {
     fn cite_passage_accepts_the_pre_35_index_argument_name() {
         let (_, _, body) = route_tool(
             "cite_passage",
-            &json!({"context_id": "sake", "source": "docs/aomine.md", "index": 1}),
+            &json!({"context_id": "sake", "source_id": "docs/aomine.md", "index": 1}),
         )
         .unwrap();
         assert_eq!(
             body,
-            Some(json!({"source": "docs/aomine.md", "paragraph": 1}))
+            Some(json!({"source_id": "docs/aomine.md", "paragraph": 1}))
         );
     }
 
@@ -992,7 +1002,7 @@ mod tests {
             schema["properties"]["index"]["type"] == "integer",
             "schema should advertise `index` as an integer: {schema}"
         );
-        assert_eq!(schema["required"], json!(["context_id", "source"]));
+        assert_eq!(schema["required"], json!(["context_id", "source_id"]));
         assert_eq!(
             schema["anyOf"],
             json!([{ "required": ["paragraph"] }, { "required": ["index"] }])
@@ -1560,14 +1570,14 @@ mod tests {
                             "subject": "Tokyo", "label": "capital_of", "object": "Japan",
                             "weight": 1.0, "count": 1,
                             "attributions": [
-                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                                {"source_id": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
                             ]
                         }
                     }]
                 })))
             } else if path.ends_with("/citations") {
                 Ok(envelope(
-                    json!({"text": "Tokyo is the capital.", "source": "doc1", "section": null}),
+                    json!({"text": "Tokyo is the capital.", "source_id": "doc1", "section": null}),
                 ))
             } else {
                 panic!("unexpected call: {path}");
@@ -1583,9 +1593,9 @@ mod tests {
         assert_eq!(
             result["citations"],
             json!([{
-                "source": "doc1",
+                "source_id": "doc1",
                 "paragraph": 0,
-                "citation": {"text": "Tokyo is the capital.", "source": "doc1", "section": null},
+                "citation": {"text": "Tokyo is the capital.", "source_id": "doc1", "section": null},
             }])
         );
         assert_eq!(result["passage_hits"], json!([]));
@@ -1635,16 +1645,16 @@ mod tests {
             "subject": "Tokyo", "label": "capital_of", "object": "Japan",
             "weight": 1.0, "count": 1,
             "attributions": [
-                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0},
-                {"source": "doc2", "weight": 1.0, "count": 1, "paragraph": 0},
-                {"source": "doc3", "weight": 1.0, "count": 1, "paragraph": 0},
+                {"source_id": "doc1", "weight": 1.0, "count": 1, "paragraph": 0},
+                {"source_id": "doc2", "weight": 1.0, "count": 1, "paragraph": 0},
+                {"source_id": "doc3", "weight": 1.0, "count": 1, "paragraph": 0},
             ]
         });
         let activate_body = envelope(json!({
             "total": 1,
             "matches": [{"strength": 1.0, "path": ["Tokyo"], "association": association}]
         }));
-        let citation_body = envelope(json!({"text": "x", "source": "doc", "section": null}));
+        let citation_body = envelope(json!({"text": "x", "source_id": "doc", "section": null}));
         // One byte short of resolve + activate + one citation: the first
         // citation's response is what tips the scale, not a fourth call.
         let budget = resolve_body.len() + activate_body.len() + citation_body.len() - 1;
@@ -1802,7 +1812,7 @@ mod tests {
                             "subject": "Tokyo", "label": "capital_of", "object": "Japan",
                             "weight": 1.0, "count": 1,
                             "attributions": [
-                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                                {"source_id": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
                             ]
                         }
                     }]
@@ -1838,7 +1848,7 @@ mod tests {
                             "subject": "Tokyo", "label": "capital_of", "object": "Japan",
                             "weight": 1.0, "count": 1,
                             "attributions": [
-                                {"source": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
+                                {"source_id": "doc1", "weight": 1.0, "count": 1, "paragraph": 0}
                             ]
                         }
                     }]
@@ -1923,7 +1933,7 @@ mod tests {
                         "vector": {"ran": false, "reason": "no embedding provider is configured"}
                     }}]},
                     "hits": [
-                        {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                        {"source_id": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
                     ]
                 })))
             } else {
@@ -1954,7 +1964,7 @@ mod tests {
                 Ok(envelope(json!([])))
             } else if path.ends_with("/sources/search") {
                 Ok(envelope(json!([
-                    {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                    {"source_id": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
                 ])))
             } else {
                 panic!("unexpected call: {path}");
@@ -1992,7 +2002,7 @@ mod tests {
                 Ok(envelope(json!({
                     "plan": {"contexts": []},
                     "hits": [
-                        {"source": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
+                        {"source_id": "doc1", "paragraph": 0, "score": 0.9, "text": "...", "lanes": {}}
                     ]
                 })))
             } else {

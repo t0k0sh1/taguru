@@ -433,7 +433,7 @@ fn retrieve_inner(
                 .flatten()
             {
                 let (Some(source), Some(paragraph)) = (
-                    attribution.get("source").and_then(Value::as_str),
+                    attribution.get("source_id").and_then(Value::as_str),
                     attribution.get("paragraph").and_then(Value::as_u64),
                 ) else {
                     continue;
@@ -452,10 +452,10 @@ fn retrieve_inner(
         for (source, paragraph) in wanted {
             match call_tool(
                 "cite_passage",
-                json!({ "context_id": context, "source": source, "paragraph": paragraph }),
+                json!({ "context_id": context, "source_id": source, "paragraph": paragraph }),
             ) {
                 Ok(response) => citations.push(json!({
-                    "source": source,
+                    "source_id": source,
                     "paragraph": paragraph,
                     "citation": response.get("result").cloned().unwrap_or(Value::Null),
                 })),

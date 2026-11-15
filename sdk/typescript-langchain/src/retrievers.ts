@@ -342,10 +342,10 @@ function wantedCitations(activations: Activation[]): Array<[string, number]> {
       if (attribution.paragraph === null) {
         continue;
       }
-      const key = citationKey(attribution.source, attribution.paragraph);
+      const key = citationKey(attribution.source_id, attribution.paragraph);
       if (!seen.has(key)) {
         seen.add(key);
-        wanted.push([attribution.source, attribution.paragraph]);
+        wanted.push([attribution.source_id, attribution.paragraph]);
       }
     }
   }
@@ -388,9 +388,9 @@ function graphDocuments(
       if (attribution.paragraph === null) {
         continue;
       }
-      const key = citationKey(attribution.source, attribution.paragraph);
+      const key = citationKey(attribution.source_id, attribution.paragraph);
       if (citations.get(key)) {
-        located.push([attribution.source, attribution.paragraph]);
+        located.push([attribution.source_id, attribution.paragraph]);
       }
     }
     if (located.length > 0) {
@@ -420,7 +420,7 @@ function graphDocuments(
       }
     } else if (includeGraphOnlyFacts) {
       // Real, retrievable knowledge with no verbatim excerpt to ground it in.
-      const bestSource = association.attributions[0]?.source ?? null;
+      const bestSource = association.attributions[0]?.source_id ?? null;
       ordered.push(
         new Document({
           pageContent: `${association.subject} ${association.label} ${association.object}`,
@@ -478,7 +478,7 @@ function textDocument(hit: PassageHit, context: string | undefined): Document {
     pageContent: hit.text,
     metadata: {
       context: context ?? null,
-      source: hit.source,
+      source: hit.source_id,
       paragraph: hit.paragraph,
       section: null,
       lane: "text",
@@ -526,7 +526,7 @@ function mergeLanes(
 
   textHits.forEach((hit, rank) => {
     const context = hitContext(hit, fallbackContext);
-    const key = `${context ?? ""}\u0000${citationKey(hit.source, hit.paragraph)}`;
+    const key = `${context ?? ""}\u0000${citationKey(hit.source_id, hit.paragraph)}`;
     const existing = scored.get(key);
     if (existing === undefined) {
       scored.set(key, { score: rrf(rank), document: textDocument(hit, context) });

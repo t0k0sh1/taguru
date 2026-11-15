@@ -99,7 +99,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     let looked_up = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("perm")),
-        Some(json!({"sources": ["session:claude:a/note"]})),
+        Some(json!({"source_ids": ["session:claude:a/note"]})),
     );
     assert_eq!(
         looked_up["passages"]["session:claude:a/note"],
@@ -129,7 +129,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         .as_array()
         .expect("attributions");
     assert_eq!(attributions.len(), 1, "{runner}");
-    assert_eq!(attributions[0]["source"], json!("session:claude:b"));
+    assert_eq!(attributions[0]["source_id"], json!("session:claude:b"));
     let stayed = server.ok(
         "POST",
         &format!("/contexts/{}/query", server.cx("perm")),

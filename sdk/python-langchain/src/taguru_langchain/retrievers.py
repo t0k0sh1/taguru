@@ -495,7 +495,7 @@ def _wanted_citations(activations: list[Activation]) -> list[tuple[str, int]]:
         for attribution in activation.association.attributions:
             if attribution.paragraph is None:
                 continue
-            key = (attribution.source, attribution.paragraph)
+            key = (attribution.source_id, attribution.paragraph)
             if key not in wanted:
                 wanted.append(key)
     return wanted
@@ -531,7 +531,7 @@ def _graph_documents(
         for attribution in association.attributions:
             if attribution.paragraph is None:
                 continue
-            key = (attribution.source, attribution.paragraph)
+            key = (attribution.source_id, attribution.paragraph)
             if citations.get(key) is not None:
                 located.append(key)
         if located:
@@ -558,7 +558,9 @@ def _graph_documents(
         elif include_graph_only_facts:
             # Real, retrievable knowledge with no verbatim excerpt to ground
             # it in — a triple is already a composed, atomic fact.
-            best_source = association.attributions[0].source if association.attributions else None
+            best_source = (
+                association.attributions[0].source_id if association.attributions else None
+            )
             ordered.append(
                 Document(
                     page_content=f"{association.subject} {association.label} {association.object}",
@@ -604,7 +606,7 @@ def _text_document(hit: PassageHit, context: str | None) -> Document:
         page_content=hit.text,
         metadata={
             "context": context,
-            "source": hit.source,
+            "source": hit.source_id,
             "paragraph": hit.paragraph,
             "section": None,
             "lane": "text",
@@ -637,7 +639,7 @@ def _merge_lanes(
 
     for rank, hit in enumerate(text_hits):
         context = _hit_context(hit, fallback_context)
-        key = (context, hit.source, hit.paragraph)
+        key = (context, hit.source_id, hit.paragraph)
         existing = scored.get(key)
         if existing is None:
             scored[key] = (_rrf(rank), _text_document(hit, context))

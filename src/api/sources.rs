@@ -29,7 +29,7 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 pub struct LookupPassagesRequest {
-    pub sources: Vec<String>,
+    pub source_ids: Vec<String>,
 }
 
 /// The `empty`/`oversized` gate every source-shaped field goes through
@@ -62,11 +62,11 @@ pub async fn lookup_passages(
     let started_at = Instant::now();
     // Each requested source returns its whole passage: the response
     // scales with this list, so the list itself is what gets bounded.
-    if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
+    if let Some(refusal) = overlong("source_ids", request.source_ids.len(), started_at) {
         return refusal;
     }
-    for source in &request.sources {
-        if let Some(refusal) = invalid_source("source", source, started_at) {
+    for source in &request.source_ids {
+        if let Some(refusal) = invalid_source("source_ids", source, started_at) {
             return refusal;
         }
     }
@@ -76,7 +76,7 @@ pub async fn lookup_passages(
     // A residency's first passage access loads the store from disk
     // (sources.json/passages.bin/WAL replay); keep that off the async
     // worker like every other passage-search entry.
-    match tokio::task::block_in_place(|| state.lookup_passages(&id, &request.sources)) {
+    match tokio::task::block_in_place(|| state.lookup_passages(&id, &request.source_ids)) {
         None => not_found(&id, started_at),
         Some(Ok((passages, missing))) => {
             state.note_read(&id, passages.is_empty());
@@ -88,7 +88,7 @@ pub async fn lookup_passages(
 
 #[derive(Debug, Deserialize)]
 pub struct CitationRequest {
-    pub source: String,
+    pub source_id: String,
     /// `index` is the pre-#35 name; still accepted so direct HTTP callers
     /// who haven't migrated aren't broken by the rename.
     #[serde(alias = "index")]
@@ -108,7 +108,7 @@ pub struct CitationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Citation {
     pub text: String,
-    pub source: String,
+    pub source_id: String,
     pub section: Option<String>,
     pub locator: Option<crate::passages::Locator>,
 }
@@ -120,7 +120,7 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    if let Some(refusal) = invalid_source("source", &request.source, started_at) {
+    if let Some(refusal) = invalid_source("source_id", &request.source_id, started_at) {
         return refusal;
     }
     if deadline.expired() {
@@ -128,14 +128,15 @@ pub async fn citation(
     }
     // Same cold-load path as lookup_passages; keep it off the async
     // worker.
-    match tokio::task::block_in_place(|| state.citation(&id, &request.source, request.paragraph)) {
+    match tokio::task::block_in_place(|| state.citation(&id, &request.source_id, request.paragraph))
+    {
         None => not_found(&id, started_at),
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(CitationLookup::UnknownSource)) => {
             state.note_read(&id, true);
             error(
                 ErrorCode::NoSource,
-                format!("source '{}' not found in context '{id}'", request.source),
+                format!("source '{}' not found in context '{id}'", request.source_id),
                 started_at,
             )
         }
@@ -145,7 +146,7 @@ pub async fn citation(
                 ErrorCode::NoParagraph,
                 format!(
                     "paragraph {} out of range for source '{}' in context '{id}'",
-                    request.paragraph, request.source
+                    request.paragraph, request.source_id
                 ),
                 started_at,
             )
@@ -159,7 +160,7 @@ pub async fn citation(
             ok(
                 Citation {
                     text,
-                    source: request.source,
+                    source_id: request.source_id,
                     section,
                     locator,
                 },
@@ -579,7 +580,7 @@ impl<'a> PassageKeyParams<'a> {
 /// reading LLM, the same posture as resolve's tiers.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PassageHit {
-    pub source: String,
+    pub source_id: String,
     pub paragraph: u32,
     pub score: f32,
     pub text: String,
@@ -611,7 +612,7 @@ impl LaneEvidence {
 impl From<crate::registry::PassageSearchHit> for PassageHit {
     fn from(hit: crate::registry::PassageSearchHit) -> Self {
         Self {
-            source: hit.source,
+            source_id: hit.source,
             paragraph: hit.index,
             score: hit.score,
             text: hit.text,
@@ -1150,7 +1151,7 @@ pub async fn search_passages(
 pub struct ExplainSearchRequest {
     pub query: String,
     /// The thing the caller expected to see.
-    pub source: String,
+    pub source_id: String,
     /// Which of the source's paragraphs (0-based). Omitted means "its
     /// best showing": the best-ranked paragraph, or the one sharing
     /// the most query terms when nothing ranked.
@@ -1187,7 +1188,7 @@ pub struct SearchExplanation {
     /// excludes it — the search being explained never considered it.
     pub verdict: &'static str,
     pub summary: String,
-    pub source: String,
+    pub source_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1286,7 +1287,7 @@ impl SearchExplanation {
         Self {
             verdict,
             summary,
-            source: source.to_string(),
+            source_id: source.to_string(),
             paragraph: None,
             paragraphs: None,
             paragraph_named: None,
@@ -1310,9 +1311,9 @@ impl SearchExplanation {
                     "source '{}' has no passages in context '{name}' — never stored here, \
                      or stored and later retracted (the store keeps no tombstone history \
                      to tell which)",
-                    request.source
+                    request.source_id
                 ),
-                &request.source,
+                &request.source_id,
             ),
             PassageExplainLookup::IndexOutOfRange { paragraphs } => {
                 let mut explanation = Self::shell(
@@ -1321,10 +1322,10 @@ impl SearchExplanation {
                         "paragraph {} is out of range for source '{}' — it stores {} \
                          paragraph(s), 0-based",
                         request.paragraph.unwrap_or_default(),
-                        request.source,
+                        request.source_id,
                         paragraphs
                     ),
-                    &request.source,
+                    &request.source_id,
                 );
                 explanation.paragraph = request.paragraph;
                 explanation.paragraphs = Some(paragraphs);
@@ -1335,19 +1336,19 @@ impl SearchExplanation {
                 format!(
                     "source '{}' is excluded by the request's source filter (tags/since/until) \
                      — the search being explained never considered it",
-                    request.source
+                    request.source_id
                 ),
-                &request.source,
+                &request.source_id,
             ),
             PassageExplainLookup::NoQueryTerms => Self::shell(
                 "no_query_terms",
                 "the query yields no searchable terms — a search of it answers the empty \
                  list before either lane runs"
                     .to_string(),
-                &request.source,
+                &request.source_id,
             ),
             PassageExplainLookup::Explained(explanation) => {
-                Self::from_explanation(&request.source, *explanation)
+                Self::from_explanation(&request.source_id, *explanation)
             }
         }
     }
@@ -1495,7 +1496,7 @@ impl SearchExplanation {
         Self {
             verdict,
             summary,
-            source: source.to_string(),
+            source_id: source.to_string(),
             paragraph: Some(explanation.paragraph),
             paragraphs: Some(explanation.paragraphs),
             paragraph_named: Some(explanation.paragraph_named),
@@ -1560,7 +1561,7 @@ pub async fn explain_search_passages(
         state.explain_passage_search(
             &id,
             &request.query,
-            &request.source,
+            &request.source_id,
             request.paragraph,
             clamp(request.limit, 5, MAX_MATCH_LIMIT),
             request.semantic_floor,
@@ -2733,7 +2734,7 @@ mod tests {
 
         let request = ExplainSearchRequest {
             query: "AAA".to_string(),
-            source: "a.md".to_string(),
+            source_id: "a.md".to_string(),
             paragraph: None,
             limit: None,
             semantic_floor: None,
@@ -2766,7 +2767,7 @@ mod tests {
 
         let request = ExplainSearchRequest {
             query: "AAA".to_string(),
-            source: "a.md".to_string(),
+            source_id: "a.md".to_string(),
             paragraph: None,
             limit: None,
             semantic_floor: None,
@@ -2935,7 +2936,7 @@ mod tests {
     #[test]
     fn citation_request_accepts_the_pre_35_index_field_name() {
         let request: CitationRequest =
-            serde_json::from_value(serde_json::json!({"source": "s", "index": 3})).unwrap();
+            serde_json::from_value(serde_json::json!({"source_id": "s", "index": 3})).unwrap();
         assert_eq!(request.paragraph, 3);
     }
 
@@ -2946,8 +2947,9 @@ mod tests {
     /// callers get this stricter, but still well-defined, rejection.
     #[test]
     fn citation_request_rejects_both_names_at_once_as_a_duplicate_field() {
-        let result: Result<CitationRequest, _> =
-            serde_json::from_value(serde_json::json!({"source": "s", "paragraph": 1, "index": 2}));
+        let result: Result<CitationRequest, _> = serde_json::from_value(
+            serde_json::json!({"source_id": "s", "paragraph": 1, "index": 2}),
+        );
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains("duplicate field"),

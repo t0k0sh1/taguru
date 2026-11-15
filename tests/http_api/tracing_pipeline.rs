@@ -963,7 +963,7 @@ fn an_unbounded_explain_records_the_effective_ann_pool() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "杜氏", "source": "docs/kura.md"})),
+        Some(json!({"query": "杜氏", "source_id": "docs/kura.md"})),
     );
 
     let _ = server.stop_gracefully();

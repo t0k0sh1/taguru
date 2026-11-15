@@ -28,6 +28,30 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — fields that read a source say `source_id`** (#1040,
+  ADR 0054; `http_contract` 2). The read-side twin of #1039 (below): every
+  attribution (`recall`, `query`, `explore`, `activate`, `paths`,
+  `unreachable_from`, and associations inside the evidence package) says
+  `source_id`; `POST /contexts/{id}/citations` takes `{source_id,
+  paragraph}` and answers `{text, source_id, section, locator}`;
+  `POST /contexts/{id}/sources/lookup` takes `source_ids`; passage search
+  hits (`/contexts/{id}/sources/search` and the cross-context
+  `/sources/search`) say `source_id`; and `sources/search/explain` takes
+  and answers `source_id`. A request still sending `source`/`sources` is
+  refused 422 `malformed_request`, naming the missing `source_id`/`source_ids`.
+  MCP's `cite_passage`, `lookup_passages`
+  and `explain_search` take the same fields, and the composed `retrieve`
+  tool's citations say `source_id`. The Python and TypeScript SDKs follow
+  (`cite_passage(source_id, paragraph)`, `lookup_passages(source_ids)`,
+  `explain_search(query, source_id)`, and the attribution, hit, citation and
+  explanation models' `source_id`); LangChain still writes it to
+  `metadata["source"]`. Unchanged: eval-set files
+  (`expected_sources[].source`, `expected_citations[].source`),
+  `taguru evaluate` reports and benchmark run logs — file formats on the
+  shared format revision, left as they are — and the evidence package's own
+  reference fields (`citation_refs`, `corroboration`, `citations[].source`),
+  consolidation and the change feed, which follow in #1041.
+
 - **Breaking (wire) — fields that write or list a source say `source_id`**
   (#1039, ADR 0054; `http_contract` 2). A source's id is still the string
   its caller chose — nothing is minted — and only the field names change:
@@ -46,8 +70,7 @@ Entries that change an on-disk format or a response shape say so.
   `ImportOutcome.source_id`, `SourceEntry.id`, and `SourcePage` without
   `sources` (`iter_sources` still yields source ids). The import stream's
   source header keeps `id`, and the data directory and file format are
-  unchanged. The read side — attributions, hits, citations, lookup,
-  search/explain — still says `source` until #1040; LangChain Documents
+  unchanged. The read side followed in #1040 (above); LangChain Documents
   keep `metadata["source"]`.
 
 - **Breaking (MCP and LangChain) — the last `group` arguments take ids**

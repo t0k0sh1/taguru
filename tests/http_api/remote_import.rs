@@ -94,7 +94,7 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(serde_json::json!({"sources": ["clean.md", "leaky.md"]})),
+        Some(serde_json::json!({"source_ids": ["clean.md", "leaky.md"]})),
     );
     assert_eq!(
         passages["passages"]["clean.md"],

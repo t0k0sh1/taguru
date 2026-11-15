@@ -198,7 +198,7 @@ fn doc2query_questions_land_lexically_without_embeddings() {
     );
     let hits = hits["hits"].as_array().unwrap();
     assert!(!hits.is_empty(), "the question's terms must land the hit");
-    assert_eq!(hits[0]["source"], json!("doc"), "{hits:?}");
+    assert_eq!(hits[0]["source_id"], json!("doc"), "{hits:?}");
     assert_eq!(hits[0]["paragraph"], json!(0), "{hits:?}");
     assert!(
         hits[0]["lanes"]["bm25"].is_object(),
@@ -703,11 +703,11 @@ fn search_explain_names_the_first_verdict_that_applies() {
         &format!("/contexts/{}/sources/search", server.cx("sake")),
         Some(json!({"query": "精米歩合はどこまで磨く?"})),
     );
-    assert_eq!(hits["hits"][0]["source"], json!("docs/kura.md"));
+    assert_eq!(hits["hits"][0]["source_id"], json!("docs/kura.md"));
     let served = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "精米歩合はどこまで磨く?", "source": "docs/kura.md"})),
+        Some(json!({"query": "精米歩合はどこまで磨く?", "source_id": "docs/kura.md"})),
     );
     assert_eq!(served["verdict"], json!("served"), "{served}");
     assert_eq!(served["paragraph"], hits["hits"][0]["paragraph"]);
@@ -740,7 +740,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let cutoff = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "霧沢", "source": "docs/many.md", "paragraph": 7})),
+        Some(json!({"query": "霧沢", "source_id": "docs/many.md", "paragraph": 7})),
     );
     assert_eq!(cutoff["verdict"], json!("below_cutoff"), "{cutoff}");
     let rank = cutoff["ranking"]["rank"].as_u64().unwrap();
@@ -762,7 +762,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|hit| hit["source"] == json!("docs/many.md") && hit["paragraph"] == json!(7)),
+            .any(|hit| hit["source_id"] == json!("docs/many.md") && hit["paragraph"] == json!(7)),
         "limit_to_reach must actually reach it: {wider}"
     );
     // The straggler's own term table shows the match that was too weak.
@@ -780,7 +780,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let overlap = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
+        Some(json!({"query": "酒造", "source_id": "docs/kuramoto.md"})),
     );
     assert_eq!(overlap["verdict"], json!("no_term_overlap"), "{overlap}");
     assert_eq!(overlap["query_terms"], json!(["酒造"]));
@@ -804,7 +804,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let ghost = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "霧沢", "source": "docs/ghost.md"})),
+        Some(json!({"query": "霧沢", "source_id": "docs/ghost.md"})),
     );
     assert_eq!(ghost["verdict"], json!("not_stored"), "{ghost}");
     assert!(
@@ -819,7 +819,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let retracted = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "酒造", "source": "docs/kuramoto.md"})),
+        Some(json!({"query": "酒造", "source_id": "docs/kuramoto.md"})),
     );
     assert_eq!(retracted["verdict"], json!("not_stored"), "{retracted}");
 
@@ -827,7 +827,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let out = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "霧沢", "source": "docs/kura.md", "paragraph": 9})),
+        Some(json!({"query": "霧沢", "source_id": "docs/kura.md", "paragraph": 9})),
     );
     assert_eq!(out["verdict"], json!("paragraph_out_of_range"), "{out}");
     assert_eq!(out["paragraphs"], json!(2));
@@ -836,7 +836,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     let empty = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "、。", "source": "docs/kura.md"})),
+        Some(json!({"query": "、。", "source_id": "docs/kura.md"})),
     );
     assert_eq!(empty["verdict"], json!("no_query_terms"), "{empty}");
 
@@ -847,7 +847,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
             "/contexts/{}/sources/search/explain",
             "00000000-0000-4000-8000-00000000dead"
         ),
-        Some(json!({"query": "霧沢", "source": "docs/kura.md"})),
+        Some(json!({"query": "霧沢", "source_id": "docs/kura.md"})),
     );
     assert_eq!(status, 404);
 }
@@ -1046,7 +1046,7 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
         Some(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                     "params": {"name": "explain_search",
                                "arguments": {"context_id": server.cx("sake"), "query": "酒造",
-                                             "source": "docs/kura.md"}}})),
+                                             "source_id": "docs/kura.md"}}})),
     );
     assert!(reply["result"].get("isError").is_none(), "{reply}");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
@@ -1108,7 +1108,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
     assert_eq!(associations[0]["object"], json!("高瀬"));
     let citations = envelope["citations"].as_array().unwrap();
     assert_eq!(citations.len(), 1, "{envelope}");
-    assert_eq!(citations[0]["source"], json!("docs/kura.md"));
+    assert_eq!(citations[0]["source_id"], json!("docs/kura.md"));
     assert_eq!(citations[0]["paragraph"], json!(0));
     assert!(
         citations[0]["citation"]["text"]

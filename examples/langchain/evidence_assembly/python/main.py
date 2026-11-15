@@ -107,7 +107,7 @@ def describe_item(item) -> str:
     HitLocator/citation_refs use elsewhere in this tree, never the raw
     fused_score (ADR 0006 §7 never serializes it at all)."""
     if item.passage is not None:
-        where = f"{item.passage.source} ¶{item.passage.paragraph}"
+        where = f"{item.passage.source_id} ¶{item.passage.paragraph}"
         snippet = item.passage.text
     elif item.association is not None:
         assoc = item.association

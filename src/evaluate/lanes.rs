@@ -89,9 +89,9 @@ pub(crate) fn extract_passages(
     let mut hits = Vec::with_capacity(raw_hits.len());
     for raw in raw_hits {
         let source = raw
-            .get("source")
+            .get("source_id")
             .and_then(Value::as_str)
-            .ok_or("a hit is missing 'source'")?
+            .ok_or("a hit is missing 'source_id'")?
             .to_string();
         let paragraph = raw
             .get("paragraph")
@@ -99,7 +99,7 @@ pub(crate) fn extract_passages(
             .ok_or("a hit is missing 'paragraph'")? as u32;
         let score = raw.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32;
         hits.push(PassageHit {
-            source,
+            source_id: source,
             paragraph,
             score,
             // `HitLocator::from` still strips this before anything
@@ -308,7 +308,7 @@ fn run_query(api: &Api, context: &str, subject: &str, label: &str, object: &str)
                         .iter()
                         .flat_map(|matched| matched.attributions.iter())
                         .map(|attribution| AttributionLocator {
-                            source: attribution.source.clone(),
+                            source: attribution.source_id.clone(),
                             paragraph: attribution.paragraph,
                         })
                         .collect();
@@ -405,7 +405,7 @@ fn check_citation(
     served: &BTreeSet<(String, u32)>,
 ) -> CitationCheck {
     let body = serde_json::json!({
-        "source": expected.source,
+        "source_id": expected.source,
         "paragraph": expected.paragraph,
     });
     let started_at = Instant::now();
