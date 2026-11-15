@@ -51,9 +51,10 @@ Entries that change an on-disk format or a response shape say so.
     locator}`; `POST /contexts/{id}/sources/lookup` takes `source_ids`;
     passage search hits (`/contexts/{id}/sources/search` and the
     cross-context `/sources/search`) say `source_id`; and
-    `sources/search/explain` takes and answers `source_id`. A request still
-    sending `source`/`sources` is refused 422 `malformed_request`, naming the
-    missing `source_id`/`source_ids`.
+    `sources/search/explain` takes and answers `source_id`. A request that
+    still sends only the old `source`/`sources` is refused 422
+    `malformed_request`, naming the missing `source_id`/`source_ids`; an old
+    key sent beside the new one is ignored, not refused.
   - **Evidence, audit and change feed:** the evidence package's
     `citation_refs[]`, `corroboration.attributions[]` and `citations[]` say
     `source_id`, and `corroboration.sources` is `corroboration.source_ids`;
