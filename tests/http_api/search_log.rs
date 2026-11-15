@@ -130,7 +130,7 @@ fn search_events_carry_cue_and_hits_when_opted_in() {
                     &format!("/contexts/{s}/associations"),
                     Some(json!([{
                         "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-                        "weight": 1.0, "source": "p1"
+                        "weight": 1.0, "source_id": "p1"
                     }]))
                 ),
                 200

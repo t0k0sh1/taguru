@@ -13,16 +13,16 @@
 // -- request-shaped inputs ----------------------------------------------------
 
 /**
- * One association to assert. `paragraph` locates the fact within `source`
+ * One association to assert. `paragraph` locates the fact within `source_id`
  * (its blank-line paragraph index) and is ignored by the server without a
- * `source`.
+ * `source_id`.
  */
 export interface AssocOp {
   subject: string;
   label: string;
   object: string;
   weight: number;
-  source?: string;
+  source_id?: string;
   paragraph?: number;
 }
 
@@ -646,19 +646,18 @@ export interface AliasEntry {
  * stored before metadata existed lists as bare.
  */
 export interface SourceEntry {
-  name: string;
+  id: string;
   stored_at?: number;
   date?: number;
   tags?: string[];
 }
 
 /**
- * `sources` is the bare id list; `entries` carries the same page with each
- * source's metadata beside it.
+ * One page of listed sources: each entry is a source id with its metadata
+ * beside it. `total` counts every matching source.
  */
 export interface SourcePage {
   total: number;
-  sources: string[];
   entries: SourceEntry[];
 }
 
@@ -1043,7 +1042,7 @@ export interface AddAssociationsResult {
 /** Outcome of one applied source (retract-then-apply). */
 export interface ImportOutcome {
   context_id: string;
-  source: string;
+  source_id: string;
   created: boolean;
   retracted: number;
   associations: number;

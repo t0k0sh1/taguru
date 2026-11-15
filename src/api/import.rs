@@ -36,7 +36,7 @@ pub struct ImportQuery {
 #[derive(Serialize)]
 pub struct ImportOutcome {
     pub context_id: String,
-    pub source: String,
+    pub source_id: String,
     pub created: bool,
     pub retracted: usize,
     pub associations: usize,
@@ -154,7 +154,7 @@ pub(crate) fn import_outcome(
 ) -> ImportOutcome {
     ImportOutcome {
         context_id: batch.context_id.clone(),
-        source: batch.source.clone(),
+        source_id: batch.source.clone(),
         created: applied.created,
         retracted: applied.retracted,
         associations: applied.associations,

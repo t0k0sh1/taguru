@@ -411,7 +411,7 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": long})),
+        Some(json!({"source_id": long})),
     );
     assert_eq!(status, 400, "{body}");
 
@@ -559,14 +559,16 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
-        Some(json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": ""}])),
+        Some(
+            json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source_id": ""}]),
+        ),
     );
     assert_eq!(status, 400, "{body}");
     assert!(
         body["error"]
             .as_str()
             .unwrap()
-            .contains("associations[0].source"),
+            .contains("associations[0].source_id"),
         "{body}"
     );
 
@@ -602,7 +604,7 @@ fn empty_names_are_rejected_at_the_write_boundary() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": ""})),
+        Some(json!({"source_id": ""})),
     );
     assert_eq!(status, 400, "{body}");
 

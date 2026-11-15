@@ -216,7 +216,7 @@ describe("TaguruIngester", () => {
     const server = new FakeServer();
     server.importResultOverride = {
       context_id: "id-sake",
-      source: "docs/aomine.md",
+      source_id: "docs/aomine.md",
       created: false,
       retracted: 0,
       associations: 2,

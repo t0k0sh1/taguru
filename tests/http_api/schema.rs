@@ -232,7 +232,7 @@ fn a_label_alias_resolving_to_the_reserved_type_label_refuses_the_put() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "蔵", "label": "schema:type", "object": "Brewery",
-                      "weight": 1.0, "source": "a.md"}]),
+                      "weight": 1.0, "source_id": "a.md"}]),
         ),
     );
     server.ok(
@@ -286,7 +286,7 @@ fn switching_to_strict_succeeds_over_a_pre_existing_violation() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "高瀬", "label": "杜氏", "object": "青嶺酒造",
-                      "weight": 1.0, "source": "a.md"}]),
+                      "weight": 1.0, "source_id": "a.md"}]),
         ),
     );
 
@@ -418,8 +418,8 @@ fn strict_refuses_a_domain_violation_before_any_write() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
-            {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
+            {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     assert_eq!(status, 400, "{body}");
@@ -462,9 +462,9 @@ fn strict_refuses_a_range_violation_and_names_the_object_path() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
-            {"subject": "高瀬", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
+            {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "高瀬", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     assert_eq!(status, 400, "{body}");
@@ -496,8 +496,8 @@ fn warn_writes_and_reports_the_same_issues_a_strict_context_would_refuse() {
     );
 
     let batch = json!([
-        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
-        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
+        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
+        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"},
     ]);
     let (status, body) = server.call(
         "POST",
@@ -546,8 +546,8 @@ fn off_mode_never_reports_issues_even_over_the_same_violation() {
     );
 
     let batch = json!([
-        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
-        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
+        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
+        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"},
     ]);
     let (status, body) = server.call(
         "POST",
@@ -594,8 +594,8 @@ fn warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap() {
         .flat_map(|i| {
             let subject = format!("人{i}");
             [
-                json!({"subject": subject, "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"}),
-                json!({"subject": subject, "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}),
+                json!({"subject": subject, "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"}),
+                json!({"subject": subject, "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"}),
             ]
         })
         .collect();
@@ -638,9 +638,9 @@ fn a_batch_typing_its_own_subject_after_the_fact_op_still_validates() {
     );
 
     let batch = json!([
-        {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
-        {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source": "a.md"},
-        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
+        {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "a.md"},
+        {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery", "weight": 1.0, "source_id": "a.md"},
+        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
     ]);
     let (status, body) = server.call(
         "POST",
@@ -680,7 +680,7 @@ fn closed_labels_refuses_an_undeclared_label() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "高瀬", "label": "未知の関係", "object": "個人A", "weight": 1.0, "source": "a.md"},
+            {"subject": "高瀬", "label": "未知の関係", "object": "個人A", "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     assert_eq!(status, 400, "{body}");

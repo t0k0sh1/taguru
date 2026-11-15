@@ -27,24 +27,24 @@ fn seed(server: &Server) {
         Some(json!([
             // The twins: two spellings of one brewery, two shared facts,
             // one distinct fact each.
-            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
-            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
-            {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source": "doc-a"},
-            {"subject": "青嶺酒蔵", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source": "doc-b"},
-            {"subject": "青嶺酒造", "label": "創業", "object": "1907", "weight": 1.0, "source": "doc-a"},
-            {"subject": "青嶺酒蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-b"},
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-b"},
+            {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source_id": "doc-b"},
+            {"subject": "青嶺酒造", "label": "創業", "object": "1907", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc-b"},
             // The supersession: 杜氏 is one-object for two subjects,
             // two-object for this one — old fact dated 1000, new 2000.
-            {"subject": "蔵A", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-2019"},
-            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2024"},
-            {"subject": "蔵B", "label": "杜氏", "object": "田中", "weight": 1.0, "source": "doc-2019"},
+            {"subject": "蔵A", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc-2019"},
+            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source_id": "doc-2024"},
+            {"subject": "蔵B", "label": "杜氏", "object": "田中", "weight": 1.0, "source_id": "doc-2019"},
             // The dispute: one edge, two sources, opposite signs.
-            {"subject": "蔵A", "label": "行う", "object": "大量生産", "weight": 1.0, "source": "宣伝"},
-            {"subject": "蔵A", "label": "行う", "object": "大量生産", "weight": -2.0, "source": "doc-2024"},
+            {"subject": "蔵A", "label": "行う", "object": "大量生産", "weight": 1.0, "source_id": "宣伝"},
+            {"subject": "蔵A", "label": "行う", "object": "大量生産", "weight": -2.0, "source_id": "doc-2024"},
             // Staleness: 蔵A's 銘柄 fact is only attested at 1000 while
             // its neighborhood reaches 2000; this one is undatable.
-            {"subject": "蔵A", "label": "銘柄", "object": "初霜", "weight": 1.0, "source": "doc-2019"},
-            {"subject": "蔵C", "label": "銘柄", "object": "幻", "weight": 1.0, "source": "doc-undated"},
+            {"subject": "蔵A", "label": "銘柄", "object": "初霜", "weight": 1.0, "source_id": "doc-2019"},
+            {"subject": "蔵C", "label": "銘柄", "object": "幻", "weight": 1.0, "source_id": "doc-undated"},
         ])),
     );
     server.ok(
@@ -135,7 +135,7 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2025"}
+            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source_id": "doc-2025"}
         ])),
     );
     let moved = audit(&server, json!({"checks": ["contradiction"]}));
@@ -361,7 +361,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2024b"}
+            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source_id": "doc-2024b"}
         ])),
     );
     let (code, stdout, _) = run_consolidation(

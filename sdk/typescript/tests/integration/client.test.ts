@@ -62,11 +62,11 @@ async function seed(name: string): Promise<string> {
   const row = await client.contexts.create(name, { description: "青嶺酒造という架空の酒蔵の知識" });
   const ctx = client.context(row.id);
   await ctx.addAssociations([
-    { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
-    { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
-    { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, source: "docs/aomine.md", paragraph: 1 },
-    { subject: "高瀬", label: "重視する", object: "寒仕込み", weight: 1.0, source: "docs/aomine.md", paragraph: 1 },
-    { subject: "青嶺酒造", label: "行う", object: "大量生産", weight: -1.0, source: "docs/aomine.md", paragraph: 2 },
+    { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source_id: "docs/aomine.md", paragraph: 0 },
+    { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source_id: "docs/aomine.md", paragraph: 0 },
+    { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, source_id: "docs/aomine.md", paragraph: 1 },
+    { subject: "高瀬", label: "重視する", object: "寒仕込み", weight: 1.0, source_id: "docs/aomine.md", paragraph: 1 },
+    { subject: "青嶺酒造", label: "行う", object: "大量生産", weight: -1.0, source_id: "docs/aomine.md", paragraph: 2 },
   ]);
   await ctx.storePassages({ "docs/aomine.md": AOMINE_DOC });
   return row.id;
@@ -118,9 +118,9 @@ describe("graph writes and reads", () => {
     const name = fresh();
     const contextId = (await client.contexts.create(name)).id;
     const ctx = client.context(contextId);
-    const op = { subject: "s", label: "l", object: "o", weight: 1.0, source: "a" };
+    const op = { subject: "s", label: "l", object: "o", weight: 1.0, source_id: "a" };
     expect((await ctx.addAssociations([op])).applied).toBe(1);
-    expect((await ctx.addAssociations([{ ...op, source: "b" }])).applied).toBe(1);
+    expect((await ctx.addAssociations([{ ...op, source_id: "b" }])).applied).toBe(1);
 
     const page = await ctx.query({ subject: "s", label: "l" });
     expect(page.total).toBe(1);
@@ -290,7 +290,7 @@ describe("sources and citations", () => {
     });
 
     const sources = await ctx.listSources();
-    expect(new Set(sources.sources)).toEqual(new Set(["docs/aomine.md", "docs/extra.md"]));
+    expect(new Set(sources.entries.map((entry) => entry.id))).toEqual(new Set(["docs/aomine.md", "docs/extra.md"]));
 
     const lookup = await ctx.lookupPassages(["docs/aomine.md", "missing.md"]);
     expect(lookup.passages["docs/aomine.md"]).toBe(AOMINE_DOC);
@@ -330,7 +330,7 @@ describe("sources and citations", () => {
     );
 
     const listed = await ctx.listSources();
-    const entries = new Map(listed.entries.map((entry) => [entry.name, entry]));
+    const entries = new Map(listed.entries.map((entry) => [entry.id, entry]));
     expect(entries.get("a.md")!.tags).toEqual(["酒"]);
     expect(entries.get("a.md")!.date).toBe(1000);
     expect(entries.get("a.md")!.stored_at).toBeDefined();
@@ -520,7 +520,7 @@ describe("transfer and maintenance", () => {
     expect((await client.context(destinationId).listSources()).total).toBe(0);
 
     const outcome = await scratch.promote(destinationId, ["docs/aomine.md"]);
-    expect(outcome.batches[0]!.source).toBe("docs/aomine.md");
+    expect(outcome.batches[0]!.source_id).toBe("docs/aomine.md");
     expect(outcome.batches[0]!.context_id).toBe(destinationId);
     expect(outcome.audit).toBeDefined();
     expect(outcome.audit!.detector).toBe("consolidation/1");
@@ -556,7 +556,7 @@ describe("transfer and maintenance", () => {
       { subject: "青嶺酒造", label: "kind", object: "会社", weight: 1.0 },
     ]);
     await ctx.addAssociations([
-      { subject: "高瀬", label: "kind", object: "杜氏", weight: 1.0, source: "docs/a.md" },
+      { subject: "高瀬", label: "kind", object: "杜氏", weight: 1.0, source_id: "docs/a.md" },
     ]);
     await ctx.retractAssociation("高瀬", "kind", "杜氏");
     expect(await ctx.addAliases({ concepts: { タカセ: "高瀬" } })).toBe(1);
@@ -731,10 +731,10 @@ describe("groups and cross-context search", () => {
     const sakeId = (await client.contexts.create(sake, { description: "酒蔵の知識" })).id;
     const teaId = (await client.contexts.create(tea, { description: "茶園の知識" })).id;
     await client.context(sakeId).addAssociations([
-      { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "sake.md", paragraph: 0 },
+      { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source_id: "sake.md", paragraph: 0 },
     ]);
     await client.context(teaId).addAssociations([
-      { subject: "青嶺茶園", label: "代表銘柄", object: "露霜", weight: 1.0, source: "tea.md", paragraph: 0 },
+      { subject: "青嶺茶園", label: "代表銘柄", object: "露霜", weight: 1.0, source_id: "tea.md", paragraph: 0 },
     ]);
     await client.context(sakeId).storePassages({ "sake.md": "青嶺酒造の代表銘柄は「青嶺」である。" });
     await client.context(teaId).storePassages({ "tea.md": "青嶺茶園の代表銘柄は「露霜」である。" });

@@ -45,7 +45,7 @@ pub struct PromoteRequest {
     /// promoting `context` (a passage or a live attribution) or the
     /// request refuses whole — under retract-then-apply a mistyped
     /// session id would otherwise no-op silently.
-    pub sources: Vec<String>,
+    pub source_ids: Vec<String>,
     /// Omitted means true: after a real apply, the destination gets
     /// the default consolidation audit (ADR 0012 — all three checks,
     /// default ceilings) and its candidates ride back under `audit`.
@@ -100,15 +100,15 @@ pub async fn promote_sources(
     AppJson(request): AppJson<PromoteRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    if request.sources.is_empty() {
+    if request.source_ids.is_empty() {
         return error(
             ErrorCode::InvalidArgument,
-            "'sources' must name at least one source id to promote — choosing which \
+            "'source_ids' must name at least one source id to promote — choosing which \
              sources are the keepers is the caller's judgment, never a default",
             started_at,
         );
     }
-    if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
+    if let Some(refusal) = overlong("source_ids", request.source_ids.len(), started_at) {
         return refusal;
     }
     // `into` is a context id, like the path's (#965): anything else is
@@ -146,7 +146,7 @@ pub async fn promote_sources(
         crate::export::EMPTY_SOURCE,
     ]
     .iter()
-    .find(|id| request.sources.iter().any(|source| source == *id))
+    .find(|id| request.source_ids.iter().any(|source| source == *id))
     {
         return error(
             ErrorCode::InvalidArgument,
@@ -200,7 +200,7 @@ pub async fn promote_sources(
             started_at,
         );
     }
-    let requested: BTreeSet<String> = request.sources.iter().cloned().collect();
+    let requested: BTreeSet<String> = request.source_ids.iter().cloned().collect();
     let snapshot = match tokio::task::block_in_place(|| state.export_context(&id, deadline)) {
         Ok(snapshot) => snapshot,
         Err(failure) => return access_error(&state, failure, &id, started_at),
@@ -210,13 +210,13 @@ pub async fn promote_sources(
     // absentees path-addressed. Nothing has been written yet.
     let available = crate::export::available_sources(&snapshot);
     let issues: Vec<Issue> = request
-        .sources
+        .source_ids
         .iter()
         .enumerate()
         .filter(|(_, source)| !available.contains(source.as_str()))
         .map(|(index, source)| {
             Issue::unknown_reference(
-                format!("sources[{index}]"),
+                format!("source_ids[{index}]"),
                 format!("'{source}' stored in context '{id}' as a passage or a live attribution"),
             )
         })

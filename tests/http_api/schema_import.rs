@@ -296,7 +296,7 @@ fn a_batch_label_alias_resolving_to_the_reserved_label_refuses_in_every_mode() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(
             json!([{"subject": "某社", "label": "schema:type", "object": "Brewery",
-                      "weight": 1.0, "source": "pre.md"}]),
+                      "weight": 1.0, "source_id": "pre.md"}]),
         ),
     );
     server.ok(

@@ -27,11 +27,11 @@ fn seed(server: &Server) {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-2019"},
-            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 2.0, "source": "doc-2019"},
-            {"subject": "蔵", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2024"},
-            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 4.0, "source": "doc-2024"},
-            {"subject": "蔵", "label": "幽霊", "object": "無日付", "weight": 1.0, "source": "doc-undated"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc-2019"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 2.0, "source_id": "doc-2019"},
+            {"subject": "蔵", "label": "杜氏", "object": "青山", "weight": 1.0, "source_id": "doc-2024"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 4.0, "source_id": "doc-2024"},
+            {"subject": "蔵", "label": "幽霊", "object": "無日付", "weight": 1.0, "source_id": "doc-undated"},
         ])),
     );
     server.ok(
@@ -144,7 +144,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵D", "label": "銘柄", "object": "残雪", "weight": 1.0, "source": "doc-memo"}
+            {"subject": "蔵D", "label": "銘柄", "object": "残雪", "weight": 1.0, "source_id": "doc-memo"}
         ])),
     );
     server.ok(

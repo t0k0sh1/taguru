@@ -115,8 +115,8 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
-            {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0, "source": "第3段落"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source_id": "第2段落"},
+            {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0, "source_id": "第3段落"},
         ])),
     );
     server.ok(
@@ -174,7 +174,7 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "第1段落"},
         ])),
     );
 
@@ -488,7 +488,7 @@ fn a_pre_manifest_generation_is_refused_not_silently_restored() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "第1段落"},
         ])),
     );
     let wal = generation.join("wal");
@@ -565,7 +565,7 @@ fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "第2段落"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "第2段落"},
         ])),
     );
     let wal = server
@@ -698,7 +698,7 @@ fn an_empty_disk_boots_from_the_bucket_and_serves_the_lineage() {
         "POST",
         &format!("/contexts/{}/associations", first.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source_id": "第2段落"},
         ])),
     );
     first.ok(
@@ -952,7 +952,7 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         "POST",
         &format!("/contexts/{}/associations", writer.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source_id": "第2段落"},
         ])),
     );
     writer.ok(

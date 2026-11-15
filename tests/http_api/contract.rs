@@ -206,7 +206,7 @@ fn seed_basic_corpus(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 2.0,
-             "source": "doc.md", "paragraph": 0},
+             "source_id": "doc.md", "paragraph": 0},
         ])),
     );
     // A locator (ADR 0007 §7) on the same (source, paragraph) the
@@ -668,8 +668,8 @@ fn add_associations_warn_mode_response_shape() {
     );
 
     let request = json!([
-        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
-        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
+        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
+        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"},
     ]);
     let (status, body) = server.call(
         "POST",
@@ -812,7 +812,7 @@ fn seed_evidence_corpus(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "docs/kura.md", "paragraph": 0},
+             "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 }
@@ -974,9 +974,9 @@ fn evidence_contradiction_group() {
         ),
         Some(json!([
             {"subject": "猫", "label": "is_a", "object": "哺乳類", "weight": 1.0,
-             "source": "s1.md", "paragraph": 0},
+             "source_id": "s1.md", "paragraph": 0},
             {"subject": "猫", "label": "is_a", "object": "爬虫類", "weight": 1.0,
-             "source": "s2.md", "paragraph": 0},
+             "source_id": "s2.md", "paragraph": 0},
         ])),
     );
 
@@ -1422,9 +1422,9 @@ fn promote_applies_and_a_dry_run_previews() {
         &format!("/contexts/{}/associations", server.cx("scratch-w")),
         Some(json!([
             {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "session:w:a", "paragraph": 0},
+             "source_id": "session:w:a", "paragraph": 0},
             {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0,
-             "source": "session:w:stay"},
+             "source_id": "session:w:stay"},
         ])),
     );
     server.ok(
@@ -1442,7 +1442,7 @@ fn promote_applies_and_a_dry_run_previews() {
         Some(json!({"concepts": {"たかせ": "高瀬", "あおみね": "青嶺"}})),
     );
 
-    let request = json!({"into": server.cx("corpus-p"), "sources": ["session:w:a"]});
+    let request = json!({"into": server.cx("corpus-p"), "source_ids": ["session:w:a"]});
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/promote?dry_run=true", server.cx("scratch-w")),
@@ -1498,14 +1498,14 @@ fn seed_consolidation_corpus(server: &Server, name: &str) {
         "POST",
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
-            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-a"},
-            {"subject": "蔵", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-b"},
-            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": 1.0, "source": "doc-a"},
-            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": -2.0, "source": "doc-b"},
-            {"subject": "蔵", "label": "銘柄", "object": "初霜", "weight": 1.0, "source": "doc-a"},
-            {"subject": "幽霊蔵", "label": "銘柄", "object": "幻", "weight": 1.0, "source": "doc-undated"},
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-b"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "蔵", "label": "杜氏", "object": "青山", "weight": 1.0, "source_id": "doc-b"},
+            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": -2.0, "source_id": "doc-b"},
+            {"subject": "蔵", "label": "銘柄", "object": "初霜", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "幽霊蔵", "label": "銘柄", "object": "幻", "weight": 1.0, "source_id": "doc-undated"},
         ])),
     );
     server.ok(
@@ -1599,7 +1599,7 @@ fn associations_store_response_shape() {
     server.ok("POST", "/contexts", Some(json!({"name": "corpus-l"})));
 
     let request = json!([
-        {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0, "source": "doc.md"},
+        {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0, "source_id": "doc.md"},
     ]);
     let (status, body) = server.call(
         "POST",
@@ -1629,7 +1629,7 @@ fn seed_aliases_corpus(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "PostgreSQL 16", "label": "採用", "object": "DB", "weight": 1.0,
-             "source": "doc.md"},
+             "source_id": "doc.md"},
         ])),
     );
 }
@@ -1709,7 +1709,7 @@ fn coverage_labels_embeddings_and_unreachable() {
         &format!("/contexts/{}/associations", server.cx("corpus-i")),
         Some(json!([
             {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0,
-             "source": "doc.md"},
+             "source_id": "doc.md"},
         ])),
     );
 
@@ -1775,8 +1775,8 @@ fn seed_vocabulary_corpus(server: &Server, name: &str) {
         "POST",
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
-            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc-b"},
             {"subject": "蔵", "label": "行う", "object": "醸造", "weight": 3.0},
         ])),
     );

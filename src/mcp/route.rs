@@ -429,11 +429,11 @@ pub fn route_tool(
                 query_string(arguments, &["dry_run"])?
             );
             need(arguments, "into")?;
-            need_present(arguments, "sources")?;
+            need_present(arguments, "source_ids")?;
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["into", "sources", "audit"])),
+                Some(pick(arguments, &["into", "source_ids", "audit"])),
             )
         }
         "retract_source" => {
@@ -442,8 +442,8 @@ pub fn route_tool(
                 context_path("context_id")?,
                 query_string(arguments, &["dry_run"])?
             );
-            need(arguments, "source")?;
-            ("POST", path, Some(pick(arguments, &["source"])))
+            need(arguments, "source_id")?;
+            ("POST", path, Some(pick(arguments, &["source_id"])))
         }
         "retract_association" => {
             let path = format!("{}/associations/retract", context_path("context_id")?);

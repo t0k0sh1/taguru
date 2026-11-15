@@ -98,9 +98,9 @@ fn audit_reports_domain_violations_even_in_off_mode() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     let mut document = strict_document();
@@ -151,9 +151,9 @@ fn audit_answers_the_same_regardless_of_mode() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -196,10 +196,10 @@ fn audit_untyped_concepts_excludes_type_names_and_declared_types() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             // "個人A" carries no schema:type assertion of its own.
             {"subject": "青嶺酒造", "label": "所在地", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -249,7 +249,7 @@ fn audit_undeclared_types_reported_regardless_of_closed_labels() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Distillery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     for closed_labels in [false, true] {
@@ -288,9 +288,9 @@ fn audit_unknown_labels_only_when_closed_labels_and_never_schema_type() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "青嶺酒造", "label": "所在地", "object": "広島",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -361,13 +361,13 @@ fn audit_violations_page_like_every_other_match_list() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "弟子1",
-             "weight": 3.0, "source": "a.md"},
+             "weight": 3.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "弟子2",
-             "weight": 2.0, "source": "a.md"},
+             "weight": 2.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "弟子3",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -459,7 +459,7 @@ fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -506,9 +506,9 @@ fn validate_dry_runs_without_persisting() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -551,9 +551,9 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -624,12 +624,12 @@ fn audit_untyped_concepts_truncates_past_max_audit_names() {
     );
     let mut ops: Vec<serde_json::Value> = vec![json!({
         "subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-        "weight": 1.0, "source": "a.md",
+        "weight": 1.0, "source_id": "a.md",
     })];
     ops.extend((0..101).map(|i| {
         json!({
             "subject": "青嶺酒造", "label": "所在地", "object": format!("個人{i:03}"),
-            "weight": 1.0, "source": "a.md",
+            "weight": 1.0, "source_id": "a.md",
         })
     }));
     server.ok(
@@ -676,7 +676,7 @@ fn audit_undeclared_types_truncates_past_max_audit_names() {
         .map(|i| {
             json!({
                 "subject": format!("組織{i:03}"), "label": "schema:type", "object": format!("型{i:03}"),
-                "weight": 1.0, "source": "a.md",
+                "weight": 1.0, "source_id": "a.md",
             })
         })
         .collect();
@@ -724,7 +724,7 @@ fn audit_unknown_labels_truncates_past_max_audit_names() {
         .map(|i| {
             json!({
                 "subject": format!("s{i:03}"), "label": format!("未知{i:03}"), "object": format!("o{i:03}"),
-                "weight": 1.0, "source": "a.md",
+                "weight": 1.0, "source_id": "a.md",
             })
         })
         .collect();

@@ -25,7 +25,7 @@ fn seed_sake_context(server: &Server) {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "docs/kura.md", "paragraph": 0},
+             "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 }
@@ -485,7 +485,7 @@ fn the_citation_missing_event_fires_only_when_a_citation_404s() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "唄", "object": "杜氏唄", "weight": 0.5,
-             "source": "docs/uta.md", "paragraph": 1},
+             "source_id": "docs/uta.md", "paragraph": 1},
         ])),
     );
     server.ok(
@@ -612,7 +612,7 @@ fn a_rerank_provider_failure_exports_outcome_provider_error() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "所在", "object": "霧沢町", "weight": 0.9,
-             "source": "docs/kura.md", "paragraph": 0},
+             "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 
@@ -1066,7 +1066,7 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
         &format!("/contexts/{}/associations", server.cx("sentinel")),
         Some(json!([{
             "subject": CONCEPT_NONCE, "label": "sentinel-label", "object": OBJECT_NONCE,
-            "weight": 1.0, "source": SOURCE_NONCE, "paragraph": 0
+            "weight": 1.0, "source_id": SOURCE_NONCE, "paragraph": 0
         }])),
     );
     server.ok(

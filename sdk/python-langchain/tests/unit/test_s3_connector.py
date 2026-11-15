@@ -766,7 +766,7 @@ def test_locators_and_sections_dropped_are_surfaced_on_the_report(
     does: `fake_server.import_result_override`."""
     fake_server.import_result_override = {
         "context_id": "sake",
-        "source": "s3://reports/a.md",
+        "source_id": "s3://reports/a.md",
         "created": True,
         "retracted": 0,
         "associations": 0,

@@ -62,7 +62,8 @@ mod tests {
         let arguments = json!({
             "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
-            "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
+            "sources": ["s"], "source": "s", "source_ids": ["s"], "source_id": "s",
+            "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
             "checks": ["merge"],
@@ -210,7 +211,7 @@ mod tests {
             &json!({
                 "context_id": "scratch-claude",
                 "into": "perm",
-                "sources": ["session:claude:a"],
+                "source_ids": ["session:claude:a"],
                 "audit": false,
                 "dry_run": true
             }),
@@ -220,20 +221,20 @@ mod tests {
         assert_eq!(path, "/contexts/scratch-claude/promote?dry_run=true");
         let body = body.unwrap();
         assert_eq!(body["into"], json!("perm"));
-        assert_eq!(body["sources"], json!(["session:claude:a"]));
+        assert_eq!(body["source_ids"], json!(["session:claude:a"]));
         assert_eq!(body["audit"], json!(false));
         assert!(body.get("dry_run").is_none(), "{body}");
 
         assert_eq!(
-            route_tool("promote", &json!({"context_id": "s", "sources": ["a"]})),
+            route_tool("promote", &json!({"context_id": "s", "source_ids": ["a"]})),
             Err("missing required argument 'into'".to_string())
         );
         assert_eq!(
             route_tool(
                 "promote",
-                &json!({"context_id": "s", "into": "p", "sources": null})
+                &json!({"context_id": "s", "into": "p", "source_ids": null})
             ),
-            Err("missing required argument 'sources'".to_string())
+            Err("missing required argument 'source_ids'".to_string())
         );
 
         // The advertised schema matches the handler's own refusal of
@@ -244,7 +245,7 @@ mod tests {
             .find(|tool| tool["name"] == "promote")
             .expect("promote is advertised");
         assert_eq!(
-            promote["inputSchema"]["properties"]["sources"]["minItems"],
+            promote["inputSchema"]["properties"]["source_ids"]["minItems"],
             json!(1)
         );
     }
@@ -426,7 +427,7 @@ mod tests {
     fn schema_required_body_arguments_are_refused_when_omitted() {
         let base = json!({
             "name": "ctx", "context_id": "ctx", "group_id": "grp", "cue": "x", "concept": "x",
-            "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
+            "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s", "source_id": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
             "type": "schema", "mode": "strict", "closed_labels": false,
@@ -453,7 +454,7 @@ mod tests {
             ("explore", "origins"),
             ("paths", "origins"),
             ("paths", "targets"),
-            ("retract_source", "source"),
+            ("retract_source", "source_id"),
             ("retract_association", "subject"),
             ("retract_association", "label"),
             ("retract_association", "object"),

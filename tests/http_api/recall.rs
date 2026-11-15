@@ -37,7 +37,7 @@ fn cross_recall_aborts_naming_the_first_missing_context_by_list_order() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("stays")),
         Some(json!([
-            {"subject": "蔵", "label": "産地", "object": "灘", "weight": 1.0, "source": "a.md"}
+            {"subject": "蔵", "label": "産地", "object": "灘", "weight": 1.0, "source_id": "a.md"}
         ])),
     );
 
@@ -87,7 +87,7 @@ fn cross_recall_mid_loop_pool_cut_still_yields_the_exact_global_top_limit() {
             .map(|(i, weight)| {
                 json!({
                     "subject": "蔵", "label": "産地", "object": format!("{name}-o{i}"),
-                    "weight": weight, "source": "a.md",
+                    "weight": weight, "source_id": "a.md",
                 })
             })
             .collect();

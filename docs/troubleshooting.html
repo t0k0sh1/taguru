@@ -298,11 +298,11 @@ CTX=$(curl -s localhost:8248/contexts | jq -r '.result.contexts[] | select(.name
 
 <span class="c"># 1. preview what the retraction would touch — writes nothing</span>
 curl -X POST "localhost:8248/contexts/$CTX/sources/retract?dry_run=true" \
-  -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
+  -H 'Content-Type: application/json' -d '{"source_id": "docs/old.md"}'
 
 <span class="c"># 2. retract: withdraw the source's associations and remove its passage</span>
 curl -X POST localhost:8248/contexts/$CTX/sources/retract \
-  -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
+  -H 'Content-Type: application/json' -d '{"source_id": "docs/old.md"}'
 
 <span class="c"># 3. compact: physically drop the withdrawn records and the passage text's bytes</span>
 curl -X POST localhost:8248/contexts/$CTX/compact</code></pre>

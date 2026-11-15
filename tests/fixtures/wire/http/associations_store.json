@@ -6,7 +6,7 @@
     {
       "label": "connects_to",
       "object": "beta",
-      "source": "doc.md",
+      "source_id": "doc.md",
       "subject": "alpha",
       "weight": 1.0
     }

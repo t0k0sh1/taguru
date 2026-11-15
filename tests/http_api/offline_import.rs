@@ -129,7 +129,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     assert_eq!(code, 1);
     let report: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["batches"].as_array().unwrap().len(), 1);
-    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    assert_eq!(report["failed_batches"][0]["source_id"], json!("leaky.md"));
     let error = report["failed_batches"][0]["error"].as_str().unwrap();
     assert!(error.starts_with("sensitive: batches[1]."), "{error}");
     assert!(!error.contains(key), "{error}");
@@ -184,7 +184,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
             .contains("refused during validation"),
         "{report}"
     );
-    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    assert_eq!(report["failed_batches"][0]["source_id"], json!("leaky.md"));
     assert!(!stdout.contains(key), "{stdout}");
 
     // Without the flag, the same file applies whole — import judges
@@ -434,7 +434,7 @@ fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
         local_outcome["context_id"],
         json!("cef2e28b-43f0-4b6c-8201-abab0785399f")
     );
-    assert_eq!(local_outcome["source"], json!("doc-guide"));
+    assert_eq!(local_outcome["source_id"], json!("doc-guide"));
     assert_eq!(local_outcome["created"], json!(true));
     assert_eq!(local_outcome["associations"], json!(1));
     assert_eq!(local_outcome["passage_stored"], json!(true));
@@ -502,7 +502,7 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
 
     let failed = &report["failed_batches"][0];
     assert_eq!(failed["context_id"], "ffa63583-dfa6-406b-87d2-84b86b0d693a");
-    assert_eq!(failed["source"], "bad.md");
+    assert_eq!(failed["source_id"], "bad.md");
     assert!(
         failed["error"]
             .as_str()
@@ -791,8 +791,8 @@ fn http_associations_drops_an_out_of_range_paragraph_against_a_stored_passage() 
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "doc-guide", "paragraph": 0},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-guide", "paragraph": 9},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "doc-guide", "paragraph": 0},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc-guide", "paragraph": 9},
         ])),
     );
 
@@ -1450,7 +1450,7 @@ fn a_rejected_new_source_import_never_appears_in_list_sources() {
         None,
     );
     assert_eq!(
-        sources["sources"],
+        listed_source_ids(&sources),
         json!(["doc-old"]),
         "the rejected batch's new source must never appear: {sources}"
     );
@@ -1493,7 +1493,7 @@ fn a_rejected_batch_in_a_stream_leaves_the_earlier_batch_durable_and_its_own_sou
         None,
     );
     assert_eq!(
-        sources["sources"],
+        listed_source_ids(&sources),
         json!(["doc-1"]),
         "batch 2's own source must never appear: {sources}"
     );
@@ -1651,9 +1651,9 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-             "weight": 1.0, "source": "a.md", "paragraph": 0},
+             "weight": 1.0, "source_id": "a.md", "paragraph": 0},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬",
-             "weight": 2.0, "source": "b.md"},
+             "weight": 2.0, "source_id": "b.md"},
         ])),
     );
     server.ok(

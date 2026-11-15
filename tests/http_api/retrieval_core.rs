@@ -175,12 +175,12 @@ fn full_retrieval_loop_over_http() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source": "第2段落"},
-            {"subject": "青嶺酒造", "label": "仕込み水", "object": "雲居山の伏流水", "weight": 1.0, "source": "第2段落"},
-            {"subject": "青嶺酒造", "label": "仕込み水", "object": "雲居山の伏流水", "weight": 1.0, "source": "第5段落"},
-            {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0, "source": "第3段落"},
-            {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0, "source": "第2段落"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "第1段落"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 2.0, "source_id": "第2段落"},
+            {"subject": "青嶺酒造", "label": "仕込み水", "object": "雲居山の伏流水", "weight": 1.0, "source_id": "第2段落"},
+            {"subject": "青嶺酒造", "label": "仕込み水", "object": "雲居山の伏流水", "weight": 1.0, "source_id": "第5段落"},
+            {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0, "source_id": "第3段落"},
+            {"subject": "青嶺酒造", "label": "行う", "object": "大量生産", "weight": -1.0, "source_id": "第2段落"},
         ])),
     );
     assert_eq!(applied, json!(6));
@@ -197,10 +197,10 @@ fn full_retrieval_loop_over_http() {
         None,
     );
     assert_eq!(sources["total"], json!(1));
-    assert_eq!(sources["sources"], json!(["第2段落"]));
-    // The listing's metadata view (#167): same page, name plus the
-    // server's stored_at stamp (its value is the wall clock's).
-    assert_eq!(sources["entries"][0]["name"], "第2段落");
+    assert_eq!(listed_source_ids(&sources), json!(["第2段落"]));
+    // The listing's metadata view (#167): each entry is the source id
+    // plus the server's stored_at stamp (its value is the wall clock's).
+    assert_eq!(sources["entries"][0]["id"], "第2段落");
     assert!(sources["entries"][0]["stored_at"].is_u64());
 
     // recall/query pages carry totals; query takes OR-sets per position.
@@ -369,7 +369,7 @@ fn full_retrieval_loop_over_http() {
     let retracted = server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "第5段落"})),
+        Some(json!({"source_id": "第5段落"})),
     );
     assert_eq!(retracted["associations_touched"], json!(1));
     let water = server.ok(

@@ -27,15 +27,15 @@ fn seed(server: &Server) {
         &format!("/contexts/{}/associations", server.cx("scratch-claude")),
         Some(json!([
             {"subject": "DB", "label": "採用", "object": "PostgreSQL 16", "weight": 1.0,
-             "source": "session:claude:a/note", "paragraph": 0},
+             "source_id": "session:claude:a/note", "paragraph": 0},
             // Corroborated across the promotion boundary: only the
             // promoted source's share may travel.
             {"subject": "CI", "label": "テストランナー", "object": "cargo-nextest", "weight": 1.0,
-             "source": "session:claude:b"},
+             "source_id": "session:claude:b"},
             {"subject": "CI", "label": "テストランナー", "object": "cargo-nextest", "weight": 1.0,
-             "source": "session:claude:stay"},
+             "source_id": "session:claude:stay"},
             {"subject": "旧鍵", "label": "管理者", "object": "山科", "weight": 1.0,
-             "source": "session:claude:stay"},
+             "source_id": "session:claude:stay"},
         ])),
     );
     server.ok(
@@ -67,14 +67,14 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"]
+            "source_ids": ["session:claude:a/note", "session:claude:b"]
         })),
     );
     // One batch per source, source-id order, the import outcome shape.
     let batches = promoted["batches"].as_array().expect("batches");
     assert_eq!(batches.len(), 2, "{promoted}");
-    assert_eq!(batches[0]["source"], json!("session:claude:a/note"));
-    assert_eq!(batches[1]["source"], json!("session:claude:b"));
+    assert_eq!(batches[0]["source_id"], json!("session:claude:a/note"));
+    assert_eq!(batches[1]["source_id"], json!("session:claude:b"));
     assert_eq!(batches[0]["context_id"], json!(server.cx("perm")));
     assert_eq!(
         batches[0]["created"],
@@ -112,7 +112,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         None,
     );
     let entry = &sources["entries"][0];
-    assert_eq!(entry["name"], json!("session:claude:a/note"), "{sources}");
+    assert_eq!(entry["id"], json!("session:claude:a/note"), "{sources}");
     assert_eq!(entry["date"], json!(1785974400), "{sources}");
     assert_eq!(entry["tags"], json!(["infra", "決定"]), "{sources}");
 
@@ -170,7 +170,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"],
+            "source_ids": ["session:claude:a/note", "session:claude:b"],
             "audit": false
         })),
     );
@@ -204,7 +204,7 @@ fn a_dry_run_previews_the_same_shape_and_writes_nothing() {
         ),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"]
+            "source_ids": ["session:claude:a/note", "session:claude:b"]
         })),
     );
     assert_eq!(preview["batches"].as_array().map(Vec::len), Some(2));
@@ -243,7 +243,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": []})),
+        Some(json!({"into": server.cx("perm"), "source_ids": []})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
@@ -254,7 +254,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": over_cap})),
+        Some(json!({"into": server.cx("perm"), "source_ids": over_cap})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("over_limit"), "{refused}");
@@ -270,7 +270,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("scratch-claude"), "sources": ["session:claude:b"]})),
+        Some(json!({"into": server.cx("scratch-claude"), "source_ids": ["session:claude:b"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert!(
@@ -282,7 +282,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": "00000000-0000-4000-8000-0000000000ff", "sources": ["session:claude:b"]})),
+        Some(json!({"into": "00000000-0000-4000-8000-0000000000ff", "source_ids": ["session:claude:b"]})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
@@ -308,7 +308,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": ["export:unsourced"]})),
+        Some(json!({"into": server.cx("perm"), "source_ids": ["export:unsourced"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert!(
@@ -323,14 +323,14 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:b", "session:claude:typo"]
+            "source_ids": ["session:claude:b", "session:claude:typo"]
         })),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_source"), "{refused}");
     assert_eq!(
         refused["issues"][0]["path"],
-        json!("sources[1]"),
+        json!("source_ids[1]"),
         "{refused}"
     );
     // The true count survives (issue #623 finding 5), and the message
@@ -358,7 +358,7 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": fake_sources})),
+        Some(json!({"into": server.cx("perm"), "source_ids": fake_sources})),
     );
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["issues_total"], json!(25), "{refused}");
@@ -369,12 +369,12 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("scratch-claude")),
-        Some(json!({"source": "session:claude:b"})),
+        Some(json!({"source_id": "session:claude:b"})),
     );
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": ["session:claude:b"]})),
+        Some(json!({"into": server.cx("perm"), "source_ids": ["session:claude:b"]})),
     );
     assert_eq!(
         status, 404,
@@ -402,7 +402,7 @@ fn the_destination_schema_judges_the_promoted_batches() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": ["session:claude:a/note"]})),
+        Some(json!({"into": server.cx("perm"), "source_ids": ["session:claude:a/note"]})),
     );
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
@@ -423,7 +423,9 @@ fn the_destination_schema_judges_the_promoted_batches() {
     server.ok(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": ["session:claude:b"], "audit": false})),
+        Some(
+            json!({"into": server.cx("perm"), "source_ids": ["session:claude:b"], "audit": false}),
+        ),
     );
     let schema = server.ok(
         "GET",
@@ -467,14 +469,14 @@ fn a_context_scoped_key_needs_the_destination_in_its_grant() {
         &format!("/contexts/{}/associations", server.cx("scratch-claude")),
         Some(
             json!([{"subject": "DB", "label": "採用", "object": "PostgreSQL 16",
-                     "weight": 1.0, "source": "session:claude:a"}]),
+                     "weight": 1.0, "source_id": "session:claude:a"}]),
         ),
         "atok",
     );
     assert_eq!(status, 200, "{body}");
 
     let request =
-        json!({"into": server.cx("perm"), "sources": ["session:claude:a"], "audit": false});
+        json!({"into": server.cx("perm"), "source_ids": ["session:claude:a"], "audit": false});
     let (status, refused) = call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
@@ -526,7 +528,7 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("perm")),
         Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                     "weight": 1.0, "source": "keep.md"}])),
+                     "weight": 1.0, "source_id": "keep.md"}])),
     );
 
     // A preview writes nothing, so the ceiling has nothing to gate.
@@ -538,7 +540,7 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
         ),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"]
+            "source_ids": ["session:claude:a/note", "session:claude:b"]
         })),
     );
     assert_eq!(preview["batches"].as_array().map(Vec::len), Some(2));
@@ -550,7 +552,7 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"]
+            "source_ids": ["session:claude:a/note", "session:claude:b"]
         })),
     );
     assert_eq!(status, 507, "{refused}");
@@ -609,7 +611,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     probe.ok(
         "POST",
         &format!("/contexts/{}/promote", probe.cx("scratch-claude")),
-        Some(json!({"into": probe.cx("perm"), "sources": ["session:claude:a/note"]})),
+        Some(json!({"into": probe.cx("perm"), "source_ids": ["session:claude:a/note"]})),
     );
     let ceiling = disk_total_bytes(&probe, "perm");
     assert!(
@@ -632,7 +634,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
         Some(json!({
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note", "session:claude:b"]
+            "source_ids": ["session:claude:a/note", "session:claude:b"]
         })),
     );
     assert_eq!(status, 507, "{refused}");
@@ -652,7 +654,7 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     );
     assert_eq!(sources["total"], json!(1), "{sources}");
     assert_eq!(
-        sources["sources"],
+        listed_source_ids(&sources),
         json!(["session:claude:a/note"]),
         "{sources}"
     );
@@ -678,7 +680,7 @@ fn a_warn_mode_destination_reports_schema_violations_in_the_envelope() {
     let (status, body) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch-claude")),
-        Some(json!({"into": server.cx("perm"), "sources": ["session:claude:a/note"], "audit": false})),
+        Some(json!({"into": server.cx("perm"), "source_ids": ["session:claude:a/note"], "audit": false})),
     );
     assert_eq!(status, 200, "warn lets the batch land: {body}");
     assert_eq!(body["schema_violations"], json!(1), "{body}");
@@ -816,7 +818,7 @@ fn the_mcp_promote_tool_reaches_the_endpoint() {
         json!({
             "context_id": server.cx("scratch-claude"),
             "into": server.cx("perm"),
-            "sources": ["session:claude:a/note"],
+            "source_ids": ["session:claude:a/note"],
             "audit": false,
             "dry_run": true
         }),
@@ -884,7 +886,7 @@ fn seed_dense_vocabulary(server: &Server, context: &str) {
                 "subject": dense_name(k),
                 "label": "次",
                 "object": dense_name(k + 1),
-                "weight": 1.0, "source": "seed.md",
+                "weight": 1.0, "source_id": "seed.md",
             })
         })
         .collect();
@@ -946,7 +948,7 @@ fn budget_refusal_cuts_a_multi_batch_promotion_short() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch")),
-        Some(json!({"into": server.cx("perm2"), "sources": sources, "audit": false})),
+        Some(json!({"into": server.cx("perm2"), "source_ids": sources, "audit": false})),
     );
     let elapsed = start.elapsed();
     assert_eq!(status, 408, "{refused} (elapsed {elapsed:?})");
@@ -1000,7 +1002,7 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
         "POST",
         &format!("/contexts/{}/associations", server.cx("scratch")),
         Some(json!([
-            {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a.md"}
+            {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source_id": "a.md"}
         ])),
     );
     server.ok(
@@ -1015,11 +1017,11 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
     let promoted = server.ok(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch")),
-        Some(json!({"into": server.cx("perm4"), "sources": ["a.md"]})),
+        Some(json!({"into": server.cx("perm4"), "source_ids": ["a.md"]})),
     );
     // The batch itself landed — only the audit degraded.
     assert_eq!(
-        promoted["batches"][0]["source"],
+        promoted["batches"][0]["source_id"],
         json!("a.md"),
         "{promoted}"
     );
@@ -1086,7 +1088,7 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
             .map(|_| {
                 json!({
                     "subject": "s", "label": "l", "object": "o",
-                    "weight": 1.0, "source": "a.md",
+                    "weight": 1.0, "source_id": "a.md",
                 })
             })
             .collect();
@@ -1107,7 +1109,7 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
     let (status, refused) = server.call(
         "POST",
         &format!("/contexts/{}/promote", server.cx("scratch")),
-        Some(json!({"into": server.cx("perm5"), "sources": ["a.md"], "audit": false})),
+        Some(json!({"into": server.cx("perm5"), "source_ids": ["a.md"], "audit": false})),
     );
     assert_eq!(status, 408, "{refused}");
     assert_eq!(refused["code"], json!("timeout"), "{refused}");
@@ -1161,7 +1163,7 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
         "POST",
         &format!("/contexts/{}/associations", server.cx("scratch-a")),
         Some(json!([
-            {"subject": "s1", "label": "l", "object": "o1", "weight": 1.0, "source": "a.md"}
+            {"subject": "s1", "label": "l", "object": "o1", "weight": 1.0, "source_id": "a.md"}
         ])),
     );
     server.ok(
@@ -1173,7 +1175,7 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
         "POST",
         &format!("/contexts/{}/associations", server.cx("scratch-b")),
         Some(json!([
-            {"subject": "s2", "label": "l", "object": "o2", "weight": 1.0, "source": "b.md"}
+            {"subject": "s2", "label": "l", "object": "o2", "weight": 1.0, "source_id": "b.md"}
         ])),
     );
     server.ok(
@@ -1188,7 +1190,7 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
             server.ok(
                 "POST",
                 &format!("/contexts/{}/promote", server.cx("scratch-a")),
-                Some(json!({"into": server.cx("perm6"), "sources": ["a.md"]})),
+                Some(json!({"into": server.cx("perm6"), "source_ids": ["a.md"]})),
             )
         });
         // Give the first request a head start into its (multi-second)
@@ -1199,7 +1201,7 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
             server.ok(
                 "POST",
                 &format!("/contexts/{}/promote", server.cx("scratch-b")),
-                Some(json!({"into": server.cx("perm6"), "sources": ["b.md"]})),
+                Some(json!({"into": server.cx("perm6"), "source_ids": ["b.md"]})),
             )
         });
         (first.join().unwrap(), second.join().unwrap())
@@ -1208,8 +1210,8 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
     // Both batches land regardless of the audit outcome — the permit
     // ceiling degrades the audit, it never sheds an already-applied
     // write.
-    assert_eq!(first["batches"][0]["source"], json!("a.md"), "{first}");
-    assert_eq!(second["batches"][0]["source"], json!("b.md"), "{second}");
+    assert_eq!(first["batches"][0]["source_id"], json!("a.md"), "{first}");
+    assert_eq!(second["batches"][0]["source_id"], json!("b.md"), "{second}");
 
     // The 200ms head start makes the first request the LIKELY one to
     // hold the permit, but it isn't a guarantee (a slow enough CI

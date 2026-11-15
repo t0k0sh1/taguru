@@ -22,7 +22,7 @@
           "schema_violations": 0,
           "sections_dropped": 0,
           "sections_stored": 0,
-          "source": "doc.md"
+          "source_id": "doc.md"
         }
       ]
     },

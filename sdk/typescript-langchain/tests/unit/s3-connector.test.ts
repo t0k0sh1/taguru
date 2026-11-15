@@ -168,7 +168,7 @@ class FakeServer {
       return ok(this.schemaDocument);
     }
     if (path.endsWith("/sources/retract") && method === "POST") {
-      const source = (body as { source: string }).source;
+      const source = (body as { source_id: string }).source_id;
       this.sources = this.sources.filter((s) => s !== source);
       this.retracted.push(source);
       return ok({ associations_touched: 0, passage_removed: true });
@@ -188,7 +188,7 @@ class FakeServer {
       if (limit !== null) {
         candidates = candidates.slice(0, limit);
       }
-      return ok({ total, sources: candidates, entries: candidates.map((name) => ({ name })) });
+      return ok({ total, entries: candidates.map((id) => ({ id })) });
     }
     if (path === "/import") {
       if (this.failImport) {
@@ -201,7 +201,7 @@ class FakeServer {
       const batchResult =
         this.importResultOverride ?? {
           context_id: "id-sake",
-          source: "docs/aomine.md",
+          source_id: "docs/aomine.md",
           created: false,
           retracted: 0,
           associations: 2,
@@ -837,7 +837,7 @@ describe("syncObjectStorage", () => {
     const server = new FakeServer();
     server.importResultOverride = {
       context_id: "id-sake",
-      source: "s3://reports/a.md",
+      source_id: "s3://reports/a.md",
       created: true,
       retracted: 0,
       associations: 0,

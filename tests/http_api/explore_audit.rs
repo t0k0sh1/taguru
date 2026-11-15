@@ -172,7 +172,7 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{"subject": "高瀬", "label": "杜氏", "object": "蔵",
-                     "weight": 1.0, "source": "a.md"}])),
+                     "weight": 1.0, "source_id": "a.md"}])),
     );
     server.ok(
         "POST",
@@ -255,9 +255,9 @@ fn audit_drift_surfaces_unsourced_weight_dead_aliases_and_pages_worst_first() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "株式会社青嶺", "label": "kind", "object": "会社",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "青嶺株式会社", "label": "kind", "object": "会社",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     let with_twins = server.ok(

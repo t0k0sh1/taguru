@@ -48,10 +48,10 @@ beforeAll(async () => {
   seededId = row.id;
   const ctx = client.context(seededId);
   await ctx.addAssociations([
-    { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
-    { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source: "docs/aomine.md", paragraph: 0 },
-    { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, source: "docs/aomine.md", paragraph: 1 },
-    { subject: "高瀬", label: "重視する", object: "寒仕込み", weight: 1.0, source: "docs/aomine.md", paragraph: 1 },
+    { subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0, source_id: "docs/aomine.md", paragraph: 0 },
+    { subject: "青嶺酒造", label: "代表銘柄", object: "青嶺", weight: 1.0, source_id: "docs/aomine.md", paragraph: 0 },
+    { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0, source_id: "docs/aomine.md", paragraph: 1 },
+    { subject: "高瀬", label: "重視する", object: "寒仕込み", weight: 1.0, source_id: "docs/aomine.md", paragraph: 1 },
   ]);
   await ctx.storePassages({ "docs/aomine.md": AOMINE_DOC });
 });

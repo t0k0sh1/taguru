@@ -150,11 +150,11 @@ fn seed_semantic_corpus(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "鶴の井", "label": "使用米", "object": "五百万石",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "白鷺の里", "label": "使用米", "object": "五百万石",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "遠山川", "label": "水系", "object": "支流",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -187,7 +187,7 @@ fn semantic_note_explains_vectors_never_generated() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -361,13 +361,13 @@ fn type_name_concepts_are_excluded_from_the_semantic_twin_audit_too() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "純米酒01", "label": "schema:type", "object": "純米原料米型",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "特別本醸造02", "label": "schema:type", "object": "特別本醸造原料米型",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "鶴の井", "label": "使用米", "object": "五百万石",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "白鷺の里", "label": "使用米", "object": "五百万石",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -448,7 +448,7 @@ fn semantic_note_explains_the_sweep_cap_skip() {
                 "label": if i % 2 == 0 { "次" } else { "続く" },
                 "object": format!("v{:04}", i + 1),
                 "weight": 1.0,
-                "source": "a.md",
+                "source_id": "a.md",
             })
         })
         .collect();

@@ -150,7 +150,7 @@ async function main(): Promise<void> {
     }
     const ctx = client.context(contextId);
     console.log("\n== 3. read the graph back with the core SDK ==");
-    console.log(`sources: ${JSON.stringify((await ctx.listSources()).sources)}`);
+    console.log(`sources: ${JSON.stringify((await ctx.listSources()).entries.map((entry) => entry.id))}`);
     const description = await ctx.describe("蒼月堂");
     if (description !== null) {
       const usages = description.as_subject.map((usage) => `${usage.label}×${usage.count}`);
@@ -177,7 +177,7 @@ async function main(): Promise<void> {
     console.log(
       `associations touched: ${gone.associations_touched}, passage removed: ${gone.passage_removed}`,
     );
-    console.log(`sources now: ${JSON.stringify((await ctx.listSources()).sources)}`);
+    console.log(`sources now: ${JSON.stringify((await ctx.listSources()).entries.map((entry) => entry.id))}`);
   } finally {
     spawned?.stop();
   }

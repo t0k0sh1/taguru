@@ -265,7 +265,7 @@ fn seed_offline_corpus(server: &Server, context: &str) {
         &format!("/contexts/{}/associations", server.cx(context)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "醸造元", "object": "蔵元",
-             "weight": 1.0, "source": "corpus/brewery.md", "paragraph": 0},
+             "weight": 1.0, "source_id": "corpus/brewery.md", "paragraph": 0},
         ])),
     );
 }

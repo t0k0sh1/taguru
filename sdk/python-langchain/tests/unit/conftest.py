@@ -356,7 +356,7 @@ class FakeServer:
                 )
             return ok(self.schema_document)
         if path.endswith("/sources/retract"):
-            source = body["source"]
+            source = body["source_id"]
             if source in self.sources:
                 self.sources.remove(source)
             self.retracted.append(source)
@@ -379,8 +379,7 @@ class FakeServer:
             return ok(
                 {
                     "total": total,
-                    "sources": candidates,
-                    "entries": [{"name": source} for source in candidates],
+                    "entries": [{"id": source} for source in candidates],
                 }
             )
         if path == "/import":
@@ -397,7 +396,7 @@ class FakeServer:
             self.imported.append(body if isinstance(body, str) else "")
             batch_result = self.import_result_override or {
                 "context_id": "sake",
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "created": False,
                 "retracted": 0,
                 "associations": 2,

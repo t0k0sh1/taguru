@@ -169,7 +169,7 @@ def main() -> int:
         context_id = next(row.id for row in client.contexts.iter() if row.name == "sougetsu-kb")
         ctx = client.context(context_id)
         print("\n== 3. read the graph back with the core SDK ==")
-        print(f"sources: {ctx.list_sources().sources}")
+        print(f"sources: {[entry.id for entry in ctx.list_sources().entries]}")
         description = ctx.describe("蒼月堂")
         if description is not None:
             usages = ", ".join(f"{usage.label}×{usage.count}" for usage in description.as_subject)
@@ -192,7 +192,7 @@ def main() -> int:
         print("\n== 5. withdraw a whole document ==")
         gone = ctx.retract_source("docs/sougetsu/tea-guide.md")
         print(f"associations touched: {gone.associations_touched}, passage removed: {gone.passage_removed}")
-        print(f"sources now: {ctx.list_sources().sources}")
+        print(f"sources now: {[entry.id for entry in ctx.list_sources().entries]}")
         return 0
     finally:
         if spawned is not None:

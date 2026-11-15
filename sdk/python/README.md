@@ -21,7 +21,7 @@ ctx = client.context(row.id)  # contexts are addressed by the minted id; "sake" 
 # groups work the same way: create answers the row (a GroupEntry), whose .id every groups.* call and group_ids list takes
 # group_id = client.groups.create("drinks", context_ids=[row.id]).id; [g.id for g in client.groups.iter() if g.name == "drinks"]
 ctx.add_associations([
-    {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "docs/aomine.md"},
+    {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "docs/aomine.md"},
 ])
 ctx.store_passages({"docs/aomine.md": "青嶺酒造は1907年創業。代表銘柄は「青嶺」。"})
 

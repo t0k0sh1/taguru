@@ -605,7 +605,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
             "POST",
             &format!("/contexts/{}/associations", shard.cx(name)),
             Some(json!([{"subject": "麹", "label": "関わる", "object": name,
-                         "weight": 1.0, "source": "s"}])),
+                         "weight": 1.0, "source_id": "s"}])),
             token,
         );
         assert_eq!(status, 200, "{body}");

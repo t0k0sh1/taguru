@@ -310,9 +310,9 @@
     <p class="section-sub">No new machinery — membership edges and negative weights express all of these.</p>
 
     <h3>Procedures (ordered knowledge)</h3>
-    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
- {<span class="k">"subject"</span>:<span class="s">"洗米"</span>,<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"object"</span>:<span class="s">"浸漬"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>},
- {<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"工程書"</span>}]</code></pre>
+    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"最初の工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source_id"</span>:<span class="s">"工程書"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"洗米"</span>,<span class="k">"label"</span>:<span class="s">"次の工程"</span>,<span class="k">"object"</span>:<span class="s">"浸漬"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source_id"</span>:<span class="s">"工程書"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"日本酒の醸造"</span>,<span class="k">"label"</span>:<span class="s">"工程"</span>,<span class="k">"object"</span>:<span class="s">"洗米"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source_id"</span>:<span class="s">"工程書"</span>}]</code></pre>
     <ul>
       <li><b>Order</b> is a chain of next-step edges (次の工程 above; fix one canonical label — branches are multiple next-step edges, i.e. a DAG). <b>Start</b> is a first-step edge (最初の工程). <b>Membership</b> (工程) connects every step to the hub, which is what makes coverage audits work.</li>
       <li>Replay is "fetch the start → <code>query {label:"次の工程"}</code> for all pairs → line them up". <b>Never use <code>explore</code> hop distance for order</b> — membership edges create shortcuts through the hub that disagree with chain position.</li>
@@ -320,9 +320,9 @@
     </ul>
 
     <h3>Causality</h3>
-    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"ストレス"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文A"</span>},
- {<span class="k">"subject"</span>:<span class="s">"カフェイン"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">-0.8</span>,<span class="k">"source"</span>:<span class="s">"論文C"</span>},
- {<span class="k">"subject"</span>:<span class="s">"運動"</span>,<span class="k">"label"</span>:<span class="s">"防ぐ"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source"</span>:<span class="s">"論文D"</span>}]</code></pre>
+    <pre><code>[{<span class="k">"subject"</span>:<span class="s">"ストレス"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source_id"</span>:<span class="s">"論文A"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"カフェイン"</span>,<span class="k">"label"</span>:<span class="s">"引き起こす"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">-0.8</span>,<span class="k">"source_id"</span>:<span class="s">"論文C"</span>},
+ {<span class="k">"subject"</span>:<span class="s">"運動"</span>,<span class="k">"label"</span>:<span class="s">"防ぐ"</span>,<span class="k">"object"</span>:<span class="s">"不眠"</span>,<span class="k">"weight"</span>:<span class="nu">1.0</span>,<span class="k">"source_id"</span>:<span class="s">"論文D"</span>}]</code></pre>
     <ul>
       <li>"Why X?" is <code>query {label:["引き起こす","高める","要因"], object:"X"}</code> — query by the causal labels with X as object. Chains show up in <code>activate</code> paths — the system shows A→B→C but never asserts A→C. Transitivity is the reader's judgment.</li>
       <li>"Does not cause" is a negative weight on the causal label; "prevents" (防ぐ) is an independent positive label. Don't mix them. Correlation stays on its own label (相関する) and is never promoted to causation.</li>

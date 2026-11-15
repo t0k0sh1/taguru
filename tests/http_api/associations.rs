@@ -50,7 +50,7 @@ fn paragraph_rejects_every_non_integer_shape() {
             &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([
                 {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
-                 "source": "a.md", "paragraph": paragraph}
+                 "source_id": "a.md", "paragraph": paragraph}
             ])),
         );
         assert_eq!(status, 400, "{name}: {body}");
@@ -106,14 +106,64 @@ fn source_over_the_name_byte_cap_is_rejected() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
-             "source": long_source}
+             "source_id": long_source}
         ])),
     );
     assert_eq!(status, 400, "{body}");
     let issues = body["issues"].as_array().expect("issues array");
     assert_eq!(issues.len(), 1, "{body}");
-    assert_eq!(issues[0]["path"], json!("associations[0].source"), "{body}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("associations[0].source_id"),
+        "{body}"
+    );
     assert_eq!(issues[0]["kind"], json!("too_long"), "{body}");
+}
+
+/// #1039 renamed the element's source field to `source_id`. The walk
+/// ignores keys it does not know, so an old caller's `source` would
+/// otherwise land its facts silently unsourced — the old key must be
+/// refused by name, and the batch must write nothing.
+#[test]
+fn the_pre_1039_source_key_is_refused_and_writes_nothing() {
+    let server = Server::start("assoc-old-source-key");
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake", "description": "d"})),
+    );
+    let writes = |server: &Server| {
+        server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["usage"]["writes"]
+            .clone()
+    };
+    let before = writes(&server);
+
+    let (status, body) = server.call(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(json!([
+            {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
+             "source": "a.md"}
+        ])),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(issues[0]["path"], json!("associations[0].source"), "{body}");
+
+    assert_eq!(writes(&server), before, "the refused batch wrote nothing");
+    // The corrective case: the same element under `source_id` lands,
+    // so the refusal above is not a handler that rejects everything.
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/associations", server.cx("sake")),
+        Some(json!([
+            {"subject": "s", "label": "l", "object": "o", "weight": 1.0,
+             "source_id": "a.md"}
+        ])),
+    );
+    assert_ne!(writes(&server), before, "{body}");
 }
 
 // --- subject/label/object wrong-type, at the HTTP level --------------------

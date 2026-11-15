@@ -33,7 +33,7 @@ def seed(client: Taguru, name: str) -> str:
                 "label": "創業年",
                 "object": "1907年",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 0,
             },
             {
@@ -41,7 +41,7 @@ def seed(client: Taguru, name: str) -> str:
                 "label": "代表銘柄",
                 "object": "青嶺",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 0,
             },
             {
@@ -49,7 +49,7 @@ def seed(client: Taguru, name: str) -> str:
                 "label": "杜氏",
                 "object": "高瀬",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 1,
             },
             {
@@ -57,7 +57,7 @@ def seed(client: Taguru, name: str) -> str:
                 "label": "重視する",
                 "object": "寒仕込み",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 1,
             },
             {
@@ -65,7 +65,7 @@ def seed(client: Taguru, name: str) -> str:
                 "label": "行う",
                 "object": "大量生産",
                 "weight": -1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 2,
             },
         ]
@@ -112,9 +112,9 @@ def test_context_lifecycle(client: Taguru, fresh_name: str) -> None:
 def test_associations_accumulate_weight_and_validate(client: Taguru, fresh_name: str) -> None:
     context_id = client.contexts.create(fresh_name).id
     ctx = client.context(context_id)
-    op = {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a"}
+    op = {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source_id": "a"}
     assert ctx.add_associations([op]).applied == 1
-    assert ctx.add_associations([{**op, "source": "b"}]).applied == 1
+    assert ctx.add_associations([{**op, "source_id": "b"}]).applied == 1
 
     page = ctx.query(subject="s", label="l")
     assert page.total == 1
@@ -267,8 +267,8 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
     assert stored.sections_dropped == 1
 
     sources = ctx.list_sources()
-    assert set(sources.sources) == {"docs/aomine.md", "docs/extra.md"}
-    assert list(ctx.iter_sources()) == sources.sources
+    assert {entry.id for entry in sources.entries} == {"docs/aomine.md", "docs/extra.md"}
+    assert list(ctx.iter_sources()) == [entry.id for entry in sources.entries]
 
     lookup = ctx.lookup_passages(["docs/aomine.md", "missing.md"])
     assert lookup.passages["docs/aomine.md"] == AOMINE_DOC
@@ -297,7 +297,7 @@ def test_sources_and_citations(client: Taguru, fresh_name: str) -> None:
 
     retracted = ctx.retract_source("docs/extra.md")
     assert retracted.passage_removed
-    assert "docs/extra.md" not in ctx.list_sources().sources
+    assert "docs/extra.md" not in [entry.id for entry in ctx.list_sources().entries]
     client.contexts.delete(context_id)
 
 
@@ -316,7 +316,7 @@ def test_source_metadata_lists_back_and_filters_search(client: Taguru, fresh_nam
         dates={"a.md": 1000},
     )
 
-    entries = {entry.name: entry for entry in ctx.list_sources().entries}
+    entries = {entry.id: entry for entry in ctx.list_sources().entries}
     assert entries["a.md"].tags == ["酒"]
     assert entries["a.md"].date == 1000
     assert entries["a.md"].stored_at is not None
@@ -397,7 +397,7 @@ def test_drift_audit_surfaces_unsourced_weight_and_dead_aliases(
                 "label": "kind",
                 "object": "杜氏",
                 "weight": 1.0,
-                "source": "docs/a.md",
+                "source_id": "docs/a.md",
             }
         ]
     )
@@ -442,7 +442,7 @@ def test_promote_moves_a_source_and_previews_with_dry_run(client: Taguru, fresh_
     assert client.context(destination_id).list_sources().total == 0
 
     outcome = scratch.promote(destination_id, ["docs/aomine.md"])
-    assert outcome.batches[0].source == "docs/aomine.md"
+    assert outcome.batches[0].source_id == "docs/aomine.md"
     assert outcome.batches[0].context_id == destination_id
     assert outcome.audit is not None
     assert outcome.audit["detector"] == "consolidation/1"
@@ -601,7 +601,7 @@ async def test_async_client_full_smoke(server, fresh_name: str) -> None:
         row = await aclient.contexts.create(fresh_name, description="async smoke")
         ctx = aclient.context(row.id)
         await ctx.add_associations(
-            [{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a"}]
+            [{"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source_id": "a"}]
         )
         await ctx.store_passages({"a": "本文。"})
         page = await ctx.recall("s")

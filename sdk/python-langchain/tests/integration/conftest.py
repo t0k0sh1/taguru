@@ -58,7 +58,7 @@ def seeded(client: Taguru) -> str:
                 "label": "創業年",
                 "object": "1907年",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 0,
             },
             {
@@ -66,7 +66,7 @@ def seeded(client: Taguru) -> str:
                 "label": "代表銘柄",
                 "object": "青嶺",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 0,
             },
             {
@@ -74,7 +74,7 @@ def seeded(client: Taguru) -> str:
                 "label": "杜氏",
                 "object": "高瀬",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 1,
             },
             {
@@ -82,7 +82,7 @@ def seeded(client: Taguru) -> str:
                 "label": "重視する",
                 "object": "寒仕込み",
                 "weight": 1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 1,
             },
             {
@@ -90,7 +90,7 @@ def seeded(client: Taguru) -> str:
                 "label": "行う",
                 "object": "大量生産",
                 "weight": -1.0,
-                "source": "docs/aomine.md",
+                "source_id": "docs/aomine.md",
                 "paragraph": 2,
             },
         ]

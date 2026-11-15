@@ -28,7 +28,7 @@ fn seed_mixed_corpus(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "docs/kura.md", "paragraph": 0},
+             "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 }
@@ -302,7 +302,7 @@ fn activate_limit_forwards_into_the_activate_call() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "所在地", "object": "雲居県",
-             "weight": 1.0, "source": "docs/kura.md", "paragraph": 0},
+             "weight": 1.0, "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 
@@ -352,7 +352,7 @@ fn an_attribution_to_a_never_stored_source_is_dropped_not_orphaned() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "受賞歴", "object": "金賞",
-             "weight": 1.0, "source": "ghost.md", "paragraph": 0},
+             "weight": 1.0, "source_id": "ghost.md", "paragraph": 0},
         ])),
     );
 
@@ -501,7 +501,7 @@ fn a_key_granted_only_read_reaches_evidence_assembly() {
             &format!("/contexts/{}/associations", server.cx("sake")),
             Some(json!([
                 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-                 "source": "docs/kura.md", "paragraph": 0},
+                 "source_id": "docs/kura.md", "paragraph": 0},
             ])),
             "atok"
         )

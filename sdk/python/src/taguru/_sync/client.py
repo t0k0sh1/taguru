@@ -1451,7 +1451,7 @@ class Context:
         result = self._post("/sources/search/explain", body)
         return decode(SearchExplanation, result)  # type: ignore[no-any-return]
 
-    def retract_source(self, source: str, *, dry_run: bool = False) -> RetractOutcome:
+    def retract_source(self, source_id: str, *, dry_run: bool = False) -> RetractOutcome:
         """Withdraw one source's contributions (diff sync before re-ingest).
 
         ``dry_run=True`` previews the same ``{associations_touched,
@@ -1463,7 +1463,7 @@ class Context:
             "POST",
             self._path + "/sources/retract",
             params=drop_none({"dry_run": True if dry_run else None}),
-            json_body={"source": source},
+            json_body={"source_id": source_id},
         )
         return decode(RetractOutcome, result)  # type: ignore[no-any-return]
 
@@ -1485,13 +1485,13 @@ class Context:
         after: str | None = None
         while True:
             page = self.list_sources(limit=limit, after=after, prefix=prefix)
-            if not page.sources:
+            if not page.entries:
                 return
-            for source in page.sources:
-                yield source
+            for entry in page.entries:
+                yield entry.id
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
-            after = page.sources[-1]
+            after = page.entries[-1].id
 
     def cite_passage(self, source: str, paragraph: int) -> Citation:
         """One verbatim paragraph by source and paragraph locator."""
@@ -1670,7 +1670,7 @@ class Context:
     def promote(
         self,
         into: str,
-        sources: Sequence[str],
+        source_ids: Sequence[str],
         *,
         audit: bool | None = None,
         dry_run: bool = False,
@@ -1695,7 +1695,7 @@ class Context:
             "POST",
             self._path + "/promote",
             params=drop_none({"dry_run": True if dry_run else None}),
-            json_body=drop_none({"into": into, "sources": list(sources), "audit": audit}),
+            json_body=drop_none({"into": into, "source_ids": list(source_ids), "audit": audit}),
         )
         return decode(PromoteOutcome, result)  # type: ignore[no-any-return]
 

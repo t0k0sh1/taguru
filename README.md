@@ -57,7 +57,7 @@ CTX=$(curl -sX POST localhost:8248/contexts -H 'Content-Type: application/json' 
 
 # store one association
 curl -X POST localhost:8248/contexts/$CTX/associations -H 'Content-Type: application/json' \
-  -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source":"第1段落"}]'
+  -d '[{"subject":"青嶺酒造","label":"代表銘柄","object":"青嶺","weight":1.0,"source_id":"第1段落"}]'
 
 # pull the thread
 curl -X POST localhost:8248/contexts/$CTX/activate -H 'Content-Type: application/json' \

@@ -629,7 +629,7 @@ class SourceEntry:
     server's stamp (epoch seconds), ``date`` the user-supplied document
     time; a source stored before metadata existed lists as bare."""
 
-    name: str
+    id: str
     stored_at: int | None = None
     date: int | None = None
     tags: list[str] = field(default_factory=list)
@@ -637,11 +637,10 @@ class SourceEntry:
 
 @dataclass(slots=True, frozen=True)
 class SourcePage:
-    """``sources`` is the bare id list; ``entries`` carries the same page
-    with each source's metadata beside it."""
+    """One page of listed sources: each entry is a source id with its
+    metadata beside it. ``total`` counts every matching source."""
 
     total: int
-    sources: list[str]
     entries: list[SourceEntry] = field(default_factory=list)
 
 
@@ -1067,7 +1066,7 @@ class ImportOutcome:
     """Outcome of one applied source (retract-then-apply)."""
 
     context_id: str
-    source: str
+    source_id: str
     created: bool
     retracted: int
     associations: int

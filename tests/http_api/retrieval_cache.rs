@@ -39,7 +39,7 @@ fn cache_misses(server: &Server, op: &str) -> u64 {
 
 fn assoc(subject: &str, label: &str, object: &str) -> Value {
     json!([{"subject": subject, "label": label, "object": object,
-            "weight": 1.0, "source": "a.md"}])
+            "weight": 1.0, "source_id": "a.md"}])
 }
 
 /// The core loop: an identical recall answers from the cache with a
@@ -502,7 +502,7 @@ fn compaction_invalidates_cache_entries_filled_before_it() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "a.md"})),
+        Some(json!({"source_id": "a.md"})),
     );
     let retracted = recall();
     assert_eq!(retracted["matches"][0]["weight"], 0.0);

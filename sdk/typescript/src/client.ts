@@ -1514,12 +1514,12 @@ export class Context {
    * bytes physically off disk — is retract, then `compact`.
    */
   async retractSource(
-    source: string,
+    sourceId: string,
     options: { dry_run?: boolean } = {},
   ): Promise<RetractOutcome> {
     const result = await this.client.requestJson("POST", `${this.path}/sources/retract`, {
       params: { dry_run: options.dry_run ? true : undefined },
-      jsonBody: { source },
+      jsonBody: { source_id: sourceId },
     });
     return result as RetractOutcome;
   }
@@ -1539,13 +1539,15 @@ export class Context {
     let after: string | undefined;
     for (;;) {
       const page = await this.listSources({ limit: options.limit, after, prefix: options.prefix });
-      if (page.sources.length === 0) {
+      if (page.entries.length === 0) {
         return;
       }
-      yield* page.sources;
+      for (const entry of page.entries) {
+        yield entry.id;
+      }
       // A short page is not the last one: a concurrent delete can shorten
       // it while later rows remain, so page until an empty page.
-      after = page.sources[page.sources.length - 1]!;
+      after = page.entries[page.entries.length - 1]!.id;
     }
   }
 
@@ -1755,12 +1757,12 @@ export class Context {
    */
   async promote(
     into: string,
-    sources: string[],
+    sourceIds: string[],
     options: { audit?: boolean; dry_run?: boolean } = {},
   ): Promise<PromoteOutcome> {
     const result = await this.client.requestJson("POST", `${this.path}/promote`, {
       params: { dry_run: options.dry_run ? true : undefined },
-      jsonBody: dropUndefined({ into, sources, audit: options.audit }),
+      jsonBody: dropUndefined({ into, source_ids: sourceIds, audit: options.audit }),
     });
     return result as PromoteOutcome;
   }

@@ -31,13 +31,13 @@ class _AssocOpRequired(TypedDict):
 
 
 class AssocOp(_AssocOpRequired, total=False):
-    """One association to assert: ``{subject, label, object, weight, source?, paragraph?}``.
+    """One association to assert: ``{subject, label, object, weight, source_id?, paragraph?}``.
 
-    ``paragraph`` locates the fact within ``source`` (its blank-line paragraph
-    index) and is ignored by the server without a ``source``.
+    ``paragraph`` locates the fact within ``source_id`` (its blank-line paragraph
+    index) and is ignored by the server without a ``source_id``.
     """
 
-    source: str
+    source_id: str
     paragraph: int
 
 
