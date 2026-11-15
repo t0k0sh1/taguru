@@ -727,9 +727,10 @@ fn fetch_embeddings(api: &Api, context: &str) -> Option<EmbeddingsBlock> {
 }
 
 /// Keyset-walks `GET /contexts/{id}/sources` itself: its page items
-/// are bare strings, not `{id, name}` objects, so `Api::list_group_rows`
-/// (built for the latter) does not fit — see `remote.rs`'s own comment
-/// on `get_with_query` for why this is not new HTTP client code.
+/// are `{id, …metadata}` entries keyed by the source id alone, not
+/// `{id, name}` rows, so `Api::list_group_rows` (built for the latter)
+/// does not fit — see `remote.rs`'s own comment on `get_with_query`
+/// for why this is not new HTTP client code.
 fn list_all_sources(api: &Api, context: &str) -> Result<BTreeSet<String>, String> {
     let mut names = BTreeSet::new();
     let mut after: Option<String> = None;
@@ -740,15 +741,15 @@ fn list_all_sources(api: &Api, context: &str) -> Result<BTreeSet<String>, String
             query.push(("after", cursor));
         }
         let body = api.get_with_query(&["contexts", context, "sources"], &query)?;
-        let items = body["sources"]
+        let items = body["entries"]
             .as_array()
             .ok_or_else(|| format!("{context}: not a taguru sources page"))?;
         let mut page: Vec<String> = Vec::with_capacity(items.len());
         for item in items {
-            let name = item
+            let id = item["id"]
                 .as_str()
-                .ok_or_else(|| format!("{context}: a sources entry is not a string"))?;
-            page.push(name.to_string());
+                .ok_or_else(|| format!("{context}: a sources entry is missing its id"))?;
+            page.push(id.to_string());
         }
         let page_len = page.len();
         // Same "did the cursor actually advance" guard as

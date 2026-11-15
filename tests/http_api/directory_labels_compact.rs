@@ -21,9 +21,9 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
-            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
-            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "b.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "b.md"},
         ])),
     );
     server.ok(
@@ -68,13 +68,17 @@ fn labels_aliases_and_sources_page_with_keyset_cursors() {
         None,
     );
     assert_eq!(first["total"], json!(3), "{first}");
-    assert_eq!(first["sources"], json!(["a.md", "b.md"]), "{first}");
+    assert_eq!(
+        listed_source_ids(&first),
+        json!(["a.md", "b.md"]),
+        "{first}"
+    );
     let second = server.ok(
         "GET",
         &format!("/contexts/{}/sources?after=b.md", server.cx("sake")),
         None,
     );
-    assert_eq!(second["sources"], json!(["c.md"]), "{second}");
+    assert_eq!(listed_source_ids(&second), json!(["c.md"]), "{second}");
 
     // aliases: one cursor across both namespaces, concepts first.
     let first = server.ok(
@@ -125,9 +129,9 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "a.md"},
-            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "a.md"},
-            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "b.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "蔵", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "a.md"},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source_id": "b.md"},
         ])),
     );
     server.ok(
@@ -164,7 +168,7 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
         None,
     );
     assert_eq!(filtered["total"], json!(1), "{filtered}");
-    assert_eq!(filtered["sources"], json!(["a.md"]), "{filtered}");
+    assert_eq!(listed_source_ids(&filtered), json!(["a.md"]), "{filtered}");
 
     // aliases: prefix applies within each namespace before the
     // concept:/label: cursor joins them.
@@ -188,7 +192,7 @@ fn labels_aliases_and_sources_filter_by_prefix_and_count_total_after_filtering()
         None,
     );
     assert_eq!(empty["total"], json!(0), "{empty}");
-    assert_eq!(empty["sources"], json!([]), "{empty}");
+    assert_eq!(listed_source_ids(&empty), json!([]), "{empty}");
 }
 
 /// Percent-encodes one query value the way ureq will not do for us.
@@ -228,15 +232,15 @@ fn the_compact_endpoint_shrinks_live_and_is_admin_only() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
-            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source_id": "gone.md"},
         ])),
         admin,
     );
     server.call_with_token(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "gone.md"})),
+        Some(json!({"source_id": "gone.md"})),
         admin,
     );
 
@@ -301,15 +305,15 @@ fn the_maintenance_compact_endpoint_sweeps_worst_ratio_first_and_is_admin_only()
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
-            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source_id": "gone.md"},
         ])),
         admin,
     );
     server.call_with_token(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "gone.md"})),
+        Some(json!({"source_id": "gone.md"})),
         admin,
     );
 
@@ -392,15 +396,15 @@ fn auto_compaction_fires_from_the_flusher_tick_by_default() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
-            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
-            {"subject": "蔵", "label": "廃止蔵", "object": "旧蔵", "weight": 1.0, "source": "gone.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source_id": "gone.md"},
+            {"subject": "蔵", "label": "廃止蔵", "object": "旧蔵", "weight": 1.0, "source_id": "gone.md"},
         ])),
     );
     server.call(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "gone.md"})),
+        Some(json!({"source_id": "gone.md"})),
     );
 
     // The tick fires every second; give a loaded CI box a generous
@@ -478,14 +482,14 @@ fn compact_leaves_group_files_byte_for_byte() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "keep.md"},
-            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source": "gone.md"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "keep.md"},
+            {"subject": "蔵", "label": "廃止銘柄", "object": "旧銘", "weight": 1.0, "source_id": "gone.md"},
         ])),
     );
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "gone.md"})),
+        Some(json!({"source_id": "gone.md"})),
     );
     server.ok(
         "POST",

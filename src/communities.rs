@@ -873,7 +873,7 @@ fn lookup_passages(
 fn retract_source(api: &Api, context: &str, source: &str) -> Result<(), String> {
     api.post_envelope(
         &["contexts", context, "sources", "retract"],
-        &json!({"source": source}),
+        &json!({"source_id": source}),
     )
     .map(|_| ())
     .map_err(|failure| failure.into_message())

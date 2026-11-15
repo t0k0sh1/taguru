@@ -52,9 +52,9 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "旧銘酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -170,9 +170,9 @@ fn paths_never_threads_through_schema_type_once_a_schema_exists() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "旧銘酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -237,13 +237,13 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "旧銘酒造", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "青嶺酒造", "label": "所在地", "object": "広島",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "広島", "label": "属する", "object": "中国地方",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -324,15 +324,15 @@ fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "蔵", "label": "銘柄", "object": "青嶺",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             // An island fact, connected to the origin cluster only
             // through the two schema:type edges' shared type object.
             {"subject": "孤島", "label": "l", "object": "先",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "蔵", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "孤島", "label": "schema:type", "object": "Brewery",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 
@@ -415,9 +415,9 @@ fn type_name_concepts_are_excluded_from_the_vocabulary_twin_audit_once_a_schema_
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "山田商店", "label": "schema:type", "object": "Organization",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "山田商会", "label": "schema:type", "object": "Organisation",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 

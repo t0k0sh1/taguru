@@ -85,7 +85,7 @@ describe("envelope and raw-body handling", () => {
   });
 
   it("normalizes import outcomes to batches, defaulting groups to empty", async () => {
-    const outcome = { context: "sake", source: "a", created: true };
+    const outcome = { context: "sake", source_id: "a", created: true };
     const single = stubClient(() => okBody(outcome));
     const result = await single.importBatches("{}");
     expect(result.batches).toHaveLength(1);
@@ -96,7 +96,7 @@ describe("envelope and raw-body handling", () => {
   });
 
   it("carries the server's group restore outcomes through import", async () => {
-    const outcome = { context: "sake", source: "a", created: true };
+    const outcome = { context: "sake", source_id: "a", created: true };
     const client = stubClient(() =>
       okBody({
         batches: [outcome],
@@ -860,7 +860,7 @@ describe("dropUndefined", () => {
 });
 
 describe("normalizeImportOutcomes", () => {
-  const BATCH = { context: "sake", source: "a", created: true };
+  const BATCH = { context: "sake", source_id: "a", created: true };
   const GROUP = {
     id: "00000000-0000-4000-9000-000000000001",
     name: "brewers",

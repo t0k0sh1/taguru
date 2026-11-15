@@ -65,7 +65,7 @@ fn every_write_entrance_feeds_the_expected_event() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "doc.md"})),
+        Some(json!({"source_id": "doc.md"})),
     );
     server.ok(
         "PUT",

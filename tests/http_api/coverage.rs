@@ -144,7 +144,7 @@ fn seed_one_concept(server: &Server, name: &str) {
         &format!("/contexts/{}/associations", server.cx(name)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 }

@@ -74,7 +74,7 @@ fn main() {
                     "label": format!("関係{}", index % 97),
                     "object": format!("対象{index}"),
                     "weight": 1.0,
-                    "source": format!("doc-{}.md", index % 500),
+                    "source_id": format!("doc-{}.md", index % 500),
                 })
             })
             .collect();
@@ -125,7 +125,7 @@ fn main() {
                     &format!("/contexts/{CONTEXT}/associations"),
                     Some(serde_json::json!([{
                         "subject": cue, "label": "追記", "object": format!("値{index}"),
-                        "weight": 1.0, "source": "mixed.md",
+                        "weight": 1.0, "source_id": "mixed.md",
                     }])),
                 )
             } else {

@@ -17,7 +17,7 @@ fn graph_writes_survive_a_hard_kill() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "第1段落"},
         ])),
     );
 
@@ -110,7 +110,7 @@ fn data_survives_a_graceful_restart() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "第1段落"},
         ])),
     );
 

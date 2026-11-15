@@ -35,7 +35,7 @@ def seeded_pair(client: Taguru, base: str) -> tuple[str, str, str, str]:
                 "label": "代表銘柄",
                 "object": "青嶺",
                 "weight": 1.0,
-                "source": "sake.md",
+                "source_id": "sake.md",
                 "paragraph": 0,
             }
         ]
@@ -47,7 +47,7 @@ def seeded_pair(client: Taguru, base: str) -> tuple[str, str, str, str]:
                 "label": "代表銘柄",
                 "object": "露霜",
                 "weight": 1.0,
-                "source": "tea.md",
+                "source_id": "tea.md",
                 "paragraph": 0,
             }
         ]

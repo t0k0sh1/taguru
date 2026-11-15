@@ -145,7 +145,7 @@ def test_ingest_outcome_counters_come_from_the_servers_import_outcome(
 ) -> None:
     fake_server.import_result_override = {
         "context_id": "sake",
-        "source": "doc.md",
+        "source_id": "doc.md",
         "created": True,
         "retracted": 0,
         "associations": 0,

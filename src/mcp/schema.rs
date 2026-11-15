@@ -207,7 +207,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                                 "label": { "type": "string" },
                                 "object": { "type": "string" },
                                 "weight": { "type": "number" },
-                                "source": { "type": "string" },
+                                "source_id": { "type": "string", "description": "the source (document) id — the stable string you chose for this document, reused to re-ingest it in place" },
                                 "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
                             },
                             "required": ["subject", "label", "object", "weight"]
@@ -300,7 +300,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_sources",
-            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync. Keyset-paged by id; total above the returned count means more pages. Beside the bare `sources` list, `entries` carries each source's metadata: stored_at (server-stamped epoch seconds), date (user-supplied), tags — absent keys mean the source has none.",
+            "Source ids with registered passages — targets for retract_source / lookup_passages, inventory for diff sync. Keyset-paged by id; total above the returned count means more pages. Each of `entries` is one source: its id, plus its metadata — stored_at (server-stamped epoch seconds), date (user-supplied), tags — absent keys mean the source has none.",
             object_schema(
                 json!({
                     "context_id": context,
@@ -585,11 +585,11 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context_id": context,
                     "into": { "type": "string", "description": "the destination context's id (the id column of list_contexts, not its name) — must already exist" },
-                    "sources": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "the scratch source ids to promote — every one must exist here" },
+                    "source_ids": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "the scratch source ids to promote — every one must exist here" },
                     "audit": { "type": "boolean", "description": "run the destination's consolidation audit after the apply (default true; dry_run never audits)" },
                     "dry_run": { "type": "boolean", "description": "preview only — report the same response shape (`batches`), write nothing, no audit" }
                 }),
-                &["context_id", "into", "sources"],
+                &["context_id", "into", "source_ids"],
             ),
         ),
         (
@@ -598,10 +598,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context_id": context,
-                    "source": { "type": "string" },
+                    "source_id": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "preview only — report what would be withdrawn, write nothing" }
                 }),
-                &["context_id", "source"],
+                &["context_id", "source_id"],
             ),
         ),
         (

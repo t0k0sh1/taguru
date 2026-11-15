@@ -34,7 +34,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
         &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
-            "weight": 1.0, "source": "keep.md"
+            "weight": 1.0, "source_id": "keep.md"
         }])),
     );
     let (status, refused) = server.call(
@@ -42,7 +42,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
         &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "銘柄", "object": "青嶺",
-            "weight": 1.0, "source": "keep.md"
+            "weight": 1.0, "source_id": "keep.md"
         }])),
     );
     assert_eq!(status, 507, "{refused}");
@@ -64,7 +64,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("capped")),
-        Some(json!({"source": "keep.md"})),
+        Some(json!({"source_id": "keep.md"})),
     );
     server.ok(
         "POST",
@@ -82,7 +82,7 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
         &format!("/contexts/{}/associations", server.cx("free")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
-            "weight": 1.0, "source": "keep.md"
+            "weight": 1.0, "source_id": "keep.md"
         }])),
     );
 
@@ -140,7 +140,7 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         &format!("/contexts/{}/associations", server.cx("capped")),
         Some(json!([{
             "subject": "蔵", "label": "杜氏", "object": "高瀬",
-            "weight": 1.0, "source": "keep.md"
+            "weight": 1.0, "source_id": "keep.md"
         }])),
     );
 
@@ -224,7 +224,7 @@ fn a_quota_follows_the_id_through_a_rename() {
             &format!("/contexts/{id}/associations"),
             Some(json!([{
                 "subject": "蔵", "label": "杜氏", "object": object,
-                "weight": 1.0, "source": "keep.md"
+                "weight": 1.0, "source_id": "keep.md"
             }])),
         )
     };

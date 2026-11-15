@@ -510,7 +510,7 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
             "/contexts/{}/sources/retract",
             server.cx("corp::communities")
         ),
-        Some(json!({"source": format!("community:{community}")})),
+        Some(json!({"source_id": format!("community:{community}")})),
     );
     let (code, stdout, _) = run_communities(
         &["--context", &server.cx("corp"), &server.base],
@@ -957,7 +957,7 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
             for object in &members[index + 1..] {
                 ops.push(json!({
                     "subject": subject, "label": "近い", "object": object,
-                    "weight": 2.0, "source": source,
+                    "weight": 2.0, "source_id": source,
                 }));
             }
         }
@@ -997,7 +997,7 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("corp")),
-        Some(json!({"source": "b.md"})),
+        Some(json!({"source_id": "b.md"})),
     );
     let (code, stdout, stderr) = run_communities(
         &["--context", &server.cx("corp"), &server.base],

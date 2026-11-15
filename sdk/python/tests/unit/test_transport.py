@@ -260,7 +260,7 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
 def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
     outcome = {
         "context_id": "sake",
-        "source": "a",
+        "source_id": "a",
         "created": True,
         "retracted": 0,
         "associations": 2,
@@ -287,13 +287,13 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
 
     client = sync_client(lambda _req: ok_response({"batches": [outcome, outcome]}))
     result = client.import_batches('{"type": "source"}')
-    assert [o.source for o in result.batches] == ["a", "a"]
+    assert [o.source_id for o in result.batches] == ["a", "a"]
 
 
 async def test_async_import_batches_decodes_locator_counts() -> None:
     outcome = {
         "context_id": "sake",
-        "source": "a",
+        "source_id": "a",
         "created": True,
         "retracted": 0,
         "associations": 2,
@@ -317,7 +317,7 @@ async def test_async_import_batches_decodes_locator_counts() -> None:
 def test_import_carries_group_restore_outcomes() -> None:
     outcome = {
         "context_id": "sake",
-        "source": "a",
+        "source_id": "a",
         "created": True,
         "retracted": 0,
         "associations": 2,
@@ -367,7 +367,7 @@ async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monke
     path.write_text('{"type": "source"}\n', encoding="utf-8")
     outcome = {
         "context_id": "sake",
-        "source": "a",
+        "source_id": "a",
         "created": True,
         "retracted": 0,
         "associations": 2,
@@ -621,7 +621,7 @@ def test_wrong_envelope_shape_error_names_the_status_and_body() -> None:
 def test_import_result_threads_schemas_issues_and_violations_through() -> None:
     outcome = {
         "context_id": "sake",
-        "source": "a",
+        "source_id": "a",
         "created": True,
         "retracted": 0,
         "associations": 2,
@@ -671,7 +671,7 @@ def test_import_result_threads_schemas_issues_and_violations_through() -> None:
     assert defaulted.schema_violations == 0
 
     legacy = normalize_import_outcomes(outcome, issues=[issue], schema_violations=2)
-    assert [batch.source for batch in legacy.batches] == ["a"]
+    assert [batch.source_id for batch in legacy.batches] == ["a"]
     assert legacy.issues == [issue]
     assert legacy.schema_violations == 2
 

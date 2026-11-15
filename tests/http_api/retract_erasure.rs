@@ -14,9 +14,9 @@ fn seed(server: &Server) {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0,
-             "source": "doc.md"},
+             "source_id": "doc.md"},
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "doc.md"},
+             "source_id": "doc.md"},
         ])),
     );
     server.ok(
@@ -43,7 +43,7 @@ fn dry_run_reports_the_real_footprint_and_writes_nothing() {
             "/contexts/{}/sources/retract?dry_run=true",
             server.cx("sake")
         ),
-        Some(json!({"source": "doc.md"})),
+        Some(json!({"source_id": "doc.md"})),
     );
     assert_eq!(preview["associations_touched"], json!(2), "{preview}");
     assert_eq!(preview["passage_removed"], json!(true), "{preview}");
@@ -61,7 +61,7 @@ fn dry_run_reports_the_real_footprint_and_writes_nothing() {
         &format!("/contexts/{}/sources", server.cx("sake")),
         None,
     );
-    assert_eq!(sources["sources"], json!(["doc.md"]), "{sources}");
+    assert_eq!(listed_source_ids(&sources), json!(["doc.md"]), "{sources}");
     let feed = server.ok(
         "GET",
         &format!("/contexts/{}/changes?since={cursor}", server.cx("sake")),
@@ -73,7 +73,7 @@ fn dry_run_reports_the_real_footprint_and_writes_nothing() {
     let real = server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "doc.md"})),
+        Some(json!({"source_id": "doc.md"})),
     );
     assert_eq!(
         real["associations_touched"],
@@ -92,7 +92,7 @@ fn dry_run_on_an_unknown_source_previews_zero() {
             "/contexts/{}/sources/retract?dry_run=true",
             server.cx("sake")
         ),
-        Some(json!({"source": "never-stored.md"})),
+        Some(json!({"source_id": "never-stored.md"})),
     );
     assert_eq!(preview["associations_touched"], json!(0));
     assert_eq!(preview["passage_removed"], json!(false));
@@ -103,7 +103,7 @@ fn dry_run_on_an_unknown_source_previews_zero() {
             "/contexts/{}/sources/retract?dry_run=true",
             "00000000-0000-4000-8000-00000000dead"
         ),
-        Some(json!({"source": "doc.md"})),
+        Some(json!({"source_id": "doc.md"})),
     );
     assert_eq!(status, 404);
 }
@@ -115,7 +115,7 @@ fn compact_rewrites_the_passage_log_when_one_exists() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "doc.md"})),
+        Some(json!({"source_id": "doc.md"})),
     );
 
     let outcome = server.ok(
@@ -166,7 +166,7 @@ fn only_an_effective_retraction_counts_as_a_write() {
         &format!("/contexts/{id}/associations"),
         Some(
             json!([{"subject": "s", "label": "l", "object": "o", "weight": 1.0,
-                     "source": "a.md"}]),
+                     "source_id": "a.md"}]),
         ),
     );
     let writes = |server: &Server| {
@@ -177,7 +177,7 @@ fn only_an_effective_retraction_counts_as_a_write() {
     let effective = server.ok(
         "POST",
         &format!("/contexts/{id}/sources/retract"),
-        Some(json!({"source": "a.md"})),
+        Some(json!({"source_id": "a.md"})),
     );
     assert_eq!(effective["passage_removed"], json!(false), "{effective}");
     assert_eq!(
@@ -189,7 +189,7 @@ fn only_an_effective_retraction_counts_as_a_write() {
     server.ok(
         "POST",
         &format!("/contexts/{id}/sources/retract"),
-        Some(json!({"source": "a.md"})),
+        Some(json!({"source_id": "a.md"})),
     );
     assert_eq!(
         writes(&server).as_u64().unwrap(),

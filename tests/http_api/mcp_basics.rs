@@ -431,8 +431,8 @@ fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
         Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "add_associations",
                    "arguments": {"context_id": server.cx("sake"), "associations": [
-                       {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
-                       {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}
+                       {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source_id": "a.md"},
+                       {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source_id": "a.md"}
                    ]}}})),
     );
     assert_eq!(status, 200, "the JSON-RPC envelope still succeeds: {reply}");
@@ -525,9 +525,9 @@ fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "高瀬", "label": "schema:type", "object": "Person",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
             {"subject": "高瀬", "label": "杜氏", "object": "個人A",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
 

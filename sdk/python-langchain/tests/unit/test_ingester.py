@@ -271,7 +271,7 @@ def test_ingest_text_propagates_section_and_locator_counts_from_the_server(
     ``locators_dropped`` onto ``IngestOutcome`` (issue #347)."""
     fake_server.import_result_override = {
         "context_id": "sake",
-        "source": "docs/aomine.md",
+        "source_id": "docs/aomine.md",
         "created": False,
         "retracted": 0,
         "associations": 2,

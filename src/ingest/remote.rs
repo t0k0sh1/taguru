@@ -435,7 +435,7 @@ pub(super) fn run_remote(
                             );
                             refused.push(serde_json::json!({
                                 "context_id": batch.context_id,
-                                "source": batch.source,
+                                "source_id": batch.source,
                                 "error": refused_batch_error(&hits),
                             }));
                             continue;

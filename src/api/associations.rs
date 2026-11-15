@@ -20,20 +20,31 @@ use super::{
     ok_with_issues, oversized, partial_write_error, truncate_issues, validation_error,
 };
 
-/// `source`'s shape: omitted (or null) means the ordinary unsourced
-/// association — see [`AssocOp::source`] — but a source that IS
-/// present is a name like any other and must carry something, or it
+/// `source_id`'s shape: omitted (or null) means the ordinary unsourced
+/// association — see [`AssocOp::source`] — but a source id that IS
+/// present is a string like any other and must carry something, or it
 /// would intern a real, permanent source id that unrelated callers'
 /// mistakes then silently merge into.
+///
+/// The pre-#1039 key `source` is refused by name: the walk ignores keys
+/// it does not know, so an old caller's `source` would otherwise land
+/// its facts unsourced — provenance lost without a word.
 fn interpret_source(
     obj: &serde_json::Map<String, Value>,
     path: &str,
     issues: &mut Vec<Issue>,
 ) -> Option<String> {
-    match obj.get("source") {
+    if obj.contains_key("source") {
+        issues.push(Issue::wrong_type(
+            format!("{path}.source"),
+            "absent — the source is named by source_id (#1039)",
+            &obj["source"],
+        ));
+    }
+    match obj.get("source_id") {
         None | Some(Value::Null) => None,
         Some(Value::String(text)) => {
-            if check_bounded_len(text, format!("{path}.source"), MAX_NAME_BYTES, issues) {
+            if check_bounded_len(text, format!("{path}.source_id"), MAX_NAME_BYTES, issues) {
                 Some(text.clone())
             } else {
                 None
@@ -41,7 +52,7 @@ fn interpret_source(
         }
         Some(other) => {
             issues.push(Issue::wrong_type(
-                format!("{path}.source"),
+                format!("{path}.source_id"),
                 "a string",
                 other,
             ));
@@ -85,8 +96,8 @@ fn interpret_weight(
     }
 }
 
-/// Zero-based paragraph position within `source` — meaningless without
-/// one, so `apply_op` only ever honors it alongside `source`.
+/// Zero-based paragraph position within the source — meaningless
+/// without one, so `apply_op` only ever honors it alongside `source_id`.
 fn interpret_paragraph(
     obj: &serde_json::Map<String, Value>,
     path: &str,
@@ -161,7 +172,8 @@ fn interpret_associations(value: &Value) -> Result<Vec<AssocOp>, Vec<Issue>> {
 }
 
 /// A batch of assertions — the arguments of `associate` /
-/// `associate_from` as JSON fields ([`AssocOp`], shared with the WAL).
+/// `associate_from` as JSON fields, walked into [`AssocOp`] (the WAL
+/// payload) by [`interpret_associations`].
 /// A batch is the natural write unit: one document's extracted facts,
 /// one request, one lock acquisition, one WAL fsync.
 pub async fn add_associations(
@@ -237,7 +249,7 @@ pub async fn add_associations(
     if let Some(installed) = installed {
         // This route has no inline label-alias declaration (no
         // `labels` field), and never retracts a source — each item
-        // carries its own optional `source` (§7.3's "there is no
+        // carries its own optional `source_id` (§7.3's "there is no
         // source retraction on this path").
         let declared_labels = BTreeMap::new();
         let env = match state.read_context(&id, |context| {

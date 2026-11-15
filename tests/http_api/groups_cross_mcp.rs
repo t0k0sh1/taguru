@@ -91,19 +91,19 @@ fn cross_context_search_answers_questions_that_straddle_the_split() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("brewery")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source": "第1段落"},
-            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source": "第1段落"},
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
-            {"subject": "青嶺酒造", "label": "開く", "object": "蔵開きの祭り", "weight": 1.0, "source": "第5段落"},
+            {"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0, "source_id": "第1段落"},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "source_id": "第1段落"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "第1段落"},
+            {"subject": "青嶺酒造", "label": "開く", "object": "蔵開きの祭り", "weight": 1.0, "source_id": "第5段落"},
         ])),
     );
     server.ok(
         "POST",
         &format!("/contexts/{}/associations", server.cx("region")),
         Some(json!([
-            {"subject": "霧沢町", "label": "所在する県", "object": "雲居県", "weight": 1.0, "source": "地誌1"},
-            {"subject": "霧沢町", "label": "力を入れる", "object": "酒蔵観光", "weight": 1.0, "source": "地誌2"},
-            {"subject": "蔵開きの祭り", "label": "時期", "object": "毎年2月", "weight": 1.0, "source": "地誌2"},
+            {"subject": "霧沢町", "label": "所在する県", "object": "雲居県", "weight": 1.0, "source_id": "地誌1"},
+            {"subject": "霧沢町", "label": "力を入れる", "object": "酒蔵観光", "weight": 1.0, "source_id": "地誌2"},
+            {"subject": "蔵開きの祭り", "label": "時期", "object": "毎年2月", "weight": 1.0, "source_id": "地誌2"},
         ])),
     );
     server.ok(
@@ -257,9 +257,9 @@ fn one_association_retracts_over_http_and_survives_a_hard_kill() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc1"},
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc2"},
-            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc1"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc1"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc2"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source_id": "doc1"},
         ])),
         write,
     );
@@ -395,7 +395,7 @@ fn flush_and_export_ride_the_mcp_transport() {
         "POST",
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
-            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "doc"},
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source_id": "doc"},
         ])),
     );
     server.ok(
@@ -448,7 +448,7 @@ fn an_oversized_mcp_tool_result_is_capped_but_the_raw_export_route_is_not() {
     let batch: Vec<Value> = (0..200)
         .map(|i| {
             json!({"subject": format!("s{i}"), "label": "rel", "object": format!("o{i}"),
-                   "weight": 1.0, "source": "doc"})
+                   "weight": 1.0, "source_id": "doc"})
         })
         .collect();
     server.ok(
@@ -814,7 +814,7 @@ fn search_explain_names_the_first_verdict_that_applies() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources/retract", server.cx("sake")),
-        Some(json!({"source": "docs/kuramoto.md"})),
+        Some(json!({"source_id": "docs/kuramoto.md"})),
     );
     let retracted = server.ok(
         "POST",
@@ -1082,7 +1082,7 @@ fn the_mcp_retrieve_tool_runs_the_composed_loop_end_to_end() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "docs/kura.md", "paragraph": 0},
+             "source_id": "docs/kura.md", "paragraph": 0},
         ])),
     );
 

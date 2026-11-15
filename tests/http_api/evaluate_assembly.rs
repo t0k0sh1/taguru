@@ -80,7 +80,7 @@ fn seed_assembly_corpus(server: &Server, context: &str) {
         &format!("/contexts/{}/associations", server.cx(context)),
         Some(json!([
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-             "source": "corpus/kura-c.md", "paragraph": 0},
+             "source_id": "corpus/kura-c.md", "paragraph": 0},
         ])),
     );
 }

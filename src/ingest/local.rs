@@ -76,7 +76,7 @@ pub(super) fn run_local(
                             );
                             refused.push(FailedBatch {
                                 context_id: batch.context_id.clone(),
-                                source: batch.source.clone(),
+                                source_id: batch.source.clone(),
                                 error: refused_batch_error(&hits),
                             });
                             continue;
@@ -272,7 +272,7 @@ pub(super) fn run_local(
                 if as_json {
                     failed_batches.push(FailedBatch {
                         context_id: batch.context_id.clone(),
-                        source: batch.source.clone(),
+                        source_id: batch.source.clone(),
                         error: refusal.text(),
                     });
                 }
@@ -484,7 +484,7 @@ pub(super) fn run_local(
 fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
     crate::api::ImportOutcome {
         context_id: batch.context_id.clone(),
-        source: batch.source.clone(),
+        source_id: batch.source.clone(),
         created: false,
         retracted: 0,
         associations: batch.associations.len(),
@@ -518,7 +518,7 @@ fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
 #[derive(serde::Serialize)]
 struct FailedBatch {
     context_id: String,
-    source: String,
+    source_id: String,
     error: String,
 }
 

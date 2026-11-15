@@ -156,7 +156,7 @@ classes:
       options: [paragraph, limit, semantic_floor, tags, since, until]
     retract_source:
       route: "POST /contexts/{id}/sources/retract"
-      args: [source]
+      args: [source_id]
       options: [dry_run]
     list_sources: { route: "GET /contexts/{id}/sources", options: [limit, after, prefix] }
     iter_sources: { route: "GET /contexts/{id}/sources", options: [limit, prefix] }
@@ -180,7 +180,7 @@ classes:
     compact: { route: "POST /contexts/{id}/compact" }
     promote:
       route: "POST /contexts/{id}/promote"
-      args: [into, sources]
+      args: [into, source_ids]
       options: [audit, dry_run]
     export: { route: "GET /contexts/{id}/export" }
     export_stream: { route: "GET /contexts/{id}/export" }

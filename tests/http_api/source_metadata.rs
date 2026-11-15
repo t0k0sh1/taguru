@@ -59,7 +59,7 @@ fn entries_by_name(page: &Value) -> Vec<(String, Value)> {
         .as_array()
         .expect("entries must be present")
         .iter()
-        .map(|entry| (entry["name"].as_str().unwrap().to_string(), entry.clone()))
+        .map(|entry| (entry["id"].as_str().unwrap().to_string(), entry.clone()))
         .collect()
 }
 
@@ -82,7 +82,7 @@ fn store_stamps_metadata_and_lists_it_back() {
         None,
     );
     assert_eq!(page["total"], 3);
-    assert_eq!(page["sources"], json!(["a.md", "b.md", "c.md"]));
+    assert_eq!(listed_source_ids(&page), json!(["a.md", "b.md", "c.md"]));
     let entries = entries_by_name(&page);
     assert_eq!(entries.len(), 3, "entries ride the same page window");
     let (name, a) = &entries[0];
@@ -109,7 +109,7 @@ fn store_stamps_metadata_and_lists_it_back() {
         &format!("/contexts/{}/sources?after=a.md&limit=1", server.cx("sake")),
         None,
     );
-    assert_eq!(page["sources"], json!(["b.md"]));
+    assert_eq!(listed_source_ids(&page), json!(["b.md"]));
     assert_eq!(entries_by_name(&page).len(), 1);
     assert_eq!(entries_by_name(&page)[0].0, "b.md");
 
@@ -662,7 +662,7 @@ fn cross_recall_matches_resolve_section_markers_through_the_name_id_bridge() {
         &format!("/contexts/{id}/associations"),
         Some(
             json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
-                     "source": "docs/a.md", "paragraph": 1}]),
+                     "source_id": "docs/a.md", "paragraph": 1}]),
         ),
     );
 

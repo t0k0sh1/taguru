@@ -35,12 +35,13 @@ pub struct LookupPassagesRequest {
 /// The `empty`/`oversized` gate every source-shaped field goes through
 /// before it reaches a lookup or write that would otherwise pay for a
 /// disk read (or fsync) before failing to find it. Shared by
-/// `lookup_passages`, `citation`, and `retract_source`.
-fn invalid_source(source: &str, started_at: Instant) -> Option<Response> {
-    if let Some(refusal) = empty("source", source, started_at) {
+/// `lookup_passages`, `citation`, and `retract_source`; `field` names
+/// the request field in the refusal.
+fn invalid_source(field: &str, source: &str, started_at: Instant) -> Option<Response> {
+    if let Some(refusal) = empty(field, source, started_at) {
         return Some(refusal);
     }
-    oversized("source", source, MAX_NAME_BYTES, started_at)
+    oversized(field, source, MAX_NAME_BYTES, started_at)
 }
 
 /// The dereference half of "find with the graph, answer from the text":
@@ -65,7 +66,7 @@ pub async fn lookup_passages(
         return refusal;
     }
     for source in &request.sources {
-        if let Some(refusal) = invalid_source(source, started_at) {
+        if let Some(refusal) = invalid_source("source", source, started_at) {
             return refusal;
         }
     }
@@ -119,7 +120,7 @@ pub async fn citation(
     AppJson(request): AppJson<CitationRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    if let Some(refusal) = invalid_source(&request.source, started_at) {
+    if let Some(refusal) = invalid_source("source", &request.source, started_at) {
         return refusal;
     }
     if deadline.expired() {
@@ -169,14 +170,12 @@ pub async fn citation(
 }
 
 /// One page of registered source ids, keyset by id — the list grows
-/// with every ingested document, so it pages like the directory.
-/// `entries` carries each listed source's metadata (#167) over the
-/// same page window; `sources` stays the bare id list it always was,
-/// so existing consumers keep parsing.
+/// with every ingested document, so it pages like the directory. Each
+/// entry is one source: its id (the caller-chosen string, #1038) and
+/// its metadata (#167).
 #[derive(Serialize)]
 pub struct SourcePage {
     pub total: usize,
-    pub sources: Vec<String>,
     pub entries: Vec<SourceEntry>,
 }
 
@@ -184,7 +183,7 @@ pub struct SourcePage {
 /// its key — a source stored before metadata existed lists as bare.
 #[derive(Serialize)]
 pub struct SourceEntry {
-    pub name: String,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stored_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,8 +211,7 @@ pub async fn list_sources(
     match tokio::task::block_in_place(|| state.passage_source_entries(&id)) {
         None => not_found(&id, started_at),
         // `passage_source_entries` already yields BTreeMap-key order —
-        // no sort. One read feeds both `sources` and `entries`, so the
-        // two views of the page can never disagree.
+        // no sort.
         Some(Ok(entries)) => {
             let entries: Vec<(String, crate::passages::SourceMeta)> = match query.prefix.as_deref()
             {
@@ -233,22 +231,14 @@ pub async fn list_sources(
                         .is_none_or(|after| source.as_str() > after)
                 })
                 .take(limit)
-                .map(|(name, meta)| SourceEntry {
-                    name,
+                .map(|(id, meta)| SourceEntry {
+                    id,
                     stored_at: meta.stored_at,
                     date: meta.date,
                     tags: meta.tags,
                 })
                 .collect();
-            let sources = entries.iter().map(|entry| entry.name.clone()).collect();
-            ok(
-                SourcePage {
-                    total,
-                    sources,
-                    entries,
-                },
-                started_at,
-            )
+            ok(SourcePage { total, entries }, started_at)
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
     }
@@ -272,7 +262,7 @@ pub(crate) fn passages_unreadable(
 
 #[derive(Debug, Deserialize)]
 pub struct RetractSourceRequest {
-    pub source: String,
+    pub source_id: String,
 }
 
 /// `?dry_run=true` (#437): report what the retraction WOULD do —
@@ -308,7 +298,7 @@ pub async fn retract_source(
     // source, retract_association's subject/label/object): an empty or
     // oversized source would otherwise reach the lookup below unchecked,
     // paying for a marker fsync and a WAL fsync before failing to find it.
-    if let Some(refusal) = invalid_source(&request.source, started_at) {
+    if let Some(refusal) = invalid_source("source_id", &request.source_id, started_at) {
         return refusal;
     }
     if deadline.expired() {
@@ -318,7 +308,7 @@ pub async fn retract_source(
         // Reads only — off the async worker like every store-loading
         // read, but with none of the write path's marker/WAL/audit.
         return match tokio::task::block_in_place(|| {
-            state.retract_source_preview(&id, &request.source)
+            state.retract_source_preview(&id, &request.source_id)
         }) {
             Err(failure) => access_error(&state, failure, &id, started_at),
             Ok((associations_touched, passage_removed)) => ok(
@@ -332,7 +322,7 @@ pub async fn retract_source(
     }
     // Retraction stages a WAL op and fsyncs before returning; keep that
     // synchronous write off the async worker like every other write path.
-    match tokio::task::block_in_place(|| state.retract_source(&id, &request.source)) {
+    match tokio::task::block_in_place(|| state.retract_source(&id, &request.source_id)) {
         Err(failure) => access_error(&state, failure, &id, started_at),
         Ok((associations_touched, passage_removed)) => {
             // The retracted SOURCE lives in the body, so the access log
@@ -341,7 +331,7 @@ pub async fn retract_source(
                 target: "taguru::audit",
                 key = %crate::api::key_name(&key),
                 context = %id,
-                source = %request.source,
+                source = %request.source_id,
                 associations_touched,
                 passage_removed,
                 "source retracted",

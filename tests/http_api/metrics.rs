@@ -122,11 +122,11 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
         &format!("/contexts/{}/associations", server.cx("pc")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-             "weight": 1.0, "source": "p1"},
+             "weight": 1.0, "source_id": "p1"},
             {"subject": "青嶺", "label": "原料米", "object": "山田錦",
-             "weight": 1.0, "source": "p1"},
+             "weight": 1.0, "source_id": "p1"},
             {"subject": "青嶺", "label": "精米歩合", "object": "五割",
-             "weight": 1.0, "source": "p1"},
+             "weight": 1.0, "source_id": "p1"},
         ])),
     );
 
@@ -219,7 +219,7 @@ fn search_outcomes_and_resolve_tiers_land_in_the_metrics_text() {
         &format!("/contexts/{}/associations", server.cx("sm")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-            "weight": 1.0, "source": "p1"
+            "weight": 1.0, "source_id": "p1"
         }])),
     );
 
@@ -290,7 +290,7 @@ fn usage_counters_track_reads_writes_and_empties_per_context() {
         &format!("/contexts/{}/associations", server.cx("used")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-            "weight": 1.0, "source": "p1"
+            "weight": 1.0, "source_id": "p1"
         }])),
     );
     server.ok(
@@ -372,7 +372,7 @@ fn empty_association_and_alias_batches_do_not_bump_the_write_counter() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-            "weight": 1.0, "source": "p1"
+            "weight": 1.0, "source_id": "p1"
         }])),
     );
     let entry = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
@@ -392,7 +392,7 @@ fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([{
             "subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺",
-            "weight": 1.0, "source": "p1"
+            "weight": 1.0, "source_id": "p1"
         }])),
     );
     server.ok(
@@ -532,7 +532,7 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         &format!("/contexts/{}/associations", server.cx("musubi")),
         Some(json!([{
             "subject": "田中", "label": "schema:type", "object": "Person",
-            "weight": 1.0, "source": "a.md"
+            "weight": 1.0, "source_id": "a.md"
         }])),
     );
     let (status, body) = server.call(
@@ -540,7 +540,7 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         &format!("/contexts/{}/associations", server.cx("musubi")),
         Some(json!([{
             "subject": "田中", "label": "杜氏", "object": "青嶺酒造",
-            "weight": 1.0, "source": "a.md"
+            "weight": 1.0, "source_id": "a.md"
         }])),
     );
     assert_eq!(status, 400, "{body}");

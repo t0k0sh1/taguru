@@ -133,7 +133,7 @@ fn seed_concepts(server: &Server, name: &str, targets: &[(&str, f32)]) {
             json!({
                 "subject": concept, "label": "l",
                 "object": format!("{concept}-obj"),
-                "weight": 1.0, "source": "a.md",
+                "weight": 1.0, "source_id": "a.md",
             })
         })
         .collect();
@@ -359,7 +359,7 @@ fn query_faulty_server(tag: &str, fault: QueryFault) -> Server {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(
@@ -414,7 +414,7 @@ fn resolve_reports_timeout_when_the_cue_embed_is_slow() {
         &format!("/contexts/{}/associations", server.cx("sake")),
         Some(json!([
             {"subject": "青嶺酒造", "label": "住所", "object": "京都",
-             "weight": 1.0, "source": "a.md"},
+             "weight": 1.0, "source_id": "a.md"},
         ])),
     );
     server.ok(

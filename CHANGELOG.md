@@ -28,6 +28,28 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — fields that write or list a source say `source_id`**
+  (#1039, ADR 0054; `http_contract` 2). A source's id is still the string
+  its caller chose — nothing is minted — and only the field names change:
+  the `POST /contexts/{id}/associations` element's `source` is `source_id`
+  (an element still carrying `source` is refused 400 on
+  `associations[i].source`, so an old caller's facts never land unsourced
+  silently); `POST /contexts/{id}/sources/retract` takes `{source_id}`;
+  `POST /contexts/{id}/promote` takes `source_ids`; every import report row
+  (`POST /import`, promote, promote dry run, `taguru import --json`'s
+  `batches` and `failed_batches`) names `source_id`; and
+  `GET /contexts/{id}/sources` answers `{total, entries: [{id, …}]}` — the
+  duplicate bare `sources` list is gone and `entries[].name` is `id`. MCP's
+  `add_associations`, `retract_source` and `promote` take the same fields.
+  The Python and TypeScript SDKs follow: the association input's `source_id`,
+  `retract_source(source_id)`, `promote(into, source_ids)`,
+  `ImportOutcome.source_id`, `SourceEntry.id`, and `SourcePage` without
+  `sources` (`iter_sources` still yields source ids). The import stream's
+  source header keeps `id`, and the data directory and file format are
+  unchanged. The read side — attributions, hits, citations, lookup,
+  search/explain — still says `source` until #1040; LangChain Documents
+  keep `metadata["source"]`.
+
 - **Breaking (MCP and LangChain) — the last `group` arguments take ids**
   (#997, closes #993). MCP's `get_group`, `update_group`, `delete_group`,
   `rename_group` and `export_group` take `group_id` (a `group` id — the

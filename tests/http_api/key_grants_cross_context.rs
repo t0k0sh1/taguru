@@ -31,7 +31,7 @@ fn key_grants_gate_roles_contexts_the_directory_and_mcp() {
         server.call_with_token(method, path, body, Some(token))
     };
     let fact = json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                      "weight": 1.0, "source": "a.md"}]);
+                      "weight": 1.0, "source_id": "a.md"}]);
 
     // The key with no TAGURU_KEY_GRANTS entry keeps the historical full
     // grant: admin, everywhere.
@@ -414,18 +414,18 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
         (
             "izakaya",
             json!([{"subject": "蔵", "label": "名物", "object": "燗酒",
-                    "weight": 0.5, "source": "iz.md"}]),
+                    "weight": 0.5, "source_id": "iz.md"}]),
         ),
         (
             "sakagura",
             json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                    "weight": 1.0, "source": "sk.md"}]),
+                    "weight": 1.0, "source_id": "sk.md"}]),
         ),
         // Never named in a target list below — must never leak in.
         (
             "noise",
             json!([{"subject": "蔵", "label": "場所", "object": "港",
-                    "weight": 2.0, "source": "no.md"}]),
+                    "weight": 2.0, "source_id": "no.md"}]),
         ),
     ] {
         server.ok("POST", "/contexts", Some(json!({"name": name, })));
@@ -731,12 +731,12 @@ fn cross_context_search_resolves_groups_beside_contexts() {
         (
             "izakaya",
             json!([{"subject": "蔵", "label": "名物", "object": "燗酒",
-                    "weight": 0.5, "source": "iz.md"}]),
+                    "weight": 0.5, "source_id": "iz.md"}]),
         ),
         (
             "sakagura",
             json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                    "weight": 1.0, "source": "sk.md"}]),
+                    "weight": 1.0, "source_id": "sk.md"}]),
         ),
     ] {
         server.ok("POST", "/contexts", Some(json!({"name": name, })));
@@ -1013,7 +1013,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
             "POST",
             &format!("/contexts/{}/associations", server.cx(context)),
             Some(json!([{"subject": fact["subject"], "label": fact["label"],
-                         "object": fact["object"], "weight": 1.0, "source": "x.md"}])),
+                         "object": fact["object"], "weight": 1.0, "source_id": "x.md"}])),
             "atok",
         );
         assert_eq!(status, 200);
@@ -1130,7 +1130,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
             "POST",
             &format!("/contexts/{sake}/associations"),
             Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                         "weight": 1.0, "source": "a.md"}])),
+                         "weight": 1.0, "source_id": "a.md"}])),
         ),
         200
     );
@@ -1173,7 +1173,7 @@ fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
         call(
             "POST",
             &format!("/contexts/{sake}/sources/retract"),
-            Some(json!({"source": "a.md"})),
+            Some(json!({"source_id": "a.md"})),
         ),
         200
     );

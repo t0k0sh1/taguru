@@ -4,7 +4,7 @@
   "operation": "promote_dry_run",
   "request": {
     "into": "00000000-0000-4000-8000-000000000002",
-    "sources": [
+    "source_ids": [
       "session:w:a"
     ]
   },
@@ -28,7 +28,7 @@
           "schema_violations": 0,
           "sections_dropped": 0,
           "sections_stored": 0,
-          "source": "session:w:a"
+          "source_id": "session:w:a"
         }
       ]
     },

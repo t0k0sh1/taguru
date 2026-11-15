@@ -37,6 +37,19 @@ pub const GHOST_ID: &str = "00000000-0000-4000-8000-00000000dead";
 #[allow(dead_code)]
 pub const GHOST_GROUP_ID: &str = "00000000-0000-4000-9000-00000000dead";
 
+/// The source ids of one `GET /contexts/{id}/sources` page, in page
+/// order, as a JSON array — `entries[].id` (#1039: the listing carries
+/// no bare id array).
+#[allow(dead_code)]
+pub fn listed_source_ids(page: &Value) -> Value {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a source page carries entries: {page}"))
+        .iter()
+        .map(|entry| entry["id"].clone())
+        .collect()
+}
+
 /// A fixed canonical context id derived from `seed` — the same
 /// construction the server's `derived_context_id` uses (SHA-256's first
 /// sixteen bytes in a v4 UUID layout), so a test can also compute the

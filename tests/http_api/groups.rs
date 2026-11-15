@@ -977,7 +977,7 @@ fn renaming_a_context_leaves_its_groups_alone_and_cross_search_shows_the_new_nam
         "POST",
         &format!("/contexts/{id}/associations"),
         Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
-                     "weight": 1.0, "source": "a.md"}])),
+                     "weight": 1.0, "source_id": "a.md"}])),
     );
     server.ok(
         "POST",

@@ -34,7 +34,7 @@ fn install_schema(server: &Server, context: &str, mode: &str) {
 
 fn assoc(subject: &str, label: &str, object: &str) -> Value {
     json!({"subject": subject, "label": label, "object": object,
-           "weight": 1.0, "source": "a.md"})
+           "weight": 1.0, "source_id": "a.md"})
 }
 
 /// Seeds one context with a brewer typed `Brewery` (which `is_a`
