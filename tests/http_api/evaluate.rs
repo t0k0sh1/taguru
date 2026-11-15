@@ -577,6 +577,73 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The FAIL summary on stdout: aggregate violations print under their
+/// own scope, case-scoped ones under `[case <id>]`, and exactly the
+/// 10-line per-case cap prints no "... and N more" tail (nothing was
+/// dropped) and no skipped-count line (nothing was skipped).
+#[test]
+fn the_threshold_fail_summary_prints_each_scope_and_exactly_ten_case_lines_without_a_tail() {
+    let server = Server::start("evaluate-thresholds-summary");
+    seed_context(&server, "sake", None);
+    let dir = eval_dir("thresholds-summary");
+    let case_ids: Vec<String> = (1..=10).map(|n| format!("case-{n:02}")).collect();
+    let mut eval = String::from("{\"type\": \"eval\",\"name\":\"summary cap\"}\n");
+    for id in &case_ids {
+        eval.push_str(&format!(
+            "{{\"case_id\":\"{id}\",\"query\":\"青嶺\",\"expected_sources\":[]}}\n"
+        ));
+    }
+    let eval_path = write_eval_file(&dir, &eval);
+    // A `min` this high is violated by every real latency, so every
+    // case contributes exactly one case-scoped violation.
+    let thresholds_path = write_thresholds(
+        &dir,
+        "{\"type\": \"evaluate_thresholds\",\
+         \"aggregate\":{\"latency.passage_ms\":{\"min\":999999.0}},\
+         \"cases\":{\"default\":{\"latency.passage_ms\":{\"min\":999999.0}}}}",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            &server.cx("sake"),
+            "--url",
+            &server.base,
+            "--out",
+            out_path.to_str().unwrap(),
+            "--thresholds",
+            thresholds_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stdout.contains("  thresholds: FAIL — 11 violation(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\n    [aggregate] latency.passage_ms: "),
+        "{stdout}"
+    );
+    for id in &case_ids {
+        assert!(
+            stdout.contains(&format!("\n    [case {id}] latency.passage_ms: ")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("more case-scoped violation(s)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("skipped as not applicable"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #276, ADR 0004 §12: `corpus.stable == false` (a write landing
 /// mid-run) failing the gate by default, and `allow_unstable_corpus`
 /// being the only opt-out, is decided entirely by
@@ -730,4 +797,38 @@ fn evaluate_exits_1_when_the_server_is_unreachable() {
     assert!(!out_path.exists());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unrecognized `--flag` and a bare positional word are refused with
+/// distinct messages, so the operator learns which mistake they made —
+/// both before any request is made (no `Server` is started).
+#[test]
+fn evaluate_names_an_unknown_flag_and_a_positional_argument_distinctly() {
+    let base = [
+        "evaluate",
+        "--eval",
+        "eval.jsonl",
+        "--context",
+        "00000000-0000-4000-8000-00000000dead",
+    ];
+    let with = |extra: &str| {
+        let mut args = base.to_vec();
+        args.push(extra);
+        run_cli(&args, &[])
+    };
+
+    let (code, _stdout, stderr) = with("--bogus");
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("unknown flag '--bogus' for evaluate"),
+        "{stderr}"
+    );
+
+    let (code, _stdout, stderr) = with("extra");
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("evaluate takes no positional arguments"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("unknown flag"), "{stderr}");
 }

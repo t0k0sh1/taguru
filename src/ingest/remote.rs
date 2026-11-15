@@ -955,3 +955,27 @@ pub(super) fn expand(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     }
     Ok(files)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One chunk line sums every count across the chunk's outcomes and
+    /// counts `created`/`passage_stored` only where they are `true`.
+    #[test]
+    fn summarize_chunk_outcomes_sums_counts_and_counts_only_true_flags() {
+        let outcomes = vec![
+            serde_json::json!({"created": true, "retracted": 2, "associations": 3,
+                "aliases": 1, "passage_stored": false, "schema_violations": 1}),
+            serde_json::json!({"created": false, "retracted": 1, "associations": 4,
+                "aliases": 2, "passage_stored": true}),
+            serde_json::json!({"created": false, "retracted": 0, "associations": 0,
+                "aliases": 0, "passage_stored": false}),
+        ];
+        assert_eq!(
+            summarize_chunk_outcomes(&outcomes),
+            "3 source(s), 1 created (3 association(s) retracted): +7 association(s), \
+             +3 alias(es), 1 passage(s) stored, 1 schema warning(s)"
+        );
+    }
+}

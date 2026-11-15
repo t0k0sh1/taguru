@@ -2505,3 +2505,212 @@ fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
 
     let _ = std::fs::remove_dir_all(&batches);
 }
+
+/// An embeddings stub: every call answers 200 with one width-4 vector
+/// per input, except a call whose inputs carry `fail_marker`, which
+/// answers 500 — so the passage half (which embeds passage text) can
+/// fail while the gloss half (which embeds concept glosses) succeeds.
+fn spawn_marker_failing_embeddings(fail_marker: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body_start = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                    if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buffer[..body_start]).to_string();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                while buffer.len() < body_start + length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request: Value =
+                    serde_json::from_slice(&buffer[body_start..body_start + length]).unwrap();
+                let inputs: Vec<&str> = request["input"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let response = if inputs.iter().any(|text| text.contains(fail_marker)) {
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let data: Vec<Value> = inputs
+                        .iter()
+                        .map(|_| json!({ "embedding": [1.0f32, 0.0, 0.0, 0.0] }))
+                        .collect();
+                    let body = json!({ "data": data }).to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    format!("http://{addr}/v1/embeddings")
+}
+
+const EMBED_BATCH: &str = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \"create\": {\"name\": \"sake\", \"description\": \"酒蔵\"}}\n\
+     {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+     {\"passage\": \"PASSAGE-MARKER 青嶺酒造の杜氏は高瀬。\"}\n";
+
+/// A gloss refresh failing alone — passage embedding not enabled — is
+/// enough for exit 1, with the graph applied.
+#[test]
+fn an_offline_import_exits_one_when_only_the_gloss_refresh_fails() {
+    let batches = batch_dir("import-exit-gloss-only");
+    let file = batches.join("a.jsonl");
+    std::fs::write(&file, EMBED_BATCH).unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-gloss-only");
+    let (code, stdout, stderr) = run_cli(
+        &["import", file.to_str().unwrap()],
+        &[
+            ("TAGURU_DATA_DIR", &data_dir.to_string_lossy()),
+            ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("TAGURU_EMBED_MODEL", "dead-mock"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 source(s) applied"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("embedding refresh failed"), "{stderr}");
+    assert!(
+        !stderr.contains("passage embedding refresh failed"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The passage refresh failing while the gloss refresh succeeds is
+/// enough for exit 1 on its own, and the successful gloss half is
+/// still reported.
+#[test]
+fn an_offline_import_exits_one_when_only_the_passage_refresh_fails() {
+    let provider = spawn_marker_failing_embeddings("PASSAGE-MARKER");
+    let batches = batch_dir("import-exit-passage-only");
+    let file = batches.join("a.jsonl");
+    std::fs::write(&file, EMBED_BATCH).unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-passage-only");
+    let (code, stdout, stderr) = run_cli(
+        &["import", file.to_str().unwrap()],
+        &[
+            ("TAGURU_DATA_DIR", &data_dir.to_string_lossy()),
+            ("TAGURU_EMBED_URL", provider.as_str()),
+            ("TAGURU_EMBED_MODEL", "marker-mock"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("sake: embedded "), "{stdout}");
+    assert!(
+        stderr.contains("passage embedding refresh failed"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("sake: embedding refresh failed"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// With a working provider the human report names both embedding
+/// halves, and `--json` keeps stdout exactly one JSON document — the
+/// per-context "embedded" lines never leak into it.
+#[test]
+fn an_offline_import_reports_embedding_lines_only_outside_json() {
+    let provider = spawn_marker_failing_embeddings("never-present-marker");
+    let batches = batch_dir("import-embed-lines");
+    let file = batches.join("a.jsonl");
+    std::fs::write(&file, EMBED_BATCH).unwrap();
+    let env = |data_dir: &std::path::Path| {
+        vec![
+            ("TAGURU_DATA_DIR", data_dir.to_string_lossy().into_owned()),
+            ("TAGURU_EMBED_URL", provider.clone()),
+            ("TAGURU_EMBED_MODEL", "ok-mock".to_string()),
+            ("TAGURU_EMBED_PASSAGES", "1".to_string()),
+        ]
+    };
+
+    let data_dir = common::scratch_dir("http-import-embed-lines-text");
+    let owned = env(&data_dir);
+    let pairs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (code, stdout, stderr) = run_cli(&["import", file.to_str().unwrap()], &pairs);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("sake: embedded 3 glosses"), "{stdout}");
+    assert!(stdout.contains("sake: embedded 1 passages"), "{stdout}");
+
+    let data_dir = common::scratch_dir("http-import-embed-lines-json");
+    let owned = env(&data_dir);
+    let pairs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (code, stdout, stderr) = run_cli(&["import", "--json", file.to_str().unwrap()], &pairs);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(report["batches"][0]["source_id"], json!("a.md"));
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// `--dry-run --json` counts concept and label aliases together, and
+/// the text dry run describes a schema record by mode and size.
+#[test]
+fn an_offline_dry_run_counts_every_alias_kind_and_describes_schemas() {
+    let batches = batch_dir("import-dry-run-aliases-schema");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"doc-guide\", \
+         \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
+         {\"alias\": \"Aomine\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n\
+         {\"alias\": \"Takase\", \"canonical\": \"高瀬\", \"kind\": \"concept\"}\n\
+         {\"alias\": \"醸造責任者\", \"canonical\": \"杜氏\", \"kind\": \"label\"}\n\
+         {\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-dry-run-aliases-schema");
+
+    let (code, stdout, stderr) =
+        run_import(&data_dir, &["--dry-run", "--json", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["batches"][0]["source_id"], json!("doc-guide"));
+    assert_eq!(report["batches"][0]["aliases"], json!(3), "{report}");
+
+    let (code, stdout, stderr) = run_import(&data_dir, &["--dry-run", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "{}: context 'cef2e28b-43f0-4b6c-8201-abab0785399f' schema (mode: warn): 0 type(s), 0 relation(s)",
+            file.display()
+        )),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}

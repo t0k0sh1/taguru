@@ -426,3 +426,65 @@ pub async fn retract_association(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ContextMeta;
+
+    /// A schema recorded in the sidecar but unreadable on disk must
+    /// refuse the write with a verdict no correction fixes: nothing
+    /// landed, and resending the same (or any corrected) body will not
+    /// help. The unresolved-digest state is the one a replica refresh
+    /// leaves (resident schema dropped, digest re-read from the
+    /// sidecar); corrupting the schema file then makes `schema_of`
+    /// itself fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_schema_refuses_as_nothing_written_and_not_retryable() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-associations-schema-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        let document = crate::schema::SchemaDocument {
+            record_type: crate::schema::SchemaType::Schema,
+            version: Some(crate::format::FORMAT_VERSION.to_string()),
+            mode: SchemaMode::Strict,
+            closed_labels: false,
+            types: BTreeMap::from([("Brewery".to_string(), crate::schema::TypeDef::default())]),
+            relations: BTreeMap::new(),
+        };
+        state
+            .put_schema(&id, crate::schema::install(document).unwrap())
+            .unwrap()
+            .unwrap();
+        let stem = state.stem_of("sake").unwrap();
+        state.replica_refresh(&stem);
+        std::fs::write(crate::registry::schema_path(&dir, &stem), b"not json").unwrap();
+        assert!(
+            matches!(state.schema_of(&id), Some(Err(_))),
+            "sanity: the corrupt schema file must make schema_of itself fail"
+        );
+
+        let response = add_associations(
+            State(state),
+            ContextIdPath(id),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(serde_json::json!([
+                {"subject": "青嶺酒造", "label": "所在", "object": "新潟", "weight": 1.0}
+            ])),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+        assert_eq!(body["integrity"], "nothing_written", "{body}");
+        assert_eq!(body["retryable_after_correction"], false, "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
