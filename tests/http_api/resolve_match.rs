@@ -245,6 +245,16 @@ fn oversized_input_lists_are_refused_before_any_work() {
             .contains("per-request limit"),
         "{parsed}"
     );
+
+    // Exactly at the cap is one batch's worth, not over it.
+    let passages: serde_json::Map<String, Value> =
+        (0..1000).map(|i| (format!("s{i}"), json!("t"))).collect();
+    let stored = server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("caps")),
+        Some(json!({"passages": passages})),
+    );
+    assert_eq!(stored["stored"], json!(1000), "{stored}");
 }
 
 #[test]

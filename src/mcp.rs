@@ -2015,6 +2015,70 @@ mod tests {
         assert_eq!(result["passage_hits"].as_array().unwrap().len(), 1);
     }
 
+    /// By default the fallback is suppressed once the graph lanes found
+    /// associations: `search_passages` is never called, `passage_hits`
+    /// stays empty and `search_plan` null.
+    #[test]
+    fn run_retrieve_suppresses_the_text_fallback_when_associations_were_found() {
+        let arguments = json!({
+            "context_id": "sake", "origins": ["tokyo"], "describe_first": false,
+            "fetch_citations": false, "text_fallback_query": "some declarative fact"
+        });
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                Ok(envelope(json!([{"name": "Tokyo"}])))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({
+                    "total": 1,
+                    "matches": [{
+                        "strength": 1.0,
+                        "path": ["Tokyo"],
+                        "association": {
+                            "subject": "Tokyo", "label": "capital_of", "object": "Japan",
+                            "weight": 1.0, "count": 1, "attributions": []
+                        }
+                    }]
+                })))
+            } else {
+                Err(format!("unexpected call: {path}"))
+            }
+        })
+        .expect("run_retrieve succeeds without the fallback search");
+
+        assert_eq!(result["associations"].as_array().unwrap().len(), 1);
+        assert_eq!(result["passage_hits"], json!([]));
+        assert_eq!(result["search_plan"], Value::Null);
+    }
+
+    /// A budget exactly equal to every dispatched response's total size
+    /// is not exceeded — only going past it refuses.
+    #[test]
+    fn run_retrieve_bounded_accepts_a_result_exactly_at_the_budget() {
+        let resolve_body = envelope(json!([{"name": "Tokyo"}]));
+        let activate_body = envelope(json!({"total": 0, "matches": []}));
+        let budget = resolve_body.len() + activate_body.len();
+        let arguments = json!({
+            "context_id": "sake", "origins": ["tokyo"], "describe_first": false,
+            "fetch_citations": false
+        });
+        let result = run_retrieve_bounded(
+            &arguments,
+            Some(budget),
+            Transport::RemoteMcp,
+            |_method, path, _body| {
+                if path.ends_with("/resolve") {
+                    Ok(resolve_body.clone())
+                } else if path.ends_with("/activate") {
+                    Ok(activate_body.clone())
+                } else {
+                    Err(format!("unexpected call: {path}"))
+                }
+            },
+        )
+        .expect("a result exactly at the budget must be returned");
+        assert_eq!(result["resolved"]["tokyo"][0]["name"], "Tokyo");
+    }
+
     #[test]
     fn run_retrieve_requires_context_and_origins() {
         assert_eq!(

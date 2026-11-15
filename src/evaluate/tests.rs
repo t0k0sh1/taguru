@@ -642,6 +642,39 @@ fn hits_from_evidence_items_never_exceeds_the_case_limit() {
     assert_eq!(hits[2].paragraph, 2);
 }
 
+/// The diagnostic `EvidenceOutcome.items` projection keeps one locator
+/// per admitted item, carrying its id, kind, fused rank and payload
+/// locator.
+#[test]
+fn evidence_locators_projects_each_item_onto_its_locator() {
+    let items = vec![
+        passage_evidence_item("corpus/a.md", 3, 1),
+        passage_evidence_item("corpus/b.md", 7, 2),
+    ];
+    let locators = serde_json::to_value(evidence_locators(&items)).unwrap();
+    assert_eq!(
+        locators,
+        serde_json::json!([
+            {
+                "candidate_id": items[0].candidate_id,
+                "kind": "passage",
+                "fused_rank": 1,
+                "source": "corpus/a.md",
+                "paragraph": 3,
+                "citation_refs": [],
+            },
+            {
+                "candidate_id": items[1].candidate_id,
+                "kind": "passage",
+                "fused_rank": 2,
+                "source": "corpus/b.md",
+                "paragraph": 7,
+                "citation_refs": [],
+            },
+        ])
+    );
+}
+
 // ========================= rerank.ran denominator =========================
 
 /// A one-case `CaseBlock` whose passage lane searched and found
@@ -1279,6 +1312,64 @@ fn score_recall_clamps_ndcg_to_one_when_two_expectations_share_a_hit() {
     assert!((recall.ndcg - 1.0).abs() < 1e-9, "{recall:?}");
 }
 
+/// MRR is the reciprocal of the first matching hit's 1-based rank: a
+/// first match at the second position scores 0.5, never 2.
+#[test]
+fn score_recall_mrr_is_the_reciprocal_of_the_first_matching_rank() {
+    let expected = vec![expected_source("corpus/a.md", &[], 1)];
+    let hits = vec![hit("corpus/other.md", 0), hit("corpus/a.md", 0)];
+    let recall = score_recall(&expected, &hits).unwrap();
+    assert!((recall.mrr - 0.5).abs() < 1e-9, "{recall:?}");
+}
+
+/// `latency.resolve_ms` aggregates every association position's own
+/// latency (whatever its outcome) and `latency.query_ms` every query
+/// probe's — the recorded values, not a constant.
+#[test]
+fn build_metrics_reports_association_position_and_query_latencies() {
+    let mut case = searched_case(None, None, None);
+    let mut queried = association_probe(Some(QueryProbe::Queried {
+        total: 1,
+        matches: 1,
+        attributions: Vec::new(),
+        latency_ms: 12,
+    }));
+    queried.subject = PositionOutcome::NotFound { latency_ms: 4 };
+    queried.label = PositionOutcome::Ambiguous {
+        tier: "lexical".to_string(),
+        candidates: vec!["a".to_string(), "b".to_string()],
+        latency_ms: 6,
+    };
+    queried.object = PositionOutcome::Errored {
+        message: "boom".to_string(),
+        latency_ms: 8,
+    };
+    let mut errored = association_probe(Some(QueryProbe::Errored {
+        message: "boom".to_string(),
+        latency_ms: 20,
+    }));
+    errored.subject = PositionOutcome::Resolved {
+        name: "s".to_string(),
+        tier: "lexical".to_string(),
+        latency_ms: 10,
+    };
+    errored.label = PositionOutcome::NotFound { latency_ms: 10 };
+    errored.object = PositionOutcome::NotFound { latency_ms: 10 };
+    case.structural = Some(StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![queried, errored],
+    });
+
+    let metrics = build_metrics(&[case], false);
+    let resolve = &metrics["latency.resolve_ms"];
+    assert_eq!(resolve.sample_size(), 6, "{resolve:?}");
+    // (4 + 6 + 8 + 10 + 10 + 10) / 6
+    assert_eq!(resolve.scalar(), Some(8.0), "{resolve:?}");
+    let query = &metrics["latency.query_ms"];
+    assert_eq!(query.sample_size(), 2, "{query:?}");
+    assert_eq!(query.scalar(), Some(16.0), "{query:?}");
+}
+
 // ========================= coverage_counts / resolved_contains =========================
 
 #[test]
@@ -1339,6 +1430,7 @@ fn association_coverage_counts_only_queried_entries_with_a_hit() {
     let coverage = association_coverage(&associations).expect("a non-empty association list");
     assert_eq!(coverage.expected, 3);
     assert_eq!(coverage.matched, 1);
+    assert!((coverage.value - 1.0 / 3.0).abs() < 1e-9, "{coverage:?}");
 }
 
 #[test]
@@ -1730,6 +1822,47 @@ fn build_missed_is_silent_about_sources_when_the_passage_lane_failed() {
     let (missed, truncated) = build_missed(&case, None, &[], &[], None, &[]);
     assert!(missed.is_empty(), "{missed:?}");
     assert_eq!(truncated, 0);
+}
+
+#[test]
+fn build_missed_names_only_the_unresolved_expected_label() {
+    let mut case = base_case("c1");
+    case.expected_labels = vec!["brews".to_string(), "ferments".to_string()];
+    let resolutions = [cue_resolution("label", &["brews"])];
+    let refs: Vec<&CueResolution> = resolutions.iter().collect();
+    let (missed, truncated) = build_missed(&case, None, &[], &refs, None, &[]);
+    assert_eq!(
+        missed,
+        ["expected_labels: 'ferments' not resolved"],
+        "{missed:?}"
+    );
+    assert_eq!(truncated, 0);
+}
+
+/// A position whose own `/resolve` call failed at the transport level
+/// is reported with that failure's message, never collapsed into the
+/// clean "a position did not pin" miss.
+#[test]
+fn build_missed_names_a_transport_errored_position_with_its_message() {
+    let case = base_case("c1");
+    let mut probe = association_probe(None);
+    probe.label = PositionOutcome::Errored {
+        message: "connection refused".to_string(),
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![probe],
+    };
+    let (missed, _) = build_missed(&case, None, &[], &[], Some(&structural), &[]);
+    assert_eq!(
+        missed,
+        [
+            "expected_associations: (s, l, o) a position could not be resolved due to a \
+             transport error: label: connection refused"
+        ],
+        "{missed:?}"
+    );
 }
 
 // ========================= score_case: lane cross-tab denominator (ADR §7) =========================
@@ -2206,4 +2339,43 @@ fn list_all_sources_refuses_a_page_that_does_not_advance() {
             "{error}"
         );
     }
+}
+
+// ========================= build_case_block: structural lane =========================
+
+/// A case declaring `expected_labels` resolves every cue against
+/// `resolve_label` and scores label coverage from that response.
+#[test]
+fn build_case_block_resolves_each_cue_as_a_label_when_labels_are_expected() {
+    let (base, requests) = respond_in_order(vec![
+        serde_json::json!({"result": []}),
+        serde_json::json!({"result": [{"name": "brews", "score": 1.0, "tier": "lexical"}]}),
+    ]);
+    let mut case = base_case("c1");
+    case.cues = vec!["brew".to_string()];
+    case.expected_labels = vec!["brews".to_string()];
+    let run_config = RunConfig {
+        assembly: false,
+        limits: BudgetLimits::resolve(None),
+        budget_given: false,
+        rerank: None,
+    };
+    let block = build_case_block(&Api::new(base), "ctx", &case, 10, &run_config);
+
+    let structural = block.structural.expect("expected_labels runs the lane");
+    assert_eq!(structural.cues.len(), 1, "{:?}", structural.cues);
+    assert_eq!(structural.cues[0].kind, "label");
+    assert_eq!(structural.cues[0].resolved_names, ["brews"]);
+    let labels = block
+        .coverage
+        .and_then(|coverage| coverage.labels)
+        .expect("label coverage is scored");
+    assert_eq!(labels.matched, 1, "{labels:?}");
+    assert!(block.missed.is_empty(), "{:?}", block.missed);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        requests[1].starts_with("POST /contexts/ctx/resolve_label "),
+        "{requests:?}"
+    );
 }

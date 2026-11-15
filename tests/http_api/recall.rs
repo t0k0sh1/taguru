@@ -115,3 +115,49 @@ fn cross_recall_mid_loop_pool_cut_still_yields_the_exact_global_top_limit() {
         .collect();
     assert_eq!(weights, vec![20.0, 19.0, 18.0, 17.0, 16.0], "{page}");
 }
+
+/// `TAGURU_CROSS_SEARCH_CONCURRENCY=0` would fan out no work, so the
+/// server floors it to the default and SAYS so in its log the first
+/// time a cross search reads the knob — an operator who set 0 learns
+/// it was not applied as written. A nonzero value is taken as given,
+/// with no warning. Both runs answer the same merged page either way.
+#[test]
+fn cross_recall_warns_once_it_floors_a_zero_concurrency_knob() {
+    for (knob, warns) in [("0", true), ("2", false)] {
+        let dir = crate::support::common::scratch_dir(&format!("recall-concurrency-{knob}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        std::fs::write(&config, format!("TAGURU_CROSS_SEARCH_CONCURRENCY={knob}\n")).unwrap();
+        let stderr = dir.join("stderr.log");
+        let server = Server::start_with_config(
+            &format!("recall-concurrency-{knob}"),
+            &config,
+            &stderr,
+            &[("RUST_LOG", "warn")],
+        );
+        for name in ["k1", "k2"] {
+            server.ok("POST", "/contexts", Some(json!({"name": name})));
+            server.ok(
+                "POST",
+                &format!("/contexts/{}/associations", server.cx(name)),
+                Some(json!([
+                    {"subject": "蔵", "label": "産地", "object": format!("{name}-o"), "weight": 1.0, "source_id": "a.md"}
+                ])),
+            );
+        }
+
+        let page = server.ok(
+            "POST",
+            "/recall",
+            Some(json!({"context_ids": [server.cx("k1"), server.cx("k2")], "cue": "蔵"})),
+        );
+        assert_eq!(page["total"], json!(2), "knob {knob}: {page}");
+
+        let log = std::fs::read_to_string(&stderr).unwrap();
+        assert_eq!(
+            log.contains("TAGURU_CROSS_SEARCH_CONCURRENCY=0 would fan out no work; using 4"),
+            warns,
+            "knob {knob}: {log}"
+        );
+    }
+}

@@ -668,6 +668,21 @@ mod tests {
         );
     }
 
+    /// Only the byte-budget refusal ("already exceeds … bytes") is
+    /// `result_too_large`; either phrase alone in an unrelated
+    /// provider message is not.
+    #[test]
+    fn error_kind_needs_both_budget_phrases_for_result_too_large() {
+        assert_eq!(
+            error_kind("tool 'resolve' returned invalid JSON: trailing bytes at line 1"),
+            "provider_error"
+        );
+        assert_eq!(
+            error_kind("the label count already exceeds the stored maximum"),
+            "provider_error"
+        );
+    }
+
     /// `call_inner` (`src/remote_mcp.rs`) and `Bridge::call`
     /// (`src/bin/taguru-mcp.rs`) both format a request-build failure by
     /// hand, out of this crate's reach to check at compile time (one

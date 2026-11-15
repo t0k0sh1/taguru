@@ -1,5 +1,6 @@
 use super::*;
 use crate::evalset::EvalOptions;
+use serde_json::json;
 
 fn args(words: &[&str]) -> Result<SearchArgs, i32> {
     parse_args(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -767,4 +768,177 @@ fn build_definitions_names_every_metric_the_retrieval_file_can_carry() {
             "{name} must have a definition: {definitions:?}"
         );
     }
+}
+
+// ============================== Sweep-found gaps ==============================
+
+#[test]
+fn each_single_valued_flag_given_twice_is_a_usage_error() {
+    for flag in ["--eval", "--url", "--config", "--context-prefix"] {
+        let mut words = vec!["--eval", "e.jsonl", "out"];
+        if flag != "--eval" {
+            words.extend([flag, "a"]);
+        }
+        words.extend([flag, "b"]);
+        assert_eq!(args(&words).unwrap_err(), 2, "{flag} twice");
+    }
+}
+
+#[test]
+fn an_unknown_flag_is_refused_even_when_it_is_the_only_positional_candidate() {
+    assert_eq!(args(&["--eval", "e.jsonl", "--bogus"]).unwrap_err(), 2);
+}
+
+#[test]
+fn lane_hit_counts_counts_every_vector_only_hit() {
+    let vector_hit = || {
+        let mut h = hit("v", 0, "");
+        h.lanes.vector = Some(crate::api::sources::LaneEvidence {
+            rank: 1,
+            score: 0.9,
+        });
+        h
+    };
+    let counts = lane_hit_counts(&[vector_hit(), vector_hit()], true);
+    assert_eq!(counts.vector_only, 2);
+    assert_eq!(counts.bm25_only + counts.both + counts.neither, 0);
+}
+
+#[test]
+fn pair_overlap_mean_rank_difference_averages_over_every_shared_locator() {
+    let a = vec![locator(1, "s1", 0), locator(2, "s2", 0)];
+    let b = vec![locator(2, "s1", 0), locator(5, "s2", 0)];
+    let (_, shared, mean_rank_difference) = pair_overlap(&a, &b);
+    assert_eq!(shared, 2);
+    // |1-2| = 1, |2-5| = 3 => mean 2
+    assert_eq!(mean_rank_difference, Some(2.0));
+}
+
+fn searched(hit_count: usize, recall: Option<f64>) -> SearchOutcome {
+    SearchOutcome::Searched {
+        hit_count,
+        empty: hit_count == 0,
+        distinct_sources: hit_count,
+        lanes: LaneHitCounts::default(),
+        plan: None,
+        hits: vec![],
+        recall: recall.map(|value| RecallResult {
+            recall_at_k: value,
+            mrr: value,
+            expected_total: 1,
+            matched: usize::from(value > 0.0),
+        }),
+    }
+}
+
+fn case_block(
+    case_id: &str,
+    models: Vec<(&str, SearchOutcome)>,
+    pairs: Vec<(&str, PairOutcome)>,
+) -> CaseBlock {
+    CaseBlock {
+        case_id: case_id.to_string(),
+        query: "q".to_string(),
+        cues: vec![],
+        limit: 10,
+        has_expectations: true,
+        models: models
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        pairs: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+    }
+}
+
+#[test]
+fn aggregate_pins_per_model_and_per_pair_metrics_over_several_cases() {
+    let cases = vec![
+        case_block(
+            "c1",
+            vec![
+                ("m1", searched(2, Some(1.0))),
+                (
+                    "m2",
+                    SearchOutcome::Failed {
+                        message: "boom".to_string(),
+                    },
+                ),
+            ],
+            vec![(
+                "2:m1__m2",
+                PairOutcome::Unavailable {
+                    message: "m2 failed".to_string(),
+                },
+            )],
+        ),
+        case_block(
+            "c2",
+            vec![("m1", searched(0, Some(0.0))), ("m2", searched(3, None))],
+            vec![(
+                "2:m1__m2",
+                PairOutcome::Compared {
+                    jaccard: Some(0.5),
+                    shared_hits: 1,
+                    mean_rank_difference: Some(2.0),
+                },
+            )],
+        ),
+    ];
+
+    let (models, pairs) = aggregate(&cases);
+    let models = serde_json::to_value(&models).unwrap();
+    let pairs = serde_json::to_value(&pairs).unwrap();
+    assert_eq!(
+        models.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["m1", "m2"],
+        "{models}"
+    );
+    assert_eq!(
+        pairs.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["2:m1__m2"],
+        "{pairs}"
+    );
+
+    let m1 = &models["m1"];
+    assert_eq!(
+        m1["hits.empty_rate"],
+        json!({"value": 0.5, "n": 2, "numerator": 1}),
+        "{m1}"
+    );
+    assert_eq!(
+        m1["cases.error_rate"],
+        json!({"value": 0.0, "n": 2, "numerator": 0}),
+        "{m1}"
+    );
+    assert_eq!(m1["hits.count"]["n"], 2, "{m1}");
+    assert_eq!(m1["hits.count"]["sum"], 2.0, "{m1}");
+    assert_eq!(m1["recall.recall_at_k"]["n"], 2, "{m1}");
+    assert_eq!(m1["recall.recall_at_k"]["sum"], 1.0, "{m1}");
+
+    let m2 = &models["m2"];
+    assert_eq!(
+        m2["cases.error_rate"],
+        json!({"value": 0.5, "n": 2, "numerator": 1}),
+        "{m2}"
+    );
+    assert_eq!(
+        m2["hits.empty_rate"],
+        json!({"value": 0.0, "n": 1, "numerator": 0}),
+        "{m2}"
+    );
+    assert!(
+        m2.get("recall.recall_at_k").is_none() && m2.get("recall.mrr").is_none(),
+        "no case scored recall for m2: {m2}"
+    );
+
+    let pair = &pairs["2:m1__m2"];
+    assert_eq!(
+        pair["pairs.unavailable_rate"],
+        json!({"value": 0.5, "n": 2, "numerator": 1}),
+        "{pair}"
+    );
+    assert_eq!(pair["overlap.jaccard"]["n"], 1, "{pair}");
+    assert_eq!(pair["overlap.jaccard"]["sum"], 0.5, "{pair}");
+    assert_eq!(pair["overlap.shared_hits"]["sum"], 1.0, "{pair}");
+    assert_eq!(pair["overlap.mean_rank_difference"]["sum"], 2.0, "{pair}");
 }

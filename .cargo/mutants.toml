@@ -225,4 +225,26 @@ exclude_re = [
     # agree, so the counter it bumps is unreachable.
     "src/ingest/remote\\.rs:406:28: replace \\+= with \\*= in run_remote",
     "src/ingest/remote\\.rs:406:28: replace \\+= with -= in run_remote",
+    # `replay_cached_search`'s lane-count guard: each count is a `u64`,
+    # so `> 0` -> `>= 0` makes the condition always true, and the only
+    # new case (all three counts 0) calls `record_passage_hit_counts(0,
+    # 0, 0)`, which is three `fetch_add(0)`s — no counter moves. The
+    # `<`/`==` and `||` -> `&&` siblings on the same line are caught.
+    "src/api\\.rs:1372:18: replace > with >= in replay_cached_search",
+    "src/api\\.rs:1372:36: replace > with >= in replay_cached_search",
+    "src/api\\.rs:1372:55: replace > with >= in replay_cached_search",
+    # `explore_page`'s cursor comparison: `k >= seat` differs from
+    # `k > seat` only when every tuple field is equal, and the identity
+    # check just above already returns `false` whenever `(k.1, k.2,
+    # k.3) == (seat.1, seat.2, seat.3)`, so equal tuples never reach it.
+    "src/api\\.rs:1936:15: replace > with >= in explore_page",
+    # `evaluate::runs_citation_lane` -> `true`: with no expected
+    # citations, `run_citation_lane` maps over an empty list (one request
+    # per entry), yielding the same empty `Vec` the `else` branch builds
+    # — no request, no score, no output differs.
+    "src/evaluate/lanes\\.rs:375:5: replace runs_citation_lane -> bool with true",
+    # `score_recall`'s nDCG guard: the function returns early unless some
+    # expectation has relevance >= 1, so past that point IDCG >= 1/log2(2)
+    # = 1 and `idcg == 0.0` never holds — `>` and `>=` always agree.
+    "src/evaluate/lanes\\.rs:523:24: replace > with >= in score_recall",
 ]

@@ -42,6 +42,9 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
         "TAGURU_LOG_SEARCHES",
         "TAGURU_ROUTE_MAP",
         "TAGURU_CONFIG",
+        // A shell value would override a test's config file (real
+        // environment variables win over --config).
+        "TAGURU_CROSS_SEARCH_CONCURRENCY",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
         "OTEL_EXPORTER_OTLP_PROTOCOL",
