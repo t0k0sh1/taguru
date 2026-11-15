@@ -538,7 +538,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": [aomine_src]})),
+        Some(json!({"source_ids": [aomine_src]})),
     );
     assert_eq!(
         passages["passages"][aomine_src],

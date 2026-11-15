@@ -10,14 +10,14 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 1174,
+        "bytes_used": 1183,
         "items_used": 2,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 311
+        "tokens_used": 314
       },
       "citations": [
         {
@@ -27,7 +27,7 @@
               "value": "1"
             },
             "section": null,
-            "source": "docs/kura.md",
+            "source_id": "docs/kura.md",
             "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
           },
           "paragraph": 0,
@@ -46,7 +46,7 @@
                 },
                 "paragraph": 0,
                 "section": null,
-                "source": "docs/kura.md",
+                "source_id": "docs/kura.md",
                 "weight": 1.0
               }
             ],
@@ -56,7 +56,7 @@
             "subject": "青嶺酒造",
             "weight": 1.0
           },
-          "bytes": 550,
+          "bytes": 553,
           "candidate_id": "association\u0000青嶺酒造\u0000杜氏\u0000高瀬",
           "citation_refs": [
             {
@@ -75,7 +75,7 @@
               "docs/kura.md"
             ]
           },
-          "estimated_tokens": 142,
+          "estimated_tokens": 143,
           "fused_rank": 1,
           "kind": "association",
           "lane_ranks": [
@@ -86,10 +86,10 @@
           ]
         },
         {
-          "bytes": 399,
+          "bytes": 402,
           "candidate_id": "passage\u000000000000-0000-4000-8000-000000000001\u0000docs/kura.md\u00000",
           "citation_refs": [],
-          "estimated_tokens": 107,
+          "estimated_tokens": 108,
           "fused_rank": 2,
           "kind": "passage",
           "lane_ranks": [
@@ -107,7 +107,7 @@
             },
             "paragraph": 0,
             "score": 0.86304635,
-            "source": "docs/kura.md",
+            "source_id": "docs/kura.md",
             "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
           }
         }

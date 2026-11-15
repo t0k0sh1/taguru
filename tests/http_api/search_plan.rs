@@ -300,7 +300,7 @@ fn a_refused_query_embedding_is_confessed_and_never_cached() {
     };
     let first = search();
     assert_eq!(
-        first["hits"][0]["source"],
+        first["hits"][0]["source_id"],
         json!("docs/ore.md"),
         "the lexical lane still answers: {first}"
     );

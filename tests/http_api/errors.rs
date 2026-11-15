@@ -306,14 +306,14 @@ fn errors_carry_the_documented_machine_readable_code() {
     let (status, body) = server.call_with_token(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "ghost", "paragraph": 0})),
+        Some(json!({"source_id": "ghost", "paragraph": 0})),
         key,
     );
     assert_eq!(code_of(status, &body), (404, "no_source".into()), "{body}");
     let (status, body) = server.call_with_token(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc", "paragraph": 9})),
+        Some(json!({"source_id": "doc", "paragraph": 9})),
         key,
     );
     assert_eq!(
@@ -805,7 +805,7 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     let lookup = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["doc.md"]})),
+        Some(json!({"source_ids": ["doc.md"]})),
     );
     assert_eq!(lookup["missing"], json!(["doc.md"]), "{lookup}");
 

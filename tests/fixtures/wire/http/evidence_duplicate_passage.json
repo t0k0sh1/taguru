@@ -9,7 +9,7 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 349,
+        "bytes_used": 352,
         "items_used": 1,
         "limits": {
           "max_bytes": 65536,
@@ -21,7 +21,7 @@
       "citations": [],
       "items": [
         {
-          "bytes": 345,
+          "bytes": 348,
           "candidate_id": "passage\u000000000000-0000-4000-8000-000000000001\u0000a.md\u00000",
           "citation_refs": [],
           "estimated_tokens": 87,
@@ -42,7 +42,7 @@
             },
             "paragraph": 0,
             "score": 0.54696476,
-            "source": "a.md",
+            "source_id": "a.md",
             "text": "the quick brown fox jumps over the lazy dog"
           }
         }

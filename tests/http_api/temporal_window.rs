@@ -72,7 +72,7 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     assert_eq!(brand["matches"][0]["count"], json!(1));
     let attributions = brand["matches"][0]["attributions"].as_array().unwrap();
     assert_eq!(attributions.len(), 1);
-    assert_eq!(attributions[0]["source"], json!("doc-2019"));
+    assert_eq!(attributions[0]["source_id"], json!("doc-2019"));
     // Unwindowed, the same edge accumulates both regimes.
     let full = server.ok(
         "POST",

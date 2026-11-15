@@ -39,7 +39,7 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["doc-guide"]})),
+        Some(json!({"source_ids": ["doc-guide"]})),
     );
     assert_eq!(
         passages["passages"]["doc-guide"],
@@ -138,7 +138,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["clean.md", "leaky.md"]})),
+        Some(json!({"source_ids": ["clean.md", "leaky.md"]})),
     );
     assert_eq!(
         passages["passages"]["clean.md"],
@@ -207,7 +207,7 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["leaky.md"]})),
+        Some(json!({"source_ids": ["leaky.md"]})),
     );
     assert!(
         passages["passages"]["leaky.md"]
@@ -623,7 +623,7 @@ fn an_offline_import_carries_questions_through_to_the_search_index() {
         Some(json!({"query": "杜氏は誰?", "limit": 3})),
     );
     let hit = &hits["hits"][0];
-    assert_eq!(hit["source"], "doc-guide");
+    assert_eq!(hit["source_id"], "doc-guide");
     assert_eq!(hit["paragraph"], 1, "the hit names the answering PARAGRAPH");
     let _ = std::fs::remove_dir_all(&batches);
 }
@@ -693,7 +693,7 @@ fn an_offline_import_carries_locators_through_and_drops_out_of_range_ones() {
     let citation = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "doc-guide", "paragraph": 1})),
+        Some(json!({"source_id": "doc-guide", "paragraph": 1})),
     );
     assert_eq!(
         citation["locator"],
@@ -1726,7 +1726,7 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     let citation = server.ok(
         "POST",
         &format!("/contexts/{}/citations", server.cx("sake")),
-        Some(json!({"source": "a.md", "paragraph": 0})),
+        Some(json!({"source_id": "a.md", "paragraph": 0})),
     );
     assert_eq!(citation["text"], json!("青嶺酒造の紹介。"), "{citation}");
     assert_eq!(citation["section"], json!("概要"), "{citation}");
@@ -2365,7 +2365,7 @@ fn a_rejected_replacement_batch_leaves_the_old_version_of_its_source_untouched()
     let passages = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("sake")),
-        Some(json!({"sources": ["doc-1"]})),
+        Some(json!({"source_ids": ["doc-1"]})),
     );
     assert_eq!(passages["passages"]["doc-1"], json!("元の文章。"));
 

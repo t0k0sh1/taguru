@@ -9,7 +9,7 @@ export const AOMINE_ASSOCIATION = {
   weight: 1.0,
   count: 1,
   attributions: [
-    { source: "docs/aomine.md", weight: 1.0, count: 1, paragraph: 1, section: null },
+    { source_id: "docs/aomine.md", weight: 1.0, count: 1, paragraph: 1, section: null },
   ],
 };
 
@@ -19,7 +19,7 @@ export const FACT_ONLY_ASSOCIATION = {
   object: "1907年",
   weight: 1.0,
   count: 1,
-  attributions: [{ source: "口伝", weight: 1.0, count: 1, paragraph: null, section: null }],
+  attributions: [{ source_id: "口伝", weight: 1.0, count: 1, paragraph: null, section: null }],
 };
 
 export const GROUP_ROWS: Record<string, unknown> = {
@@ -217,7 +217,7 @@ export class FakeServer {
         hits: contextIds.map((id) => ({
           context_id: id,
           context_name: nameOf(id),
-          source: `docs/${nameOf(id)}.md`,
+          source_id: `docs/${nameOf(id)}.md`,
           paragraph: 0,
           score: 2.0,
           text: `${nameOf(id)} の段落。`,
@@ -243,8 +243,8 @@ export class FakeServer {
       });
     }
     if (path.endsWith("/citations")) {
-      const { source } = body as { source: string };
-      return ok({ text: "杜氏は高瀬である。", source, section: "人物" });
+      const { source_id } = body as { source_id: string };
+      return ok({ text: "杜氏は高瀬である。", source_id, section: "人物" });
     }
     if (path.endsWith("/sources/search")) {
       if (this.failTextSearch) {
@@ -268,14 +268,14 @@ export class FakeServer {
         },
         hits: [
           {
-            source: "docs/aomine.md",
+            source_id: "docs/aomine.md",
             paragraph: 1,
             score: 3.0,
             text: "杜氏は高瀬である。",
             lanes: { bm25: { rank: 0, score: 3.0 } },
           },
           {
-            source: "docs/other.md",
+            source_id: "docs/other.md",
             paragraph: 0,
             score: 1.0,
             text: "別の文書の段落。",

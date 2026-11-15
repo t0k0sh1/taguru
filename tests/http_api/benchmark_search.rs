@@ -246,6 +246,12 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     // concept; m2's carries neither.
     assert_eq!(m1["recall"]["recall_at_k"], 1.0, "{m1}");
     assert_eq!(m1["recall"]["mrr"], 1.0, "{m1}");
+    // Ranks are 1-based positions in the model's own hit list.
+    assert_eq!(
+        m1["hits"],
+        json!([{"rank": 1, "source": "corpus/brewery.md", "paragraph": 0}]),
+        "{m1}"
+    );
     let m2 = &case["models"]["m2"];
     assert_eq!(m2["outcome"], "searched", "{m2}");
     assert_eq!(m2["recall"]["recall_at_k"], 0.0, "{m2}");

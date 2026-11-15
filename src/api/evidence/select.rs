@@ -939,7 +939,7 @@ mod tests {
     ) -> AssociationOut {
         let mut association = association_out(subject, label, object, weight);
         association.attributions = vec![AttributionOut {
-            source: source.to_string(),
+            source_id: source.to_string(),
             weight,
             count: 1,
             paragraph: Some(paragraph),
@@ -951,7 +951,7 @@ mod tests {
 
     fn passage_hit(source: &str, paragraph: u32, text: &str) -> PassageHit {
         PassageHit {
-            source: source.to_string(),
+            source_id: source.to_string(),
             paragraph,
             score: 1.0,
             text: text.to_string(),
@@ -985,7 +985,7 @@ mod tests {
     fn citation_for(source: &str, section: Option<&str>) -> Citation {
         Citation {
             text: format!("excerpt of {source}"),
-            source: source.to_string(),
+            source_id: source.to_string(),
             section: section.map(|s| s.to_string()),
             locator: None,
         }
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn admitted_item_bytes_reflect_the_real_f32_shortest_score_not_an_f64_widened_one() {
         let hit = PassageHit {
-            source: "s".to_string(),
+            source_id: "s".to_string(),
             paragraph: 0,
             score: 0.86304635,
             text: "hit".to_string(),
@@ -1397,7 +1397,7 @@ mod tests {
         let mut association = association_out("cats", "is_a", "mammals", 1.0);
         association.attributions = vec![
             AttributionOut {
-                source: "a.txt".to_string(),
+                source_id: "a.txt".to_string(),
                 weight: 1.0,
                 count: 1,
                 paragraph: Some(1),
@@ -1405,7 +1405,7 @@ mod tests {
                 locator: None,
             },
             AttributionOut {
-                source: "b.txt".to_string(),
+                source_id: "b.txt".to_string(),
                 weight: 1.0,
                 count: 1,
                 paragraph: Some(2),
@@ -1442,7 +1442,7 @@ mod tests {
         // paragraph.
         let mut association = association_out("cats", "is_a", "mammals", 1.0);
         association.attributions = vec![AttributionOut {
-            source: "a.txt".to_string(),
+            source_id: "a.txt".to_string(),
             weight: 1.0,
             count: 1,
             paragraph: None,
@@ -1575,7 +1575,7 @@ mod tests {
     fn activation_uses_the_inner_association_and_keeps_kind_association() {
         let mut inner = association_out("cats", "is_a", "mammals", 1.0);
         inner.attributions = vec![AttributionOut {
-            source: "book.txt".to_string(),
+            source_id: "book.txt".to_string(),
             weight: 1.0,
             count: 1,
             paragraph: Some(1),
@@ -1675,7 +1675,7 @@ mod tests {
         let sources: Vec<&str> = result
             .items
             .iter()
-            .map(|item| item.passage.as_ref().unwrap().source.as_str())
+            .map(|item| item.passage.as_ref().unwrap().source_id.as_str())
             .collect();
         assert_eq!(sources, vec!["dominant", "other", "dominant"]);
     }
@@ -1765,7 +1765,7 @@ mod tests {
         let sources: Vec<&str> = result
             .items
             .iter()
-            .map(|item| item.passage.as_ref().unwrap().source.as_str())
+            .map(|item| item.passage.as_ref().unwrap().source_id.as_str())
             .collect();
         assert_eq!(sources, vec!["alpha", "beta", "gamma", "alpha"]);
     }
@@ -1960,7 +1960,7 @@ mod tests {
                     let mut association = association_out(subject, label, object, *weight);
                     if let Some((src, paragraph)) = source {
                         association.attributions = vec![AttributionOut {
-                            source: src.to_string(),
+                            source_id: src.to_string(),
                             weight: *weight,
                             count: 1,
                             paragraph: Some(*paragraph),

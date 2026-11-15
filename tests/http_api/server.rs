@@ -32,7 +32,7 @@ fn graph_writes_survive_a_hard_kill() {
     // The WAL replay must carry the source too, or retract and citation
     // would silently stop reaching this fact.
     assert_eq!(
-        recalled["matches"][0]["attributions"][0]["source"],
+        recalled["matches"][0]["attributions"][0]["source_id"],
         json!("第1段落"),
         "{recalled}"
     );
@@ -138,7 +138,7 @@ fn data_survives_a_graceful_restart() {
     );
     assert_eq!(recalled["matches"][0]["object"], json!("1907年"));
     assert_eq!(
-        recalled["matches"][0]["attributions"][0]["source"],
+        recalled["matches"][0]["attributions"][0]["source_id"],
         json!("第1段落"),
         "{recalled}"
     );

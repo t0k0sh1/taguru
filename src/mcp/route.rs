@@ -209,8 +209,8 @@ pub fn route_tool(
         }
         "lookup_passages" => {
             let path = format!("{}/sources/lookup", context_path("context_id")?);
-            need_present(arguments, "sources")?;
-            ("POST", path, Some(pick(arguments, &["sources"])))
+            need_present(arguments, "source_ids")?;
+            ("POST", path, Some(pick(arguments, &["source_ids"])))
         }
         "list_sources" => (
             "GET",
@@ -517,7 +517,7 @@ pub fn route_tool(
         "explain_search" => {
             let path = format!("{}/sources/search/explain", context_path("context_id")?);
             need(arguments, "query")?;
-            need(arguments, "source")?;
+            need(arguments, "source_id")?;
             (
                 "POST",
                 path,
@@ -525,7 +525,7 @@ pub fn route_tool(
                     arguments,
                     &[
                         "query",
-                        "source",
+                        "source_id",
                         "paragraph",
                         "limit",
                         "semantic_floor",
@@ -538,7 +538,7 @@ pub fn route_tool(
         }
         "cite_passage" => {
             let path = format!("{}/citations", context_path("context_id")?);
-            need(arguments, "source")?;
+            need(arguments, "source_id")?;
             let has_paragraph = arguments
                 .get("paragraph")
                 .is_some_and(|value| !value.is_null());
@@ -554,7 +554,7 @@ pub fn route_tool(
                 path,
                 Some(pick_with_alias(
                     arguments,
-                    &["source", "paragraph"],
+                    &["source_id", "paragraph"],
                     "paragraph",
                     "index",
                 )),

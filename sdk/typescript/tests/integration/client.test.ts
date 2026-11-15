@@ -126,7 +126,7 @@ describe("graph writes and reads", () => {
     expect(page.total).toBe(1);
     expect(page.matches[0]!.weight).toBe(1.0);
     expect(page.matches[0]!.count).toBe(2);
-    expect(page.matches[0]!.attributions.map((a) => a.source).sort()).toEqual(["a", "b"]);
+    expect(page.matches[0]!.attributions.map((a) => a.source_id).sort()).toEqual(["a", "b"]);
 
     await expect(ctx.addAssociations([{ ...op, weight: 1e300 }])).rejects.toBeInstanceOf(
       ValidationError,
@@ -297,7 +297,7 @@ describe("sources and citations", () => {
     expect(lookup.missing).toEqual(["missing.md"]);
 
     const page = await ctx.searchPassages("杜氏は高瀬である", { limit: 3 });
-    expect(page.hits[0]!.source).toBe("docs/aomine.md");
+    expect(page.hits[0]!.source_id).toBe("docs/aomine.md");
     expect(page.hits[0]!.lanes.bm25).toBeDefined();
     expect(page.hits[0]!.lanes.vector).toBeUndefined();
     // The plan (#151): response-level lane verdicts beside the hits.
@@ -337,7 +337,7 @@ describe("sources and citations", () => {
     expect(entries.get("b.md")!.tags).toBeUndefined();
 
     const filtered = await ctx.searchPassages("共通語の資料", { tags: ["酒"] });
-    expect(new Set(filtered.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    expect(new Set(filtered.hits.map((hit) => hit.source_id))).toEqual(new Set(["a.md"]));
     expect(filtered.plan.contexts[0]!.filter).toEqual({
       eligible_sources: 1,
       total_sources: 2,
@@ -346,7 +346,7 @@ describe("sources and citations", () => {
     // The half-open window over date ?? stored_at: b.md's only
     // timestamp is the stamp (now), far past the fixture date.
     const dated = await ctx.searchPassages("共通語の資料", { until: 1500 });
-    expect(new Set(dated.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    expect(new Set(dated.hits.map((hit) => hit.source_id))).toEqual(new Set(["a.md"]));
     const unfiltered = await ctx.searchPassages("共通語の資料");
     expect(unfiltered.hits).toHaveLength(2);
     expect(unfiltered.plan.contexts[0]!.filter).toBeUndefined();
@@ -360,7 +360,7 @@ describe("sources and citations", () => {
       context_ids: [contextId],
       tags: ["酒"],
     });
-    expect(new Set(cross.hits.map((hit) => hit.source))).toEqual(new Set(["a.md"]));
+    expect(new Set(cross.hits.map((hit) => hit.source_id))).toEqual(new Set(["a.md"]));
     expect(cross.plan.contexts[0]!.filter?.eligible_sources).toBe(1);
     await client.contexts.delete(contextId);
   });

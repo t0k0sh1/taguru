@@ -123,7 +123,7 @@ class FakeServer {
       );
     }
     if (path.endsWith("/sources/retract") && method === "POST") {
-      const source = (body as { source: string }).source;
+      const source = (body as { source_id: string }).source_id;
       this.sources = this.sources.filter((s) => s !== source);
       this.retracted.push(source);
       return ok({ associations_touched: 0, passage_removed: true });
@@ -135,8 +135,7 @@ class FakeServer {
         .sort();
       return ok({
         total: candidates.length,
-        sources: candidates,
-        entries: candidates.map((name) => ({ name })),
+        entries: candidates.map((id) => ({ id })),
       });
     }
     if (path === "/import") {
@@ -144,8 +143,8 @@ class FakeServer {
       return ok({
         batches: [
           {
-            context: "sake",
-            source: "file:///a.md",
+            context_id: "cef2e28b-43f0-4b6c-8201-abab0785399f",
+            source_id: "file:///a.md",
             created: false,
             retracted: 0,
             associations: 0,

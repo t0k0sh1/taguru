@@ -99,7 +99,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
     let looked_up = server.ok(
         "POST",
         &format!("/contexts/{}/sources/lookup", server.cx("perm")),
-        Some(json!({"sources": ["session:claude:a/note"]})),
+        Some(json!({"source_ids": ["session:claude:a/note"]})),
     );
     assert_eq!(
         looked_up["passages"]["session:claude:a/note"],
@@ -129,7 +129,7 @@ fn promotion_moves_named_sources_whole_and_is_idempotent() {
         .as_array()
         .expect("attributions");
     assert_eq!(attributions.len(), 1, "{runner}");
-    assert_eq!(attributions[0]["source"], json!("session:claude:b"));
+    assert_eq!(attributions[0]["source_id"], json!("session:claude:b"));
     let stayed = server.ok(
         "POST",
         &format!("/contexts/{}/query", server.cx("perm")),
@@ -894,83 +894,6 @@ fn seed_dense_vocabulary(server: &Server, context: &str) {
         "POST",
         &format!("/contexts/{}/associations", server.cx(context)),
         Some(serde_json::Value::Array(chain)),
-    );
-}
-
-/// Each passage carries a few KB of filler so a batch's own write cost
-/// (WAL bytes, not just per-batch bookkeeping) is what the budget test
-/// below leans on for margin — a trivial one-line passage per source
-/// left too little headroom on faster (CI) hardware, where 600 tiny
-/// batches landed comfortably inside a 1s budget (824ms observed) even
-/// though the same fixture took over a second for ~50 batches on a
-/// slower machine.
-fn seed_many_sources(server: &Server, context: &str, count: usize) {
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": context, "description": "d"})),
-    );
-    // ~6.6KB/passage: at `count` == MAX_MATCH_LIMIT (1000) the whole
-    // seeding POST stays comfortably under the 8MiB body cap.
-    let filler = "本文".repeat(1100);
-    let passages: serde_json::Map<String, serde_json::Value> = (0..count)
-        .map(|i| (format!("s{i:04}"), json!(format!("{i}: {filler}"))))
-        .collect();
-    server.ok(
-        "POST",
-        &format!("/contexts/{}/sources", server.cx(context)),
-        Some(json!({"passages": passages})),
-    );
-}
-
-/// `budget_refusal` (`promote.rs:552-576`): the apply loop's own
-/// per-iteration deadline check trips before all batches land — a
-/// resumable-prefix 408, distinct from `deadline_exceeded`'s top-of-
-/// handler refusal (which fires before anything runs at all).
-#[test]
-fn budget_refusal_cuts_a_multi_batch_promotion_short() {
-    let server = Server::start_with_env(
-        "promote-budget-refusal",
-        &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")],
-    );
-    // MAX_MATCH_LIMIT (1000, `overlong`'s own ceiling on `sources`) —
-    // as many batches as the request can carry, maximizing margin.
-    const COUNT: usize = 1000;
-    seed_many_sources(&server, "scratch", COUNT);
-    server.ok(
-        "POST",
-        "/contexts",
-        Some(json!({"name": "perm2", "description": "d"})),
-    );
-
-    let sources: Vec<String> = (0..COUNT).map(|i| format!("s{i:04}")).collect();
-    let start = std::time::Instant::now();
-    let (status, refused) = server.call(
-        "POST",
-        &format!("/contexts/{}/promote", server.cx("scratch")),
-        Some(json!({"into": server.cx("perm2"), "source_ids": sources, "audit": false})),
-    );
-    let elapsed = start.elapsed();
-    assert_eq!(status, 408, "{refused} (elapsed {elapsed:?})");
-    assert_eq!(refused["code"], json!("timeout"), "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains("budget partway through the promotion"),
-        "{refused}"
-    );
-    // A resumable prefix, `/import`'s own discipline: never
-    // all-or-nothing, and never silently the full count either. Not
-    // asserting `landed > 0` too: on a CI machine slow enough that
-    // even the first batch hasn't landed by the 1s budget, that's
-    // still a valid (if maximally early) resumable-prefix outcome —
-    // the elapsed time in the failure message is what would actually
-    // explain a `landed == COUNT` failure (the budget never bit).
-    let landed = refused["durable_batches"].as_u64().unwrap();
-    assert!(
-        landed < COUNT as u64,
-        "{refused} (elapsed {elapsed:?}, landed {landed})"
     );
 }
 

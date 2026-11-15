@@ -92,7 +92,7 @@ function describeItem(item: EvidenceItem): string {
   let where: string;
   let snippet: string;
   if (item.passage) {
-    where = `${item.passage.source} ¶${item.passage.paragraph}`;
+    where = `${item.passage.source_id} ¶${item.passage.paragraph}`;
     snippet = item.passage.text;
   } else if (item.association) {
     const association = item.association;

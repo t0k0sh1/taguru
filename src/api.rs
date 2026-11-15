@@ -2092,7 +2092,8 @@ pub(crate) fn injected_deadline_race() -> bool {
 /// batch recorded for that source — never a fabricated value.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AttributionOut {
-    pub source: String,
+    /// The attributed source's id (the caller-chosen string, ADR 0054).
+    pub source_id: String,
     /// This source's raw cumulative contribution, NOT averaged — divide
     /// by `count` for its per-assertion average. Contrast with the
     /// enclosing [`AssociationOut::weight`], which is averaged.
@@ -2127,7 +2128,7 @@ fn attribution_out(
     let section = found.and_then(|found| found.section.clone());
     let locator = found.and_then(|found| found.locator.clone());
     AttributionOut {
-        source: attribution.source,
+        source_id: attribution.source,
         weight: attribution.weight,
         count: attribution.count,
         paragraph: attribution.paragraph,

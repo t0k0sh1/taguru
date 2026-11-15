@@ -265,7 +265,7 @@ export interface Locator {
 
 /** One source's contribution to an association. `weight` is raw cumulative. */
 export interface Attribution {
-  source: string;
+  source_id: string;
   weight: number;
   count: number;
   paragraph: number | null;
@@ -690,7 +690,7 @@ export interface PassageLanes {
 
 /** One paragraph hit from `searchPassages`. `text` is that paragraph alone. */
 export interface PassageHit {
-  source: string;
+  source_id: string;
   paragraph: number;
   score: number;
   text: string;
@@ -882,7 +882,7 @@ export interface SearchExplanation {
     | "served"
   >;
   summary: string;
-  source: string;
+  source_id: string;
   paragraph?: number;
   paragraphs?: number;
   paragraph_named?: boolean;
@@ -896,7 +896,7 @@ export interface SearchExplanation {
 /** One verbatim paragraph. `section`/`locator` are null when absent. */
 export interface Citation {
   text: string;
-  source: string;
+  source_id: string;
   section: string | null;
   locator: Locator | null;
 }

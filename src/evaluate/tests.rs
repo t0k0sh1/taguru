@@ -429,7 +429,7 @@ fn passage_page_value() -> Value {
         },
         "hits": [
             {
-                "source": "corpus/brewery.md",
+                "source_id": "corpus/brewery.md",
                 "paragraph": 0,
                 "score": 1.0,
                 "text": "青嶺は青嶺酒造が造る銘柄です。",
@@ -444,7 +444,7 @@ fn extract_passages_reads_the_real_plan_and_hits_shape() {
     let value = passage_page_value();
     let (hits, plan) = extract_passages(&value).expect("a well-formed PassagePage must parse");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].source, "corpus/brewery.md");
+    assert_eq!(hits[0].source_id, "corpus/brewery.md");
     let plan = plan.expect("plan.contexts must carry the one searched context");
     assert_eq!(plan.context_id, "cef2e28b-43f0-4b6c-8201-abab0785399f");
     assert_eq!(plan.context_name, "sake");
@@ -453,7 +453,7 @@ fn extract_passages_reads_the_real_plan_and_hits_shape() {
 #[test]
 fn extract_passages_falls_back_to_a_bare_hits_array() {
     let value = serde_json::json!([
-        {"source": "corpus/brewery.md", "paragraph": 0, "score": 0.5}
+        {"source_id": "corpus/brewery.md", "paragraph": 0, "score": 0.5}
     ]);
     let (hits, plan) = extract_passages(&value).expect("a bare hits array must still parse");
     assert_eq!(hits.len(), 1);
@@ -463,7 +463,7 @@ fn extract_passages_falls_back_to_a_bare_hits_array() {
 
 #[test]
 fn extract_passages_falls_back_to_an_object_wrapped_hits_array_without_a_plan() {
-    let value = serde_json::json!({"hits": [{"source": "s", "paragraph": 1, "score": 0.1}]});
+    let value = serde_json::json!({"hits": [{"source_id": "s", "paragraph": 1, "score": 0.1}]});
     let (hits, plan) =
         extract_passages(&value).expect("an object without plan must still parse via hits");
     assert_eq!(hits.len(), 1);
@@ -487,7 +487,7 @@ fn extract_passages_rejects_a_response_with_no_recognizable_hits() {
 #[test]
 fn extract_passages_fallback_recovers_text_when_the_raw_hit_still_carries_it() {
     let value = serde_json::json!([
-        {"source": "corpus/brewery.md", "paragraph": 0, "score": 0.5, "text": "青嶺酒造は雲居県霧沢町の蔵元である。"}
+        {"source_id": "corpus/brewery.md", "paragraph": 0, "score": 0.5, "text": "青嶺酒造は雲居県霧沢町の蔵元である。"}
     ]);
     let (hits, _plan) = extract_passages(&value).expect("a bare hits array must still parse");
     assert_eq!(hits[0].text, "青嶺酒造は雲居県霧沢町の蔵元である。");
@@ -499,7 +499,7 @@ fn extract_passages_fallback_recovers_text_when_the_raw_hit_still_carries_it() {
 #[test]
 fn extract_passages_fallback_degrades_to_empty_text_when_absent() {
     let value = serde_json::json!([
-        {"source": "corpus/brewery.md", "paragraph": 0, "score": 0.5}
+        {"source_id": "corpus/brewery.md", "paragraph": 0, "score": 0.5}
     ]);
     let (hits, _plan) = extract_passages(&value).expect("a bare hits array must still parse");
     assert_eq!(hits[0].text, "");
@@ -529,7 +529,7 @@ fn assert_no_body_text(value: &Value, needle: &str, path: &str) {
 #[test]
 fn hit_locator_never_carries_the_passage_body_text() {
     let hit = PassageHit {
-        source: "corpus/brewery.md".to_string(),
+        source_id: "corpus/brewery.md".to_string(),
         paragraph: 0,
         score: 1.0,
         text: "TOP-SECRET-PASSAGE-BODY-TEXT".to_string(),
@@ -570,7 +570,7 @@ fn evidence_locator_never_carries_the_passage_body_text() {
         estimated_tokens: Some(0),
         association: None,
         passage: Some(PassageHit {
-            source: "corpus/brewery.md".to_string(),
+            source_id: "corpus/brewery.md".to_string(),
             paragraph: 0,
             score: 1.0,
             text: "TOP-SECRET-PASSAGE-BODY-TEXT".to_string(),
@@ -610,7 +610,7 @@ fn passage_evidence_item(source: &str, paragraph: u32, rank: usize) -> EvidenceI
         estimated_tokens: Some(0),
         association: None,
         passage: Some(PassageHit {
-            source: source.to_string(),
+            source_id: source.to_string(),
             paragraph,
             score: 1.0,
             text: String::new(),

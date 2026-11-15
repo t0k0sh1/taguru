@@ -17,7 +17,7 @@ AOMINE_ASSOCIATION = {
     "weight": 1.0,
     "count": 1,
     "attributions": [
-        {"source": "docs/aomine.md", "weight": 1.0, "count": 1, "paragraph": 1, "section": None}
+        {"source_id": "docs/aomine.md", "weight": 1.0, "count": 1, "paragraph": 1, "section": None}
     ],
 }
 
@@ -28,7 +28,7 @@ FACT_ONLY_ASSOCIATION = {
     "weight": 1.0,
     "count": 1,
     "attributions": [
-        {"source": "口伝", "weight": 1.0, "count": 1, "paragraph": None, "section": None}
+        {"source_id": "口伝", "weight": 1.0, "count": 1, "paragraph": None, "section": None}
     ],
 }
 
@@ -262,7 +262,7 @@ class FakeServer:
                         {
                             "context_id": context_id,
                             "context_name": context_id.removeprefix("id-"),
-                            "source": f"docs/{context_id.removeprefix('id-')}.md",
+                            "source_id": f"docs/{context_id.removeprefix('id-')}.md",
                             "paragraph": 0,
                             "score": 2.0,
                             "text": f"{context_id.removeprefix('id-')} の段落。",
@@ -294,7 +294,9 @@ class FakeServer:
                 }
             )
         if path.endswith("/citations"):
-            return ok({"text": "杜氏は高瀬である。", "source": body["source"], "section": "人物"})
+            return ok(
+                {"text": "杜氏は高瀬である。", "source_id": body["source_id"], "section": "人物"}
+            )
         if path.endswith("/sources/search"):
             if self.fail_text_search:
                 return httpx.Response(
@@ -325,14 +327,14 @@ class FakeServer:
                     },
                     "hits": [
                         {
-                            "source": "docs/aomine.md",
+                            "source_id": "docs/aomine.md",
                             "paragraph": 1,
                             "score": 3.0,
                             "text": "杜氏は高瀬である。",
                             "lanes": {"bm25": {"rank": 0, "score": 3.0}},
                         },
                         {
-                            "source": "docs/other.md",
+                            "source_id": "docs/other.md",
                             "paragraph": 0,
                             "score": 1.0,
                             "text": "別の文書の段落。",

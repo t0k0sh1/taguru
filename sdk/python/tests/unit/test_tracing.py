@@ -41,8 +41,8 @@ ASSOCIATION = {
     "weight": 2.0,
     "count": 2,
     "attributions": [
-        {"source": "docs/aomine.md", "weight": 2.0, "count": 2, "paragraph": 1, "section": None},
-        {"source": "unstored.md", "weight": 1.0, "count": 1, "paragraph": 0, "section": None},
+        {"source_id": "docs/aomine.md", "weight": 2.0, "count": 2, "paragraph": 1, "section": None},
+        {"source_id": "unstored.md", "weight": 1.0, "count": 1, "paragraph": 0, "section": None},
     ],
 }
 
@@ -89,12 +89,12 @@ def routed_handler(calls: list[tuple[str, dict[str, str]]]):
                 }
             )
         if path.endswith("/citations"):
-            if body["source"] == "unstored.md":
+            if body["source_id"] == "unstored.md":
                 return httpx.Response(
                     404, json={"status": "error", "error": "no stored passage", "time": 0.0}
                 )
             return ok_response(
-                {"text": "杜氏は高瀬。", "source": body["source"], "section": "人物"}
+                {"text": "杜氏は高瀬。", "source_id": body["source_id"], "section": "人物"}
             )
         if path.endswith("/sources/search"):
             return ok_response(

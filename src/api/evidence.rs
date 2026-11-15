@@ -236,7 +236,7 @@ impl EvidenceCandidate {
             (false, true) => LANE_PASSAGE_VECTOR,
             _ => LANE_PASSAGE_BM25,
         };
-        let source = hit.source.clone();
+        let source = hit.source_id.clone();
         let paragraph = hit.paragraph;
         let canonical_key = passage_key(context, &source, paragraph);
         let origins = BTreeSet::from([(source.clone(), paragraph)]);
@@ -310,7 +310,7 @@ impl EvidenceCandidate {
             CandidatePayload::Association(association) => association
                 .attributions
                 .iter()
-                .map(|attribution| attribution.source.clone())
+                .map(|attribution| attribution.source_id.clone())
                 .collect(),
             _ => self.source.iter().cloned().collect::<BTreeSet<_>>(),
         }
@@ -398,7 +398,7 @@ fn primary_attribution(
             a.weight
                 .abs()
                 .total_cmp(&b.weight.abs())
-                .then_with(|| b.source.cmp(&a.source))
+                .then_with(|| b.source_id.cmp(&a.source_id))
                 // `None < Some(_)`, and every comparison here is
                 // reversed (`b.cmp(&a)`) to prefer the smallest value
                 // — which would make a paragraph-less attribution beat
@@ -409,7 +409,7 @@ fn primary_attribution(
         })
         .map(|attribution| {
             (
-                Some(attribution.source.clone()),
+                Some(attribution.source_id.clone()),
                 attribution.paragraph,
                 attribution.section.clone(),
             )
@@ -426,7 +426,7 @@ fn origins_of(attributions: &[super::AttributionOut]) -> BTreeSet<(String, u32)>
         .filter_map(|attribution| {
             attribution
                 .paragraph
-                .map(|paragraph| (attribution.source.clone(), paragraph))
+                .map(|paragraph| (attribution.source_id.clone(), paragraph))
         })
         .collect()
 }
@@ -708,7 +708,7 @@ mod tests {
         paragraph: Option<u32>,
     ) -> super::super::AttributionOut {
         super::super::AttributionOut {
-            source: source.to_string(),
+            source_id: source.to_string(),
             weight,
             count: 1,
             paragraph,
@@ -720,7 +720,7 @@ mod tests {
     fn passage_hit(source: &str, paragraph: u32, bm25: bool, vector: bool) -> PassageHit {
         use super::super::sources::{LaneEvidence, PassageLanes};
         PassageHit {
-            source: source.to_string(),
+            source_id: source.to_string(),
             paragraph,
             score: 1.0,
             text: "text".to_string(),
@@ -1036,7 +1036,7 @@ mod tests {
         fn citation() -> Citation {
             Citation {
                 text: "excerpt".to_string(),
-                source: "book.txt".to_string(),
+                source_id: "book.txt".to_string(),
                 section: None,
                 locator: None,
             }

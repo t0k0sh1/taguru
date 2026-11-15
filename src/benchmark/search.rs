@@ -789,7 +789,7 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
                     .enumerate()
                     .map(|(index, hit)| HitLocator {
                         rank: index + 1,
-                        source: hit.source.clone(),
+                        source: hit.source_id.clone(),
                         paragraph: hit.paragraph,
                     })
                     .collect();
@@ -800,7 +800,7 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
                 });
                 let distinct_sources = hits
                     .iter()
-                    .map(|hit| hit.source.as_str())
+                    .map(|hit| hit.source_id.as_str())
                     .collect::<BTreeSet<_>>()
                     .len();
                 hit_locators.insert(model_id.clone(), locators.clone());
@@ -877,7 +877,7 @@ fn search_case_model(
 }
 
 /// Prefers the real `{plan, hits}` shape; falls back to pulling
-/// `source`/`paragraph`/`score`/`text` out of either a bare hits array
+/// `source_id`/`paragraph`/`score`/`text` out of either a bare hits array
 /// (the pre-#151 wire shape `PassagePage`'s own doc comment
 /// describes) or an object whose `hits` array doesn't fit
 /// `PassageHit`'s current (lane-carrying) shape — an older or
@@ -898,9 +898,9 @@ fn extract_hits(value: &Value) -> Result<(Vec<PassageHit>, Option<SearchContextP
     let mut hits = Vec::with_capacity(raw_hits.len());
     for raw in raw_hits {
         let source = raw
-            .get("source")
+            .get("source_id")
             .and_then(Value::as_str)
-            .ok_or("a hit is missing 'source'")?
+            .ok_or("a hit is missing 'source_id'")?
             .to_string();
         let paragraph = raw
             .get("paragraph")
@@ -913,7 +913,7 @@ fn extract_hits(value: &Value) -> Result<(Vec<PassageHit>, Option<SearchContextP
             .unwrap_or("")
             .to_string();
         hits.push(PassageHit {
-            source,
+            source_id: source,
             paragraph,
             score,
             text,
@@ -974,7 +974,7 @@ impl ExpectedItem {
     fn matches(&self, hit: &PassageHit, normalized_hit_text: &str) -> bool {
         match self {
             ExpectedItem::Source { path, paragraphs } => {
-                &hit.source == path
+                &hit.source_id == path
                     && (paragraphs.is_empty() || paragraphs.contains(&hit.paragraph))
             }
             ExpectedItem::Concept { normalized } => {

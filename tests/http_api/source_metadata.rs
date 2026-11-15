@@ -263,7 +263,7 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|hit| hit["source"].as_str().unwrap().to_string())
+            .map(|hit| hit["source_id"].as_str().unwrap().to_string())
             .collect()
     };
 
@@ -468,7 +468,7 @@ fn the_semantic_tier_never_pairs_requests_across_different_filters() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|hit| hit["source"].as_str().unwrap().to_string())
+            .map(|hit| hit["source_id"].as_str().unwrap().to_string())
             .collect()
     };
 
@@ -512,7 +512,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     let plain = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "共通語の資料", "source": "c.md"})),
+        Some(json!({"query": "共通語の資料", "source_id": "c.md"})),
     );
     assert_eq!(plain["verdict"], "served", "{plain}");
 
@@ -521,7 +521,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     let filtered = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "共通語の資料", "source": "c.md", "tags": ["酒"]})),
+        Some(json!({"query": "共通語の資料", "source_id": "c.md", "tags": ["酒"]})),
     );
     assert_eq!(filtered["verdict"], "filtered_out", "{filtered}");
     assert!(
@@ -540,7 +540,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     let second = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "共通語の資料", "source": "b.md", "tags": ["酒"]})),
+        Some(json!({"query": "共通語の資料", "source_id": "b.md", "tags": ["酒"]})),
     );
     assert_eq!(second["verdict"], "filtered_out", "{second}");
     let row = server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None);
@@ -556,7 +556,7 @@ fn explain_names_filtered_out_before_the_lanes() {
     let eligible = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("sake")),
-        Some(json!({"query": "共通語の資料", "source": "a.md", "tags": ["酒"]})),
+        Some(json!({"query": "共通語の資料", "source_id": "a.md", "tags": ["酒"]})),
     );
     assert_eq!(eligible["verdict"], "served", "{eligible}");
     assert_eq!(eligible["ranking"]["ranked"], 1, "{eligible}");
@@ -606,7 +606,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
         .as_array()
         .unwrap_or_else(|| panic!("no hits in {page}"));
     assert!(
-        !hits.is_empty() && hits.iter().all(|hit| hit["source"] == "a.md"),
+        !hits.is_empty() && hits.iter().all(|hit| hit["source_id"] == "a.md"),
         "{page}"
     );
     assert_eq!(
@@ -627,7 +627,7 @@ fn the_mcp_tools_route_metadata_and_filters() {
     let explained = server.call_tool(
         4,
         "explain_search",
-        json!({"context_id": server.cx("sake"), "query": "共通語の資料", "source": "b.md", "tags": ["酒"]}),
+        json!({"context_id": server.cx("sake"), "query": "共通語の資料", "source_id": "b.md", "tags": ["酒"]}),
     );
     assert_ne!(explained["isError"], json!(true), "{explained}");
     let envelope: Value =

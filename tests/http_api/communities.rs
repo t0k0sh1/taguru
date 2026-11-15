@@ -1032,7 +1032,7 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
             "/contexts/{}/sources/lookup",
             server.cx("corp::communities")
         ),
-        Some(json!({"sources": ["community:L0-1"]})),
+        Some(json!({"source_ids": ["community:L0-1"]})),
     );
     assert!(
         looked["passages"]["community:L0-1"].is_null(),
@@ -1070,7 +1070,7 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
             "/contexts/{}/sources/lookup",
             server.cx("corp::communities")
         ),
-        Some(json!({"sources": ["communities:manifest"]})),
+        Some(json!({"source_ids": ["communities:manifest"]})),
     );
     let mut manifest: Value =
         serde_json::from_str(stored["passages"]["communities:manifest"].as_str().unwrap())

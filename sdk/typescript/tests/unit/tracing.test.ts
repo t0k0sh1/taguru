@@ -84,8 +84,8 @@ const ASSOCIATION = {
   weight: 2.0,
   count: 2,
   attributions: [
-    { source: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
-    { source: "unstored.md", weight: 1.0, count: 1, paragraph: 0, section: null },
+    { source_id: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
+    { source_id: "unstored.md", weight: 1.0, count: 1, paragraph: 0, section: null },
   ],
 };
 
@@ -113,10 +113,10 @@ function routed(calls: Array<{ path: string; headers: Record<string, string> }>)
       });
     }
     if (req.path.endsWith("/citations")) {
-      if (body["source"] === "unstored.md") {
+      if (body["source_id"] === "unstored.md") {
         return errBody(404, "no stored passage");
       }
-      return okBody({ text: "杜氏は高瀬。", source: body["source"], section: "人物" });
+      return okBody({ text: "杜氏は高瀬。", source_id: body["source_id"], section: "人物" });
     }
     if (req.path.endsWith("/sources/search")) {
       return okBody({
@@ -223,8 +223,8 @@ describe("retrieve() tracing", () => {
     const allStored = {
       ...ASSOCIATION,
       attributions: [
-        { source: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
-        { source: "docs/other.md", weight: 1.0, count: 1, paragraph: 0, section: null },
+        { source_id: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
+        { source_id: "docs/other.md", weight: 1.0, count: 1, paragraph: 0, section: null },
       ],
     };
     const handler = (req: StubRequest) => {
@@ -243,7 +243,7 @@ describe("retrieve() tracing", () => {
       }
       if (req.path.endsWith("/citations")) {
         // Every source here is stored — none 404s.
-        return okBody({ text: "杜氏は高瀬。", source: body["source"], section: "人物" });
+        return okBody({ text: "杜氏は高瀬。", source_id: body["source_id"], section: "人物" });
       }
       throw new Error(req.path);
     };

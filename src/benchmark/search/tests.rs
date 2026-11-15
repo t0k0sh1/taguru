@@ -7,7 +7,7 @@ fn args(words: &[&str]) -> Result<SearchArgs, i32> {
 
 fn hit(source: &str, paragraph: u32, text: &str) -> PassageHit {
     PassageHit {
-        source: source.to_string(),
+        source_id: source.to_string(),
         paragraph,
         score: 1.0,
         text: text.to_string(),
@@ -282,12 +282,12 @@ fn extract_hits_prefers_the_typed_plan_and_hits_shape() {
             "bm25": {"ran": true},
             "vector": {"ran": false, "reason": "no embedding provider is configured"}
         }}]},
-        "hits": [{"source": "docs/a.md", "paragraph": 0, "score": 1.0, "text": "hello",
+        "hits": [{"source_id": "docs/a.md", "paragraph": 0, "score": 1.0, "text": "hello",
                    "lanes": {"bm25": {"rank": 1, "score": 1.0}}}]
     });
     let (hits, plan) = extract_hits(&value).unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].source, "docs/a.md");
+    assert_eq!(hits[0].source_id, "docs/a.md");
     assert!(hits[0].lanes.bm25.is_some());
     assert!(hits[0].lanes.vector.is_none());
     let plan = plan.unwrap();
@@ -304,7 +304,7 @@ fn extract_hits_prefers_the_typed_plan_and_hits_shape() {
 #[test]
 fn extract_hits_falls_back_to_a_bare_hit_array() {
     let value = serde_json::json!([
-        {"source": "docs/a.md", "paragraph": 0, "score": 0.5, "text": "hello"}
+        {"source_id": "docs/a.md", "paragraph": 0, "score": 0.5, "text": "hello"}
     ]);
     let (hits, plan) = extract_hits(&value).unwrap();
     assert_eq!(hits.len(), 1);
@@ -314,7 +314,8 @@ fn extract_hits_falls_back_to_a_bare_hit_array() {
 
 #[test]
 fn extract_hits_falls_back_to_an_object_wrapped_hits_array_without_a_plan() {
-    let value = serde_json::json!({"hits": [{"source": "docs/a.md", "paragraph": 1, "text": "x"}]});
+    let value =
+        serde_json::json!({"hits": [{"source_id": "docs/a.md", "paragraph": 1, "text": "x"}]});
     let (hits, plan) = extract_hits(&value).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].paragraph, 1);

@@ -148,7 +148,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
         &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "こはくいろ"})),
     );
-    assert_eq!(page["hits"][0]["source"], json!("docs/ore.md"), "{page}");
+    assert_eq!(page["hits"][0]["source_id"], json!("docs/ore.md"), "{page}");
 
     // The provider now answers width 4 behind the same model name.
     // Fresh cue/query strings on every call below: the cue cache must
@@ -177,7 +177,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
     let explained = server.ok(
         "POST",
         &format!("/contexts/{}/sources/search/explain", server.cx("mine")),
-        Some(json!({"query": "とうめいなたから", "source": "docs/ore.md"})),
+        Some(json!({"query": "とうめいなたから", "source_id": "docs/ore.md"})),
     );
     assert_eq!(explained["vector"]["ran"], json!(false), "{explained}");
     assert_eq!(explained["vector"]["reason"], json!(reason), "{explained}");
@@ -237,7 +237,7 @@ fn a_width_change_is_named_on_every_surface_and_one_refresh_heals_it() {
         &format!("/contexts/{}/sources/search", server.cx("mine")),
         Some(json!({"query": "アンバーのそう"})),
     );
-    assert_eq!(page["hits"][0]["source"], json!("docs/ore.md"), "{page}");
+    assert_eq!(page["hits"][0]["source_id"], json!("docs/ore.md"), "{page}");
     assert_eq!(
         page["plan"]["contexts"][0]["lanes"]["vector"]["ran"],
         json!(true),

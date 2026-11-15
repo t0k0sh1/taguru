@@ -140,7 +140,7 @@ classes:
       route: "POST /contexts/{id}/sources"
       args: [passages]
       options: [questions, sections, locators, tags, dates]
-    lookup_passages: { route: "POST /contexts/{id}/sources/lookup", args: [sources] }
+    lookup_passages: { route: "POST /contexts/{id}/sources/lookup", args: [source_ids] }
     search_passages:
       route: "POST /contexts/{id}/sources/search"
       args: [query]
@@ -152,7 +152,7 @@ classes:
     analyze_communities: { route: "GET /contexts/{id}/communities" }
     explain_search_passages:
       route: "POST /contexts/{id}/sources/search/explain"
-      args: [query, source]
+      args: [query, source_id]
       options: [paragraph, limit, semantic_floor, tags, since, until]
     retract_source:
       route: "POST /contexts/{id}/sources/retract"
@@ -160,7 +160,7 @@ classes:
       options: [dry_run]
     list_sources: { route: "GET /contexts/{id}/sources", options: [limit, after, prefix] }
     iter_sources: { route: "GET /contexts/{id}/sources", options: [limit, prefix] }
-    cite_passage: { route: "POST /contexts/{id}/citations", args: [source, paragraph] }
+    cite_passage: { route: "POST /contexts/{id}/citations", args: [source_id, paragraph] }
     get_aliases: { route: "GET /contexts/{id}/aliases", options: [limit, after, prefix] }
     iter_aliases: { route: "GET /contexts/{id}/aliases", options: [limit, prefix] }
     add_aliases: { route: "POST /contexts/{id}/aliases", options: [concepts, labels] }

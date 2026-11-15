@@ -10,14 +10,14 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 1428,
+        "bytes_used": 1440,
         "items_used": 2,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 370
+        "tokens_used": 373
       },
       "citations": [
         {
@@ -27,7 +27,7 @@
               "value": "1"
             },
             "section": null,
-            "source": "s1.md",
+            "source_id": "s1.md",
             "text": "猫は哺乳類である。"
           },
           "paragraph": 0,
@@ -37,7 +37,7 @@
           "citation": {
             "locator": null,
             "section": null,
-            "source": "s2.md",
+            "source_id": "s2.md",
             "text": "猫は爬虫類だと主張する文献もある。"
           },
           "paragraph": 0,
@@ -56,7 +56,7 @@
                 },
                 "paragraph": 0,
                 "section": null,
-                "source": "s1.md",
+                "source_id": "s1.md",
                 "weight": 1.0
               }
             ],
@@ -66,7 +66,7 @@
             "subject": "猫",
             "weight": 1.0
           },
-          "bytes": 570,
+          "bytes": 573,
           "candidate_id": "association\u0000猫\u0000is_a\u0000哺乳類",
           "citation_refs": [
             {
@@ -88,7 +88,7 @@
               "s1.md"
             ]
           },
-          "estimated_tokens": 146,
+          "estimated_tokens": 147,
           "fused_rank": 1,
           "kind": "association",
           "lane_ranks": [
@@ -106,7 +106,7 @@
                 "locator": null,
                 "paragraph": 0,
                 "section": null,
-                "source": "s2.md",
+                "source_id": "s2.md",
                 "weight": 1.0
               }
             ],
@@ -116,7 +116,7 @@
             "subject": "猫",
             "weight": 1.0
           },
-          "bytes": 547,
+          "bytes": 550,
           "candidate_id": "association\u0000猫\u0000is_a\u0000爬虫類",
           "citation_refs": [
             {
@@ -138,7 +138,7 @@
               "s2.md"
             ]
           },
-          "estimated_tokens": 140,
+          "estimated_tokens": 141,
           "fused_rank": 2,
           "kind": "association",
           "lane_ranks": [

@@ -13,7 +13,7 @@ describe("matchCursor", () => {
       count: 2,
       attributions: [
         {
-          source: "docs/aomine.md",
+          source_id: "docs/aomine.md",
           weight: 1.0,
           count: 2,
           paragraph: null,

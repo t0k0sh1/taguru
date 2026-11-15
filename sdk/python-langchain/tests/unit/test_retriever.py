@@ -471,20 +471,20 @@ class _ConcurrencyProbeContext:
             weight=1.0,
             count=1,
             attributions=[
-                Attribution(source="docs/a.md", weight=1.0, count=1, paragraph=0),
-                Attribution(source="docs/b.md", weight=1.0, count=1, paragraph=0),
+                Attribution(source_id="docs/a.md", weight=1.0, count=1, paragraph=0),
+                Attribution(source_id="docs/b.md", weight=1.0, count=1, paragraph=0),
             ],
         )
         activation = Activation(strength=1.0, path=["青嶺酒造"], association=association)
         return ActivationPage(total=1, matches=[activation])
 
-    async def cite_passage(self, source: str, paragraph: int) -> Citation:
-        self.cite_calls.append((source, paragraph))
+    async def cite_passage(self, source_id: str, paragraph: int) -> Citation:
+        self.cite_calls.append((source_id, paragraph))
         self._current += 1
         self.max_concurrent = max(self.max_concurrent, self._current)
         await asyncio.sleep(0.01)  # long enough for a truly concurrent sibling to overlap
         self._current -= 1
-        return Citation(text=f"text of {source}", source=source)
+        return Citation(text=f"text of {source_id}", source_id=source_id)
 
 
 async def test_agraph_lane_fetches_citations_concurrently_not_sequentially(
@@ -518,16 +518,16 @@ class _FailingCiteContext(_ConcurrencyProbeContext):
         self.started = 0
         self.cancelled = 0
 
-    async def cite_passage(self, source: str, paragraph: int) -> Citation:
+    async def cite_passage(self, source_id: str, paragraph: int) -> Citation:
         self.started += 1
-        if source == "docs/a.md":
+        if source_id == "docs/a.md":
             raise ValueError("boom")  # a non-NotFoundError, must propagate
         try:
             await asyncio.sleep(1.0)  # long; a live sibling would outlast the raise
         except asyncio.CancelledError:
             self.cancelled += 1
             raise
-        return Citation(text="unreached", source=source)
+        return Citation(text="unreached", source_id=source_id)
 
 
 async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(

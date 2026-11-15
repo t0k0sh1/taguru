@@ -35,7 +35,7 @@ RESOLVE_EXPLANATION: dict[str, Any] = {
 SEARCH_EXPLANATION: dict[str, Any] = {
     "verdict": "no_term_overlap",
     "summary": "query says 酒造, the paragraph spells 酒蔵.",
-    "source": "docs/aomine.md",
+    "source_id": "docs/aomine.md",
     "paragraph": 1,
     "paragraphs": 3,
     "paragraph_named": True,
@@ -103,7 +103,7 @@ def test_explain_search_passages_posts_query_source_and_decodes() -> None:
     assert path == "/contexts/aomine/sources/search/explain"
     assert body == {
         "query": "青嶺酒造の酒造",
-        "source": "docs/aomine.md",
+        "source_id": "docs/aomine.md",
         "paragraph": 1,
         "semantic_floor": 0.2,
     }

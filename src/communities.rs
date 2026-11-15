@@ -633,7 +633,7 @@ fn render_batches(
 /// only for a manifest that exists but does not parse — that needs a
 /// human, not a silent full rebuild.
 fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManifest>, String> {
-    let body = json!({"sources": [MANIFEST_SOURCE]});
+    let body = json!({"source_ids": [MANIFEST_SOURCE]});
     let result = match api.post_envelope(&["contexts", derived_id, "sources", "lookup"], &body) {
         Ok(result) => result,
         Err(ApiFailure::NotFound { .. }) => return Ok(None),
@@ -855,7 +855,7 @@ fn lookup_passages(
     context: &str,
     sources: &[String],
 ) -> Result<BTreeMap<String, String>, String> {
-    let body = json!({"sources": sources});
+    let body = json!({"source_ids": sources});
     let result = api
         .post_envelope(&["contexts", context, "sources", "lookup"], &body)
         .map_err(|failure| failure.into_message())?;

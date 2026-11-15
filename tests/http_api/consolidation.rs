@@ -325,7 +325,7 @@ fn the_cli_judges_incrementally_by_fingerprint() {
             "/contexts/{}/sources/lookup",
             server.cx("sake::consolidation")
         ),
-        Some(json!({"sources": ["consolidation:manifest"]})),
+        Some(json!({"source_ids": ["consolidation:manifest"]})),
     );
     let manifest: Value = serde_json::from_str(
         stored["passages"]["consolidation:manifest"]
@@ -713,7 +713,7 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
             "/contexts/{}/sources/lookup",
             server.cx("sake::consolidation")
         ),
-        Some(json!({"sources": ["consolidation:manifest"]})),
+        Some(json!({"source_ids": ["consolidation:manifest"]})),
     );
     let manifest: Value = serde_json::from_str(
         stored["passages"]["consolidation:manifest"]
@@ -780,7 +780,7 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
                 "/contexts/{}/sources/lookup",
                 server.cx("sake::consolidation")
             ),
-            Some(json!({"sources": ["consolidation:manifest"]})),
+            Some(json!({"source_ids": ["consolidation:manifest"]})),
         );
         assert_eq!(
             stored["passages"]["consolidation:manifest"]

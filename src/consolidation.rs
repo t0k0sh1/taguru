@@ -400,7 +400,7 @@ fn stored_judgments(
             .iter()
             .map(|candidate| judgment_source(&candidate.fingerprint)),
     );
-    let body = json!({ "sources": wanted });
+    let body = json!({ "source_ids": wanted });
     // An id nothing answers to is a first run.
     let found = match api.post_envelope(&["contexts", artifact_id, "sources", "lookup"], &body) {
         Ok(result) => result,

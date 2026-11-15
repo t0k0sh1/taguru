@@ -514,7 +514,7 @@ fn cross_context_search_merges_tagged_matches_across_named_contexts() {
     assert_eq!(hits.len(), 2, "both contexts must answer: {hits:?}");
     assert_eq!(hits[0]["context_name"], json!("izakaya"), "{hits:?}");
     assert_eq!(hits[1]["context_name"], json!("sakagura"), "{hits:?}");
-    assert_eq!(hits[0]["source"], json!("iz.md"), "{hits:?}");
+    assert_eq!(hits[0]["source_id"], json!("iz.md"), "{hits:?}");
 
     // Refusals, each before anything is searched.
     let (status, empty) = server.call(
