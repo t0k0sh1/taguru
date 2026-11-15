@@ -240,6 +240,65 @@ fn the_query_lane_runs_only_when_labels_pins_a_facet_and_contributes_real_eviden
     );
 }
 
+/// Every lane reports a 1-based rank for its own top candidate (ADR
+/// 0006 §7) — the `query` lane's single pinned triple and the
+/// `community` lane's single summary both sit at rank 1, never 0.
+#[test]
+fn query_and_community_lanes_report_one_based_lane_ranks() {
+    let server = Server::start("evidence-lane-ranks");
+    seed_mixed_corpus(&server, "sake");
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sake")), None)["revision"].clone();
+    server.create_with_id(
+        &communities_artifact_id(&server.cx("sake")),
+        json!({"name": "sake::communities"}),
+    );
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context_id": server.cx("sake"),
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+        ],
+    });
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake::communities")),
+        Some(json!({"passages": {
+            "community:L0-0": "青嶺酒造と杜氏たちの共同体についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+
+    let package = server.ok(
+        "POST",
+        &format!("/contexts/{}/evidence", server.cx("sake")),
+        Some(json!({
+            "origins": ["青嶺酒造"],
+            "labels": ["杜氏"],
+            "include_communities": true,
+        })),
+    );
+    assert_eq!(
+        package["plan"]["lanes"]["communities"]["ran"],
+        json!(true),
+        "{package}"
+    );
+    let items = package["items"].as_array().expect("items array");
+    let lane_rank = |lane: &str| -> Vec<Value> {
+        items
+            .iter()
+            .flat_map(|item| item["lane_ranks"].as_array().unwrap().iter())
+            .filter(|entry| entry["lane"] == json!(lane))
+            .map(|entry| entry["rank"].clone())
+            .collect()
+    };
+    assert_eq!(lane_rank("graph_query"), [json!(1)], "{package}");
+    assert_eq!(lane_rank("community"), [json!(1)], "{package}");
+}
+
 /// ADR 0006 §5.1's `dice_floor`/`resolve_limit`/`semantic_floor` all
 /// forward into the same `ResolveRequest` `assemble_evidence` builds
 /// per origin cue — a typo cue resolves under the default floor but is

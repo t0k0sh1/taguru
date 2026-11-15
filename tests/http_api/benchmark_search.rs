@@ -545,3 +545,212 @@ fn benchmark_search_builds_a_corpus_and_still_names_a_batch_that_failed_to_impor
 
     let _ = std::fs::remove_dir_all(&results_dir);
 }
+
+#[test]
+fn benchmark_search_reports_import_counts_skips_non_batch_files_and_pairs_distinct_models_only() {
+    let server = Server::start("search-edges");
+    let results_dir = write_results_dir("edges");
+    let eval_path = results_dir.join("eval.jsonl");
+    // The second case's only expectation carries relevance 0, so it
+    // contributes nothing to the recall denominator: no recall block.
+    std::fs::write(
+        &eval_path,
+        "{\"type\": \"eval\",\"name\":\"edges\"}\n\
+         {\"case_id\":\"scored\",\"query\":\"青嶺\",\
+         \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":3}]}\n\
+         {\"case_id\":\"unscored\",\"query\":\"青嶺\",\
+         \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":0}]}\n",
+    )
+    .unwrap();
+    let cell = results_dir.join("cells/m1/run01");
+    std::fs::write(cell.join("broken.jsonl"), "not a json header at all\n").unwrap();
+    // Neither of these is a batch file; importing either would fail.
+    std::fs::write(cell.join("diagnostics.jsonl"), "not a batch\n").unwrap();
+    std::fs::write(cell.join("stdout.log"), "not a batch\n").unwrap();
+    // 60 bytes + "::m1" = exactly MAX_CONTEXT_NAME_BYTES (64): allowed.
+    let prefix = "p".repeat(60);
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            &server.base,
+            "--context-prefix",
+            &prefix,
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let retrieval: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    let m1 = &retrieval["corpus"]["m1"];
+    assert_eq!(m1["context"], format!("{prefix}::m1"), "{m1}");
+    assert_eq!(m1["outcome"], "built", "{m1}");
+    assert_eq!(m1["segments_imported"], 1, "{m1}");
+    assert_eq!(m1["segments_failed"], 1, "only broken.jsonl failed: {m1}");
+
+    for case in retrieval["cases"].as_array().unwrap() {
+        let keys: Vec<&String> = case["pairs"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["2:m1__m2"], "{case}");
+    }
+    let scored = &retrieval["cases"][0];
+    assert_eq!(scored["case_id"], "scored");
+    assert_eq!(
+        scored["models"]["m1"]["recall"]["recall_at_k"], 1.0,
+        "{scored}"
+    );
+    let unscored = &retrieval["cases"][1];
+    assert_eq!(unscored["case_id"], "unscored");
+    assert!(
+        unscored["models"]["m1"].get("recall").is_none(),
+        "{unscored}"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
+
+#[test]
+fn benchmark_search_refuses_a_corpus_context_name_one_byte_over_the_limit() {
+    let results_dir = write_results_dir("name-over-limit");
+    let eval_path = write_eval_file(&results_dir);
+    // 61 bytes + "::m1" = 65 bytes.
+    let prefix = "p".repeat(61);
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context-prefix",
+            &prefix,
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("exceed 64 bytes"), "{stderr}");
+    assert!(stderr.contains("(65 bytes)"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
+
+/// An always-succeeding OpenAI-style embeddings stub, width 4: one
+/// vector per `input` entry. Reads headers until `\r\n\r\n`, then the
+/// `Content-Length` body, before answering.
+fn spawn_embeddings_stub() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body_start = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                    if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buffer[..body_start]).to_string();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                while buffer.len() < body_start + length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request: Value =
+                    serde_json::from_slice(&buffer[body_start..body_start + length])
+                        .unwrap_or(Value::Null);
+                let count = request["input"].as_array().map_or(0, Vec::len);
+                let data: Vec<Value> = (0..count)
+                    .map(|_| json!({ "embedding": [1.0f32, 0.0, 0.0, 0.0] }))
+                    .collect();
+                let body = json!({ "data": data }).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    format!("http://{addr}/v1/embeddings")
+}
+
+#[test]
+fn benchmark_search_skip_import_reports_the_existing_corpus_passage_vectors() {
+    let embed_url = spawn_embeddings_stub();
+    let server = Server::start_with_env(
+        "search-passage-vectors",
+        &[
+            ("TAGURU_EMBED_URL", embed_url.as_str()),
+            ("TAGURU_EMBED_MODEL", "pv-mock"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    let results_dir = write_results_dir("passage-vectors");
+    let eval_path = write_eval_file(&results_dir);
+
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake::m1", "description": "pre-existing"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sake::m1")),
+        Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/embeddings/refresh", server.cx("sake::m1")),
+        None,
+    );
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            &server.base,
+            "--skip-import",
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let retrieval: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    let m1 = &retrieval["corpus"]["m1"];
+    assert_eq!(m1["outcome"], "search_only", "{m1}");
+    assert_eq!(
+        m1["passage_vectors"],
+        json!({"model": "pv-mock", "rows": 1}),
+        "{m1}"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}

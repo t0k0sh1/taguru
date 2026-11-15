@@ -3739,4 +3739,152 @@ mod tests {
             "the caller's own message must not get a second notice appended: {body}"
         );
     }
+
+    /// The prose half of a wrong-type issue names the JSON type and,
+    /// for scalars, the value itself; a string preview is cut at 64
+    /// chars and only a string actually longer than that gets the `…`.
+    #[test]
+    fn describe_value_names_the_type_and_marks_only_a_cut_string_preview() {
+        use serde_json::json;
+        assert_eq!(describe_value(&json!(null)), "null");
+        assert_eq!(describe_value(&json!(true)), "boolean true");
+        assert_eq!(describe_value(&json!(1.5)), "number 1.5");
+        assert_eq!(describe_value(&json!("sake")), "string \"sake\"");
+        assert_eq!(describe_value(&json!([1])), "an array");
+        assert_eq!(describe_value(&json!({"a": 1})), "an object");
+
+        let exactly_64 = "蔵".repeat(64);
+        assert_eq!(
+            describe_value(&json!(exactly_64)),
+            format!("string {exactly_64:?}"),
+            "a string exactly at the preview cap is shown whole, unmarked"
+        );
+        let past_64 = "蔵".repeat(65);
+        assert_eq!(
+            describe_value(&json!(past_64)),
+            format!("string {:?}…", "蔵".repeat(64)),
+            "one char past the cap is cut to 64 and marked"
+        );
+    }
+
+    /// The remainder line appears only when the caller listed fewer
+    /// issues than the true total, and names exactly how many it left out.
+    #[test]
+    fn collected_validation_message_counts_the_unlisted_remainder_only_when_there_is_one() {
+        let listed = fixture_issues(2);
+        let message = collected_validation_message("the batch", &listed, 5);
+        assert_eq!(
+            message,
+            "the batch refused 5 issue(s):\
+             \n- x[0]: expected a value, got absent\
+             \n- x[1]: expected a value, got absent\
+             \n… and 3 more issue(s); nothing was applied"
+        );
+
+        let message = collected_validation_message("the batch", &listed, 2);
+        assert!(!message.contains("more issue(s)"), "{message}");
+        assert!(message.ends_with("; nothing was applied"), "{message}");
+    }
+
+    /// A partial batch write counts as a write against the `context`
+    /// only when something actually landed before the failure; a
+    /// refusal that applied nothing leaves the usage counter alone. The
+    /// capacity/conflict split is the `full` flag's alone.
+    #[tokio::test]
+    async fn partial_write_error_counts_a_write_only_when_something_landed() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-partial-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let id = state
+            .create("sake", crate::registry::ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let writes = || state.directory_entry("sake").unwrap().usage.writes;
+
+        let response = partial_write_error(
+            &state,
+            &id,
+            PartialWrite {
+                applied: 0,
+                message: "conflict".into(),
+                full: false,
+            },
+            Instant::now(),
+            |applied, message| format!("{applied} applied: {message}"),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_json(response).await;
+        assert_eq!(body["error"], "0 applied: conflict", "{body}");
+        assert_eq!(writes(), 0, "nothing landed, so no write is counted");
+
+        let response = partial_write_error(
+            &state,
+            &id,
+            PartialWrite {
+                applied: 2,
+                message: "full".into(),
+                full: true,
+            },
+            Instant::now(),
+            |applied, message| format!("{applied} applied: {message}"),
+        );
+        assert_eq!(
+            body_json(response).await["code"],
+            ErrorCode::StorageFull.as_str()
+        );
+        assert_eq!(writes(), 1, "two ops landed, so the write is counted");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cache hit replays its passage lane contributions whichever
+    /// single lane carried them — a hit whose hits all came from both
+    /// lanes, or all from the vector lane alone, must still show on
+    /// `taguru_passage_lane_contributions_total`.
+    #[test]
+    fn replay_cached_search_replays_lane_hits_carried_by_any_single_lane() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-replay-lane-hits-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let key = RetrievalKey {
+            op: crate::metrics::RetrievalCacheOp::SearchPassages,
+            targets: Box::new([]),
+            params: String::new(),
+        };
+        let hit = |lane_hits: [u64; 3]| CachedRetrieval {
+            payload: serde_json::value::to_raw_value(&serde_json::json!({}))
+                .unwrap()
+                .into(),
+            target_empty: Box::new([]),
+            lane_hits,
+            log_hits: 0,
+            log_top_score: 0.0,
+        };
+        let lane = |name: &str| {
+            let rendered = state.metrics().render_prometheus(&state.gauge_snapshot());
+            let prefix = format!("taguru_passage_lane_contributions_total{{lane=\"{name}\"}} ");
+            rendered
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .unwrap_or_else(|| panic!("{name} not rendered: {rendered}"))
+                .parse::<u64>()
+                .unwrap()
+        };
+
+        replay_cached_search(&state, &key, &hit([0, 3, 0]));
+        assert_eq!(lane("both_lanes"), 3);
+        replay_cached_search(&state, &key, &hit([0, 0, 5]));
+        assert_eq!(lane("vector_only"), 5);
+        replay_cached_search(&state, &key, &hit([7, 0, 0]));
+        assert_eq!(
+            (lane("bm25_only"), lane("both_lanes"), lane("vector_only")),
+            (7, 3, 5)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

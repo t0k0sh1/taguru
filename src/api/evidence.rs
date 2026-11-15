@@ -1029,6 +1029,51 @@ mod tests {
         );
     }
 
+    /// Within one group the best (lowest) `lane_rank` member is the
+    /// representative — a worse-ranked copy arriving later never
+    /// replaces it, and on a full `(lane_rank, lane)` tie the first
+    /// arrival stays.
+    #[test]
+    fn the_best_ranked_copy_stays_the_representative_and_a_full_tie_keeps_the_first() {
+        let best =
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 1.0), 1);
+        let worse =
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 2.0), 2);
+        let (fused, _) = fuse(vec![best, worse]);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].candidate.lane_rank, 1);
+        assert_eq!(fused[0].candidate.signed_weight, Some(1.0));
+
+        let first =
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 1.0), 1);
+        let tied =
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 2.0), 1);
+        let (fused, _) = fuse(vec![first, tied]);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].candidate.signed_weight, Some(1.0));
+    }
+
+    /// RRF: each lane contributes `1 / (RRF_K + rank)` at its best rank.
+    #[test]
+    fn fused_score_sums_reciprocal_rank_over_each_lanes_best_rank() {
+        let query =
+            EvidenceCandidate::from_association("ctx", association_out("a", "l", "b", 1.0), 1);
+        let mut activation_assoc = association_out("a", "l", "b", 1.0);
+        activation_assoc.attributions = Vec::new();
+        let activation = EvidenceCandidate::from_activation(
+            "ctx",
+            ActivationOut {
+                strength: 0.5,
+                path: vec!["a".to_string(), "b".to_string()],
+                association: activation_assoc,
+            },
+            2,
+        );
+        let (fused, _) = fuse(vec![query, activation]);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].fused_score, 1.0 / 61.0 + 1.0 / 62.0);
+    }
+
     // --- Citations ---
 
     #[test]
