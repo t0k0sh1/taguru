@@ -216,6 +216,36 @@ fn spawn_mutating_proxy(target_base: String, context: String) -> String {
     format!("http://{addr}")
 }
 
+/// [`spawn_recording_proxy`]'s sibling for the latency fields: holds
+/// every `/sources/search` request for `delay` before forwarding it, so
+/// the passage lane's recorded `latency_ms` has a known floor no real
+/// measurement can come in under.
+fn spawn_delaying_proxy(target_base: String, delay: std::time::Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let target_base = target_base.clone();
+            std::thread::spawn(move || {
+                let Some((method, path, body)) = read_proxied_request(&mut stream) else {
+                    return;
+                };
+                if path
+                    .split('?')
+                    .next()
+                    .unwrap_or(&path)
+                    .ends_with("/sources/search")
+                {
+                    std::thread::sleep(delay);
+                }
+                relay_and_respond(&mut stream, &target_base, &method, &path, &body);
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
 // ================================ Offline corpus (3.1/3.2) ================================
 //
 // Five sources, deliberately vocabulary-disjoint (Japanese BM25 terms
@@ -898,6 +928,59 @@ fn evaluate_fails_the_gate_when_a_write_lands_mid_run() {
             .unwrap()
             .contains("allow_unstable_corpus"),
         "{violation}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `latency.*` is measured wall time, not a placeholder: with every
+/// passage search held for 50ms by [`spawn_delaying_proxy`], each case's
+/// recorded `passage.latency_ms` is at least 50.
+#[test]
+fn evaluate_records_the_passage_lanes_real_wall_time() {
+    const DELAY_MS: u64 = 50;
+    let server = Server::start("evaluate-fixture-latency");
+    seed_offline_corpus(&server, "latency");
+    let proxy_base = spawn_delaying_proxy(
+        server.base.clone(),
+        std::time::Duration::from_millis(DELAY_MS),
+    );
+
+    let dir = eval_dir("latency");
+    let eval_path = write_eval_file(
+        &dir,
+        "{\"type\": \"eval\",\"name\":\"latency floor\"}\n\
+         {\"case_id\":\"latency-001\",\"query\":\"青嶺\",\
+         \"expected_sources\":[{\"source\":\"corpus/brewery.md\",\"relevance\":1}]}\n",
+    );
+    let out_path = dir.join("evaluation.json");
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "evaluate",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--context",
+            &server.cx("latency"),
+            "--url",
+            &proxy_base,
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let evaluation: Value =
+        serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+    let passage = &evaluation["cases"][0]["passage"];
+    assert_eq!(passage["outcome"], "searched", "{passage}");
+    let latency_ms = passage["latency_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no passage.latency_ms: {passage}"));
+    assert!(
+        latency_ms >= DELAY_MS,
+        "{latency_ms} < {DELAY_MS}: {passage}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

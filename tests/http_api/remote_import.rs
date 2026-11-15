@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 
+use serde_json::{Value, json};
+
 use crate::support::{Server, batch_dir, run_cli, run_import};
 
 /// Every file directly under `dir`, name → bytes — the same
@@ -1180,4 +1182,257 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
         )),
         "{stderr}"
     );
+}
+
+/// One batch unit with `pad` extra bytes of subject — for fixtures that
+/// need units of chosen relative sizes.
+fn padded_batch(id: &str, pad: usize) -> String {
+    format!(
+        "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"{id}\", \
+         \"create\": {{\"name\": \"sake\", \"description\": \"d\"}}}}\n\
+         {{\"subject\": \"s{id}{}\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n",
+        "x".repeat(pad)
+    )
+}
+
+/// After a 413 the budget halves to half the refused chunk, and a
+/// queued chunk still over that budget is split before it is sent —
+/// counted in the live chunk total. Units a, b (≈2×), c, d: the 413'd
+/// whole halves into [a b] and [c d]; [a b] is over the halved budget
+/// and splits proactively, so three chunks land.
+#[test]
+fn a_queued_chunk_over_the_halved_budget_is_split_before_sending() {
+    let batches = batch_dir("remote-import-proactive-halve");
+    let file = batches.join("seed.jsonl");
+    let unit = padded_batch("a.md", 0).len();
+    let content = [
+        padded_batch("a.md", 0),
+        padded_batch("b.md", unit),
+        padded_batch("c.md", 0),
+        padded_batch("d.md", 0),
+    ]
+    .concat();
+    std::fs::write(&file, &content).expect("fixture must be writable");
+    // Under the whole stream (5 units' worth), over the [a b] half (3).
+    let cap = (unit * 4).to_string();
+    let server = Server::start_with_env(
+        "remote-import-proactive-halve",
+        &[("TAGURU_MAX_BODY_BYTES", cap.as_str())],
+    );
+    let (code, stdout, stderr) = run_cli(
+        &["import", "--url", &server.base, file.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("chunk 1/3: 1 source(s)"), "{stdout}");
+    assert!(stdout.contains("chunk 2/3: 1 source(s)"), "{stdout}");
+    assert!(stdout.contains("chunk 3/3: 2 source(s)"), "{stdout}");
+    assert!(
+        stdout.contains("import: 4 source(s) applied across 1 context(s) in 3 chunk(s)"),
+        "{stdout}"
+    );
+    // A run with no schema or group records prints no line for either.
+    assert!(!stdout.contains("schema record(s)"), "{stdout}");
+    assert!(!stdout.contains("group record(s)"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+const SCHEMA_GROUP_STREAM: &str = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"a.md\", \
+     \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n\
+     {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
+     {\"type\": \"schema\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"mode\": \"warn\", \
+     \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
+     {\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-6b7572610001\", \"name\": \"kura\", \
+     \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}\n";
+
+/// The remote summary tallies schema and group records the server
+/// confirmed against the ones sent; `--json` carries them as arrays;
+/// a dry run counts them in its one summary line.
+#[test]
+fn a_remote_import_summarizes_its_schema_and_group_records() {
+    let batches = batch_dir("remote-import-schema-group-summary");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(&file, SCHEMA_GROUP_STREAM).expect("fixture must be writable");
+
+    let server = Server::start("remote-import-schema-group-dry");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(
+            "dry run: 1 source(s), 1 schema record(s) and 1 group record(s) valid, nothing applied"
+        ),
+        "{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_cli(
+        &["import", "--url", &server.base, file.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 schema record(s) installed"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 of 1 group record(s) restored"),
+        "{stdout}"
+    );
+
+    let server = Server::start("remote-import-schema-group-json");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(report["batches"][0]["source_id"], json!("a.md"));
+    assert_eq!(
+        report["schemas"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+    assert_eq!(
+        report["groups"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// A schema-less, group-less remote `--json` run omits both keys,
+/// matching the local document byte for byte.
+#[test]
+fn a_remote_json_without_schemas_or_groups_omits_both_keys() {
+    let batches = batch_dir("remote-import-json-omits");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(&file, padded_batch("a.md", 0)).expect("fixture must be writable");
+    let server = Server::start("remote-import-json-omits");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(report.get("schemas").is_none(), "{report}");
+    assert!(report.get("groups").is_none(), "{report}");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The client's pre-send budget is half the server's default body cap
+/// and inclusive: a unit of exactly that many bytes passes the check
+/// (and reaches for the network), one byte more is refused before any
+/// request is made.
+#[test]
+fn the_pre_send_budget_admits_a_unit_exactly_at_it_and_refuses_one_byte_more() {
+    const BUDGET: usize = 4 * 1024 * 1024;
+    let batches = batch_dir("remote-import-budget-edge");
+    let header = "{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \"id\": \"big.md\", \
+                  \"create\": {\"name\": \"sake\", \"description\": \"d\"}}\n";
+    let fact = "{\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}";
+    // No trailing newline: the unit is the whole file, byte for byte.
+    let sized = |size: usize| {
+        format!(
+            "{header}{fact}{}",
+            " ".repeat(size - header.len() - fact.len())
+        )
+    };
+
+    let exact = batches.join("exact.jsonl");
+    std::fs::write(&exact, sized(BUDGET)).unwrap();
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            "http://127.0.0.1:9",
+            exact.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(!stderr.contains("alone is"), "{stderr}");
+    assert!(stderr.contains("import → http://127.0.0.1:9"), "{stderr}");
+
+    let over = batches.join("over.jsonl");
+    std::fs::write(&over, sized(BUDGET + 1)).unwrap();
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            "http://127.0.0.1:9",
+            over.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("alone is 4194305 byte(s), over the 4194304-byte chunk budget"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("import →"),
+        "nothing may be sent: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// A file that exists but cannot be read refuses the whole remote run
+/// during validation, counted per file, before any request.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_refuses_the_remote_run_during_validation() {
+    use std::os::unix::fs::PermissionsExt;
+    let batches = batch_dir("remote-import-unreadable");
+    let good = batches.join("a.jsonl");
+    std::fs::write(&good, padded_batch("a.md", 0)).unwrap();
+    let locked = batches.join("b.jsonl");
+    std::fs::write(&locked, padded_batch("b.md", 0)).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&locked).is_ok() {
+        // Running as root: permissions cannot make a file unreadable.
+        let _ = std::fs::remove_dir_all(&batches);
+        return;
+    }
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            "http://127.0.0.1:9",
+            good.to_str().unwrap(),
+            locked.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("1 of 2 file(s) refused during validation; nothing was applied"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("import →"),
+        "nothing may be sent: {stderr}"
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&batches);
 }

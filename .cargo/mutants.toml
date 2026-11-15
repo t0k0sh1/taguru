@@ -184,4 +184,45 @@ exclude_re = [
     # clock, neither of which this suite does anywhere else. No
     # black-box test can deterministically hit that single instant.
     "src/hydrate\\.rs:165:17: replace < with <= in prepare",
+    # `evaluate::truncate_message`'s char-boundary back-off loop: `end`
+    # is a `usize` and `is_char_boundary(0)` is always true, so the loop
+    # stops at 0 whether its guard reads `end > 0` or `end >= 0` — no
+    # observable difference. The sibling `&&` -> `||` and `-=` -> `+=`
+    # mutants on the same loop are caught (truncate_message_* tests).
+    "replace > with >= in truncate_message",
+    # `import_batch`'s warn-issue cap: at `warn_issues.len() ==
+    # MAX_LISTED_ISSUES` (the only value where `<` and `<=` disagree) the
+    # `<=` mutant extends the list, and the very next
+    # `truncate(MAX_LISTED_ISSUES)` restores the identical list —
+    # `schema_issues_in_batch` is pure, so no output differs. The `+=`
+    # sibling on `warn_total` is caught
+    # (warn_violations_sum_across_every_batch_of_the_stream).
+    "replace < with <= in import_batch",
+    # `ingest::run_local`'s mid-run flush cadence: `ops_since_flush` only
+    # decides how often `flush_dirty()` runs inside the loop (every
+    # 100,000 ops); the run always calls `flush_dirty()` at its end, so
+    # stdout, stderr, the exit code, and the final on-disk state are the
+    # same whether the counter grows (`+=`), never grows (`*=` from 0),
+    # or the threshold check flips (`>=` -> `<`). Line-anchored: other
+    # `+=` mutants in `run_local` count reported totals and are caught.
+    "src/ingest/local\\.rs:257:33: replace \\+= with \\*= in run_local",
+    "src/ingest/local\\.rs:270:33: replace \\+= with \\*= in run_local",
+    "src/ingest/local\\.rs:285:28: replace >= with < in run_local",
+    # Same counter, the `-=` variant: it only differs (by underflowing)
+    # when a batch is refused after writing some ops, which needs an
+    # injected persistence fault — those hooks exist in-process only,
+    # and `run_local` reads its boot config from the process environment,
+    # so it is driven as a subprocess where no fault can be injected.
+    # Untestable here rather than equivalent; a real partial-write
+    # refusal would make the mutant panic.
+    "src/ingest/local\\.rs:270:33: replace \\+= with -= in run_local",
+    # `group_failures` is only ever read as `> 0`; in the refusal branch
+    # fewer records were restored than sent, so `len - restored` and
+    # `len + restored` are both positive — the same exit code and output.
+    "src/ingest/local\\.rs:371:47: replace - with \\+ in run_local",
+    # `ingest::run_remote`'s split_batches / parse_stream batch-count
+    # mismatch guard: both read the same validated stream and always
+    # agree, so the counter it bumps is unreachable.
+    "src/ingest/remote\\.rs:406:28: replace \\+= with \\*= in run_remote",
+    "src/ingest/remote\\.rs:406:28: replace \\+= with -= in run_remote",
 ]

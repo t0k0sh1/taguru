@@ -549,6 +549,49 @@ fn an_offline_run_records_no_embedding_provider_and_no_reranker() {
     );
 }
 
+/// #308: `POST /contexts/{name}/evidence` has no tags/since/until
+/// fields, so under `--assembly` a case declaring ANY ONE of them is
+/// named in `warnings` — and a case declaring none of them is not.
+#[test]
+fn assembly_warns_for_each_case_naming_tags_since_or_until_and_only_those() {
+    let server = Server::start("evaluate-assembly-filter-warnings");
+    seed_assembly_corpus(&server, "sake");
+    let dir = eval_dir("filter-warnings");
+    let lines = [
+        r#"{"type": "eval","name":"filters not applied under --assembly"}"#,
+        r#"{"case_id":"plain","query":"青嶺酒造","expected_sources":[]}"#,
+        r#"{"case_id":"tags-only","query":"青嶺酒造","expected_sources":[],"options":{"tags":["t"]}}"#,
+        r#"{"case_id":"since-only","query":"青嶺酒造","expected_sources":[],"options":{"since":1}}"#,
+        r#"{"case_id":"until-only","query":"青嶺酒造","expected_sources":[],"options":{"until":4102444800}}"#,
+    ];
+    let eval_path = write_eval_file(&dir, &(lines.join("\n") + "\n"));
+
+    let out_path = dir.join("assembly.json");
+    let (code, stderr, evaluation) =
+        run_evaluate(&server, &eval_path, "sake", &out_path, &["--assembly"]);
+    assert_eq!(code, 0, "{stderr}");
+    let warned: Vec<&str> = evaluation["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array: {evaluation}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|w| w.contains("options.tags/since/until are not applied under --assembly"))
+        .collect();
+    assert_eq!(warned.len(), 3, "{warned:?}");
+    for id in ["tags-only", "since-only", "until-only"] {
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.starts_with(&format!("case '{id}':"))),
+            "{id}: {warned:?}"
+        );
+    }
+    assert!(
+        !warned.iter().any(|w| w.starts_with("case 'plain':")),
+        "{warned:?}"
+    );
+}
+
 // ================================ compare ================================
 
 /// `taguru evaluate compare` still runs to completion (exit 0) on a

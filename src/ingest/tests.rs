@@ -1764,6 +1764,28 @@ fn chunk_halve_never_produces_an_empty_half_on_two_units() {
     assert_eq!(second.units[0].label, "small");
 }
 
+/// A unit that brings the pending chunk to exactly the budget still
+/// rides in it — the budget is inclusive.
+#[test]
+fn pack_chunks_keeps_a_unit_that_lands_exactly_on_the_budget() {
+    let queue = pack_chunks(vec![unit("a", 50), unit("b", 50), unit("c", 1)], 100);
+    let sizes: Vec<usize> = queue.iter().map(Chunk::size).collect();
+    assert_eq!(sizes, vec![100, 1], "{sizes:?}");
+}
+
+/// The split lands at the first unit whose running total reaches half
+/// the bytes — not later, even when the remaining units are small.
+#[test]
+fn chunk_halve_splits_where_the_running_total_first_reaches_half() {
+    let chunk = Chunk {
+        units: vec![unit("a", 30), unit("b", 30), unit("c", 30), unit("d", 10)],
+    };
+    let (first, second) = chunk.halve();
+    assert_eq!(first.size(), 60);
+    assert_eq!(second.size(), 40);
+    assert_eq!(second.units[0].label, "c");
+}
+
 #[test]
 fn chunk_body_guarantees_a_trailing_newline_per_unit() {
     let chunk = Chunk {

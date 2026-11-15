@@ -206,6 +206,61 @@ fn rerank_with_assembly_is_accepted() {
     assert_eq!(parsed.rerank.as_deref(), Some("some-model"));
 }
 
+#[test]
+fn help_exits_zero_from_parse_args_under_either_spelling() {
+    for flag in ["--help", "-h"] {
+        assert_eq!(args(&[flag]).unwrap_err(), 0, "{flag}");
+    }
+}
+
+#[test]
+fn every_duplicated_value_flag_is_refused_even_when_the_rest_is_valid() {
+    for (flag, value) in [
+        ("--context", "other"),
+        ("--url", "http://h:1"),
+        ("--config", "c.env"),
+        ("--out", "o.json"),
+        ("--thresholds", "t.json"),
+    ] {
+        assert_eq!(
+            args(&[
+                "--eval",
+                "a.jsonl",
+                "--context",
+                "sake",
+                flag,
+                value,
+                flag,
+                value
+            ])
+            .unwrap_err(),
+            2,
+            "{flag}"
+        );
+    }
+}
+
+#[test]
+fn max_bytes_or_max_tokens_alone_is_enough_to_populate_budget() {
+    let parsed = args(&["--eval", "a.jsonl", "--context", "sake", "--max-bytes", "7"]).unwrap();
+    let budget = parsed.budget.expect("--max-bytes alone must set budget");
+    assert_eq!(budget.max_bytes, Some(7));
+    assert_eq!(budget.max_items, None);
+
+    let parsed = args(&[
+        "--eval",
+        "a.jsonl",
+        "--context",
+        "sake",
+        "--max-tokens",
+        "9",
+    ])
+    .unwrap();
+    let budget = parsed.budget.expect("--max-tokens alone must set budget");
+    assert_eq!(budget.max_tokens, Some(9));
+    assert_eq!(budget.max_bytes, None);
+}
+
 // ================================ Dispatch ================================
 
 #[test]
@@ -256,6 +311,26 @@ fn truncate_message_cuts_long_multibyte_messages_without_panicking() {
     let truncated = truncate_message(&long);
     assert!(truncated.ends_with('…'), "{truncated}");
     assert!(truncated.len() < long.len());
+}
+
+#[test]
+fn truncate_message_keeps_exactly_the_cap_of_an_ascii_message() {
+    let long = "x".repeat(MAX_ERROR_BYTES + 50);
+    assert_eq!(
+        truncate_message(&long),
+        format!("{}…", "x".repeat(MAX_ERROR_BYTES))
+    );
+}
+
+#[test]
+fn truncate_message_backs_off_to_the_char_boundary_below_the_cap() {
+    // 'あ' is 3 bytes and the cap is not a multiple of 3: the cut must
+    // land on the last whole character AT OR BELOW the cap, never above.
+    let long = "あ".repeat(200);
+    assert_eq!(
+        truncate_message(&long),
+        format!("{}…", "あ".repeat(MAX_ERROR_BYTES / 3))
+    );
 }
 
 // ================================ Tier choice ================================
@@ -637,6 +712,70 @@ fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_aske
     let metrics = build_metrics(&[case], false);
     let rerank_ran = metrics.get("rerank.ran").expect("metric key exists");
     assert_eq!(rerank_ran.sample_size(), 0, "{rerank_ran:?}");
+}
+
+#[test]
+fn build_metrics_counts_passage_failures_and_structural_cases() {
+    let mut failed = searched_case(None, None, None);
+    failed.passage = PassageOutcome::Failed {
+        message: "boom".to_string(),
+        latency_ms: 1,
+    };
+    let mut structural = searched_case(None, None, None);
+    structural.structural = Some(StructuralBlock {
+        cues: Vec::new(),
+        associations: Vec::new(),
+    });
+    let plain = searched_case(None, None, None);
+
+    let metrics = build_metrics(&[failed, structural, plain], false);
+    let failure_rate = &metrics["passage.failure_rate"];
+    assert_eq!(failure_rate.numerator(), Some(1), "{failure_rate:?}");
+    assert_eq!(failure_rate.sample_size(), 3, "{failure_rate:?}");
+    let structural_rate = &metrics["structural.case_rate"];
+    assert_eq!(structural_rate.numerator(), Some(1), "{structural_rate:?}");
+    assert_eq!(structural_rate.sample_size(), 3, "{structural_rate:?}");
+}
+
+#[test]
+fn build_metrics_counts_section_checks_and_unclassified_unresolved_citations() {
+    let checks = vec![
+        citation_check(
+            "a.md",
+            0,
+            true,
+            resolved_outcome(SectionCheck::Matched { expected: None }, None),
+        ),
+        citation_check(
+            "a.md",
+            1,
+            true,
+            resolved_outcome(
+                SectionCheck::Mismatched {
+                    expected: Some("s".to_string()),
+                },
+                None,
+            ),
+        ),
+        // No code at all (transport failure) and a code this harness
+        // does not special-case: both land in `citations.other`.
+        citation_check("a.md", 2, true, unresolved_outcome(None)),
+        citation_check("a.md", 3, true, unresolved_outcome(Some("internal"))),
+    ];
+    let mut case = searched_case(None, None, None);
+    case.citations = Some(CitationsBlock {
+        recall: score_citation_recall(&checks),
+        validity: score_citation_validity(&checks),
+        checks,
+    });
+
+    let metrics = build_metrics(&[case], false);
+    let section = &metrics["citations.section_match"];
+    assert_eq!(section.numerator(), Some(1), "{section:?}");
+    assert_eq!(section.sample_size(), 2, "{section:?}");
+    let other = &metrics["citations.other"];
+    assert_eq!(other.numerator(), Some(2), "{other:?}");
+    assert_eq!(other.sample_size(), 4, "{other:?}");
 }
 
 // ========================= assembly stdout summary =========================
@@ -1653,6 +1792,52 @@ fn score_case_lane_cross_is_none_with_only_a_source_expectation() {
     assert!(scores.recall.is_some());
 }
 
+#[test]
+fn score_case_scores_labels_only_against_label_cues() {
+    let mut case = base_case("c1");
+    case.expected_labels = vec!["x".to_string()];
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: Vec::new(),
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: vec![cue_resolution("label", &["x"])],
+        associations: Vec::new(),
+    };
+    let scores = score_case(&case, &passage, Some(&structural), &[]);
+    let coverage = scores
+        .coverage
+        .expect("a labels-only expectation still yields a coverage block");
+    assert!(coverage.concepts.is_none());
+    assert!(coverage.associations.is_none());
+    let labels = coverage.labels.expect("expected_labels was declared");
+    assert_eq!(labels.matched, 1);
+}
+
+#[test]
+fn score_case_lane_cross_reports_neither_lane_when_nothing_matched() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![expected_source("a.md", &[], 1)];
+    case.expected_concepts = vec!["x".to_string()];
+    let passage = PassageOutcome::Searched {
+        plan: None,
+        hits: vec![hit("b.md", 0)],
+        latency_ms: 1,
+    };
+    let structural = StructuralBlock {
+        cues: vec![cue_resolution("concept", &["y"])],
+        associations: Vec::new(),
+    };
+    let scores = score_case(&case, &passage, Some(&structural), &[]);
+    assert_eq!(scores.recall.as_ref().map(|r| r.matched), Some(0));
+    let cross = scores
+        .lane_cross
+        .expect("both expectation kinds declared and the passage lane completed");
+    assert!(!cross.structural_hit, "zero matched concepts is no hit");
+    assert!(!cross.passage_hit, "zero matched sources is no hit");
+}
+
 // ========================= No fused cross-lane scale (#215's own requirement) =========================
 
 /// Words that would imply a case's/run's outcome folds graph, BM25, and
@@ -1941,4 +2126,84 @@ fn loaded_cases_carry_their_line() {
         .collect();
     assert_eq!(lines, vec![("a".to_string(), 2), ("b".to_string(), 4)]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ========================= list_all_sources: keyset walk =========================
+
+/// Answers one connection per response, in order, recording each
+/// request line — the same one-shot skeleton as `remote.rs`'s own
+/// `respond_in_order_capturing` (private to that module's tests).
+fn respond_in_order(
+    responses: Vec<Value>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests_clone = std::sync::Arc::clone(&requests);
+    std::thread::spawn(move || {
+        for body in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // One `read` may return part of the request line; keep
+            // reading until the headers end so the recorded line is whole.
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let start_line = request.lines().next().unwrap_or("").to_string();
+            requests_clone.lock().unwrap().push(start_line);
+            let body = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}"), requests)
+}
+
+fn sources_page(ids: &[&str]) -> Value {
+    let entries: Vec<Value> = ids.iter().map(|id| serde_json::json!({"id": id})).collect();
+    serde_json::json!({"result": {"entries": entries}})
+}
+
+#[test]
+fn list_all_sources_walks_every_advancing_page_until_an_empty_one() {
+    let (base, requests) = respond_in_order(vec![
+        sources_page(&["a.md", "b.md"]),
+        sources_page(&["c.md"]),
+        sources_page(&[]),
+    ]);
+    let names = list_all_sources(&Api::new(base), "ctx")
+        .expect("pages that advance past the cursor must walk to the end");
+    assert_eq!(
+        names.into_iter().collect::<Vec<_>>(),
+        ["a.md", "b.md", "c.md"]
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert!(requests[1].contains("after=b.md"), "{requests:?}");
+    assert!(requests[2].contains("after=c.md"), "{requests:?}");
+}
+
+#[test]
+fn list_all_sources_refuses_a_page_that_does_not_advance() {
+    for second in [&["b.md"][..], &["a.md", "z.md"][..]] {
+        let (base, _requests) =
+            respond_in_order(vec![sources_page(&["a.md", "b.md"]), sources_page(second)]);
+        let error = list_all_sources(&Api::new(base), "ctx")
+            .expect_err("a page that does not clear the cursor must not loop forever");
+        assert!(
+            error.contains("ctx: the server's sources page did not advance past 'b.md'"),
+            "{error}"
+        );
+    }
 }

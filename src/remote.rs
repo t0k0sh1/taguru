@@ -1279,9 +1279,17 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
+                // One `read` may return part of the request line; keep
+                // reading until the headers end so the recorded line is whole.
+                let mut request = Vec::new();
                 let mut buffer = [0u8; 2048];
-                let read = stream.read(&mut buffer).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buffer[..read]);
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
                 let start_line = request.lines().next().unwrap_or("").to_string();
                 requests_clone.lock().unwrap().push(start_line);
                 let body = body.to_string();

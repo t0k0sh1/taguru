@@ -3247,4 +3247,114 @@ mod tests {
             rendered.contains("taguru_passage_lane_contributions_total{lane=\"vector_only\"} 1")
         );
     }
+
+    /// The `served` verdict's summary comes from its own match arm —
+    /// the verdict string alone cannot tell it from the generic
+    /// "shares no term" fallback, so the rank/limit phrasing is what
+    /// pins the arm in place.
+    #[test]
+    fn served_summary_reports_the_rank_and_limit_not_the_no_term_overlap_text() {
+        let explanation = crate::registry::PassageSearchExplanation {
+            paragraph: 2,
+            paragraphs: 3,
+            paragraph_named: false,
+            query_terms: Vec::new(),
+            lexical: None,
+            paragraph_terms: None,
+            vector: crate::registry::VectorLaneReport::Off {
+                provider_configured: false,
+            },
+            fused: false,
+            ranked: 5,
+            rank: Some(1),
+            score: Some(0.9),
+            bm25_lane: Some((1, 0.9)),
+            vector_lane: None,
+            limit: 3,
+            served: true,
+            cutoff_score: None,
+            limit_to_reach: crate::registry::LimitToReach::At(1),
+        };
+        let result = SearchExplanation::from_explanation("doc-a", explanation);
+        assert_eq!(result.verdict, "served", "{}", result.summary);
+        assert_eq!(
+            result.summary, "served: paragraph 2 of 'doc-a' ranked 1 of 5 at limit 3",
+            "must use the served phrasing, not the no-term-overlap fallback"
+        );
+    }
+
+    /// A `store_passages` body for source `a.md` carrying `questions`
+    /// and `tags` lists of the given lengths (questions all on
+    /// paragraph 0, tags all distinct).
+    fn store_body(questions: usize, tags: usize) -> Value {
+        let questions: Vec<Value> = (0..questions)
+            .map(|index| serde_json::json!({"paragraph": 0, "question": format!("q{index}")}))
+            .collect();
+        let tags: Vec<String> = (0..tags).map(|index| format!("tag{index}")).collect();
+        serde_json::json!({
+            "passages": {"a.md": "本文"},
+            "questions": {"a.md": questions},
+            "tags": {"a.md": tags},
+        })
+    }
+
+    /// The per-paragraph question cap is inclusive: exactly
+    /// `MAX_QUESTIONS_PER_PARAGRAPH` on one paragraph stores, and the
+    /// one past it is refused at its own item path — one issue, not
+    /// one per question.
+    #[test]
+    fn questions_per_paragraph_accept_exactly_the_cap_and_refuse_one_past_it() {
+        let at_cap = interpret_store_passages(&store_body(MAX_QUESTIONS_PER_PARAGRAPH, 0))
+            .map(|request| request.questions["a.md"].len());
+        assert_eq!(at_cap.ok(), Some(MAX_QUESTIONS_PER_PARAGRAPH));
+
+        let Err(issues) = interpret_store_passages(&store_body(MAX_QUESTIONS_PER_PARAGRAPH + 1, 0))
+        else {
+            panic!("one question past the per-paragraph cap must be refused");
+        };
+        let paths: Vec<&str> = issues.iter().map(|issue| issue.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![format!("questions['a.md'][{MAX_QUESTIONS_PER_PARAGRAPH}].paragraph").as_str()]
+        );
+    }
+
+    /// The per-source tag cap is inclusive: exactly
+    /// `MAX_TAGS_PER_SOURCE` tags stores, one past it is refused.
+    #[test]
+    fn tags_per_source_accept_exactly_the_cap_and_refuse_one_past_it() {
+        let at_cap = interpret_store_passages(&store_body(0, MAX_TAGS_PER_SOURCE))
+            .map(|request| request.tags["a.md"].len());
+        assert_eq!(at_cap.ok(), Some(MAX_TAGS_PER_SOURCE));
+
+        let Err(issues) = interpret_store_passages(&store_body(0, MAX_TAGS_PER_SOURCE + 1)) else {
+            panic!("one tag past the per-source cap must be refused");
+        };
+        let paths: Vec<&str> = issues.iter().map(|issue| issue.path.as_str()).collect();
+        assert_eq!(paths, vec!["tags['a.md']"]);
+    }
+
+    /// A shape-refused store tells the caller both that nothing landed
+    /// and that correcting the body and resending is the way forward
+    /// (issue #182's structured refusal detail).
+    #[tokio::test]
+    async fn a_shape_refused_store_reports_nothing_written_and_retryable_after_correction() {
+        let (state, _dir) = scratch_state("store-refusal-detail");
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        let response = store_passages(
+            State(state),
+            ContextIdPath(id),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(store_body(0, MAX_TAGS_PER_SOURCE + 1)),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str(), "{body}");
+        assert_eq!(body["integrity"], "nothing_written", "{body}");
+        assert_eq!(body["retryable_after_correction"], true, "{body}");
+    }
 }

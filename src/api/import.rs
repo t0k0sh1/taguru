@@ -1625,4 +1625,65 @@ mod tests {
             .is_none()
         );
     }
+
+    /// `warn` across a multi-batch stream: the envelope's
+    /// `schema_violations` is the SUM of every batch's own count, not
+    /// just the last batch's (or none at all) — the stream accumulates
+    /// it one applied batch at a time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warn_violations_sum_across_every_batch_of_the_stream() {
+        let state = scratch_state("warn-total-sum");
+        let context_id = state.create("sake", ContextMeta::default()).unwrap();
+        // Installed up front: a stream's own schema record lands only
+        // after every batch, so it would judge none of them.
+        let document: crate::schema::SchemaDocument = serde_json::from_value(serde_json::json!({
+            "type": "schema",
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
+        }))
+        .unwrap();
+        state
+            .put_schema(&context_id, crate::schema::install(document).unwrap())
+            .unwrap()
+            .unwrap();
+        let violations = |source: &str, subjects: &[&str]| {
+            let mut batch = format!(
+                "{{\"type\": \"source\", \"context_id\": \"{context_id}\", \"id\": \"{source}\"}}\n"
+            );
+            for subject in subjects {
+                batch.push_str(&format!(
+                    "{{\"subject\": \"{subject}\", \"label\": \"schema:type\", \"object\": \
+                     \"Person\", \"weight\": 1.0}}\n\
+                     {{\"subject\": \"{subject}\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \
+                     \"weight\": 1.0}}\n"
+                ));
+            }
+            batch
+        };
+        let body = format!(
+            "{}{}",
+            violations("a.md", &["田中", "佐藤"]),
+            violations("b.md", &["鈴木", "高橋", "伊藤"]),
+        );
+
+        let response = call_import(&state, &body).await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok", "{body}");
+        assert_eq!(
+            body["result"]["batches"][0]["schema_violations"], 2,
+            "{body}"
+        );
+        assert_eq!(
+            body["result"]["batches"][1]["schema_violations"], 3,
+            "{body}"
+        );
+        assert_eq!(body["schema_violations"], 5, "{body}");
+        assert_eq!(body["issues"].as_array().unwrap().len(), 5, "{body}");
+    }
 }
