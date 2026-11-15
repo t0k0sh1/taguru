@@ -288,7 +288,7 @@ pub async fn promote_sources(
             // Promotion lands in an established context, never mints
             // one — see [`crate::ingest::Batch::strip_create`].
             batch.strip_create();
-            if deadline.expired() {
+            if deadline.expired() || injected_promote_loop_expiry() {
                 return Err(Box::new(budget_refusal(
                     index,
                     total,
@@ -565,9 +565,43 @@ fn quota_refusal(
     )
 }
 
+// Test-only countdown that makes the apply loop's deadline check report
+// expired after `remaining` batches have landed — `import.rs`'s
+// `expire_schema_loop_after` for this loop. A real budget can only be
+// raced against wall-clock time, which faster CI hardware outruns.
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_PROMOTE_LOOP_AFTER: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn expire_promote_loop_after(remaining: u32) {
+    EXPIRE_PROMOTE_LOOP_AFTER.with(|cell| cell.set(Some(remaining)));
+}
+
+#[cfg(test)]
+fn injected_promote_loop_expiry() -> bool {
+    EXPIRE_PROMOTE_LOOP_AFTER.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            true
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors api.rs's injected_deadline_race
+fn injected_promote_loop_expiry() -> bool {
+    false
+}
+
 /// The refusal a budget spent partway through the apply loop answers —
 /// `/import`'s own resumable-prefix contract, promote's wording.
-#[mutants::skip] // reachable only when the budget dies mid-loop; timing cannot be pinned deterministically in tests
 fn budget_refusal(
     index: usize,
     total: usize,
@@ -600,5 +634,89 @@ fn audit_skip_reason(failure: AccessError) -> &'static str {
         AccessError::DeadlineExceeded => "deadline_exceeded",
         AccessError::NotFound => "no_context",
         _ => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ContextMeta;
+
+    fn scratch_state(tag: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-promote-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        AppState::boot(dir, usize::MAX, None).unwrap()
+    }
+
+    /// `budget_refusal`: the apply loop's per-batch deadline check
+    /// trips after the first batch has landed — a resumable-prefix 408
+    /// that names how many batches are durable, and the batches after
+    /// the cut never land.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_budget_spent_mid_loop_refuses_with_the_landed_prefix() {
+        let state = scratch_state("budget-refusal");
+        state.create("scratch", ContextMeta::default()).unwrap();
+        state.create("perm", ContextMeta::default()).unwrap();
+        let scratch = state.id_of("scratch");
+        let perm = state.id_of("perm");
+        let stream: String = (0..3)
+            .map(|i| {
+                format!(
+                    "{{\"type\": \"source\", \"context_id\": \"{scratch}\", \"id\": \"s{i}\"}}\n\
+                     {{\"passage\": \"段落 {i}\"}}\n"
+                )
+            })
+            .collect();
+        let seeded = super::super::import::import_batch(
+            State(state.clone()),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppQuery(super::super::import::ImportQuery::default()),
+            super::super::AppBytes(axum::body::Bytes::from(stream)),
+        )
+        .await;
+        assert_eq!(seeded.status(), 200);
+
+        expire_promote_loop_after(1);
+        let response = promote_sources(
+            State(state.clone()),
+            ContextIdPath(scratch),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            axum::Extension(HeavyOpsLimiter::new(1)),
+            AppQuery(PromoteQuery::default()),
+            AppJson(PromoteRequest {
+                into: perm.clone(),
+                source_ids: vec!["s0".into(), "s1".into(), "s2".into()],
+                audit: Some(false),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), 408);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("budget partway through the promotion"),
+            "{body}"
+        );
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 1, "{body}");
+
+        // The claim checked against what actually landed: the first
+        // source moved, the ones after the cut did not.
+        let wanted = vec!["s0".to_string(), "s1".to_string(), "s2".to_string()];
+        let (passages, missing) = state.lookup_passages(&perm, &wanted).unwrap().unwrap();
+        assert!(passages.contains_key("s0"), "{passages:?}");
+        assert_eq!(missing, ["s1", "s2"], "{passages:?}");
     }
 }

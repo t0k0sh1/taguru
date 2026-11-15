@@ -877,7 +877,7 @@ fn search_case_model(
 }
 
 /// Prefers the real `{plan, hits}` shape; falls back to pulling
-/// `source`/`paragraph`/`score`/`text` out of either a bare hits array
+/// `source_id`/`paragraph`/`score`/`text` out of either a bare hits array
 /// (the pre-#151 wire shape `PassagePage`'s own doc comment
 /// describes) or an object whose `hits` array doesn't fit
 /// `PassageHit`'s current (lane-carrying) shape — an older or
