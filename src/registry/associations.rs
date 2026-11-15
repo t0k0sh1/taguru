@@ -192,7 +192,7 @@ impl AppState {
                             // double up.
                             if touched == 0 {
                                 entry.changes.lock().push(ChangeKind::SourceRetracted {
-                                    source: source.to_string(),
+                                    source_id: source.to_string(),
                                 });
                             }
                         }

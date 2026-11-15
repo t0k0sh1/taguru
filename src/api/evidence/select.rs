@@ -39,7 +39,7 @@ use crate::api::{AssociationOut, MAX_LISTED_ISSUES};
 /// package's top-level `citations` ([`CitationEntry`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CitationRef {
-    pub(crate) source: String,
+    pub(crate) source_id: String,
     pub(crate) paragraph: u32,
 }
 
@@ -51,7 +51,7 @@ pub(crate) struct CitationRef {
 /// truncated.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Corroboration {
-    pub(crate) sources: Vec<String>,
+    pub(crate) source_ids: Vec<String>,
     pub(crate) attributions: Vec<CitationRef>,
 }
 
@@ -378,7 +378,7 @@ pub(crate) fn select_with_reorder(
 
         totals = candidate_totals;
         for entry in scratch.into_entries() {
-            citations.insert(entry.source, entry.paragraph, entry.citation);
+            citations.insert(entry.source_id, entry.paragraph, entry.citation);
         }
         for &i in idxs {
             let prepared_item = prepared[i]
@@ -389,8 +389,9 @@ pub(crate) fn select_with_reorder(
     }
 
     let mut citations_out = citations.into_entries();
-    citations_out
-        .sort_by(|a, b| (a.source.as_str(), a.paragraph).cmp(&(b.source.as_str(), b.paragraph)));
+    citations_out.sort_by(|a, b| {
+        (a.source_id.as_str(), a.paragraph).cmp(&(b.source_id.as_str(), b.paragraph))
+    });
 
     let omitted_total = omitted.len();
     omitted.truncate(MAX_LISTED_ISSUES);
@@ -651,7 +652,7 @@ fn diversity_reorder(
 /// [`CitationContribution`] already owns a moment later.
 #[derive(Serialize)]
 struct CitationEntryRef<'a> {
-    source: &'a str,
+    source_id: &'a str,
     paragraph: u32,
     citation: &'a Citation,
 }
@@ -712,7 +713,7 @@ fn prepare_item(
     let citation_refs: Vec<CitationRef> = resolved
         .iter()
         .map(|(source, paragraph, _)| CitationRef {
-            source: source.clone(),
+            source_id: source.clone(),
             paragraph: *paragraph,
         })
         .collect();
@@ -730,11 +731,11 @@ fn prepare_item(
     // more independent sources, violating ADR 0006 §9 I4 ("corroboration
     // is never silently collapsed"). `attributions` still only ever
     // lists what actually resolved to citation text — a source with no
-    // resolvable locator is named in `sources` but contributes no
+    // resolvable locator is named in `source_ids` but contributes no
     // `attributions` entry.
     let corroboration = if kind == KIND_ASSOCIATION && !corroborating_sources.is_empty() {
         Some(Corroboration {
-            sources: corroborating_sources.into_iter().collect(),
+            source_ids: corroborating_sources.into_iter().collect(),
             attributions: citation_refs.clone(),
         })
     } else {
@@ -774,7 +775,7 @@ fn prepare_item(
             // `citation` below are moved into `CitationContribution`
             // once, not cloned.
             let probe = CitationEntryRef {
-                source: source.as_str(),
+                source_id: source.as_str(),
                 paragraph,
                 citation: &citation,
             };
@@ -1319,13 +1320,13 @@ mod tests {
             result
                 .citations
                 .iter()
-                .any(|c| c.source == refs[0].source && c.paragraph == refs[0].paragraph)
+                .any(|c| c.source_id == refs[0].source_id && c.paragraph == refs[0].paragraph)
         );
         for entry in &result.citations {
             assert!(result.items.iter().any(|item| {
                 item.citation_refs
                     .iter()
-                    .any(|r| r.source == entry.source && r.paragraph == entry.paragraph)
+                    .any(|r| r.source_id == entry.source_id && r.paragraph == entry.paragraph)
             }));
         }
     }
@@ -1424,7 +1425,7 @@ mod tests {
             .as_ref()
             .expect("association with origins has corroboration");
         assert_eq!(
-            corroboration.sources,
+            corroboration.source_ids,
             vec!["a.txt".to_string(), "b.txt".to_string()]
         );
         assert_eq!(corroboration.attributions.len(), 2);
@@ -1435,7 +1436,7 @@ mod tests {
         // An attribution naming a source but no paragraph never enters
         // `origins`/`citation_refs` (`origins_of`'s own filter, ADR
         // 0006 §6) — but it still corroborates the fact and must still
-        // be named in `corroboration.sources`. Regression for gating
+        // be named in `corroboration.source_ids`. Regression for gating
         // `corroboration` on `citation_refs.is_empty()`, which dropped
         // this source (and every sibling attribution's source) entirely
         // whenever none of an association's attributions carried a
@@ -1456,7 +1457,7 @@ mod tests {
             .corroboration
             .as_ref()
             .expect("a paragraph-less attribution still corroborates");
-        assert_eq!(corroboration.sources, vec!["a.txt".to_string()]);
+        assert_eq!(corroboration.source_ids, vec!["a.txt".to_string()]);
         assert!(
             corroboration.attributions.is_empty(),
             "no paragraph locator to name — attributions stays empty, not the whole field"
@@ -1478,7 +1479,7 @@ mod tests {
             .corroboration
             .as_ref()
             .expect("an unresolvable citation still corroborates");
-        assert_eq!(corroboration.sources, vec!["a.txt".to_string()]);
+        assert_eq!(corroboration.source_ids, vec!["a.txt".to_string()]);
         assert!(corroboration.attributions.is_empty());
     }
 

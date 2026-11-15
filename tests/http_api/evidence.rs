@@ -65,7 +65,7 @@ fn assembles_a_mixed_lane_provenance_complete_package() {
             assert!(
                 citations
                     .iter()
-                    .any(|entry| entry["source"] == reference["source"]
+                    .any(|entry| entry["source_id"] == reference["source_id"]
                         && entry["paragraph"] == reference["paragraph"]),
                 "orphan citation_ref {reference} in {package}"
             );
@@ -77,7 +77,8 @@ fn assembles_a_mixed_lane_provenance_complete_package() {
                 .as_array()
                 .unwrap_or(&Vec::new())
                 .iter()
-                .any(|r| r["source"] == entry["source"] && r["paragraph"] == entry["paragraph"])),
+                .any(|r| r["source_id"] == entry["source_id"]
+                    && r["paragraph"] == entry["paragraph"])),
             "unreferenced citation entry {entry} in {package}"
         );
     }
@@ -438,7 +439,7 @@ fn an_attribution_to_a_never_stored_source_is_dropped_not_orphaned() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|c| c["source"] == json!("ghost.md")),
+            .any(|c| c["source_id"] == json!("ghost.md")),
         "ghost.md must never appear in the package's citations: {package}"
     );
 }

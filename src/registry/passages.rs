@@ -115,7 +115,7 @@ impl AppState {
                     // batches.
                     entry.changes.lock().extend(sources.iter().map(|source| {
                         crate::registry::ChangeKind::SourceStored {
-                            source: source.clone(),
+                            source_id: source.clone(),
                         }
                     }));
                 }

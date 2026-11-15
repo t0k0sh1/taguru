@@ -300,7 +300,7 @@ impl EvidenceCandidate {
 
     /// The distinct sources this candidate's evidence is attributed to
     /// — `origins`'s other public projection, and the basis for a
-    /// future `corroboration.sources` wire field (#305). Reads
+    /// `corroboration.source_ids` wire field (#305). Reads
     /// straight off the embedded `AssociationOut::attributions` rather
     /// than `origins` itself, so a source whose attribution carries no
     /// `paragraph` (and therefore cannot enter `origins`, a
@@ -467,7 +467,7 @@ pub(crate) struct FusedCandidate {
 /// once, never duplicated per referencing item.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CitationEntry {
-    pub(crate) source: String,
+    pub(crate) source_id: String,
     pub(crate) paragraph: u32,
     pub(crate) citation: Citation,
 }
@@ -507,7 +507,7 @@ impl CitationCollector {
             return false;
         }
         self.entries.push(CitationEntry {
-            source,
+            source_id: source,
             paragraph,
             citation,
         });

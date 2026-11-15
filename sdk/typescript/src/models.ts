@@ -374,7 +374,7 @@ export interface PathsPage {
  * One recorded content change. `type` — what the event is — decides
  * which optional fields ride along: `associations_added`/`aliases_added`/
  * `aliases_removed` carry `count`; `source_stored`/`source_retracted`
- * carry `source`; `association_retracted` carries `subject`/`label`/
+ * carry `source_id`; `association_retracted` carries `subject`/`label`/
  * `object`; `schema_updated` carries `mode`. Unknown future types decode
  * too — treat them as "something changed".
  */
@@ -385,7 +385,7 @@ export interface ChangeEvent {
   subject?: string;
   label?: string;
   object?: string;
-  source?: string;
+  source_id?: string;
   mode?: string;
 }
 
@@ -1164,12 +1164,12 @@ export interface LaneRank {
 }
 
 /**
- * A `(source, paragraph)` locator with no citation text attached — the text
+ * A `(source_id, paragraph)` locator with no citation text attached — the text
  * itself lives exactly once, keyed the same way, in the package's top-level
  * `citations`.
  */
 export interface CitationRef {
-  source: string;
+  source_id: string;
   paragraph: number;
 }
 
@@ -1179,7 +1179,7 @@ export interface CitationRef {
  * only when it has at least one citation.
  */
 export interface Corroboration {
-  sources: string[];
+  source_ids: string[];
   attributions: CitationRef[];
 }
 
@@ -1210,11 +1210,11 @@ export interface EvidenceItem {
 }
 
 /**
- * One resolved citation, keyed by `(source, paragraph)`, shared by every
+ * One resolved citation, keyed by `(source_id, paragraph)`, shared by every
  * `EvidenceItem` whose `citation_refs` names it.
  */
 export interface CitationEntry {
-  source: string;
+  source_id: string;
   paragraph: number;
   citation: Citation;
 }

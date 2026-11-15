@@ -142,9 +142,9 @@
     {"candidate_id": "association\u0000青嶺酒造\u0000杜氏\u0000高瀬",
      "kind": "association", "fused_rank": 1,
      "lane_ranks": [{"lane": "graph_activate", "rank": 1}],
-     "citation_refs": [{"source": "corpus/kura.md", "paragraph": 0}],
-     "corroboration": {"sources": ["corpus/kura.md"],
-                        "attributions": [{"source": "corpus/kura.md", "paragraph": 0}]},
+     "citation_refs": [{"source_id": "corpus/kura.md", "paragraph": 0}],
+     "corroboration": {"source_ids": ["corpus/kura.md"],
+                        "attributions": [{"source_id": "corpus/kura.md", "paragraph": 0}]},
      "bytes": 210, "estimated_tokens": 54,
      "association": { "...": "the existing AssociationOut shape, embedded verbatim" }},
     {"candidate_id": "passage\u0000sake\u0000corpus/kura.md\u00000",
@@ -153,7 +153,7 @@
      "citation_refs": [], "bytes": 340, "estimated_tokens": 96,
      "passage": { "...": "the existing PassageHit shape, embedded verbatim" }}
   ],
-  "citations": [{"source": "corpus/kura.md", "paragraph": 0,
+  "citations": [{"source_id": "corpus/kura.md", "paragraph": 0,
                  "citation": {"text": "...", "source_id": "corpus/kura.md", "section": null,
                               "locator": null}}],
   "budget": {"items_used": 2, "bytes_used": 612, "tokens_used": 158,
@@ -256,7 +256,7 @@
     <ul>
       <li><b>Exact-key dedup.</b> Association candidates dedup on <code>(subject, label, object)</code> after alias resolution; passage/community candidates dedup on <code>(context, source, paragraph)</code>.</li>
       <li><b>Near-duplicate suppression.</b> A fixed character-bigram Dice-coefficient threshold over passage text, staged after ranking so "keep the higher-ranked candidate" is well-defined; no raw coefficient ever reaches the wire.</li>
-      <li><b>Corroboration.</b> A fact several sources assert keeps every source named in <code>corroboration.sources</code> — never collapsed to a count, and never counted as independent corroboration more than once per distinct source.</li>
+      <li><b>Corroboration.</b> A fact several sources assert keeps every source named in <code>corroboration.source_ids</code> — never collapsed to a count, and never counted as independent corroboration more than once per distinct source.</li>
       <li><b>Contradiction.</b> Candidates sharing <code>(subject, label)</code> but disagreeing on <code>object</code>, or opposite-signed same-triple candidates, form one contradiction group — admitted or omitted <b>as one atomic unit</b>, never split, with <code>contradicts</code> naming every disagreeing <code>candidate_id</code>. This grouping is purely structural: an ordinary <b>multi-valued relation</b> (several genuinely true <code>object</code>s under one <code>(subject, label)</code>, e.g. several rice varieties under one brewery's "uses rice" fact) groups the same way a real contradiction does, since both share the same wire shape. A relation with many values is therefore admitted or omitted together, and a small budget can drop the whole group at once rather than partially.</li>
       <li><b>Diversity.</b> Tier-based round-robin admission (<code>plan.selection.diversity_tier_width</code>) — within a tier, a candidate whose primary source hasn't appeared yet is preferred over a repeat source. This reorders admission <i>inside</i> a tier only; it never changes relevance rank.</li>
     </ul>
