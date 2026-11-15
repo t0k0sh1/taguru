@@ -24,7 +24,7 @@ const MIXED_LANES_RESULT: EvidencePackage = {
         text: "青嶺酒造は雲居県霧沢町の蔵元である。",
       },
       paragraph: 0,
-      source: "docs/kura.md",
+      source_id: "docs/kura.md",
     },
   ],
   items: [
@@ -48,10 +48,10 @@ const MIXED_LANES_RESULT: EvidencePackage = {
       },
       bytes: 512,
       candidate_id: "association-1",
-      citation_refs: [{ paragraph: 0, source: "docs/kura.md" }],
+      citation_refs: [{ paragraph: 0, source_id: "docs/kura.md" }],
       corroboration: {
-        attributions: [{ paragraph: 0, source: "docs/kura.md" }],
-        sources: ["docs/kura.md"],
+        attributions: [{ paragraph: 0, source_id: "docs/kura.md" }],
+        source_ids: ["docs/kura.md"],
       },
       estimated_tokens: 132,
       fused_rank: 1,
@@ -112,7 +112,7 @@ describe("assembleEvidence", () => {
     expect(JSON.parse(calls[0]!.body ?? "{}")).toEqual({ origins: ["青嶺酒造"] });
     expect(pkg.items).toHaveLength(2);
     expect(pkg.items[0]!.kind).toBe("association");
-    expect(pkg.items[0]!.corroboration?.sources).toEqual(["docs/kura.md"]);
+    expect(pkg.items[0]!.corroboration?.source_ids).toEqual(["docs/kura.md"]);
     expect(pkg.items[1]!.kind).toBe("passage");
     expect(pkg.budget.limits.max_items).toBe(40);
     expect(pkg.plan.lanes.communities.ran).toBe(false);

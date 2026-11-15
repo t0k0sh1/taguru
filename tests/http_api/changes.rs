@@ -95,9 +95,9 @@ fn every_write_entrance_feeds_the_expected_event() {
     );
     let events = page["events"].as_array().unwrap();
     assert_eq!(events[0]["count"], json!(2), "two lines, one event");
-    assert_eq!(events[2]["source"], json!("doc.md"));
+    assert_eq!(events[2]["source_id"], json!("doc.md"));
     assert_eq!(events[3]["subject"], json!("青嶺酒造"));
-    assert_eq!(events[4]["source"], json!("doc.md"));
+    assert_eq!(events[4]["source_id"], json!("doc.md"));
     assert_eq!(events[5]["mode"], json!("warn"));
     assert_eq!(page["more"], json!(false));
 

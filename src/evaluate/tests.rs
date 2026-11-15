@@ -561,7 +561,7 @@ fn evidence_locator_never_carries_the_passage_body_text() {
             rank: 1,
         }],
         citation_refs: vec![CitationRef {
-            source: "corpus/brewery.md".to_string(),
+            source_id: "corpus/brewery.md".to_string(),
             paragraph: 0,
         }],
         corroboration: None,

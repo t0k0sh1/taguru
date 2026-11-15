@@ -10,14 +10,14 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 1440,
+        "bytes_used": 1464,
         "items_used": 2,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 373
+        "tokens_used": 379
       },
       "citations": [
         {
@@ -31,7 +31,7 @@
             "text": "猫は哺乳類である。"
           },
           "paragraph": 0,
-          "source": "s1.md"
+          "source_id": "s1.md"
         },
         {
           "citation": {
@@ -41,7 +41,7 @@
             "text": "猫は爬虫類だと主張する文献もある。"
           },
           "paragraph": 0,
-          "source": "s2.md"
+          "source_id": "s2.md"
         }
       ],
       "items": [
@@ -66,12 +66,12 @@
             "subject": "猫",
             "weight": 1.0
           },
-          "bytes": 573,
+          "bytes": 582,
           "candidate_id": "association\u0000猫\u0000is_a\u0000哺乳類",
           "citation_refs": [
             {
               "paragraph": 0,
-              "source": "s1.md"
+              "source_id": "s1.md"
             }
           ],
           "contradicts": [
@@ -81,14 +81,14 @@
             "attributions": [
               {
                 "paragraph": 0,
-                "source": "s1.md"
+                "source_id": "s1.md"
               }
             ],
-            "sources": [
+            "source_ids": [
               "s1.md"
             ]
           },
-          "estimated_tokens": 147,
+          "estimated_tokens": 149,
           "fused_rank": 1,
           "kind": "association",
           "lane_ranks": [
@@ -116,12 +116,12 @@
             "subject": "猫",
             "weight": 1.0
           },
-          "bytes": 550,
+          "bytes": 559,
           "candidate_id": "association\u0000猫\u0000is_a\u0000爬虫類",
           "citation_refs": [
             {
               "paragraph": 0,
-              "source": "s2.md"
+              "source_id": "s2.md"
             }
           ],
           "contradicts": [
@@ -131,14 +131,14 @@
             "attributions": [
               {
                 "paragraph": 0,
-                "source": "s2.md"
+                "source_id": "s2.md"
               }
             ],
-            "sources": [
+            "source_ids": [
               "s2.md"
             ]
           },
-          "estimated_tokens": 141,
+          "estimated_tokens": 143,
           "fused_rank": 2,
           "kind": "association",
           "lane_ranks": [

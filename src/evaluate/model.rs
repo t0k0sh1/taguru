@@ -434,7 +434,7 @@ pub(crate) fn hits_from_evidence_items(items: &[EvidenceItem], limit: usize) -> 
             let attributed = item
                 .citation_refs
                 .iter()
-                .map(|reference| (reference.source.clone(), reference.paragraph));
+                .map(|reference| (reference.source_id.clone(), reference.paragraph));
             own.chain(attributed)
         })
         .take(limit)

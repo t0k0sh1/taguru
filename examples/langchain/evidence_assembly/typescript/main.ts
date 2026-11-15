@@ -107,7 +107,7 @@ function describeItem(item: EvidenceItem): string {
   }
   let line = `  [${item.kind.padStart(11)} rank=${item.fused_rank}] (${where}) ${snippet}`;
   if (item.corroboration) {
-    line += `  corroborated by: ${JSON.stringify([...item.corroboration.sources].sort())}`;
+    line += `  corroborated by: ${JSON.stringify([...item.corroboration.source_ids].sort())}`;
   }
   if (item.contradicts && item.contradicts.length > 0) {
     line += `  contradicts: ${JSON.stringify(item.contradicts)}`;

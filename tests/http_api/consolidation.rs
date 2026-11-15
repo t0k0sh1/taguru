@@ -108,8 +108,8 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
     assert_eq!(objects[1]["latest"], json!(2000));
     let contested = &contradiction["candidates"][1];
     assert_eq!(contested["kind"], json!("contested"));
-    assert_eq!(contested["supporting_sources"], json!(["宣伝"]));
-    assert_eq!(contested["disputing_sources"], json!(["doc-2024"]));
+    assert_eq!(contested["supporting_source_ids"], json!(["宣伝"]));
+    assert_eq!(contested["disputing_source_ids"], json!(["doc-2024"]));
 
     // Staleness: 蔵A's 銘柄 fact (latest 1000) trails its own
     // neighborhood (2000); the undatable edge is counted, not guessed.

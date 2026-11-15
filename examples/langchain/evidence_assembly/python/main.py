@@ -120,7 +120,7 @@ def describe_item(item) -> str:
         where, snippet = "?", "?"
     line = f"  [{item.kind:>11} rank={item.fused_rank}] ({where}) {snippet}"
     if item.corroboration is not None:
-        line += f"  corroborated by: {sorted(item.corroboration.sources)}"
+        line += f"  corroborated by: {sorted(item.corroboration.source_ids)}"
     if item.contradicts:
         line += f"  contradicts: {item.contradicts}"
     return line

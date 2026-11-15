@@ -28,7 +28,7 @@ MIXED_LANES_RESULT: dict[str, Any] = {
                 "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。",
             },
             "paragraph": 0,
-            "source": "docs/kura.md",
+            "source_id": "docs/kura.md",
         }
     ],
     "items": [
@@ -51,10 +51,10 @@ MIXED_LANES_RESULT: dict[str, Any] = {
             },
             "bytes": 512,
             "candidate_id": "association\u0000青嶺酒造\u0000杜氏\u0000高瀬",
-            "citation_refs": [{"paragraph": 0, "source": "docs/kura.md"}],
+            "citation_refs": [{"paragraph": 0, "source_id": "docs/kura.md"}],
             "corroboration": {
-                "attributions": [{"paragraph": 0, "source": "docs/kura.md"}],
-                "sources": ["docs/kura.md"],
+                "attributions": [{"paragraph": 0, "source_id": "docs/kura.md"}],
+                "source_ids": ["docs/kura.md"],
             },
             "estimated_tokens": 132,
             "fused_rank": 1,
@@ -111,7 +111,7 @@ def test_assemble_evidence_posts_to_the_evidence_route_with_a_bare_origins_call(
     assert package.items[0].kind == "association"
     assert package.items[0].association is not None
     assert package.items[0].corroboration is not None
-    assert package.items[0].corroboration.sources == ["docs/kura.md"]
+    assert package.items[0].corroboration.source_ids == ["docs/kura.md"]
     assert package.items[0].contradicts == []
     assert package.items[1].kind == "passage"
     assert package.items[1].passage is not None

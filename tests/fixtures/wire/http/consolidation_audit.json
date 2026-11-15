@@ -23,7 +23,7 @@
                 "count": 1,
                 "latest": 1000,
                 "object": "高瀬",
-                "sources": [
+                "source_ids": [
                   "doc-a"
                 ],
                 "weight": 1.0
@@ -32,7 +32,7 @@
                 "count": 1,
                 "latest": 2000,
                 "object": "青山",
-                "sources": [
+                "source_ids": [
                   "doc-b"
                 ],
                 "weight": 1.0
@@ -42,7 +42,7 @@
           },
           {
             "count": 2,
-            "disputing_sources": [
+            "disputing_source_ids": [
               "doc-b"
             ],
             "fingerprint": "a00ec2a4d393e2dd",
@@ -50,7 +50,7 @@
             "label": "行う",
             "object": "大量生産",
             "subject": "蔵",
-            "supporting_sources": [
+            "supporting_source_ids": [
               "doc-a"
             ],
             "weight": -0.5
@@ -94,7 +94,7 @@
             "latest": 1000,
             "neighborhood_latest": 2000,
             "object": "高瀬",
-            "sources": [
+            "source_ids": [
               "doc-a"
             ],
             "subject": "蔵"
@@ -106,7 +106,7 @@
             "latest": 1000,
             "neighborhood_latest": 2000,
             "object": "初霜",
-            "sources": [
+            "source_ids": [
               "doc-a"
             ],
             "subject": "蔵"

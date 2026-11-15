@@ -122,12 +122,12 @@ pub enum ChangeKind {
     },
     /// A source's passage landed (stored or replaced).
     SourceStored {
-        source: String,
+        source_id: String,
     },
     /// A source's contributions were withdrawn (graph side; its
     /// passage, when one existed, went with it).
     SourceRetracted {
-        source: String,
+        source_id: String,
     },
     /// A schema document was installed or replaced.
     SchemaUpdated {
@@ -269,7 +269,7 @@ pub fn events_of_ops(ops: &[WalOp]) -> Vec<ChangeKind> {
             WalOp::AliasConcept { .. } | WalOp::AliasLabel { .. } => aliases_added += 1,
             WalOp::UnaliasConcept { .. } | WalOp::UnaliasLabel { .. } => aliases_removed += 1,
             WalOp::RetractSource { source } => individual.push(ChangeKind::SourceRetracted {
-                source: source.clone(),
+                source_id: source.clone(),
             }),
             WalOp::RetractAssociation {
                 subject,
@@ -331,7 +331,7 @@ mod tests {
         let mut ring = ChangeRing::default();
         ring.push(added(1));
         ring.push(ChangeKind::SourceStored {
-            source: "a.md".into(),
+            source_id: "a.md".into(),
         });
         let ChangesOutcome::Page { events, next, more } = ring.read(None, 10) else {
             panic!();
@@ -448,7 +448,7 @@ mod tests {
                 ChangeKind::AssociationsAdded { count: 3 },
                 ChangeKind::AliasesAdded { count: 1 },
                 ChangeKind::SourceRetracted {
-                    source: "old.md".into()
+                    source_id: "old.md".into()
                 },
             ]
         );

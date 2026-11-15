@@ -180,8 +180,8 @@ pub enum ContradictionCandidate {
         object: String,
         weight: f64,
         count: u64,
-        supporting_sources: Vec<String>,
-        disputing_sources: Vec<String>,
+        supporting_source_ids: Vec<String>,
+        disputing_source_ids: Vec<String>,
         fingerprint: String,
     },
 }
@@ -195,7 +195,7 @@ pub struct ObjectOut {
     pub object: String,
     pub weight: f64,
     pub count: u64,
-    pub sources: Vec<String>,
+    pub source_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<u64>,
 }
@@ -220,7 +220,7 @@ pub struct StaleCandidate {
     /// The newest effective time across the subject's live edges.
     pub neighborhood_latest: u64,
     pub gap: u64,
-    pub sources: Vec<String>,
+    pub source_ids: Vec<String>,
     pub fingerprint: String,
 }
 
@@ -513,7 +513,7 @@ pub(super) fn contradiction_section(
                     object: row.object,
                     weight: row.weight,
                     count: row.count,
-                    sources: row.sources,
+                    source_ids: row.sources,
                 })
                 .collect(),
         });
@@ -529,8 +529,8 @@ pub(super) fn contradiction_section(
             object: conflict.object,
             weight: conflict.weight,
             count: conflict.count,
-            supporting_sources: conflict.supporting_sources,
-            disputing_sources: conflict.disputing_sources,
+            supporting_source_ids: conflict.supporting_sources,
+            disputing_source_ids: conflict.disputing_sources,
         });
     }
     Ok(ContradictionSection { total, candidates })
@@ -620,7 +620,7 @@ pub(super) fn staleness_section(
             latest,
             neighborhood_latest,
             gap,
-            sources: association
+            source_ids: association
                 .attributions
                 .iter()
                 .map(|attribution| attribution.source.clone())

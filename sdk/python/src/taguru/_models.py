@@ -369,7 +369,7 @@ class ChangeEvent:
     """One recorded content change. ``type`` — what the event is —
     decides which optional fields ride along: ``associations_added``/
     ``aliases_added``/``aliases_removed`` carry ``count``;
-    ``source_stored``/``source_retracted`` carry ``source``;
+    ``source_stored``/``source_retracted`` carry ``source_id``;
     ``association_retracted`` carries ``subject``/``label``/``object``;
     ``schema_updated`` carries ``mode``. Unknown future types decode
     too — treat them as "something changed"."""
@@ -380,7 +380,7 @@ class ChangeEvent:
     subject: str | None = None
     label: str | None = None
     object: str | None = None
-    source: str | None = None
+    source_id: str | None = None
     mode: str | None = None
 
 
@@ -1189,11 +1189,11 @@ class LaneRank:
 
 @dataclass(slots=True, frozen=True)
 class CitationRef:
-    """A ``(source, paragraph)`` locator with no citation text attached
+    """A ``(source_id, paragraph)`` locator with no citation text attached
     — the text itself lives exactly once, keyed the same way, in the
     package's top-level ``citations``."""
 
-    source: str
+    source_id: str
     paragraph: int
 
 
@@ -1203,7 +1203,7 @@ class Corroboration:
     item's underlying evidence traces back to. Present only for that
     item kind, and only when it has at least one citation."""
 
-    sources: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
     attributions: list[CitationRef] = field(default_factory=list)
 
 
@@ -1236,10 +1236,10 @@ class EvidenceItem:
 
 @dataclass(slots=True, frozen=True)
 class CitationEntry:
-    """One resolved citation, keyed by ``(source, paragraph)``, shared
+    """One resolved citation, keyed by ``(source_id, paragraph)``, shared
     by every :class:`EvidenceItem` whose ``citation_refs`` names it."""
 
-    source: str
+    source_id: str
     paragraph: int
     citation: Citation
 

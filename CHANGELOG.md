@@ -28,6 +28,24 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — the evidence package, consolidation audit and change
+  feed name sources by `source_id`** (#1041, ADR 0054; `http_contract` 2).
+  The last read-side columns of #1038's rename: the evidence package's
+  `citation_refs[]`, `corroboration.attributions[]` and `citations[]` say
+  `source_id`, and `corroboration.sources` is `corroboration.source_ids`;
+  `POST /contexts/{id}/consolidation/audit`'s `objects[].sources` and
+  staleness candidates' `sources` are `source_ids`, and a contested
+  candidate's `supporting_sources`/`disputing_sources` are
+  `supporting_source_ids`/`disputing_source_ids` — so are the judgment
+  payloads `taguru consolidation` stores in its derived context from this
+  build on; the change feed's `source_stored`/`source_retracted` events
+  carry `source_id`. The Python and TypeScript SDKs' `CitationRef`,
+  `CitationEntry`, `Corroboration` and `ChangeEvent` follow. A `taguru
+  evaluate` report's evidence items embed the wire `citation_refs`
+  verbatim, so those entries say `source_id` too; the report's own
+  locator fields keep `source`. Unchanged: counts (`stats.sources`) and
+  the data directory's internal keys.
+
 - **Breaking (wire) — fields that read a source say `source_id`** (#1040,
   ADR 0054; `http_contract` 2). The read-side twin of #1039 (below): every
   attribution (`recall`, `query`, `explore`, `activate`, `paths`,
@@ -50,7 +68,7 @@ Entries that change an on-disk format or a response shape say so.
   `taguru evaluate` reports and benchmark run logs — file formats on the
   shared format revision, left as they are — and the evidence package's own
   reference fields (`citation_refs`, `corroboration`, `citations[].source`),
-  consolidation and the change feed, which follow in #1041.
+  consolidation and the change feed, which follow in #1041 (above).
 
 - **Breaking (wire) — fields that write or list a source say `source_id`**
   (#1039, ADR 0054; `http_contract` 2). A source's id is still the string
