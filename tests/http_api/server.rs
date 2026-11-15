@@ -29,6 +29,13 @@ fn graph_writes_survive_a_hard_kill() {
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(recalled["matches"][0]["object"], json!("1907年"));
+    // The WAL replay must carry the source too, or retract and citation
+    // would silently stop reaching this fact.
+    assert_eq!(
+        recalled["matches"][0]["attributions"][0]["source"],
+        json!("第1段落"),
+        "{recalled}"
+    );
 }
 
 #[test]
@@ -130,4 +137,9 @@ fn data_survives_a_graceful_restart() {
         Some(json!({"cue": "青嶺酒造"})),
     );
     assert_eq!(recalled["matches"][0]["object"], json!("1907年"));
+    assert_eq!(
+        recalled["matches"][0]["attributions"][0]["source"],
+        json!("第1段落"),
+        "{recalled}"
+    );
 }

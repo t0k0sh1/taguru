@@ -32,9 +32,12 @@ A source has neither problem:
   takes the source in the request body.
 - It cannot be renamed. Nothing in the API changes a source's string.
 
-What a source's string does do is carry idempotency. Ingest replaces a
-document per source (retract, then apply), so re-ingesting a document
-under the same string replaces it instead of adding a second copy.
+What a source's string does do is carry idempotency. `POST /import` and
+`taguru import` replace a document per source (retract, then apply), and a
+live writer replaces one by retracting the source before re-asserting it,
+so re-ingesting a document under the same string replaces it instead of
+adding a second copy. (Re-posting facts to `/associations` without the
+retraction adds weight; the string is what the retraction aims at.)
 `taguru extract` uses the document's path, `taguru-code` the file path,
 LangChain loaders `metadata["source"]`, and an LLM writing through MCP
 names the document on every `add_associations` element.

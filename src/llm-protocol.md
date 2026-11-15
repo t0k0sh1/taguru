@@ -172,8 +172,11 @@ answers back into prose are your job.
      edge).
 2. `POST /contexts/{id}/associations` in batches — one segment per
    request, up to 10,000 associations, with a `source_id` on every element
-   (the stable string you choose for the document — re-ingesting under the
-   same `source_id` replaces it; a `source` key is refused, it is `source_id`).
+   (the stable string you choose for the document; a `source` key is
+   refused — the field is `source_id`). Posting the same facts again under
+   the same `source_id` ADDS weight, it does not replace them: to replace a
+   document, retract it first (step 7) or send it through `POST /import`,
+   which replaces per source.
    Split a larger segment across requests; for corpus-scale ingestion,
    use `POST /import` or `taguru import` instead.
    A single-association request still pays for a full durable write —

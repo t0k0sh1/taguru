@@ -207,7 +207,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                                 "label": { "type": "string" },
                                 "object": { "type": "string" },
                                 "weight": { "type": "number" },
-                                "source_id": { "type": "string", "description": "the source (document) id — the stable string you chose for this document, reused to re-ingest it in place" },
+                                "source_id": { "type": "string", "description": "the source (document) id — the stable string you chose for this document. Re-posting under it adds weight rather than replacing: retract_source first (or use import) to replace a document" },
                                 "paragraph": { "type": "integer", "description": "zero-based paragraph position" }
                             },
                             "required": ["subject", "label", "object", "weight"]
