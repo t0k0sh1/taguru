@@ -3063,6 +3063,78 @@ fn two_v097_files_stating_one_source_refuse_the_run() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// The conflict only ids reveal: a v0.9.7 file naming a standing
+/// context and a current-format file addressing that context's id state
+/// the same source. Neither the per-file name check nor the id check of
+/// current files can see it before boot; once the name settles on the id
+/// the run refuses whole and writes nothing.
+#[test]
+fn a_v097_file_and_a_current_file_claiming_one_source_by_id_refuse_the_run() {
+    let id = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
+    let batches = batch_dir("legacy-id-conflict");
+    let seed = batches.join("seed.jsonl");
+    std::fs::write(
+        &seed,
+        format!(
+            "{{\"type\":\"source\",\"context_id\":\"{id}\",\"id\":\"seed.md\",\
+             \"create\":{{\"name\":\"sake\"}}}}\n\
+             {{\"subject\":\"蔵\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-id-conflict");
+    let (code, stdout, stderr) = run_import(&data_dir, &[seed.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let current = batches.join("a-current.jsonl");
+    std::fs::write(
+        &current,
+        format!(
+            "{{\"type\":\"source\",\"context_id\":\"{id}\",\"id\":\"a.md\"}}\n\
+             {{\"subject\":\"蔵\",\"label\":\"所在地\",\"object\":\"霧沢\",\"weight\":1.0}}\n"
+        ),
+    )
+    .unwrap();
+    let old = batches.join("b-legacy.jsonl");
+    std::fs::write(
+        &old,
+        "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\"}\n\
+         {\"subject\":\"蔵\",\"label\":\"銘柄\",\"object\":\"青嶺\",\"weight\":1.0}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &[current.to_str().unwrap(), old.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("is already stated by an earlier file")
+            && stderr.contains("1 of 2 file(s) refused during validation; nothing was applied"),
+        "{stderr}"
+    );
+
+    let server = Server::start_on("legacy-id-conflict", data_dir);
+    // Only the seed's fact stands: neither file of the refused run
+    // wrote its association.
+    let facts = server.ok(
+        "POST",
+        &format!("/contexts/{id}/query"),
+        Some(json!({"subject": "蔵"})),
+    );
+    let labels: Vec<&str> = facts["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fact| fact["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        ["杜氏"],
+        "nothing of the refused run landed: {facts}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --url` does not read a v0.9.7 file: it refuses before
 /// sending anything, naming the entrances that do.
 #[test]

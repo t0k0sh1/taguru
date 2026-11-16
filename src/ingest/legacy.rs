@@ -403,7 +403,7 @@ pub(crate) fn resolve_legacy(
         }
         let id = match standing_groups.get(&record.name).map(Vec::as_slice) {
             Some([id]) => id.clone(),
-            Some(ids) if ids.len() > 1 => {
+            Some(ids @ [_, _, ..]) => {
                 return Err(LegacyRefusal::Ambiguous {
                     kind: "group",
                     name: record.name.clone(),
