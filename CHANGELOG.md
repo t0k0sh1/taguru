@@ -7,6 +7,26 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-17
+
+An identifier release (#958). Contexts and groups get server-minted
+UUID ids apart from their free-form, non-unique display names: every
+path, member list, grant, quota, import header and file name takes the
+id (ADR 0045, 0050–0053), and `taguru contexts` / `taguru groups` find
+an id by name. A source keeps the string its caller chose, and every
+field that names one says `source_id` / `source_ids` (ADR 0054); an API
+key's name is its id, held to 1–64 characters of `A-Z a-z 0-9 . _ -`
+(ADR 0055); a community's id is valid within one analysis and its hits
+carry the `fingerprint` that survives re-runs (ADR 0056). File-format
+records state `type` / `version` / `id` (format revision `2026-11-13`,
+ADR 0042–0044). **Breaking**: `http_contract` 2 and `mcp_contract` 2 —
+upgrade server and SDKs together; pre-rename request keys and the
+retired `TAGURU_KEY_SCOPES` are refused by name, never silently
+ignored. **On-disk format change**: a 0.9.7 data directory does not
+boot — export it with 0.9.7 and import it into this build, which reads
+the 0.9.7 export as migration input (ADR 0057; see *Upgrading from
+0.9.7* below). Python 3.11+ and Node.js 22.13+ are required; MSRV 1.96.
+
 ### Upgrading from 0.9.7
 
 0.10.0 changes the data directory, the wire and the configuration
@@ -4983,7 +5003,9 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/t0k0sh1/taguru/compare/v0.9.7...v0.10.0
+[0.9.7]: https://github.com/t0k0sh1/taguru/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/t0k0sh1/taguru/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/t0k0sh1/taguru/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...v0.9.4
