@@ -342,7 +342,7 @@ load-bearing ones:
 | `TAGURU_ADDR` | `127.0.0.1:8248` | Bind address ("TAGU" on a phone keypad) |
 | `TAGURU_DATA_DIR` | `./data` | Data directory |
 | `TAGURU_API_TOKEN` | — | Bearer token (everything but `/health`, `/live`, `/metrics`). Unset = unauthenticated, localhost only |
-| `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation |
+| `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation. A key's name is its id (grants, rate limits and OAuth delegations key on it): 1–64 characters of `A-Z a-z 0-9 . _ -`, anything else refuses boot |
 | `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to `contexts` listed by context **id** (the `id` column of `GET /contexts`; a display name refuses boot — a rename never moves a grant). These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
