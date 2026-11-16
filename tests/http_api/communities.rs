@@ -1202,25 +1202,48 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
         "{stderr}"
     );
 
-    // The manifest an earlier release stored parses as JSON but names no
-    // `type` (ADR 0042): refused by that, with the same way out.
-    overwrite_manifest(
-        &server,
-        "corp::communities",
-        &json!({
-            "taguru_communities": 1, "algorithm": "louvain-cc/1", "source_context_id": server.cx("corp"),
+    // A manifest an earlier format revision wrote — the v0.9.7
+    // release's untyped `taguru_communities` record, or a typed one
+    // stamped with an earlier revision — is incomparable, not an error:
+    // the run rebuilds and says why (SHOULD-FIX 3).
+    let mut calls = 4;
+    for manifest in [
+        json!({
+            "taguru_communities": 1, "algorithm": "louvain-cc/1", "source_context": "corp",
             "revision": {"graph": 1, "passages": 0, "config": 0}, "levels": 1, "communities": [],
-        })
-        .to_string(),
-    );
+        }),
+        json!({
+            "type": "communities_manifest", "version": "2026-10-01", "algorithm": "louvain-cc/1",
+            "source_context_id": server.cx("corp"),
+            "revision": {"graph": 1, "passages": 0, "config": 0}, "levels": 1, "communities": [],
+        }),
+    ] {
+        overwrite_manifest(&server, "corp::communities", &manifest.to_string());
+        let (code, stdout, stderr) = run_communities(
+            &["--context", &server.cx("corp"), &server.base],
+            &extract_env,
+        );
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("manifest from an earlier format revision"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
+        calls += 2;
+        assert_eq!(requests.lock().unwrap().len(), calls);
+    }
+
+    // A manifest of a NEWER revision is not this build's to judge.
+    let mut newer: Value = manifest.clone();
+    newer["version"] = json!("2099-01-01");
+    overwrite_manifest(&server, "corp::communities", &newer.to_string());
     let (code, _stdout, stderr) = run_communities(
         &["--context", &server.cx("corp"), &server.base],
         &extract_env,
     );
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("is not a manifest this build reads")
-            && stderr.contains("no `type` column"),
+        stderr.contains("is not a manifest this build reads"),
         "{stderr}"
     );
     assert!(
@@ -1657,4 +1680,33 @@ fn a_rename_or_a_twin_name_never_detaches_the_artifact_from_its_source() {
             .contains("'twin::communities' is not a context id"),
         "{refused}"
     );
+}
+
+/// `communities/search`'s pre-0.10.0 `derived` key is refused by name,
+/// naming `derived_id` — dropped, it silently searched the DEFAULT
+/// artifact instead of the one the caller named. The MCP tool forwards
+/// it so the refusal reaches tool callers too.
+#[test]
+fn the_pre_rename_derived_key_is_refused_by_name() {
+    let server = Server::start("communities-renamed-derived");
+    let sake = server.create_context("sake");
+    let (status, refused) = server.call(
+        "POST",
+        &format!("/contexts/{sake}/communities/search"),
+        Some(json!({"query": "蔵", "derived": "sake::communities"})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("'derived'"), "{refused}");
+    assert!(message.contains("'derived_id'"), "{refused}");
+
+    let answer = server.call_tool(
+        1,
+        "search_communities",
+        json!({"context_id": sake, "query": "蔵", "derived": "sake::communities"}),
+    );
+    assert_eq!(answer["isError"], json!(true), "{answer}");
+    let text = answer["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("'derived_id'"), "{text}");
 }

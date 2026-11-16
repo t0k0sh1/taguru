@@ -24,6 +24,11 @@ pub(super) async fn cross_recall(
     axum::Extension(deadline): axum::Extension<Deadline>,
     api::AppJson(request): api::AppJson<api::CrossRecallRequest>,
 ) -> Response {
+    if let Some(refusal) =
+        api::cross_target_rename_refusal(&request.contexts, &request.groups, Instant::now())
+    {
+        return refusal;
+    }
     let limit = request.limit;
     let context_ids = request.context_ids.clone();
     let group_ids = request.group_ids.clone();
@@ -50,6 +55,11 @@ pub(super) async fn cross_query(
     axum::Extension(deadline): axum::Extension<Deadline>,
     api::AppJson(request): api::AppJson<api::CrossQueryRequest>,
 ) -> Response {
+    if let Some(refusal) =
+        api::cross_target_rename_refusal(&request.contexts, &request.groups, Instant::now())
+    {
+        return refusal;
+    }
     let limit = request.limit;
     let context_ids = request.context_ids.clone();
     let group_ids = request.group_ids.clone();
@@ -195,6 +205,11 @@ pub(super) async fn cross_search_passages(
     api::AppJson(request): api::AppJson<api::CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) =
+        api::cross_target_rename_refusal(&request.contexts, &request.groups, started_at)
+    {
+        return refusal;
+    }
     let base = match reserialize(&request) {
         Ok(base) => base,
         Err(refusal) => return *refusal,
@@ -380,7 +395,7 @@ pub(super) async fn merge_contexts(
             Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
-                contexts: Vec::new(),
+                context_ids: Vec::new(),
                 error,
             }),
         }

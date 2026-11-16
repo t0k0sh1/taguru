@@ -503,12 +503,18 @@ fn write_schema(dir: &Path, stem: &str, document: &SchemaDocument) -> io::Result
 ///   with the recorded one (in EITHER direction) → refuse: the digest
 ///   is the one artifact that can catch an interrupted `PUT` a valid-
 ///   looking file would otherwise hide
+/// - bytes in the shape before ADR 0043 (a numeric `schema` stamp) →
+///   refuse with [`crate::format::migration_hint`], nothing set aside:
+///   the file is a release's own, the directory needs the migration
 /// - bytes that read but do not parse → the mangled bytes are set aside
 ///   as `{stem}.schema.corrupt` for hand recovery (evidence, like
 ///   `scan_groups`' own quarantine) when `set_aside_corrupt` is `true`,
 ///   and refuse either way — UNLIKE `scan_groups`, there is no
 ///   fresh-empty-record fallback here (see the module doc)
-/// - a document [`install`] refuses → refuse (a hand-edited file only)
+/// - a document stamped with one of [`crate::format::EARLIER_VERSIONS`]
+///   → loads as this build's own (the shape is unchanged since ADR 0043)
+/// - a document [`install`] refuses → refuse (a hand-edited file, or a
+///   format revision newer than this build's)
 ///
 /// `set_aside_corrupt` gates the ONE side effect this otherwise
 /// read-only function has: `taguru inspect` audits directories —
@@ -578,8 +584,20 @@ pub(crate) fn load_schema(
             recorded_digest.unwrap_or("none"),
         )));
     }
-    let document: SchemaDocument = match serde_json::from_slice(&bytes) {
+    let mut document: SchemaDocument = match serde_json::from_slice(&bytes) {
         Ok(document) => document,
+        Err(error) if is_pre_revision_shape(&bytes) => {
+            // The `{"schema": 1, ...}` stamp of every document written
+            // before ADR 0043 — a release's own file, not mangled bytes,
+            // so nothing is set aside: the directory needs the
+            // migration, not hand recovery.
+            return Err(io::Error::other(format!(
+                "schema '{}' does not parse ({error}): it carries the numeric `schema` stamp of \
+                 the releases before ADR 0043, which this build does not read — {}",
+                path.display(),
+                crate::format::migration_hint()
+            )));
+        }
         Err(error) => {
             let set_aside = schema_corrupt_path(dir, stem);
             if set_aside_corrupt {
@@ -617,13 +635,45 @@ pub(crate) fn load_schema(
             )));
         }
     };
+    // A document stamped with an earlier format revision reads as this
+    // build's own: the schema document's shape — `type`, `version`,
+    // `mode`, `closed_labels`, `types` (`is_a`), `relations` (`domain`,
+    // `range`) — has not changed since ADR 0043 stamped it, so every
+    // stamped revision is this one's, field for field. The digest still
+    // covers the bytes on disk (checked above); `install` states the
+    // current revision in memory, and the next PUT rewrites the file
+    // with it.
+    if document
+        .version
+        .as_deref()
+        .is_some_and(crate::format::is_earlier_version)
+    {
+        document.version = None;
+    }
     install(document).map(Some).map_err(|violation| {
+        let cause = match &violation {
+            // Neither this revision nor an earlier one.
+            SchemaViolation::UnknownVersion(_) => {
+                "written by a taguru whose format revision this build does not read (a newer \
+                 one, or a hand edit)"
+            }
+            _ => "a hand-edited file only; nothing this server writes can produce this shape",
+        };
         io::Error::other(format!(
-            "schema '{}' does not validate: {violation} — a hand-edited file only; nothing \
-             this server writes can produce this shape",
+            "schema '{}' does not validate: {violation} — {cause}",
             path.display()
         ))
     })
+}
+
+/// Whether `bytes` are a JSON object in the shape before ADR 0043 —
+/// a numeric `schema` stamp and no `type` column.
+fn is_pre_revision_shape(bytes: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_slice::<serde_json::Value>(bytes)
+    else {
+        return false;
+    };
+    object.get("schema").is_some_and(serde_json::Value::is_u64) && !object.contains_key("type")
 }
 
 #[cfg(test)]
@@ -1055,6 +1105,77 @@ mod tests {
             "a parseable file is not corrupt bytes; nothing is set aside"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ReviewImportExport BLOCKER 2: a `{stem}.schema.json` stamped by
+    /// a build of an earlier format revision — the shape unchanged
+    /// since ADR 0043 — loads as this build's own, digest checked
+    /// against the bytes on disk, and is served with the current
+    /// revision.
+    #[test]
+    fn a_document_stamped_with_an_earlier_revision_loads_as_this_builds() {
+        for (tag, version) in [("schema-0917", "2026-09-17"), ("schema-1001", "2026-10-01")] {
+            let dir = scratch_dir(tag);
+            fs::create_dir_all(&dir).unwrap();
+            let bytes = format!(
+                r#"{{"type":"schema","version":"{version}","mode":"warn","closed_labels":true,"types":{{"Brewery":{{"is_a":["Org"]}}}},"relations":{{"brews":{{"domain":["Brewery"],"range":[]}}}}}}"#
+            );
+            fs::write(schema_path(&dir, "sake"), &bytes).unwrap();
+            let digest = sha256_hex(bytes.as_bytes());
+
+            let loaded = load_schema(&dir, "sake", Some(&digest), true)
+                .unwrap()
+                .expect("a schema is present");
+            let document = loaded.document();
+            assert_eq!(
+                document.version.as_deref(),
+                Some(crate::format::FORMAT_VERSION)
+            );
+            assert_eq!(document.mode, SchemaMode::Warn);
+            assert!(document.closed_labels);
+            assert!(loaded.closure_of("Brewery").contains("Org"));
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The release-era `{"schema": 1}` shape refuses with the migration
+    /// hint, and — being a release's own file — is not set aside.
+    #[test]
+    fn a_pre_revision_document_refuses_with_the_migration_hint() {
+        let dir = scratch_dir("schema-pre-revision");
+        fs::create_dir_all(&dir).unwrap();
+        let bytes = br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
+        let digest = sha256_hex(bytes);
+
+        let error = load_schema(&dir, "sake", Some(&digest), true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with(&crate::format::migration_hint()),
+            "{error}"
+        );
+        assert!(!schema_corrupt_path(&dir, "sake").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A revision that is neither this build's nor an earlier one it
+    /// reads (a newer build wrote it) is named as such — not dismissed as
+    /// a hand edit, which is what every other violation is.
+    #[test]
+    fn an_unknown_revision_is_named_as_a_newer_build_not_a_hand_edit() {
+        let dir = scratch_dir("schema-unknown-revision");
+        fs::create_dir_all(&dir).unwrap();
+        let bytes = br#"{"type":"schema","version":"2099-01-01","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
+        let digest = sha256_hex(bytes);
+
+        let error = load_schema(&dir, "sake", Some(&digest), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a newer one, or a hand edit"), "{error}");
+        assert!(!error.contains("a hand-edited file only"), "{error}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

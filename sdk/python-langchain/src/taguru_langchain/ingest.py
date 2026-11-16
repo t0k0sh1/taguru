@@ -871,8 +871,8 @@ class TaguruIngester:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
-        vocabulary = self._fetch_vocabulary()
-        schema = self._fetch_schema()
+        vocabulary = self._fetch_vocabulary(dry_run=dry_run)
+        schema = self._fetch_schema(dry_run=dry_run)
         system = system_prompt(vocabulary, self.questions, self.fact_budget, schema)
         paragraph_count = len(split_paragraphs(text))
         rules = self._item_rules(paragraph_count)
@@ -1049,7 +1049,7 @@ class TaguruIngester:
             try:
                 # The import above just created (or found) the context
                 # by name; the refresh addresses it by id.
-                context_id = self._context_id()
+                context_id = self.context_id()
                 if context_id is None:
                     raise NotFoundError(f"context {self.context!r} not found", status=404)
                 refresh_result = self.client.context(context_id).refresh_embeddings()
@@ -1115,20 +1115,39 @@ class TaguruIngester:
                 break
         return outcomes
 
-    def _context_id(self, *, strict: bool = False) -> str | None:
+    def context_id(self, *, strict: bool = False) -> str | None:
         """The id behind the ingester's context NAME, read off the directory —
-        ``None`` when nothing carries the name yet (first ingest) or when a
-        listing fails; several contexts sharing it raise, since writing into
-        "one of them" would be a coin flip. ``strict`` lets a failed listing
-        propagate instead: the batch header must not mint a second id for a
-        context the directory merely failed to show."""
-        assert self.client is not None
+        ``None`` when no context carries the name yet (before the first
+        ingest creates it). Several contexts sharing the name raise, since
+        writing into "one of them" would be a coin flip. Public so callers
+        that hold only the name (examples, the S3 connector's deletion sweep)
+        address the id-keyed ``client.context(id)`` routes through the same
+        lookup; the TypeScript twin is ``TaguruIngester.contextId()``.
+
+        Only "no such context" — no matching row, or a 404 from the listing —
+        reads as ``None``. Any other listing failure (403, 503, transport)
+        propagates, so a caller reports the real cause instead of a
+        misleading "not found". ``strict`` makes the 404 propagate too: the
+        batch header must not mint a second id for a context the directory
+        merely failed to show."""
+        return self._lookup_context_id(strict=strict, offline=False)
+
+    def _lookup_context_id(self, *, strict: bool, offline: bool) -> str | None:
+        """``context_id``'s body. ``offline`` reads ANY listing failure as
+        "not there yet" — only for a dry run, which renders NDJSON and must
+        keep working when the directory cannot be listed at all."""
+        if self.client is None:
+            raise ValueError("this ingester was built with only an async client")
         try:
             matches = [row.id for row in self.client.contexts.iter() if row.name == self.context]
-        except Exception:
+        except NotFoundError:
             if strict:
                 raise
             return None
+        except Exception:
+            if offline:
+                return None
+            raise
         if len(matches) > 1:
             raise ValueError(
                 f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
@@ -1141,18 +1160,19 @@ class TaguruIngester:
         A real import refuses to guess when the directory cannot be listed
         (a minted id would create a duplicate of a context that exists); a
         dry run only renders NDJSON, so it keeps the offline-tolerant read."""
-        existing = self._context_id(strict=not dry_run)
+        existing = self._lookup_context_id(strict=not dry_run, offline=dry_run)
         if existing is not None:
             return existing
         if self._minted_context_id is None:
             self._minted_context_id = str(uuid.uuid4())
         return self._minted_context_id
 
-    def _fetch_vocabulary(self) -> list[str]:
+    def _fetch_vocabulary(self, *, dry_run: bool) -> list[str]:
         """The ``context``'s live relation vocabulary — an advantage the offline
-        extractor structurally lacks. Best-effort: an absent ``context`` is fine."""
+        extractor structurally lacks. Best-effort: an absent ``context`` is
+        fine, and a dry run reads an unlistable directory as no vocabulary."""
         assert self.client is not None
-        context_id = self._context_id()
+        context_id = self._lookup_context_id(strict=False, offline=dry_run)
         if context_id is None:
             return []
         try:
@@ -1161,13 +1181,13 @@ class TaguruIngester:
             return []
         return page.labels
 
-    def _fetch_schema(self) -> SchemaDocument | None:
+    def _fetch_schema(self, *, dry_run: bool) -> SchemaDocument | None:
         """The ``context``'s schema document (ADR 0009 §11.4), same
         best-effort posture as ``_fetch_vocabulary``: a schema-unaware
         server or a schema-free ``context`` is fine, and this ingester works
         unchanged either way."""
         assert self.client is not None
-        context_id = self._context_id()
+        context_id = self._lookup_context_id(strict=False, offline=dry_run)
         if context_id is None:
             return None
         try:
@@ -1306,8 +1326,8 @@ class TaguruIngester:
             raise ValueError(f"document exceeds the {MAX_PASSAGE_BYTES}-byte passage cap")
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
-        vocabulary = await self._afetch_vocabulary()
-        schema = await self._afetch_schema()
+        vocabulary = await self._afetch_vocabulary(dry_run=dry_run)
+        schema = await self._afetch_schema(dry_run=dry_run)
         system = system_prompt(vocabulary, self.questions, self.fact_budget, schema)
         paragraph_count = len(split_paragraphs(text))
         rules = self._item_rules(paragraph_count)
@@ -1483,7 +1503,7 @@ class TaguruIngester:
             self._emit(EmbeddingRefreshStarted(source=source))
             try:
                 # Same id resolution as the sync path.
-                context_id = await self._acontext_id()
+                context_id = await self.acontext_id()
                 if context_id is None:
                     raise NotFoundError(f"context {self.context!r} not found", status=404)
                 refresh_result = await self.async_client.context(context_id).refresh_embeddings()
@@ -1625,35 +1645,44 @@ class TaguruIngester:
 
     async def _aheader_context_id(self, *, dry_run: bool) -> str:
         """Async twin of ``_header_context_id``."""
-        existing = await self._acontext_id(strict=not dry_run)
+        existing = await self._alookup_context_id(strict=not dry_run, offline=dry_run)
         if existing is not None:
             return existing
         if self._minted_context_id is None:
             self._minted_context_id = str(uuid.uuid4())
         return self._minted_context_id
 
-    async def _acontext_id(self, *, strict: bool = False) -> str | None:
-        """Async twin of ``_context_id``."""
-        assert self.async_client is not None
+    async def acontext_id(self, *, strict: bool = False) -> str | None:
+        """Async twin of ``context_id``."""
+        return await self._alookup_context_id(strict=strict, offline=False)
+
+    async def _alookup_context_id(self, *, strict: bool, offline: bool) -> str | None:
+        """Async twin of ``_lookup_context_id``."""
+        if self.async_client is None:
+            raise ValueError("this ingester was built with only a sync client")
         try:
             matches = [
                 row.id
                 async for row in self.async_client.contexts.iter()
                 if row.name == self.context
             ]
-        except Exception:
+        except NotFoundError:
             if strict:
                 raise
             return None
+        except Exception:
+            if offline:
+                return None
+            raise
         if len(matches) > 1:
             raise ValueError(
                 f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
             )
         return matches[0] if matches else None
 
-    async def _afetch_vocabulary(self) -> list[str]:
+    async def _afetch_vocabulary(self, *, dry_run: bool) -> list[str]:
         assert self.async_client is not None
-        context_id = await self._acontext_id()
+        context_id = await self._alookup_context_id(strict=False, offline=dry_run)
         if context_id is None:
             return []
         try:
@@ -1664,10 +1693,10 @@ class TaguruIngester:
             return []
         return page.labels
 
-    async def _afetch_schema(self) -> SchemaDocument | None:
+    async def _afetch_schema(self, *, dry_run: bool) -> SchemaDocument | None:
         """Async twin of ``_fetch_schema``."""
         assert self.async_client is not None
-        context_id = await self._acontext_id()
+        context_id = await self._alookup_context_id(strict=False, offline=dry_run)
         if context_id is None:
             return None
         try:

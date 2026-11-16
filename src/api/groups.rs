@@ -15,9 +15,10 @@ use super::aliases::MAX_CURSOR_BYTES;
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppQuery, ErrorCode, GroupIdPath, MAX_CONTEXT_NAME_BYTES,
-    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found,
-    invalid_context_ids, invalid_group_id, invalid_group_ids, key_name, nesting_refusal, ok,
-    optional_body, over_cap_refusal, overlong, oversized,
+    MAX_DESCRIPTION_BYTES, MAX_MATCH_LIMIT, RenamedField, clamp_page, deadline_exceeded, error,
+    group_not_found, invalid_context_ids, invalid_group_id, invalid_group_ids, key_name,
+    nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
+    renamed_field_refusal,
 };
 
 /// Keyset paging over the name-ordered `group` directory, the
@@ -147,7 +148,7 @@ fn deadline_gated_group_entry(
 
 /// The change token on one `group` row (the `group` by id, so two that
 /// share a name never share a token): FNV-1a over the grant-visible
-/// transitive `context` closure, each member as its length-prefixed name
+/// transitive `context` closure, each member as its length-prefixed id
 /// followed by the three revision counters — structurally unambiguous,
 /// so distinct closures cannot collide by concatenation. The closure
 /// (not the direct members) because a `group` search fans out through
@@ -410,6 +411,10 @@ pub struct CreateGroupRequest {
     /// and the nesting that results must stay acyclic and at most
     /// [`MAX_GROUP_DEPTH`] `groups` tall.
     pub group_ids: Vec<String>,
+    /// The pre-0.10.0 member keys, which held names; caught only to be
+    /// refused by name ([`renamed_field_refusal`]).
+    pub contexts: RenamedField,
+    pub groups: RenamedField,
 }
 
 pub async fn create_group(
@@ -424,6 +429,15 @@ pub async fn create_group(
         Ok(request) => request,
         Err(refusal) => return *refusal,
     };
+    if let Some(refusal) = renamed_field_refusal(
+        &[
+            (&request.contexts, "contexts", "'context_ids'"),
+            (&request.groups, "groups", "'group_ids'"),
+        ],
+        started_at,
+    ) {
+        return refusal;
+    }
     let name = request.name;
     if let Some(refusal) = oversized("the group name", &name, MAX_CONTEXT_NAME_BYTES, started_at) {
         return refusal;
@@ -542,6 +556,15 @@ pub struct UpdateGroupRequest {
     pub remove_context_ids: Vec<String>,
     pub add_group_ids: Vec<String>,
     pub remove_group_ids: Vec<String>,
+    /// The pre-0.10.0 delta keys, which held names, plus the row's own
+    /// membership keys a caller might echo back from a v0.9.7 `GET`;
+    /// caught only to be refused by name ([`renamed_field_refusal`]).
+    pub add_contexts: RenamedField,
+    pub remove_contexts: RenamedField,
+    pub add_groups: RenamedField,
+    pub remove_groups: RenamedField,
+    pub contexts: RenamedField,
+    pub groups: RenamedField,
 }
 
 pub async fn update_group(
@@ -553,6 +576,35 @@ pub async fn update_group(
     AppJson(request): AppJson<UpdateGroupRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = renamed_field_refusal(
+        &[
+            (&request.add_contexts, "add_contexts", "'add_context_ids'"),
+            (
+                &request.remove_contexts,
+                "remove_contexts",
+                "'remove_context_ids'",
+            ),
+            (&request.add_groups, "add_groups", "'add_group_ids'"),
+            (
+                &request.remove_groups,
+                "remove_groups",
+                "'remove_group_ids'",
+            ),
+            (
+                &request.contexts,
+                "contexts",
+                "'add_context_ids' / 'remove_context_ids'",
+            ),
+            (
+                &request.groups,
+                "groups",
+                "'add_group_ids' / 'remove_group_ids'",
+            ),
+        ],
+        started_at,
+    ) {
+        return refusal;
+    }
     if let Some(description) = &request.description
         && let Some(refusal) = oversized(
             "the description",

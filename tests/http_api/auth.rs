@@ -560,3 +560,65 @@ fn bearer_token_gates_every_route_except_health_metrics_and_version() {
     );
     assert_eq!(status, 200);
 }
+
+/// A context-scoped key may not create contexts: `POST /contexts`
+/// carries no `{id}` for the per-context grant check, and the id the
+/// server would mint lies outside every grant — so a key held to one
+/// context could otherwise fill the directory with contexts it can
+/// never touch. The MCP `create_context` tool dispatches onto the same
+/// route and is refused the same way; an unscoped write key creates.
+#[test]
+fn a_context_scoped_key_cannot_create_contexts() {
+    let grants = format!(
+        r#"{{"scribe": "write", "potter": {{"role": "write", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
+    let server = Server::start_with_env(
+        "auth-scoped-create",
+        &[
+            ("TAGURU_API_TOKENS", "scribe:wtok,potter:stok"),
+            ("TAGURU_KEY_GRANTS", grants.as_str()),
+        ],
+    );
+    let count = || {
+        server
+            .call_with_token("GET", "/contexts", None, Some("wtok"))
+            .1["result"]["total"]
+            .as_u64()
+            .expect("the directory page carries a total")
+    };
+
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "routing bait", "description": "d"})),
+        Some("stok"),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["code"], json!("forbidden"), "{body}");
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("context-scoped"), "{body}");
+    assert!(message.contains("potter"), "{body}");
+
+    let (status, answer) = server.call_with_token(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "create_context", "arguments": {"name": "routing bait"}}})),
+        Some("stok"),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 403"), "{text}");
+    assert_eq!(count(), 0, "neither refused create may land a context");
+
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "sake"})),
+        Some("wtok"),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(count(), 1);
+}

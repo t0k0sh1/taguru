@@ -805,6 +805,25 @@ fn communities_url_flag_reaches_the_named_server() {
     );
 }
 
+/// The id of an inspect fixture's hand-laid `context` family: a
+/// canonical context id, the only stem shape boot — and so inspect —
+/// accepts (ADR 0045). `seed` keeps one test's families apart.
+fn fixture_id(seed: u8) -> String {
+    format!("00000000-0000-4000-8000-{seed:012x}")
+}
+
+/// Plants `id`'s current-format sidecar naming the family `name` — the
+/// display name inspect reports it under — and returns the `{id}.ctx`
+/// path for the caller to fill.
+fn plant_sidecar(dir: &std::path::Path, id: &str, name: &str) -> PathBuf {
+    std::fs::write(
+        dir.join(format!("{id}.meta.json")),
+        format!(r#"{{"id":"{id}","name":"{name}","description":"","pinned":false}}"#),
+    )
+    .unwrap();
+    dir.join(format!("{id}.ctx"))
+}
+
 #[test]
 fn inspect_verifies_a_directory_and_a_single_image() {
     let dir = common::scratch_dir("cli-inspect");
@@ -813,7 +832,7 @@ fn inspect_verifies_a_directory_and_a_single_image() {
     context
         .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
         .unwrap();
-    let image = dir.join("sake.ctx");
+    let image = plant_sidecar(&dir, &fixture_id(1), "sake");
     std::fs::write(&image, context.to_bytes()).unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
@@ -857,7 +876,7 @@ fn inspect_json_reports_directory_and_image_stats_as_one_document() {
     context
         .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
         .unwrap();
-    let image = dir.join("sake.ctx");
+    let image = plant_sidecar(&dir, &fixture_id(1), "sake");
     std::fs::write(&image, context.to_bytes()).unwrap();
 
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
@@ -914,7 +933,7 @@ fn inspect_fails_an_image_whose_bytes_rotted_in_place() {
     let mut image = context.to_bytes();
     let last_arena_byte = image.len() - 5; // the 4-byte footer follows
     image[last_arena_byte] ^= 0x01;
-    std::fs::write(dir.join("sake.ctx"), &image).unwrap();
+    std::fs::write(plant_sidecar(&dir, &fixture_id(1), "sake"), &image).unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -931,7 +950,9 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
     std::fs::create_dir_all(&dir).unwrap();
 
     // A truncated/garbage image must fail the whole inspection.
-    std::fs::write(dir.join("bad.ctx"), b"not an image").unwrap();
+    let bad = fixture_id(1);
+    let bad_image = plant_sidecar(&dir, &bad, "bad");
+    std::fs::write(&bad_image, b"not an image").unwrap();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -942,10 +963,11 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
 
     // A healthy image whose WAL does not parse: the log holds
     // acknowledged writes that exist nowhere else, so this fails too.
+    let sake = fixture_id(2);
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
-    std::fs::write(dir.join("sake.wal.jsonl"), b"not json\n").unwrap();
-    std::fs::remove_file(dir.join("bad.ctx")).unwrap();
+    std::fs::write(plant_sidecar(&dir, &sake, "sake"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join(format!("{sake}.wal.jsonl")), b"not json\n").unwrap();
+    std::fs::remove_file(&bad_image).unwrap();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -956,8 +978,8 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
 
     // Same strictness for the passage store: its snapshot holds
     // acknowledged text, so garbage there is a failure, not a shrug.
-    std::fs::remove_file(dir.join("sake.wal.jsonl")).unwrap();
-    std::fs::write(dir.join("sake.passages.bin"), b"not a snapshot").unwrap();
+    std::fs::remove_file(dir.join(format!("{sake}.wal.jsonl"))).unwrap();
+    std::fs::write(dir.join(format!("{sake}.passages.bin")), b"not a snapshot").unwrap();
     let output = run(&["inspect", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -979,7 +1001,8 @@ fn inspect_json_reports_the_three_corrupt_statuses() {
     let dir = common::scratch_dir("cli-corrupt-json");
     std::fs::create_dir_all(&dir).unwrap();
 
-    std::fs::write(dir.join("bad.ctx"), b"not an image").unwrap();
+    let bad_image = plant_sidecar(&dir, &fixture_id(1), "bad");
+    std::fs::write(&bad_image, b"not an image").unwrap();
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -989,18 +1012,19 @@ fn inspect_json_reports_the_three_corrupt_statuses() {
     assert_eq!(report["corrupt"], 1);
     assert!(report["contexts"][0].get("associations").is_none());
 
+    let sake = fixture_id(2);
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
-    std::fs::write(dir.join("sake.wal.jsonl"), b"not json\n").unwrap();
-    std::fs::remove_file(dir.join("bad.ctx")).unwrap();
+    std::fs::write(plant_sidecar(&dir, &sake, "sake"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join(format!("{sake}.wal.jsonl")), b"not json\n").unwrap();
+    std::fs::remove_file(&bad_image).unwrap();
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
     assert_eq!(report["contexts"][0]["status"], "corrupt_wal");
 
-    std::fs::remove_file(dir.join("sake.wal.jsonl")).unwrap();
-    std::fs::write(dir.join("sake.passages.bin"), b"not a snapshot").unwrap();
+    std::fs::remove_file(dir.join(format!("{sake}.wal.jsonl"))).unwrap();
+    std::fs::write(dir.join(format!("{sake}.passages.bin")), b"not a snapshot").unwrap();
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -1023,14 +1047,15 @@ fn inspect_reports_a_torn_wal_tail_without_healing_it() {
 
     // A healthy image at watermark 0 — the WAL below carries the writes.
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    let sake = fixture_id(1);
+    std::fs::write(plant_sidecar(&dir, &sake, "sake"), context.to_bytes()).unwrap();
 
     // One complete acknowledged record, then a fragment with no closing
     // newline: exactly the shape a crash leaves after O_APPEND wrote
     // part of the next line. This is the same on-disk JSON the server's
     // replay reads, hand-written here the way wal.rs's own torn-tail
     // tests are.
-    let wal = dir.join("sake.wal.jsonl");
+    let wal = dir.join(format!("{sake}.wal.jsonl"));
     let mut bytes = br#"{"seq":1,"op":"associate","subject":"a","label":"likes","object":"apple","weight":1.0}"#
         .to_vec();
     bytes.push(b'\n');
@@ -1077,20 +1102,26 @@ fn inspect_reports_a_torn_import_marker_without_failing() {
     let dir = common::scratch_dir("cli-import-marker");
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    // A real id whose display name differs from it — the shape every
+    // server-written family has: the marker names its context by ID,
+    // and inspect must find that id among the families here, not
+    // among their names.
+    let sake = fixture_id(1);
+    std::fs::write(plant_sidecar(&dir, &sake, "sake"), context.to_bytes()).unwrap();
     // The marker as the server writes it: {stem}.{source-hash}.importing,
-    // the (context, source) pair in the content. The exact hash is
+    // the (context id, source) pair in the content. The exact hash is
     // irrelevant to reporting — content is what gets read.
     std::fs::write(
-        dir.join("sake.00000000deadbeef.importing"),
-        br#"{"context":"sake","source":"doc-1"}"#,
+        dir.join(format!("{sake}.00000000deadbeef.importing")),
+        format!(r#"{{"context":"{sake}","source":"doc-1"}}"#),
     )
     .unwrap();
     // A marker whose context is gone: noted, not warned — the server's
     // next boot removes it.
+    let ghost = fixture_id(9);
     std::fs::write(
-        dir.join("ghost.00000000deadbeef.importing"),
-        br#"{"context":"ghost","source":"doc-9"}"#,
+        dir.join(format!("{ghost}.00000000deadbeef.importing")),
+        format!(r#"{{"context":"{ghost}","source":"doc-9"}}"#),
     )
     .unwrap();
 
@@ -1130,20 +1161,22 @@ fn inspect_json_reports_torn_tail_and_import_marker_notices() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    let sake = fixture_id(1);
+    std::fs::write(plant_sidecar(&dir, &sake, "sake"), context.to_bytes()).unwrap();
     let mut bytes = br#"{"seq":1,"op":"associate","subject":"a","label":"likes","object":"apple","weight":1.0}"#
         .to_vec();
     bytes.push(b'\n');
     bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b"#);
-    std::fs::write(dir.join("sake.wal.jsonl"), &bytes).unwrap();
+    std::fs::write(dir.join(format!("{sake}.wal.jsonl")), &bytes).unwrap();
     std::fs::write(
-        dir.join("sake.00000000deadbeef.importing"),
-        br#"{"context":"sake","source":"doc-1"}"#,
+        dir.join(format!("{sake}.00000000deadbeef.importing")),
+        format!(r#"{{"context":"{sake}","source":"doc-1"}}"#),
     )
     .unwrap();
+    let ghost = fixture_id(9);
     std::fs::write(
-        dir.join("ghost.00000000deadbeef.importing"),
-        br#"{"context":"ghost","source":"doc-9"}"#,
+        dir.join(format!("{ghost}.00000000deadbeef.importing")),
+        format!(r#"{{"context":"{ghost}","source":"doc-9"}}"#),
     )
     .unwrap();
     // A marker whose bytes don't even parse as JSON — the third
@@ -1189,7 +1222,10 @@ fn inspect_json_reports_torn_tail_and_import_marker_notices() {
 
     // The WAL is left byte-for-byte untouched by --json too — the
     // read-only guarantee does not bend for the JSON rendering.
-    assert_eq!(std::fs::read(dir.join("sake.wal.jsonl")).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read(dir.join(format!("{sake}.wal.jsonl"))).unwrap(),
+        bytes
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1267,19 +1303,19 @@ fn inspect_reads_the_name_from_the_sidecar_and_falls_back_to_the_stem() {
     // in the sidecar. A family with no sidecar at all reports under
     // its stem — the same fallback boot applies — not a failure.
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("some-id.ctx"), context.to_bytes()).unwrap();
     std::fs::write(
-        dir.join("some-id.meta.json"),
-        br#"{"id":"some-id","name":"sake","description":"d","pinned":false}"#,
+        plant_sidecar(&dir, &fixture_id(1), "sake"),
+        context.to_bytes(),
     )
     .unwrap();
-    std::fs::write(dir.join("bare-id.ctx"), context.to_bytes()).unwrap();
+    let bare = fixture_id(2);
+    std::fs::write(dir.join(format!("{bare}.ctx")), context.to_bytes()).unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("sake"), "{stdout}");
-    assert!(stdout.contains("bare-id"), "{stdout}");
+    assert!(stdout.contains("sake: ok"), "{stdout}");
+    assert!(stdout.contains(&format!("{bare}: ok")), "{stdout}");
     assert!(stdout.contains("total: 2 contexts"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1305,7 +1341,8 @@ fn inspect_fails_a_pre_id_sidecar_with_the_migration_message() {
     assert_eq!(output.status.code(), Some(1), "{stdout}");
     assert!(stdout.contains("records no context id"), "{stdout}");
     assert!(
-        stdout.contains("carry that stream forward through the builds in between"),
+        stdout.contains("export it there (`taguru export --out DIR`)")
+            && stdout.contains("docs/import.html#upgrading-from-0-9-7"),
         "the FAILURE line names the migration: {stdout}"
     );
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
@@ -1315,7 +1352,43 @@ fn inspect_fails_a_pre_id_sidecar_with_the_migration_message() {
     assert_eq!(report["contexts"][0]["status"], "pre_id_sidecar");
     let error = report["contexts"][0]["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("carry that stream forward through the builds in between"),
+        error.contains("export it there (`taguru export --out DIR`)")
+            && error.contains("docs/import.html#upgrading-from-0-9-7"),
+        "{report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.ctx` stem that is not a canonical context id is pre-id data
+/// even with no sidecar to say so (a pre-id family whose sidecar is
+/// gone): the server refuses the directory, so inspect fails it with
+/// the migration message instead of reporting it ok under its stem.
+#[test]
+fn inspect_fails_a_non_id_stem_with_the_migration_message() {
+    let dir = common::scratch_dir("cli-inspect-non-id-stem");
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+
+    let output = run(&["inspect", &dir.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("sake.ctx: FAILURE"), "{stdout}");
+    assert!(stdout.contains("not named by a context id"), "{stdout}");
+    assert!(
+        stdout.contains("docs/import.html#upgrading-from-0-9-7"),
+        "the FAILURE line names the migration: {stdout}"
+    );
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["contexts"][0]["status"], "pre_id_stem");
+    assert_eq!(report["corrupt"], 1);
+    let error = report["contexts"][0]["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("docs/import.html#upgrading-from-0-9-7"),
         "{report}"
     );
 
@@ -1351,8 +1424,9 @@ fn inspect_warns_on_unparseable_meta_json_but_does_not_fail() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
-    std::fs::write(dir.join("sake.meta.json"), b"not json").unwrap();
+    let sake = fixture_id(1);
+    std::fs::write(dir.join(format!("{sake}.ctx")), context.to_bytes()).unwrap();
+    std::fs::write(dir.join(format!("{sake}.meta.json")), b"not json").unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2801,7 +2875,11 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     let dir = common::scratch_dir("cli-inspect-groups");
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        plant_sidecar(&dir, &fixture_id(1), "sake"),
+        context.to_bytes(),
+    )
+    .unwrap();
     let kura = write_group_file(
         &dir,
         "kura",
@@ -2925,7 +3003,11 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
-    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        plant_sidecar(&dir, &fixture_id(1), "sake"),
+        context.to_bytes(),
+    )
+    .unwrap();
     let kura_id = write_group_file(
         &dir,
         "kura",

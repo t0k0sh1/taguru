@@ -10,6 +10,56 @@ pub(crate) struct RouteMap {
     pub(super) shards: Vec<String>,
     pub(super) contexts: BTreeMap<String, usize>,
     pub(super) fallback: Option<usize>,
+    /// Which shard answered for a context id, learned from ownership
+    /// probes. It lives inside the snapshot on purpose: a hot reload
+    /// builds a new `RouteMap`, so the cache starts empty with every
+    /// new map, and an index stored here always indexes THIS map's
+    /// shard list.
+    pub(super) owners: OwnerCache,
+}
+
+/// How many id→shard verdicts one map snapshot remembers. About 100
+/// bytes an entry, so the cap holds the router near 6 MiB however
+/// many distinct ids its callers name.
+pub(super) const OWNER_CACHE_CAPACITY: usize = 65_536;
+
+/// The router-side id→shard cache behind [`super::locate_owner`]
+/// (#130's probes made every proxied call cost the caller rate-limit
+/// budget on every shard). A hit skips the probe, so a proxied call
+/// costs the owning shard one request, as a single instance would.
+/// Entries are forgotten when the owner answers a 404 or 409 for the
+/// id, when a router `DELETE` drops the context, and whenever the map
+/// reloads. Bounded: once full, an arbitrary entry is evicted for
+/// each new id.
+#[derive(Debug, Default)]
+pub(super) struct OwnerCache {
+    entries: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+impl OwnerCache {
+    pub(super) fn get(&self, id: &str) -> Option<usize> {
+        self.entries.lock().get(id).copied()
+    }
+
+    pub(super) fn remember(&self, id: &str, shard: usize) {
+        let mut entries = self.entries.lock();
+        if entries.len() >= OWNER_CACHE_CAPACITY
+            && !entries.contains_key(id)
+            && let Some(evicted) = entries.keys().next().cloned()
+        {
+            entries.remove(&evicted);
+        }
+        entries.insert(id.to_string(), shard);
+    }
+
+    pub(super) fn forget(&self, id: &str) {
+        self.entries.lock().remove(id);
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
 }
 
 impl RouteMap {
@@ -99,6 +149,7 @@ impl RouteMap {
             shards,
             contexts,
             fallback,
+            owners: OwnerCache::default(),
         })
     }
 

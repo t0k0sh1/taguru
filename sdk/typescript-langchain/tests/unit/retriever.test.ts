@@ -237,6 +237,55 @@ describe("TaguruRetriever cross-context", () => {
     expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
   });
 
+  // context_id combined with the cross fields: it leads the target list —
+  // pinned identically in the Python suite so the twins cannot drift again.
+  it("searches context_id first when combined with context_ids", async () => {
+    const server = new FakeServer();
+    const retriever = new TaguruRetriever({
+      context_id: "id-tea",
+      context_ids: ["id-sake", "id-tea"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
+    expect(resolves).toEqual(["/contexts/id-tea/resolve", "/contexts/id-sake/resolve"]);
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("searches context_id beside a group's members", async () => {
+    const server = new FakeServer();
+    const retriever = new TaguruRetriever({
+      context_id: "id-sake",
+      group_ids: ["gid-childg"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
+    expect(resolves).toEqual(["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]);
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("falls back to context_id when the group directory fails to read", async () => {
+    const server = new FakeServer();
+    server.failGroupDirectoryAfter = 0;
+    const retriever = new TaguruRetriever({
+      context_id: "id-sake",
+      group_ids: ["gid-brewery"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
   it("pages the group walk through rows that share a name", async () => {
     // A page boundary between two rows named alike: the (name, id) cursor
     // resumes after the first, never skipping the second.

@@ -71,7 +71,8 @@ fn version_is_bare_json_and_matches_the_protocol_trailer() {
     assert!(body.get("result").is_none(), "{body}");
     assert_eq!(body["http_contract"]["current"], json!(2));
     assert_eq!(body["http_contract"]["supported"], json!([2]));
-    assert_eq!(body["mcp_contract"]["current"], json!(1));
+    assert_eq!(body["mcp_contract"]["current"], json!(2));
+    assert_eq!(body["mcp_contract"]["supported"], json!([2]));
     assert_eq!(body["record_formats"], json!(["2026-11-13"]));
     assert!(
         body["image_formats"]

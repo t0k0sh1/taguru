@@ -469,11 +469,11 @@ impl Tailer {
                 return Ok(());
             }
             let Some(name) = self.state.replica_register(stem) else {
-                // A sidecar the boot scan would refuse (pre-id, or a
-                // foreign id — `replica_register` already warned):
-                // never hydrated, never refreshed, and it must count
-                // as failed or the per-lane metrics below (keyed on
-                // `failed`) would report this lane as fully caught up.
+                // A family the boot scan would refuse (a pre-id sidecar
+                // or stem, or a foreign id — `replica_register` already
+                // warned): never hydrated, never refreshed, and it must
+                // count as failed or the per-lane metrics below (keyed
+                // on `failed`) would report this lane as fully caught up.
                 failed.insert(stem.as_str());
                 continue;
             };
@@ -556,6 +556,18 @@ mod tests {
     use crate::ship::{ShipProgress, Shipper};
     use crate::wal::{self, WalOp};
     use std::path::Path as FsPath;
+
+    /// The hand-laid fixture families' ids: canonical context ids, the
+    /// only stem shape a boot or the tailer registers (ADR 0045). Their
+    /// sidecars keep the display names `ctx_a`/`ctx_b` the directory
+    /// lookups and metric labels read.
+    const CTX_A: &str = "00000000-0000-4000-8000-00000000000a";
+    const CTX_B: &str = "00000000-0000-4000-8000-00000000000b";
+
+    /// A fixture family's sidecar as a writer of this build lays it.
+    fn meta_json(stem: &str, name: &str, description: &str) -> String {
+        format!(r#"{{"id":"{stem}","name":"{name}","description":"{description}","pinned":false}}"#)
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("taguru-replica-{tag}-{}", std::process::id()));
@@ -825,13 +837,18 @@ mod tests {
     async fn two_segment_bucket(tag: &str) -> (PathBuf, PathBuf) {
         let bucket = scratch(&format!("{tag}-bucket"));
         let writer = scratch(&format!("{tag}-writer"));
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"d","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "d"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -845,7 +862,12 @@ mod tests {
         .await
         .unwrap();
         shipper.cycle().await.unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            2,
+            &[associate("b")],
+        )
+        .unwrap();
         shipper.cycle().await.unwrap();
         shipper.retire_generation().await;
         (bucket, writer)
@@ -1033,7 +1055,7 @@ mod tests {
         let lane_dir = bucket
             .join("gen-00000000000000000001")
             .join("wal")
-            .join("ctx_a.wal.jsonl");
+            .join(format!("{CTX_A}.wal.jsonl"));
         let segments: Vec<_> = std::fs::read_dir(&lane_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1055,7 +1077,7 @@ mod tests {
             .expect_err("a torn lane fails the poll");
         assert!(error.to_string().contains("could not be tailed"), "{error}");
         assert!(
-            !target.join("ctx_a.wal.jsonl").exists(),
+            !target.join(format!("{CTX_A}.wal.jsonl")).exists(),
             "an un-assemblable lane lands nothing — no partial file"
         );
         let text = scrape(&state);
@@ -1075,8 +1097,8 @@ mod tests {
             .await
             .expect("the retry lands the family");
         assert_eq!(
-            std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap(),
-            std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
+            std::fs::read(writer.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
             "the healed lane is byte-identical to the shipped stream"
         );
         let text = scrape(&state);
@@ -1105,13 +1127,18 @@ mod tests {
     async fn a_refresh_owed_from_a_failed_poll_lands_even_when_a_reader_hydrates_first() {
         let bucket = scratch("owed-bucket");
         let writer = scratch("owed-writer");
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "old"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1147,11 +1174,16 @@ mod tests {
 
         // The writer moves the meta and ships a second segment.
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "new"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            2,
+            &[associate("b")],
+        )
+        .unwrap();
         shipper.cycle().await.unwrap();
         shipper.retire_generation().await;
 
@@ -1160,7 +1192,7 @@ mod tests {
         let lane_dir = bucket
             .join("gen-00000000000000000001")
             .join("wal")
-            .join("ctx_a.wal.jsonl");
+            .join(format!("{CTX_A}.wal.jsonl"));
         let segments: Vec<_> = std::fs::read_dir(&lane_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1177,7 +1209,7 @@ mod tests {
         // current, so the next retarget will not report it stale.
         std::fs::rename(&torn, segments.iter().max().unwrap()).unwrap();
         hydrator
-            .ensure_context("ctx_a")
+            .ensure_context(CTX_A)
             .expect("the reader's own hydration lands");
         assert_eq!(
             state.directory_entry("ctx_a").unwrap().description,
@@ -1208,13 +1240,18 @@ mod tests {
     async fn a_refresh_owed_survives_a_shared_hydration_failure() {
         let bucket = scratch("shared-owed-bucket");
         let writer = scratch("shared-owed-writer");
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "old"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1249,11 +1286,16 @@ mod tests {
         assert_eq!(state.directory_entry("ctx_a").unwrap().description, "old");
 
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "new"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            2,
+            &[associate("b")],
+        )
+        .unwrap();
         shipper.cycle().await.unwrap();
         shipper.retire_generation().await;
 
@@ -1262,7 +1304,7 @@ mod tests {
         let meta_object = bucket
             .join("gen-00000000000000000001")
             .join("files")
-            .join("ctx_a.meta.json");
+            .join(format!("{CTX_A}.meta.json"));
         let torn = meta_object.with_extension("torn-aside");
         std::fs::rename(&meta_object, &torn).unwrap();
         tailer
@@ -1274,7 +1316,7 @@ mod tests {
         // the next retarget will not report the stem stale.
         std::fs::rename(&torn, &meta_object).unwrap();
         hydrator
-            .ensure_context("ctx_a")
+            .ensure_context(CTX_A)
             .expect("the reader's own hydration lands");
         assert_eq!(
             state.directory_entry("ctx_a").unwrap().description,
@@ -1306,13 +1348,18 @@ mod tests {
     async fn a_failed_switch_leaves_the_previous_lineages_lag_rows_intact() {
         let bucket = scratch("switch-blackout-bucket");
         let writer = scratch("switch-blackout-writer");
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"old","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "old"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1363,8 +1410,8 @@ mod tests {
         // download, which would make tearing the remote object below
         // invisible.
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"new","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "new"),
         )
         .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
@@ -1387,7 +1434,7 @@ mod tests {
         let meta_object = bucket
             .join("gen-00000000000000000002")
             .join("files")
-            .join("ctx_a.meta.json");
+            .join(format!("{CTX_A}.meta.json"));
         std::fs::rename(&meta_object, meta_object.with_extension("torn-aside")).unwrap();
 
         tailer
@@ -1421,20 +1468,30 @@ mod tests {
      {
         let bucket = scratch("switch-retry-bucket");
         let writer = scratch("switch-retry-writer");
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"a","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "a"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
-        std::fs::write(writer.join("ctx_b.ctx"), b"image-v1").unwrap();
-        std::fs::write(
-            writer.join("ctx_b.meta.json"),
-            br#"{"id":"ctx_b","name":"ctx_b","description":"b","pinned":false}"#,
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_b.wal.jsonl"), 1, &[associate("b")]).unwrap();
+        std::fs::write(writer.join(format!("{CTX_B}.ctx")), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join(format!("{CTX_B}.meta.json")),
+            meta_json(CTX_B, "ctx_b", "b"),
+        )
+        .unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_B}.wal.jsonl")),
+            1,
+            &[associate("b")],
+        )
+        .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1483,10 +1540,10 @@ mod tests {
         // `hydrate_shared` cannot skip the download via a byte-identical
         // local copy (which would make tearing the remote object below
         // invisible).
-        std::fs::remove_file(writer.join("ctx_b.wal.jsonl")).unwrap();
+        std::fs::remove_file(writer.join(format!("{CTX_B}.wal.jsonl"))).unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"a2","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "a2"),
         )
         .unwrap();
         let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
@@ -1510,7 +1567,7 @@ mod tests {
         let meta_object = bucket
             .join("gen-00000000000000000002")
             .join("files")
-            .join("ctx_a.meta.json");
+            .join(format!("{CTX_A}.meta.json"));
         std::fs::rename(&meta_object, meta_object.with_extension("torn-aside")).unwrap();
         tailer
             .poll_once()
@@ -1560,8 +1617,8 @@ mod tests {
 
         // A crash mid-apply, restaged: one family member torn to
         // garbage, another missing entirely.
-        std::fs::write(target.join("ctx_a.wal.jsonl"), b"torn mid-write").unwrap();
-        std::fs::remove_file(target.join("ctx_a.ctx")).unwrap();
+        std::fs::write(target.join(format!("{CTX_A}.wal.jsonl")), b"torn mid-write").unwrap();
+        std::fs::remove_file(target.join(format!("{CTX_A}.ctx"))).unwrap();
 
         // The restart's boot decision re-verifies the whole cache —
         // the same prepare a real `serve --replica` runs.
@@ -1569,14 +1626,14 @@ mod tests {
             crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
                 .await
                 .expect("a cache re-verifies after a crash");
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.ctx"))).unwrap(),
             b"image-v1"
         );
         assert_eq!(
-            std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap(),
-            std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
+            std::fs::read(writer.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
             "the torn lane is refetched whole"
         );
 

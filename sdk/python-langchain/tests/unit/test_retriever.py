@@ -269,6 +269,71 @@ async def test_a_directory_failing_partway_keeps_the_rows_read_beside_direct_tar
     ]
 
 
+# ``context_id`` combined with the cross fields: it leads the target list —
+# pinned identically in the TypeScript suite so the twins cannot drift again.
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_leads_when_combined_with_context_ids(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    retriever = TaguruRetriever(
+        context_id="id-tea",
+        context_ids=["id-sake", "id-tea"],
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        retriever.invoke("青嶺酒造")
+    else:
+        await retriever.ainvoke("青嶺酒造")
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [
+        {"context_ids": ["id-tea", "id-sake"], "query": "青嶺酒造", "limit": 5}
+    ]
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_is_searched_beside_a_groups_members(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    retriever = TaguruRetriever(
+        context_id="id-sake",
+        group_ids=["gid-childg"],
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        retriever.invoke("青嶺酒造")
+    else:
+        await retriever.ainvoke("青嶺酒造")
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [
+        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+    ]
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_is_the_fallback_when_the_group_directory_fails(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    fake_server.fail_group_directory_after = 0
+    retriever = TaguruRetriever(
+        context_id="id-sake",
+        group_ids=["gid-brewery"],
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        retriever.invoke("青嶺酒造")
+    else:
+        await retriever.ainvoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
+
+
 def test_the_group_walk_pages_through_rows_that_share_a_name(
     sync_client: Taguru, monkeypatch: pytest.MonkeyPatch
 ) -> None:

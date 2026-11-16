@@ -32,6 +32,9 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
         "TAGURU_API_TOKEN",
         "TAGURU_API_TOKENS",
         "TAGURU_KEY_GRANTS",
+        // The pre-0.10.0 grants name refuses boot (#959): a developer
+        // shell still exporting it would fail every spawn.
+        "TAGURU_KEY_SCOPES",
         "TAGURU_EXTRACT_URL",
         "TAGURU_EXTRACT_MODEL",
         "TAGURU_EXTRACT_API_KEY",

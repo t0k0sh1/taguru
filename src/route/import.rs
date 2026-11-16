@@ -1,7 +1,9 @@
-//! `POST /import`: splits the batch stream by each batch's `context`
-//! header, dry-run-preflights every chunk against the owning shards,
-//! then dispatches in stream order — the same all-or-nothing shape a
-//! single instance gives one stream.
+//! `POST /import`: splits the batch stream by each batch's
+//! `context_id` header — the shard already holding the id, else the
+//! shard the first batch's `create.name` routes to — dry-run-
+//! preflights every chunk against the owning shards, then dispatches
+//! in stream order — the same all-or-nothing shape a single instance
+//! gives one stream.
 
 use super::*;
 
@@ -19,6 +21,15 @@ pub(super) async fn route_import(
 ) -> Response {
     let started_at = Instant::now();
     let map = state.map();
+    // A v0.9.7 stream (`taguru_batch` headers naming contexts) is a
+    // migration input: the shard that converts it resolves names
+    // against its own registry and mints the missing ids at random, so
+    // no shard's conversion agrees with another's and the router could
+    // not route the converted batches. Refused before any shard is
+    // asked, naming the two places the conversion is whole.
+    if crate::ingest::is_legacy_stream(&body) {
+        return legacy_stream_refusal(started_at);
+    }
     // The same whole-stream validation a shard would run, so a
     // malformed stream refuses here with the same message and the same
     // stream-level line numbers.
@@ -42,7 +53,7 @@ pub(super) async fn route_import(
         let shard = match owner_of.get(&batch.context_id) {
             Some(shard) => *shard,
             None => {
-                let shard = match locate_owner(
+                let shard = match probe_owner(
                     &state,
                     &map,
                     &batch.context_id,
@@ -105,7 +116,7 @@ pub(super) async fn route_import(
         let shard = match owner_of.get(context_id) {
             Some(shard) => *shard,
             None => {
-                match locate_owner(&state, &map, context_id, &headers, deadline, started_at).await {
+                match probe_owner(&state, &map, context_id, &headers, deadline, started_at).await {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
                     Located::Unreached { refusal, .. } => return refusal,
@@ -143,7 +154,7 @@ pub(super) async fn route_import(
             let shard = match owner_of.get(member) {
                 Some(shard) => *shard,
                 None => {
-                    match locate_owner(&state, &map, member, &headers, deadline, started_at).await {
+                    match probe_owner(&state, &map, member, &headers, deadline, started_at).await {
                         Located::Shard(shard) => shard,
                         Located::Answered(response) => return response,
                         Located::Unreached { refusal, .. } => return refusal,
@@ -227,7 +238,7 @@ pub(super) async fn route_import(
                     return unreachable_refusal(
                         &[Unreached {
                             shard: map.url(shard).to_string(),
-                            contexts: Vec::new(),
+                            context_ids: Vec::new(),
                             error,
                         }],
                         started_at,
@@ -283,7 +294,7 @@ pub(super) async fn route_import(
                 return unreachable_refusal(
                     &[Unreached {
                         shard: map.url(*shard).to_string(),
-                        contexts: Vec::new(),
+                        context_ids: Vec::new(),
                         error,
                     }],
                     started_at,
@@ -350,7 +361,7 @@ pub(super) async fn route_import(
                 return unreachable_refusal(
                     &[Unreached {
                         shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
+                        context_ids: Vec::new(),
                         error,
                     }],
                     started_at,
@@ -414,7 +425,7 @@ pub(super) async fn route_import(
                     return unreachable_refusal(
                         &[Unreached {
                             shard: map.url(shard).to_string(),
-                            contexts: Vec::new(),
+                            context_ids: Vec::new(),
                             error,
                         }],
                         started_at,
@@ -461,6 +472,22 @@ pub(super) async fn route_import(
         result["groups"] = json!(groups);
     }
     api::ok(result, started_at)
+}
+
+/// The refusal for a v0.9.7 stream through the router: nothing was
+/// applied, and the message names where the same stream DOES import —
+/// a single instance (which converts it whole), or each shard directly
+/// with the part of the stream that shard should hold.
+fn legacy_stream_refusal(started_at: Instant) -> Response {
+    api::error(
+        ErrorCode::InvalidArgument,
+        "this is a v0.9.7 import stream (`taguru_batch` headers): the router cannot route it, \
+         because converting it mints context ids on the receiving instance; import it into a \
+         single instance, or into each shard directly (POST /import on the shard), then serve \
+         that data through the router — see docs/import.html#upgrading-from-0-9-7; nothing \
+         was applied",
+        started_at,
+    )
 }
 
 /// What earlier requests of one import already made durable, counted

@@ -254,7 +254,9 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <code>context</code> is created under that id and that name. So a file that creates
       a <code>context</code> picks its id itself (a fresh UUID, e.g. from <code>uuidgen</code>) and
       every later file for the same <code>context</code> repeats it. Importing into an absent id
-      without a create block is refused.
+      without a create block is refused. A 0.9.7 export, whose headers name the
+      <code>context</code> instead, is read too, as migration input:
+      see <a href="#upgrading-from-0-9-7">Upgrading from 0.9.7</a>.
     </p>
 
     <h3>Association lines</h3>
@@ -414,7 +416,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
         <tbody>
           <tr><td><code>context</code> name · <code>group</code> name (members included)</td><td>64 bytes</td></tr>
           <tr><td>source id · subject/label/object · alias/canonical</td><td>1,024 bytes</td></tr>
-          <tr><td><code>group</code> membership (member <code>contexts</code> / child <code>groups</code>, each)</td><td>1,000 names</td></tr>
+          <tr><td><code>group</code> membership (member <code>context_ids</code> / child <code>group_ids</code>, each)</td><td>1,000 ids</td></tr>
           <tr><td>create.description</td><td>4,096 bytes</td></tr>
           <tr><td>weight</td><td>finite, |w| ≤ 1e6</td></tr>
           <tr><td>passage</td><td>8 MiB (the default HTTP body cap)</td></tr>
@@ -484,9 +486,9 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
 curl -X POST localhost:8248/import \
   -H 'Authorization: Bearer &lt;key&gt;' \
   --data-binary @docs-aomine.jsonl
-<span class="c"># → {"result": {"context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f", "source_id": "docs/aomine.md",</span>
-<span class="c">#    "created": false, "retracted": 12, "associations": 14,</span>
-<span class="c">#    "aliases": 2, "passage_stored": true}, "status": "ok", …}</span></code></pre>
+<span class="c"># → {"status": "ok", "result": {"batches": [{"context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f",</span>
+<span class="c">#    "source_id": "docs/aomine.md", "created": false, "retracted": 12,</span>
+<span class="c">#    "associations": 14, "aliases": 2, "passage_stored": true, …}]}, "time": …}</span></code></pre>
     <ul>
       <li>Validation first (a malformed line is a 400 with its line number, and nothing applies), then retract-then-apply — re-POSTing the same source file replaces the source exactly, just like re-running the CLI. The response carries the same numbers the CLI prints.</li>
       <li>It obeys everything every endpoint obeys: Bearer auth, the body cap (<code>TAGURU_MAX_BODY_BYTES</code>, default 8 MiB — larger source files go through the offline CLI or a raised cap), the request timeout, per-key rate limits.</li>
@@ -601,7 +603,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       the single-file case.
     </p>
     <p>
-      That stream is what <code>taguru export --out DIR [CONTEXT...]</code> writes (offline, under
+      That stream is what <code>taguru export --out DIR [ID...]</code> writes (offline, under
       the directory lock), and what a running server serves at
       <code>GET /contexts/{id}/export</code> (the body is the JSON Lines stream itself).
       One <code>context</code> = one stream: one source file per source id, in order, with a <code>create</code>
@@ -614,9 +616,9 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       first, then stream it in.
     </p>
     <p>
-      <code>taguru export --url URL --out DIR [CONTEXT...]</code> automates the same walk against a
+      <code>taguru export --url URL --out DIR [ID...]</code> automates the same walk against a
       <b>running</b> server instead of a local data directory: it enumerates <code>GET /contexts</code>
-      — and, without <code>CONTEXT</code> arguments (a full export), <code>GET /groups</code> too,
+      — and, without <code>ID</code> arguments (a full export), <code>GET /groups</code> too,
       both keyset-paged — fetching each item from its own export endpoint and writing the identical
       files a local export would. Auth rides <code>TAGURU_API_TOKEN</code> (or
       the first <code>name:token</code> entry of <code>TAGURU_API_TOKENS</code>), the same variables
@@ -636,6 +638,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li>Rendering is deterministic: the same state writes the same bytes, so backups diff against each other.</li>
     </ul>
     <pre><code><span class="c"># evacuate one context from a live server and restore it elsewhere</span>
+CTX=cef2e28b-43f0-4b6c-8201-abab0785399f  <span class="c"># the context's id: the id column of GET /contexts</span>
 curl -H 'Authorization: Bearer &lt;key&gt;' \
   localhost:8248/contexts/$CTX/export &gt; sake.jsonl
 curl -X POST other-host:8248/import \
@@ -643,6 +646,92 @@ curl -X POST other-host:8248/import \
 <span class="c"># offline:  taguru export --out backups/ ; taguru import backups/</span>
 <span class="c"># whole server, live — the loop above, automated:</span>
 taguru export --url "$TAGURU_URL" --out backups/</code></pre>
+  </section>
+
+  <section id="upgrading-from-0-9-7">
+    <h2>Upgrading from 0.9.7</h2>
+    <p class="section-sub">
+      This build does not boot a data directory written by 0.9.7 or earlier. In those releases
+      <code>contexts</code> and <code>groups</code> were addressed by name; here they have ids.
+      The upgrade is one export and one import. This build reads the 0.9.7 release's export
+      format (<code>taguru_batch</code> headers, <code>taguru_schema</code> and
+      <code>taguru_group</code> records) as migration input, and the import mints the ids
+      (ADR 0057).
+    </p>
+    <ol>
+      <li>With 0.9.7 still installed, stop the server and export the whole directory offline:
+        <code>taguru export --out DIR</code>. A directory written by an earlier 0.9.x release
+        boots on 0.9.7, so export it from there. Keep the old data directory as your backup:
+        this build refuses to boot it.</li>
+      <li>Install this build and point <code>TAGURU_DATA_DIR</code> at a new, empty
+        directory.</li>
+      <li>Run <code>taguru import DIR</code> (offline, before the first <code>serve</code>).
+        This is the recommended path. It reads every file of the export in one run, so a group
+        can name contexts and child groups from any other file.</li>
+      <li>Or start the server and use <code>POST /import</code>. Post each context file (every
+        <code>*.jsonl</code> that is not a <code>*.group.jsonl</code>) on its own, then all the
+        group files <b>in one body</b>:
+        <code>cat DIR/*.group.jsonl | curl -X POST localhost:8248/import -H 'Authorization:
+        Bearer &lt;key&gt;' --data-binary @-</code>. A group's child groups resolve only within
+        the same body or among groups already on the server. <code>taguru import --url</code>
+        does not read 0.9.7 files, because each of its chunks would settle names separately. It
+        refuses them and names the entrances that do read them.</li>
+    </ol>
+    <p>How the 0.9.7 records map:</p>
+    <ul>
+      <li><b>Context names.</b> A header's <code>context</code> name resolves to the one
+        <code>context</code> on the server that has exactly that name, and its id is reused.
+        Names with a <code>/</code> or any other character are kept as they are. A name no
+        <code>context</code> carries gets a freshly minted id and is created from the first
+        <code>create</code> block the import brings for it. An absent name with no create block
+        anywhere in the import is refused by name, as 0.9.7 refused it. A name that several
+        <code>contexts</code> share is refused (<code>409 conflict</code> over HTTP), never
+        guessed; rename all but one first.</li>
+      <li><b>Sources</b> keep their id as <code>source_id</code>. Passages (with
+        <code>stored_at</code>, <code>date</code> and <code>tags</code>), questions, sections,
+        locators, associations and aliases are read exactly as 0.9.7 wrote them.</li>
+      <li><b>Schema records</b> install onto the <code>context</code> their name resolves to,
+        after every source, as in the current format.</li>
+      <li><b>Group records.</b> A group resolves by name the same way, and an absent one gets a
+        minted id. Member <code>contexts</code> resolve by name. Child <code>groups</code> resolve
+        to a record of the same import or to the one group on the server with that name. The
+        records restore as one set with children landing first, so <code>all.group.jsonl</code>
+        sorting before <code>drinks.group.jsonl</code> does not matter.</li>
+      <li>Every name is settled before anything is written. A refusal leaves the new directory
+        untouched, and the whole import can be rerun once it is corrected. Rerunning a finished
+        import changes nothing: every name now resolves to the id the first run minted.</li>
+      <li>A file is one format or the other. Mixing 0.9.7 records and current-format records in
+        one file is refused by line, but separate files of both formats may share one
+        <code>taguru import</code> run. Only the 0.9.7 release's format is read. Streams from
+        the unreleased builds between 0.9.7 and this release are not import input, and
+        <code>taguru export</code> always writes the current format.</li>
+    </ul>
+    <p>After the import:</p>
+    <ul>
+      <li><b>Derived artifacts.</b> Community-summary and consolidation artifacts
+        (<code>NAME::communities</code>, <code>NAME::consolidation</code>) arrive as plain
+        <code>contexts</code> under fresh ids. This build derives an artifact's id from its
+        source <code>context</code>'s id, so run <code>taguru communities --context ID</code>
+        and <code>taguru consolidation --context ID</code> once per source. That run builds the
+        artifact from scratch, with fresh LLM calls, and later runs are incremental again. Then
+        delete the imported copies (<code>DELETE /contexts/{id}</code>) so a name is not left
+        on two <code>contexts</code>. A stored manifest written by 0.9.7 or an earlier format
+        revision is treated as incomparable, and the next run rebuilds it.</li>
+      <li><b>Grants and quotas</b> name <code>contexts</code> by id now
+        (<code>TAGURU_KEY_GRANTS</code>, quotas). Rewrite them with the ids from
+        <code>GET /contexts</code>. API key names are ids too, so check them before the
+        first <code>serve</code>.</li>
+      <li><b>Behind <code>taguru router</code></b>, upgrade each shard on its own: export it
+        with 0.9.7, start the new build on an empty data directory, then run
+        <code>taguru import DIR</code> offline or <code>POST /import</code> to the shard
+        directly. The router refuses a 0.9.7 body. A group whose members span shards comes back
+        with a different id on each shard, but the router needs one id per group. So after every
+        shard has imported, list <code>GET /groups</code> through the router and delete each of
+        those per-shard ids through the router (<code>DELETE /groups/{id}</code>). Then recreate
+        each group once through the router with <code>POST /groups</code>, giving
+        <code>context_ids</code> as the union of its members. Recreate child groups first, and
+        pass their new ids in the parent's <code>group_ids</code>.</li>
+    </ul>
   </section>
 
   <section id="producing">

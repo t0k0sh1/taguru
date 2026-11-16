@@ -229,6 +229,10 @@ async fn serve(
         std::env::var("TAGURU_API_TOKENS").ok(),
     )
     .and_then(|mut keyring| {
+        // The pre-0.10.0 grants name refuses boot instead of arming
+        // no grant at all (see `auth::RETIRED_GRANTS_VAR`); a
+        // `--config` file's copy is in the environment by now too.
+        auth::refuse_retired_grants_var(std::env::var_os(auth::RETIRED_GRANTS_VAR).is_some())?;
         // Grants are part of the same credential story: a grant that
         // silently failed to arm is an authorization hole.
         keyring.apply_grants(std::env::var("TAGURU_KEY_GRANTS").ok().as_deref())?;

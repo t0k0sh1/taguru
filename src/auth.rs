@@ -159,6 +159,12 @@ enum GrantSpec {
         role: String,
         #[serde(default)]
         contexts: Option<Vec<String>>,
+        /// Every other key, kept only to be refused by name: an unread
+        /// key fails OPEN here — a `contexts` list hiding under a typo
+        /// (`context`) or under a key grants never had (`groups`) would
+        /// leave the grant on every `context`.
+        #[serde(flatten)]
+        unknown: std::collections::BTreeMap<String, serde_json::Value>,
     },
 }
 
@@ -268,9 +274,11 @@ impl Keyring {
     /// ["<context id>"]}}`. Refusals are boot refusals, keyring-style: a
     /// grant naming no configured key is a typo that would silently guard
     /// nobody, an empty `contexts` list would grant nothing at all —
-    /// omitting the field is how "every `context`" is said — and an entry
+    /// omitting the field is how "every `context`" is said — an entry
     /// that is not a context id (a display name, say) would match no
-    /// `context` ever, silently locking the key out.
+    /// `context` ever, silently locking the key out, and a field the
+    /// grant does not know would go unread and leave it on every
+    /// `context`.
     pub fn apply_grants(&mut self, json: Option<&str>) -> Result<(), String> {
         let Some(json) = json else {
             return Ok(());
@@ -292,7 +300,20 @@ impl Keyring {
             }
             let (role, contexts) = match spec {
                 GrantSpec::Role(role) => (role, None),
-                GrantSpec::Full { role, contexts } => (role, contexts),
+                GrantSpec::Full {
+                    role,
+                    contexts,
+                    unknown,
+                } => {
+                    if let Some(field) = unknown.keys().next() {
+                        return Err(format!(
+                            "TAGURU_KEY_GRANTS key '{name}': unknown field '{field}' (a grant \
+                             takes role and contexts) — unread, it would leave the grant on \
+                             every context"
+                        ));
+                    }
+                    (role, contexts)
+                }
             };
             let role = match role.as_str() {
                 "read" => Role::Read,
@@ -491,11 +512,41 @@ impl SharedKeyring {
     }
 }
 
+/// `TAGURU_KEY_GRANTS`' name before 0.10.0 (#959) — the one auth,
+/// limit, or quota variable renamed or removed since 0.9.7. Its value
+/// is never read, but its presence refuses boot and refuses a reload
+/// (which keeps the previous table): a deployment that missed the
+/// rename would otherwise arm no grant at all, and every key it meant
+/// to restrict would fall back to the default grant — admin, on every
+/// context.
+pub const RETIRED_GRANTS_VAR: &str = "TAGURU_KEY_SCOPES";
+
+/// Boot's and reload's shared refusal of [`RETIRED_GRANTS_VAR`]. `set`
+/// is presence alone, an empty value included: a blank-templated
+/// secret still says the deployment was written for the old name.
+pub fn refuse_retired_grants_var(set: bool) -> Result<(), String> {
+    if set {
+        return Err(format!(
+            "{RETIRED_GRANTS_VAR} is set, but 0.10.0 renamed it TAGURU_KEY_GRANTS (same value \
+             shape) and no longer reads the old name: rename it, or unset it — ignoring it \
+             would leave every key it restricts with admin rights on every context"
+        ));
+    }
+    Ok(())
+}
+
 /// The variables the runtime reload re-reads — the whole auth table
 /// and nothing else. The single-token spelling belongs here too: it
 /// is the same table (key name "default"), and leaving it out would
-/// keep single-token deployments restarting to rotate.
-const AUTH_VARS: [&str; 3] = ["TAGURU_API_TOKEN", "TAGURU_API_TOKENS", "TAGURU_KEY_GRANTS"];
+/// keep single-token deployments restarting to rotate. The retired
+/// grants name rides last, read only so a reload refuses it exactly
+/// as boot does.
+const AUTH_VARS: [&str; 4] = [
+    "TAGURU_API_TOKEN",
+    "TAGURU_API_TOKENS",
+    "TAGURU_KEY_GRANTS",
+    RETIRED_GRANTS_VAR,
+];
 
 /// Where each auth variable's CURRENT value comes from on a reload.
 /// Captured in `main` BEFORE `config::load_config` folds the file
@@ -526,7 +577,7 @@ impl AuthSource {
         self.config.as_deref()
     }
 
-    /// The three auth values as they stand now, in [`AUTH_VARS`]
+    /// The auth values as they stand now, in [`AUTH_VARS`]
     /// order. `Err` is a reload refusal: an unreadable or malformed
     /// file must keep the previous table, unlike boot where the same
     /// failure refuses to start.
@@ -642,10 +693,13 @@ fn apply_reload(
         tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
         ReloadOutcome::Refused
     };
-    let [single, named, grants] = match values {
+    let [single, named, grants, retired_grants] = match values {
         Ok(values) => values,
         Err(error) => return refused(error),
     };
+    if let Err(error) = refuse_retired_grants_var(retired_grants.is_some()) {
+        return refused(error);
+    }
     let mut next = match Keyring::parse(single, named) {
         Ok(next) => next,
         Err(error) => return refused(error),
@@ -1481,7 +1535,7 @@ mod tests {
         std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-old,laptop:tok-laptop\n").unwrap();
         let source = AuthSource {
             config: Some(config.clone()),
-            from_shell: [false; 3],
+            from_shell: [false; AUTH_VARS.len()],
         };
         let keyring = ring(None, Some("ci:tok-old,laptop:tok-laptop"));
         let app = || gate_app(keyring.clone(), Some(Arc::clone(&oauth)));
@@ -1534,7 +1588,7 @@ mod tests {
         let config = dir.join("taguru.env");
         let source = AuthSource {
             config: Some(config.clone()),
-            from_shell: [false; 3],
+            from_shell: [false; AUTH_VARS.len()],
         };
         let keyring = ring(None, Some("ci:tok-a"));
         let gate = || app(keyring.clone());
@@ -1553,7 +1607,7 @@ mod tests {
         // An unreadable source: the same refusal.
         let missing = AuthSource {
             config: Some(dir.join("gone.env")),
-            from_shell: [false; 3],
+            from_shell: [false; AUTH_VARS.len()],
         };
         assert_eq!(
             reload_keyring(&keyring, &missing, "test"),
@@ -1607,6 +1661,67 @@ mod tests {
         assert!(!disabled.load().is_disabled());
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The pre-0.10.0 grants name (#959) refuses a reload like any
+    /// malformed source, the previous table staying armed: applying the
+    /// file without it would arm no grant, and every key it restricts
+    /// would fall back to admin everywhere. It refuses beside the new
+    /// name too, and with an empty value — presence is the signal.
+    #[test]
+    fn a_reload_carrying_the_retired_grants_name_keeps_the_previous_table() {
+        let dir = std::env::temp_dir().join(format!("taguru-authretired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        let source = AuthSource {
+            config: Some(config.clone()),
+            from_shell: [false; AUTH_VARS.len()],
+        };
+        let mut armed = Keyring::parse(None, Some("ci:tok-a".into())).unwrap();
+        armed.apply_grants(Some(r#"{"ci": "read"}"#)).unwrap();
+        let keyring = SharedKeyring::new(armed);
+
+        for retired in [
+            "TAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+            "TAGURU_KEY_GRANTS={\"ci\": \"read\"}\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+            "TAGURU_KEY_SCOPES=\n",
+        ] {
+            std::fs::write(&config, format!("TAGURU_API_TOKENS=ci:tok-b\n{retired}")).unwrap();
+            assert_eq!(
+                reload_keyring(&keyring, &source, "test"),
+                ReloadOutcome::Refused,
+                "{retired}"
+            );
+            let current = keyring.load();
+            assert_eq!(current.grant_of("ci").role, Role::Read, "{retired}");
+            assert_eq!(
+                current.authenticate("tok-a").as_deref(),
+                Some("ci"),
+                "the old token stays armed: {retired}"
+            );
+        }
+
+        // Renamed, the same table is an explicit no-op.
+        std::fs::write(
+            &config,
+            "TAGURU_API_TOKENS=ci:tok-a\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reload_keyring(&keyring, &source, "test"),
+            ReloadOutcome::Unchanged
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_retired_grants_name_refuses_by_presence_and_names_its_replacement() {
+        assert_eq!(refuse_retired_grants_var(false), Ok(()));
+        let refusal = refuse_retired_grants_var(true).unwrap_err();
+        assert!(refusal.contains("TAGURU_KEY_SCOPES"), "{refusal}");
+        assert!(refusal.contains("TAGURU_KEY_GRANTS"), "{refusal}");
     }
 
     #[tokio::test]
@@ -1721,6 +1836,16 @@ mod tests {
             (
                 r#"{"reader": {"role": "read", "contexts": ["CEF2E28B-43F0-4B6C-8201-ABAB0785399F"]}}"#,
                 "is not a context id",
+            ),
+            // An unread key fails OPEN (the grant would cover every
+            // context), so a typo or a key grants never had refuses.
+            (
+                r#"{"reader": {"role": "read", "context": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
+                "unknown field 'context'",
+            ),
+            (
+                r#"{"reader": {"role": "read", "groups": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
+                "unknown field 'groups'",
             ),
             ("not json", "documented JSON shape"),
             ("", "empty"),

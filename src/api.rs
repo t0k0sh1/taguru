@@ -182,8 +182,12 @@ pub(crate) const HTTP_CONTRACT: u64 = 2;
 /// `isError`/`structuredContent` convention, and the JSON-RPC
 /// error-code vocabulary. A pure HTTP-shape change is classified
 /// under [`HTTP_CONTRACT`] even though it is also visible over MCP —
-/// there is no double bump for the same change.
-pub(crate) const MCP_CONTRACT: u64 = 1;
+/// there is no double bump for the same change. 2 since 0.10.0's id
+/// cutover (#958): `retrieve`'s `citations[].source` became
+/// `citations[].source_id`, and required tool arguments were renamed
+/// (`context` → `context_id`, `name` → `group_id`, `sources` →
+/// `source_ids`) — both breaking under ADR 0005 §4.
+pub(crate) const MCP_CONTRACT: u64 = 2;
 
 /// The eight version dimensions ADR 0005 §3 names, gathered in one
 /// place: the body of `GET /version` (ADR 0005 §6) and the trailer
@@ -1701,6 +1705,76 @@ fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
             started_at,
         )
     })
+}
+
+/// A request key 0.10.0 renamed: the struct field that catches it.
+/// Presence is the whole signal, so the value is never parsed — a
+/// wrong-typed old value must not turn into a type error that hides
+/// the rename — and an explicit `null` counts as present: an
+/// `Option` would read `"contexts": null` as absent and let the old
+/// key through. Every field of this type needs `#[serde(default)]`
+/// (field or container), which is what absence reads as.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RenamedField(bool);
+
+impl RenamedField {
+    /// Whether the request carried the key, whatever its value.
+    pub(crate) fn is_present(self) -> bool {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RenamedField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self(true))
+    }
+}
+
+/// Refuses a request that still carries a key 0.10.0 renamed (#958's
+/// id cutover), naming its replacement — the precedent is the
+/// associations walk's `source` refusal (#1039). The structs behind
+/// these routes default every field, so an old caller's key would
+/// otherwise be dropped without a word: a membership write that does
+/// nothing, or a search against a different target, under a 200.
+/// `renamed` lists `(caught value, old key, replacement)` — the
+/// replacement as the message names it, quoted (`"'add_context_ids'"`,
+/// or two keys for an old field with no single successor); the first
+/// old key present refuses, and nothing has been applied by then.
+pub(crate) fn renamed_field_refusal(
+    renamed: &[(&RenamedField, &str, &str)],
+    started_at: Instant,
+) -> Option<Response> {
+    let (_, old, new) = renamed.iter().find(|(caught, _, _)| caught.is_present())?;
+    Some(error(
+        ErrorCode::InvalidArgument,
+        format!(
+            "'{old}' is no longer read: send {new} instead (0.10.0 renamed these fields \
+             when they began taking ids — the id column of GET /contexts or GET /groups — \
+             never names); nothing was applied"
+        ),
+        started_at,
+    ))
+}
+
+/// The cross-`context` verbs' (`/recall`, `/query`, `/sources/search`)
+/// pre-0.10.0 target keys, which held names. Unlike their successors
+/// they are not required, so a request still sending `contexts` beside
+/// the new `group_ids` would search the groups alone under a 200 — the
+/// silent narrowing [`renamed_field_refusal`] exists to stop. Shared by
+/// the server's handlers and the router's, which re-serializes the
+/// request (dropping these keys) before any shard could refuse them.
+pub(crate) fn cross_target_rename_refusal(
+    contexts: &RenamedField,
+    groups: &RenamedField,
+    started_at: Instant,
+) -> Option<Response> {
+    renamed_field_refusal(
+        &[
+            (contexts, "contexts", "'context_ids'"),
+            (groups, "groups", "'group_ids'"),
+        ],
+        started_at,
+    )
 }
 
 /// The one clamp every numeric cap in this file goes through: an

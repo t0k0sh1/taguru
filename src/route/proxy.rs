@@ -61,7 +61,7 @@ pub(super) async fn proxy_context_root(
     axum::Extension(deadline): axum::Extension<Deadline>,
     request: Request,
 ) -> Response {
-    proxy_context(state, id, deadline, request).await
+    proxy_context(state, id, deadline, request, true).await
 }
 
 pub(super) async fn proxy_context_sub(
@@ -70,7 +70,7 @@ pub(super) async fn proxy_context_sub(
     axum::Extension(deadline): axum::Extension<Deadline>,
     request: Request,
 ) -> Response {
-    proxy_context(state, id, deadline, request).await
+    proxy_context(state, id, deadline, request, false).await
 }
 
 /// `POST /contexts` — the one `context` verb with no id in its path
@@ -123,7 +123,19 @@ pub(super) async fn route_create_context(
         )
         .await
     {
-        Ok(answer) => passthrough(answer),
+        Ok(answer) => {
+            // The shard just told us it owns the id it minted: cached,
+            // so a context created through the router never pays a
+            // first-touch probe.
+            if answer.status.is_success()
+                && let Ok(envelope) =
+                    serde_json::from_slice::<ShardEnvelope<serde_json::Value>>(&answer.body)
+                && let Some(id) = envelope.result.get("id").and_then(|id| id.as_str())
+            {
+                map.owners.remember(id, shard);
+            }
+            passthrough(answer)
+        }
         Err(error) => api::error(
             ErrorCode::ShardUnreachable,
             format!(
@@ -141,7 +153,10 @@ pub(super) async fn route_create_context(
 /// probe (`GET /contexts/{id}`, the caller's own credentials) per
 /// distinct shard, concurrently. A single-shard map skips the probes
 /// outright; so the common deployments (one shard, or one plus a
-/// `*` line naming it) pay nothing.
+/// `*` line naming it) pay nothing. Each probe is a request the
+/// shard's rate limiter charges to the caller's key, so the verdict
+/// is cached per map snapshot ([`config::OwnerCache`]): only the first
+/// touch of an id (per router, per map reload) pays the probes.
 enum Owner {
     Shard(usize),
     Answered(Response),
@@ -167,9 +182,36 @@ pub(super) enum Located {
 }
 
 /// [`resolve_owner`] for callers that treat "nowhere" as a state, not
-/// an error — `POST /import`, whose header's `create` block is what
-/// decides where an id that no shard holds yet should land (#965).
+/// an error — a fan-out search, which sends an id whose shard is down
+/// to that shard so it surfaces as a labeled partial. A cached verdict
+/// answers without a probe: the shard it names still refuses an id it
+/// no longer holds in its own words (and the proxy forgets the entry
+/// on that answer), so a stale hit costs one 404, never a misplaced
+/// write. Callers that PLACE data from the verdict use
+/// [`probe_owner`] instead.
 pub(super) async fn locate_owner(
+    state: &RouterState,
+    map: &RouteMap,
+    id: &str,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Located {
+    if let Some(shard) = map.owners.get(id) {
+        return Located::Shard(shard);
+    }
+    probe_owner(state, map, id, headers, deadline, started_at).await
+}
+
+/// [`locate_owner`] that always asks the shards, never the cache —
+/// for verdicts that decide where data LANDS: `POST /import`, whose
+/// header's `create` block decides where an id that no shard holds
+/// yet should land (#965), and `group` writes, which project members
+/// per shard and broadcast sequentially. A stale cached owner there
+/// would create the context on the wrong shard, or leave a `group`
+/// write applied on the shards before the one that refuses the
+/// member. The verdict it finds still fills the cache.
+pub(super) async fn probe_owner(
     state: &RouterState,
     map: &RouteMap,
     id: &str,
@@ -212,7 +254,10 @@ pub(super) async fn locate_owner(
         }
     }
     match owners.as_slice() {
-        [owner] => Located::Shard(*owner),
+        [owner] => {
+            map.owners.remember(id, *owner);
+            Located::Shard(*owner)
+        }
         [] => {
             if let Some(answer) = refused {
                 return Located::Answered(passthrough(answer));
@@ -231,22 +276,31 @@ pub(super) async fn locate_owner(
                     ),
                 };
             }
+            // Every shard said 404: a cached owner (an import's fresh
+            // probe can run past one) is stale.
+            map.owners.forget(id);
             Located::Missing
         }
-        several => Located::Answered(api::error(
-            ErrorCode::Conflict,
-            format!(
-                "context '{id}' is held by {} shards ({}) — mid-move stray? finish the move \
-                 (delete the source copy) before addressing it through the router",
-                several.len(),
-                several
-                    .iter()
-                    .map(|&shard| map.url(shard))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            started_at,
-        )),
+        several => {
+            // Never cached: the next request must see the conflict too.
+            map.owners.forget(id);
+            Located::Answered(api::error(
+                ErrorCode::Conflict,
+                format!(
+                    "context '{id}' is held by {} shards ({}) — mid-move stray? the router \
+                     refuses every verb on it, DELETE included: delete the stray copy directly \
+                     on the shard that should not hold it, then address the context through \
+                     the router again",
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|&shard| map.url(shard))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                started_at,
+            ))
+        }
     }
 }
 
@@ -273,12 +327,14 @@ async fn resolve_owner(
 /// The transparent hop: same method, same path and query, headers
 /// minus the hop-by-hop set, body streamed out and the shard's answer
 /// streamed back — the response is the shard's own bytes, error
-/// shapes included.
+/// shapes included. `root` is whether the path is `/contexts/{id}`
+/// itself, where a successful `DELETE` drops the context.
 async fn proxy_context(
     state: RouterState,
     id: String,
     deadline: Deadline,
     request: Request,
+    root: bool,
 ) -> Response {
     let started_at = Instant::now();
     // Before the map is consulted: a dot segment is refused whatever
@@ -354,6 +410,9 @@ async fn proxy_context(
             // proxy relays verbatim, not a client-span failure — only
             // the transport arm below marks this span ERROR.
             span.record("taguru.shard.outcome", shard_outcome);
+            if forgets_owner(status, root, &parts.method) {
+                map.owners.forget(&id);
+            }
             let headers = hop_headers(answer.headers());
             let mut response = Response::builder().status(status);
             if let Some(response_headers) = response.headers_mut() {
@@ -376,6 +435,11 @@ async fn proxy_context(
                 .record_shard(map.url(shard), "unreached");
             span.record("taguru.shard.outcome", "unreached");
             span.record("otel.status_code", "ERROR");
+            // A cached owner that cannot be reached is no longer trusted:
+            // the next request re-probes, so a context moved off a dead
+            // shard is found where it now lives instead of answering 502
+            // until the next map reload.
+            map.owners.forget(&id);
             api::error(
                 ErrorCode::ShardUnreachable,
                 format!(
@@ -388,9 +452,84 @@ async fn proxy_context(
     }
 }
 
+/// Whether the owner's answer makes the cached id→shard verdict
+/// suspect: a 404 (the shard no longer holds the id — or holds it but
+/// not the sub-resource; a re-probe sorts out which), a 409 (a
+/// mid-move stray, among others), or a successful `DELETE` of the
+/// context itself.
+pub(super) fn forgets_owner(status: StatusCode, root: bool, method: &Method) -> bool {
+    status == StatusCode::NOT_FOUND
+        || status == StatusCode::CONFLICT
+        || (root && *method == Method::DELETE && status.is_success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_owner_is_forgotten_on_404_409_and_a_context_delete_only() {
+        for status in [StatusCode::NOT_FOUND, StatusCode::CONFLICT] {
+            for root in [true, false] {
+                assert!(forgets_owner(status, root, &Method::GET), "{status} {root}");
+            }
+        }
+        assert!(forgets_owner(StatusCode::OK, true, &Method::DELETE));
+        // A sub-resource delete leaves the context where it is.
+        assert!(!forgets_owner(StatusCode::OK, false, &Method::DELETE));
+        // A refused delete leaves it too.
+        assert!(!forgets_owner(StatusCode::FORBIDDEN, true, &Method::DELETE));
+        for status in [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(!forgets_owner(status, true, &Method::GET), "{status}");
+            assert!(!forgets_owner(status, false, &Method::POST), "{status}");
+        }
+    }
+
+    /// The cache is bounded: a new id past the cap evicts one entry
+    /// rather than growing, and re-remembering a known id evicts
+    /// nothing.
+    #[test]
+    fn the_owner_cache_stays_within_its_cap() {
+        let map = RouteMap::parse("a = http://a:1\nb = http://b:1\n").unwrap();
+        for index in 0..config::OWNER_CACHE_CAPACITY {
+            map.owners.remember(&format!("id-{index}"), index % 2);
+        }
+        assert_eq!(map.owners.len(), config::OWNER_CACHE_CAPACITY);
+        map.owners.remember("id-0", 1);
+        assert_eq!(map.owners.len(), config::OWNER_CACHE_CAPACITY);
+        assert_eq!(map.owners.get("id-0"), Some(1));
+        map.owners.remember("fresh", 0);
+        assert_eq!(map.owners.len(), config::OWNER_CACHE_CAPACITY);
+        assert_eq!(map.owners.get("fresh"), Some(0));
+        map.owners.forget("fresh");
+        assert_eq!(map.owners.get("fresh"), None);
+    }
+
+    /// A hot reload builds a new map, and the new map's cache starts
+    /// empty: no verdict learned against the old shard list survives.
+    #[test]
+    fn a_reloaded_map_starts_with_an_empty_owner_cache() {
+        let state = RouterState {
+            inner: Arc::new(RouterInner {
+                map: parking_lot::RwLock::new(Arc::new(
+                    RouteMap::parse("a = http://a:1\nb = http://b:1\n").unwrap(),
+                )),
+                client: reqwest::Client::new(),
+                metrics: RouterMetrics::default(),
+                instructions: OnceLock::new(),
+            }),
+        };
+        state.map().owners.remember("ctx", 1);
+        assert_eq!(state.map().owners.get("ctx"), Some(1));
+        state.swap_map(RouteMap::parse("b = http://b:1\na = http://a:1\n").unwrap());
+        assert_eq!(state.map().owners.get("ctx"), None);
+    }
 
     /// A dot segment, raw or percent-encoded in either case, is one;
     /// a segment that merely contains dots (`.well-known`, `a..b`,

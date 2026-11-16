@@ -110,6 +110,10 @@ class FakeServer:
         # schema-unaware server, so every pre-existing test keeps
         # exercising the schema-free prompt/checkpoint path unchanged.
         self.schema_document: dict[str, Any] | None = None
+        # When set, GET /contexts answers this status (e.g. 403, 404) — to
+        # exercise the ingester's id lookup telling "no such context"
+        # apart from a listing that failed for another reason.
+        self.contexts_listing_status: int | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -130,6 +134,17 @@ class FakeServer:
             # (#964) — routed above `self.calls.append` like /version,
             # so the resolution round trip doesn't pollute the exact
             # call-list assertions below.
+            if self.contexts_listing_status is not None:
+                return httpx.Response(
+                    self.contexts_listing_status,
+                    json={
+                        "status": "error",
+                        "code": "simulated",
+                        "error": "simulated listing failure",
+                        "time": 0.001,
+                    },
+                )
+
             def row(name: str) -> dict[str, Any]:
                 return {
                     "id": f"id-{name}",

@@ -187,9 +187,11 @@ def main() -> int:
         #    docs/evidence.html. Context.assemble_evidence(), not a bare
         #    client-level call — every read/write method is bound to one
         #    context, named after the server's own vocabulary.
-        #    Paths address a context by id (#964), so look it up by the
-        #    name the ingester created it under.
-        context_id = next(row.id for row in client.contexts.iter() if row.name == "aomine-evidence")
+        #    Paths address a context by id (#964), so ask the ingester for the
+        #    id of the context it created by name.
+        context_id = ingester.context_id()
+        if context_id is None:
+            raise SystemExit("context aomine-evidence was not created")
         context = client.context(context_id)
         print(f"\n== {QUERY} ==")
         generous = context.assemble_evidence(origins=["青嶺酒造"], text_fallback_query=QUERY)

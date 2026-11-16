@@ -243,17 +243,25 @@ fn drive(
 
     // The stored judgments this run can reuse. A manifest whose
     // detector differs marks every stored judgment incomparable —
-    // loudly, the communities behavior for a changed algorithm.
-    let (manifest_detector, judged) = stored_judgments(&api, &artifact_id, &candidates)?;
-    let comparable = match &manifest_detector {
-        Some(detector) if detector != CONSOLIDATION_DETECTOR => {
+    // loudly, the communities behavior for a changed algorithm — and
+    // so does one an earlier format revision wrote.
+    let (manifest, judged) = stored_judgments(&api, &artifact_id, &candidates)?;
+    let comparable = match &manifest {
+        StoredManifest::Current(Some(detector)) if detector != CONSOLIDATION_DETECTOR => {
             eprintln!(
                 "consolidation: detector changed ({detector} → {CONSOLIDATION_DETECTOR}); \
                  previous judgments are incomparable and every candidate re-judges"
             );
             false
         }
-        _ => true,
+        StoredManifest::Earlier => {
+            eprintln!(
+                "consolidation: the stored manifest is from an earlier format revision; \
+                 previous judgments are incomparable and every candidate re-judges"
+            );
+            false
+        }
+        StoredManifest::Absent | StoredManifest::Current(_) => true,
     };
     let (reusable, fresh): (Vec<&Candidate>, Vec<&Candidate>) =
         candidates.iter().partition(|candidate| {
@@ -287,6 +295,33 @@ fn drive(
 
     let chat = crate::extract::ChatClient::from_env()
         .map_err(|error| format!("{error} (only --dry-run works without it)"))?;
+    // An incomparable manifest (another detector, an earlier format
+    // revision) taints every judgment stored under it, not just this
+    // run's checks: a judgment of a check this run did not ask for
+    // would otherwise survive under the CURRENT manifest written below
+    // and be reused as comparable next time. Withdraw them first — a
+    // crash after this leaves fewer judgments (re-judged later), never
+    // a stale one under a new stamp.
+    if !comparable {
+        let rewritten: BTreeSet<String> = fresh
+            .iter()
+            .map(|candidate| judgment_source(&candidate.fingerprint))
+            .collect();
+        let stale = stale_judgments(&api, &artifact_id, &rewritten)?;
+        for source in &stale {
+            api.post_envelope(
+                &["contexts", artifact_id.as_str(), "sources", "retract"],
+                &json!({"source_id": source}),
+            )
+            .map_err(|failure| failure.into_message())?;
+        }
+        if !stale.is_empty() {
+            report.push_str(&format!(
+                "withdrew {} incomparable judgment(s) of checks this run did not ask for\n",
+                stale.len()
+            ));
+        }
+    }
     let mut batches: Vec<String> = Vec::new();
     let mut applied = 0usize;
     let mut dismissed = 0usize;
@@ -387,13 +422,55 @@ fn flatten(audit: &ConsolidationAudit) -> Vec<Candidate> {
     candidates
 }
 
-/// The manifest's detector (None when the artifact `context` does not
-/// exist yet) and the set of judgment sources already stored.
+/// What the judgment artifact's stored manifest is to this run.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+enum StoredManifest {
+    /// No artifact, or no manifest in it yet: a first run.
+    Absent,
+    /// This build's manifest, with the detector it recorded.
+    Current(Option<String>),
+    /// A manifest an earlier format revision wrote: incomparable.
+    Earlier,
+}
+
+/// Every `judgment:*` source stored in the artifact except `keep` —
+/// keyset-walked over `GET /contexts/{id}/sources`.
+fn stale_judgments(
+    api: &Api,
+    artifact_id: &str,
+    keep: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let mut stale = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "1000")];
+        if let Some(after) = &after {
+            query.push(("after", after.as_str()));
+        }
+        let page = api.get_with_query(&["contexts", artifact_id, "sources"], &query)?;
+        let ids: Vec<String> = page["entries"]
+            .as_array()
+            .ok_or_else(|| format!("{artifact_id}: not a taguru sources page"))?
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect();
+        let Some(last) = ids.last().cloned() else {
+            return Ok(stale);
+        };
+        stale.extend(
+            ids.into_iter()
+                .filter(|id| id.starts_with("judgment:") && !keep.contains(id)),
+        );
+        after = Some(last);
+    }
+}
+
+/// The stored manifest and the set of judgment sources already stored.
 fn stored_judgments(
     api: &Api,
     artifact_id: &str,
     candidates: &[Candidate],
-) -> Result<(Option<String>, BTreeSet<String>), String> {
+) -> Result<(StoredManifest, BTreeSet<String>), String> {
     let mut wanted: Vec<String> = vec![MANIFEST_SOURCE.to_string()];
     wanted.extend(
         candidates
@@ -404,30 +481,34 @@ fn stored_judgments(
     // An id nothing answers to is a first run.
     let found = match api.post_envelope(&["contexts", artifact_id, "sources", "lookup"], &body) {
         Ok(result) => result,
-        Err(ApiFailure::NotFound { .. }) => return Ok((None, BTreeSet::new())),
+        Err(ApiFailure::NotFound { .. }) => return Ok((StoredManifest::Absent, BTreeSet::new())),
         Err(ApiFailure::Other(error)) => return Err(error),
     };
     let passages = found["passages"].as_object().cloned().unwrap_or_default();
-    let manifest_detector = match passages.get(MANIFEST_SOURCE).and_then(Value::as_str) {
+    let manifest = match passages.get(MANIFEST_SOURCE).and_then(Value::as_str) {
         Some(text) => {
             let manifest: Value = serde_json::from_str(text)
                 .map_err(|error| format!("the stored manifest did not parse: {error}"))?;
-            judge_manifest(&manifest).map_err(|error| {
+            match judge_manifest(&manifest).map_err(|error| {
                 format!(
                     "the stored manifest is not one this build reads ({error}) — refusing \
                      to diff against it; delete the judgment context to start over"
                 )
-            })?;
-            manifest["detector"].as_str().map(str::to_string)
+            })? {
+                Stamp::Current => {
+                    StoredManifest::Current(manifest["detector"].as_str().map(str::to_string))
+                }
+                Stamp::Earlier => StoredManifest::Earlier,
+            }
         }
-        None => None,
+        None => StoredManifest::Absent,
     };
     let judged = passages
         .keys()
         .filter(|source| source.as_str() != MANIFEST_SOURCE)
         .cloned()
         .collect();
-    Ok((manifest_detector, judged))
+    Ok((manifest, judged))
 }
 
 /// One candidate through the LLM: strict-JSON verdict, leniently
@@ -530,24 +611,45 @@ fn judgment_batch(
     format!("{header}\n{association}\n{passage}")
 }
 
+/// What a stored manifest's stamp says it is.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+enum Stamp {
+    /// This build's revision (or no `version`, which reads as it).
+    Current,
+    /// Written by an earlier format revision: typed and stamped with
+    /// one of [`crate::format::EARLIER_VERSIONS`], or the v0.9.7
+    /// release's untyped `taguru_consolidation` record.
+    Earlier,
+}
+
+/// Judges a stored manifest's `type` and `version` (ADR 0042). A
+/// `version` that is present must be a string — `null` and numbers are
+/// values, not the omission the column allows — and must be this
+/// build's own or an earlier revision's; an absent one reads as this
+/// build's. Anything else — another `type`, a newer revision, an
+/// untyped record that is not v0.9.7's — is refused.
+fn judge_manifest(manifest: &Value) -> Result<Stamp, String> {
+    if manifest.get("type").is_none() && manifest.get("taguru_consolidation").is_some() {
+        return Ok(Stamp::Earlier);
+    }
+    crate::format::check_type(manifest.get("type").and_then(Value::as_str), MANIFEST_TYPE)?;
+    match manifest.get("version") {
+        None => crate::format::check_version(None).map(|()| Stamp::Current),
+        Some(Value::String(version)) if crate::format::is_earlier_version(version) => {
+            Ok(Stamp::Earlier)
+        }
+        Some(Value::String(version)) => {
+            crate::format::check_version(Some(version)).map(|()| Stamp::Current)
+        }
+        Some(other) => Err(format!("version {other} is not a string")),
+    }
+}
+
 /// The manifest batch — written LAST so its stamp attests a complete
 /// artifact, never a torn one. No create block: at least one judgment
 /// batch always precedes it in the same run (`fresh.is_empty()`
 /// returns before any import), so the artifact `context` exists by the
 /// time this lands.
-/// Judges a stored manifest's `type` and `version` (ADR 0042). A
-/// `version` that is present must be a string — `null` and numbers are
-/// values, not the omission the column allows — and must be this
-/// build's own; an absent one reads as this build's.
-fn judge_manifest(manifest: &Value) -> Result<(), String> {
-    crate::format::check_type(manifest.get("type").and_then(Value::as_str), MANIFEST_TYPE)?;
-    match manifest.get("version") {
-        None => crate::format::check_version(None),
-        Some(Value::String(version)) => crate::format::check_version(Some(version)),
-        Some(other) => Err(format!("version {other} is not a string")),
-    }
-}
-
 fn manifest_batch(artifact_id: &str, context_id: &str) -> String {
     let header = crate::format::source_header_line(MANIFEST_SOURCE, artifact_id, None);
     let manifest = json!({
@@ -583,6 +685,33 @@ mod tests {
         assert!(
             parse_judgment("{\"verdict\": \"maybe\"}").is_none(),
             "an unknown verdict is junk, not a judgment"
+        );
+    }
+
+    /// SHOULD-FIX 3: a manifest an earlier format revision wrote is
+    /// incomparable (every candidate re-judges), not a refusal; this
+    /// build's reads as current; anything else still refuses.
+    #[test]
+    fn an_earlier_revisions_manifest_is_incomparable_not_refused() {
+        for version in crate::format::EARLIER_VERSIONS {
+            let manifest = json!({"type": MANIFEST_TYPE, "version": version,
+                                  "detector": CONSOLIDATION_DETECTOR, "context_id": "c"});
+            assert_eq!(judge_manifest(&manifest), Ok(Stamp::Earlier), "{version}");
+        }
+        let v097 = json!({"taguru_consolidation": 1, "detector": "consolidation/1",
+                          "context": "sake"});
+        assert_eq!(judge_manifest(&v097), Ok(Stamp::Earlier));
+        let current = json!({"type": MANIFEST_TYPE, "version": crate::format::FORMAT_VERSION});
+        assert_eq!(judge_manifest(&current), Ok(Stamp::Current));
+        assert_eq!(
+            judge_manifest(&json!({"type": MANIFEST_TYPE})),
+            Ok(Stamp::Current)
+        );
+        assert!(judge_manifest(&json!({"type": MANIFEST_TYPE, "version": "2099-01-01"})).is_err());
+        assert!(judge_manifest(&json!({"consolidation": 1})).is_err());
+        assert!(
+            judge_manifest(&json!({"type": "communities_manifest", "version": "2026-10-01"}))
+                .is_err()
         );
     }
 

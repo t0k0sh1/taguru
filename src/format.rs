@@ -10,18 +10,33 @@
 /// not about one of them.
 pub(crate) const FORMAT_VERSION: &str = "2026-11-13";
 
+/// The format revisions before [`FORMAT_VERSION`], oldest first. None
+/// was released: they stamped records on main between the v0.9.7
+/// release and this one. A reader that knows its shape did not change
+/// across them may read a record stamped with one as its own (the
+/// at-rest `{stem}.schema.json`); a reader whose record did change
+/// treats one as written by an earlier build (a stored derivation
+/// manifest: incomparable, rebuild). Streams stamped with one are not
+/// import input (ADR 0057 — only the v0.9.7 release's export is).
+pub(crate) const EARLIER_VERSIONS: [&str; 2] = ["2026-09-17", "2026-10-01"];
+
+/// Whether `version` is one of [`EARLIER_VERSIONS`] — by equality, as
+/// [`check_version`] judges the current one.
+pub(crate) fn is_earlier_version(version: &str) -> bool {
+    EARLIER_VERSIONS.contains(&version)
+}
+
 /// How to move a data directory this build refuses to boot: the tail
-/// every pre-id refusal (boot and `taguru inspect`) ends with. A stream
-/// the release that wrote the directory exports is in that release's
-/// format, which this build does not import, so the data has to be
-/// carried through the builds in between (ADR 0053 §3).
+/// every pre-id refusal (boot and `taguru inspect`) ends with. The
+/// v0.9.7 release's export is this build's migration input (ADR 0057):
+/// that release reads every directory an earlier release wrote, and
+/// this build imports what it exports, minting the ids.
 pub(crate) fn migration_hint() -> String {
-    format!(
-        "export it with the release that wrote it and carry that stream forward through \
-         the builds in between, each importing what the one before exports or booting the \
-         data directory it leaves — this build imports format '{FORMAT_VERSION}' only \
-         (ADR 0053 §3)"
-    )
+    "boot it on taguru v0.9.7 and export it there (`taguru export --out DIR`), then point \
+     this build at an empty data directory and run `taguru import DIR` before starting it \
+     (or start it and POST /import) — this build reads a v0.9.7 export as migration input \
+     and mints the ids (ADR 0057; docs/import.html#upgrading-from-0-9-7)"
+        .to_string()
 }
 
 /// Judges a record's `version` column. Absent means "whatever the
@@ -124,20 +139,34 @@ pub(crate) fn record_type(value: &serde_json::Value) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// The hint names the only revision this build imports, so a
-    /// reader can tell the old release's export will not import as is.
+    /// The hint names the one release whose export this build imports,
+    /// and where the steps are written down.
     #[test]
-    fn the_migration_hint_names_the_revision_this_build_imports() {
+    fn the_migration_hint_names_the_v097_export_and_the_docs() {
         let hint = migration_hint();
+        assert!(hint.starts_with("boot it on taguru v0.9.7"), "{hint}");
+        assert!(hint.contains("`taguru import DIR`"), "{hint}");
         assert!(
-            hint.starts_with("export it with the release that wrote it"),
+            hint.contains("docs/import.html#upgrading-from-0-9-7"),
             "{hint}"
         );
-        assert!(hint.contains("the builds in between"), "{hint}");
+    }
+
+    /// The earlier revisions are published dates too, older than the
+    /// current one, and matched exactly.
+    #[test]
+    fn the_earlier_versions_precede_the_current_one_and_match_exactly() {
+        assert_eq!(EARLIER_VERSIONS, ["2026-09-17", "2026-10-01"]);
         assert!(
-            hint.contains(&format!("imports format '{FORMAT_VERSION}' only")),
-            "{hint}"
+            EARLIER_VERSIONS
+                .iter()
+                .all(|version| *version < FORMAT_VERSION)
         );
+        assert!(is_earlier_version("2026-10-01"));
+        assert!(is_earlier_version("2026-09-17"));
+        assert!(!is_earlier_version(FORMAT_VERSION));
+        assert!(!is_earlier_version("2026-10-01 "));
+        assert!(!is_earlier_version("2026-08-01"));
     }
 
     #[test]

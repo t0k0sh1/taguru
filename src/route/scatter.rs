@@ -131,6 +131,14 @@ pub(super) fn gather(
         match outcome {
             Ok(answer) if answer.status.is_success() => answers.push((shard, answer.body)),
             Ok(answer) => {
+                // The cached owner refusing an id it was sent (moved,
+                // deleted out from under the router): forget what this
+                // shard was trusted with, so the next search re-probes.
+                if forgets_owner(answer.status, false, &Method::POST) {
+                    for id in scatter.per_shard.get(&shard).into_iter().flatten() {
+                        map.owners.forget(id);
+                    }
+                }
                 let code = serde_json::from_slice::<Value>(&answer.body)
                     .ok()
                     .and_then(|body| body.get("code").and_then(Value::as_str).map(str::to_string));
@@ -142,11 +150,21 @@ pub(super) fn gather(
                     .unwrap_or(usize::MAX);
                 aborts.push((abort_rank(code.as_deref()), first_direct, shard, answer));
             }
-            Err(error) => unreached.push(Unreached {
-                shard: map.url(shard).to_string(),
-                contexts: scatter.per_shard.get(&shard).cloned().unwrap_or_default(),
-                error,
-            }),
+            Err(error) => {
+                // An owner the router cannot reach may never come back
+                // with these ids (a move finished elsewhere while it was
+                // down): forget them, so the next search re-probes
+                // instead of labeling them unreached for good.
+                let context_ids = scatter.per_shard.get(&shard).cloned().unwrap_or_default();
+                for id in &context_ids {
+                    map.owners.forget(id);
+                }
+                unreached.push(Unreached {
+                    shard: map.url(shard).to_string(),
+                    context_ids,
+                    error,
+                });
+            }
         }
     }
     if let Some((_, _, _, answer)) = aborts

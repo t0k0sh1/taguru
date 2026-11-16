@@ -36,7 +36,7 @@ pub(super) async fn broadcast_flush(
             Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
-                contexts: Vec::new(),
+                context_ids: Vec::new(),
                 error,
             }),
         }
@@ -87,7 +87,7 @@ pub(super) async fn broadcast_maintenance(
             Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
-                contexts: Vec::new(),
+                context_ids: Vec::new(),
                 error,
             }),
         }

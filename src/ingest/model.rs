@@ -1,9 +1,11 @@
 //! The batch data model and the JSONL stream parser: the `Batch`/
 //! `Stream` shapes [`super::rejection::apply_batch`] and
 //! [`super::rejection::preview_batch`] act on, plus every line shape
-//! (`taguru_batch` header, association, alias, passage, question,
+//! (`source` header, association, alias, passage, question,
 //! section, locator, `group`, `schema`) `parse_stream`
-//! reads.
+//! reads. The v0.9.7 release's record lines (`taguru_batch`,
+//! `taguru_schema`, `taguru_group`) are read by [`super::legacy`],
+//! dispatched from this file's one stream loop (ADR 0057).
 
 use super::*;
 
@@ -25,6 +27,18 @@ pub(crate) struct Stream {
     pub(crate) schemas: Vec<(String, schema::InstalledSchema)>,
     /// Each record whole, under its own id (#996).
     pub(crate) groups: Vec<StoredGroup>,
+}
+
+/// What [`parse_any_stream`] read. A file is one format or the other,
+/// never both: the first stream-level record decides, and a record of
+/// the other format later in the same file is refused (ADR 0057).
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum ParsedStream {
+    Current(Stream),
+    /// A v0.9.7 export stream, still addressed by display names —
+    /// [`super::legacy::resolve_legacy`] turns it into a [`Stream`]
+    /// against the receiving instance's registry.
+    Legacy(super::legacy::LegacyStream),
 }
 
 /// The header's create block, parsed: the display name the `context`
@@ -222,9 +236,16 @@ impl Batch {
     }
 
     pub(super) fn describe(&self) -> String {
+        self.describe_as(&self.context_id)
+    }
+
+    /// [`Self::describe`] naming the `context` as `context` — a v0.9.7
+    /// batch's dry-run line names it by the name its header carried,
+    /// since no id is settled until the import runs (ADR 0057).
+    pub(super) fn describe_as(&self, context: &str) -> String {
         format!(
             "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}{}",
-            self.context_id,
+            context,
             self.source,
             self.associations.len(),
             self.concepts.len() + self.labels.len(),
@@ -513,23 +534,80 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
         .expect("parse_stream refuses empty streams"))
 }
 
-/// Parses a batch stream: one batch, or several concatenated — the
-/// shape `taguru export` renders — with any `group` records
-/// riding alongside. Every `taguru_batch` header line closes the batch
-/// before it and opens the next; a `group` line closes it too
-/// and stands alone, so an op line after one needs a fresh header.
-/// Line numbers in errors count from the stream's first line. Two
-/// batches claiming one (`context`, source) pair — or two records
-/// claiming one `group` — refuse the whole stream, within a stream
-/// exactly as across import's files: one batch owns one source's
-/// truth, one record one `group`'s.
-pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
+/// Parses a batch stream in the current format: one batch, or several
+/// concatenated — the shape `taguru export` renders — with any `group`
+/// records riding alongside. See [`parse_any_stream`] for the line
+/// rules. A v0.9.7 export stream is refused here by what it is: only
+/// the two entrances that resolve names against a registry
+/// (`taguru import` offline and `POST /import`) read one (ADR 0057).
+pub(crate) fn parse_stream(reader: impl BufRead) -> Result<Stream, String> {
+    match parse_any_stream(reader)? {
+        ParsedStream::Current(stream) => Ok(stream),
+        ParsedStream::Legacy(_) => Err(super::legacy::legacy_elsewhere_message()),
+    }
+}
+
+/// What a stream-level record is, whichever format spells it.
+#[derive(Clone, Copy)]
+pub(super) enum RecordKind {
+    Header,
+    Schema,
+    Group,
+}
+
+/// Which format a stream-level record is in (ADR 0057).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Current,
+    Legacy,
+}
+
+impl Dialect {
+    fn describe(self) -> &'static str {
+        match self {
+            Dialect::Current => "current-format (`type`)",
+            Dialect::Legacy => "v0.9.7 (`taguru_batch`/`taguru_schema`/`taguru_group`)",
+        }
+    }
+}
+
+/// Classifies a line as a stream-level record, or `None` for an
+/// operation line (or anything else, which [`parse_op`] refuses).
+fn classify(value: &serde_json::Value) -> Option<(Dialect, RecordKind)> {
+    match crate::format::record_type(value) {
+        Some("source") => Some((Dialect::Current, RecordKind::Header)),
+        Some("schema") => Some((Dialect::Current, RecordKind::Schema)),
+        Some("group") => Some((Dialect::Current, RecordKind::Group)),
+        _ => super::legacy::legacy_record_kind(value).map(|kind| (Dialect::Legacy, kind)),
+    }
+}
+
+/// Parses a batch stream in either format. Every header line closes
+/// the batch before it and opens the next; a `group` or schema line
+/// closes it too and stands alone, so an op line after one needs a
+/// fresh header. Line numbers in errors count from the stream's first
+/// line. Two batches claiming one (`context`, source) pair — or two
+/// records claiming one `group` — refuse the whole stream, within a
+/// stream exactly as across import's files: one batch owns one
+/// source's truth, one record one `group`'s. The first stream-level
+/// record decides the format; a record of the other one later in the
+/// same file is refused, so a file never half-reads as each.
+pub(crate) fn parse_any_stream(mut reader: impl BufRead) -> Result<ParsedStream, String> {
     let mut batches: Vec<Batch> = Vec::new();
     let mut schemas: Vec<(String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<StoredGroup> = Vec::new();
+    // A v0.9.7 stream's batches keep their header's context NAME here,
+    // index for index with `batches` (headers open batches in the same
+    // order they finish), and its group records name everything.
+    let mut legacy_names: Vec<String> = Vec::new();
+    let mut legacy_groups: Vec<super::legacy::LegacyGroup> = Vec::new();
+    // The format the first stream-level record set, and its line.
+    let mut dialect: Option<(Dialect, usize)> = None;
     let mut current: Option<Batch> = None;
     // Each claim → the line that made it (#863): a duplicate names the
-    // earlier line, not just "an earlier batch".
+    // earlier line, not just "an earlier batch". Keyed by the context's
+    // id — or, in a v0.9.7 stream, by its name; one file is one format,
+    // so the two keys never share a map.
     let mut owners: HashMap<(String, String), usize> = HashMap::new();
     let mut schema_owners: HashMap<String, usize> = HashMap::new();
     let mut group_owners: HashMap<String, usize> = HashMap::new();
@@ -585,54 +663,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         }
         let value: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("line {number}: not JSON: {error}"))?;
-        let record_type = crate::format::record_type(&value);
-        let is_header = record_type == Some("source");
-        let is_schema = record_type == Some("schema");
-        let is_group = record_type == Some("group");
-        if is_header || is_schema || is_group {
-            // Any stream-level record closes the batch before it — one
-            // boundary step, however many marker kinds exist.
-            if let Some(finished) = current.take() {
-                batches.push(finish_batch(finished)?);
-                question_counts.clear();
-                seen_questions.clear();
-            }
-        }
-        if is_header {
-            let batch = parse_header(value, number)?;
-            if let Some(earlier) = owners.get(&(batch.context_id.clone(), batch.source.clone())) {
-                return Err(format!(
-                    "line {number}: source '{}' in context '{}' is already stated by \
-                     an earlier source of this stream, at line {earlier} — a source's truth is \
-                     stated once, by one file",
-                    batch.source, batch.context_id
-                ));
-            }
-            owners.insert((batch.context_id.clone(), batch.source.clone()), number);
-            current = Some(batch);
-        } else if is_schema {
-            let (context, installed) = parse_schema(value, number)?;
-            if let Some(earlier) = schema_owners.get(&context) {
-                return Err(format!(
-                    "line {number}: context '{context}' schema is already stated by an \
-                     earlier record of this stream, at line {earlier} — one record owns one \
-                     context's schema"
-                ));
-            }
-            schema_owners.insert(context.clone(), number);
-            schemas.push((context, installed));
-        } else if is_group {
-            let record = parse_group(value, number)?;
-            if let Some(earlier) = group_owners.get(&record.id) {
-                return Err(format!(
-                    "line {number}: group '{}' is already stated by an earlier record \
-                     of this stream, at line {earlier} — one record owns one group's truth",
-                    record.id
-                ));
-            }
-            group_owners.insert(record.id.clone(), number);
-            groups.push(record);
-        } else {
+        let Some((spelling, kind)) = classify(&value) else {
             match &mut current {
                 None => {
                     return Err(format!(
@@ -648,13 +679,99 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
                     number,
                 )?,
             }
+            continue;
+        };
+        match dialect {
+            None => dialect = Some((spelling, number)),
+            Some((began, first)) if began != spelling => {
+                return Err(format!(
+                    "line {number}: a {} record in a file whose line {first} began a {} \
+                     stream — a v0.9.7 export and a current-format stream may not be mixed in \
+                     one file; import them as separate files",
+                    spelling.describe(),
+                    began.describe()
+                ));
+            }
+            Some(_) => {}
+        }
+        // Any stream-level record closes the batch before it — one
+        // boundary step, however many marker kinds exist.
+        if let Some(finished) = current.take() {
+            batches.push(finish_batch(finished)?);
+            question_counts.clear();
+            seen_questions.clear();
+        }
+        match kind {
+            RecordKind::Header => {
+                let (key, batch) = match spelling {
+                    Dialect::Current => {
+                        let batch = parse_header(value, number)?;
+                        (batch.context_id.clone(), batch)
+                    }
+                    Dialect::Legacy => {
+                        let (name, batch) = super::legacy::parse_header(value, number)?;
+                        legacy_names.push(name.clone());
+                        (name, batch)
+                    }
+                };
+                if let Some(earlier) = owners.get(&(key.clone(), batch.source.clone())) {
+                    return Err(format!(
+                        "line {number}: source '{}' in context '{key}' is already stated by \
+                         an earlier source of this stream, at line {earlier} — a source's \
+                         truth is stated once, by one file",
+                        batch.source
+                    ));
+                }
+                owners.insert((key, batch.source.clone()), number);
+                current = Some(batch);
+            }
+            RecordKind::Schema => {
+                let (context, installed) = match spelling {
+                    Dialect::Current => parse_schema(value, number)?,
+                    Dialect::Legacy => super::legacy::parse_schema(value, number)?,
+                };
+                if let Some(earlier) = schema_owners.get(&context) {
+                    return Err(format!(
+                        "line {number}: context '{context}' schema is already stated by an \
+                         earlier record of this stream, at line {earlier} — one record owns \
+                         one context's schema"
+                    ));
+                }
+                schema_owners.insert(context.clone(), number);
+                schemas.push((context, installed));
+            }
+            RecordKind::Group => {
+                // A current record is keyed by its id, a v0.9.7 one by
+                // its name — each format's identity for a `group`.
+                let key = match spelling {
+                    Dialect::Current => {
+                        let record = parse_group(value, number)?;
+                        let key = record.id.clone();
+                        groups.push(record);
+                        key
+                    }
+                    Dialect::Legacy => {
+                        let record = super::legacy::parse_group(value, number)?;
+                        let key = record.name.clone();
+                        legacy_groups.push(record);
+                        key
+                    }
+                };
+                if let Some(earlier) = group_owners.get(&key) {
+                    return Err(format!(
+                        "line {number}: group '{key}' is already stated by an earlier record \
+                         of this stream, at line {earlier} — one record owns one group's truth"
+                    ));
+                }
+                group_owners.insert(key, number);
+            }
         }
     }
     match current.take() {
         Some(finished) => batches.push(finish_batch(finished)?),
         // A stream of schema or group records alone is a legitimate
         // restore; a stream of nothing is a mistake.
-        None if batches.is_empty() && schemas.is_empty() && groups.is_empty() => {
+        None if dialect.is_none() => {
             return Err(
                 "empty file: expected a source file header, schema record, or group record line"
                     .to_string(),
@@ -662,15 +779,22 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         }
         None => {}
     }
-    Ok(Stream {
-        batches,
-        schemas,
-        groups,
+    Ok(match dialect {
+        Some((Dialect::Legacy, _)) => ParsedStream::Legacy(super::legacy::LegacyStream {
+            batches: legacy_names.into_iter().zip(batches).collect(),
+            schemas,
+            groups: legacy_groups,
+        }),
+        _ => ParsedStream::Current(Stream {
+            batches,
+            schemas,
+            groups,
+        }),
     })
 }
 
 /// Byte ranges of each batch in a stream [`parse_stream`] already
-/// validated: a batch runs from its `taguru_batch` header line to the
+/// validated: a batch runs from its `source` header line to the
 /// next stream-level record (header, `schema`, or
 /// `group` line) or EOF. Schema- and `group`-record bytes belong
 /// to no batch — they are re-rendered from the parsed records instead
@@ -788,34 +912,68 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
             MAX_DESCRIPTION_BYTES,
         )?;
     }
-    Ok(Batch {
-        context_id: header.context_id,
-        source: header.id,
-        create: header.create.map(|block| CreateSpec {
+    Ok(Batch::opened(
+        header.context_id,
+        header.id,
+        header.create.map(|block| CreateSpec {
             name: block.name,
-            meta: ContextMeta {
-                description: block.description,
-                pinned: block.pinned,
-                dice_floor: block.dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
-                semantic_floor: block.semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
-            },
+            meta: create_meta(
+                block.description,
+                block.pinned,
+                block.dice_floor,
+                block.semantic_floor,
+            ),
         }),
-        passage: None,
-        questions: Vec::new(),
-        sections: Vec::new(),
-        locators: Vec::new(),
-        stored_at: None,
-        date: None,
-        tags: Vec::new(),
-        associations: Vec::new(),
-        concepts: BTreeMap::new(),
-        labels: BTreeMap::new(),
-        header_line: number,
-        first_question_line: None,
-        first_section_line: None,
-        first_locator_line: None,
-        first_paragraph_line: None,
-    })
+        number,
+    ))
+}
+
+/// A create block's config fields as the meta a new `context` starts
+/// with, floors clamped to `[0, 1]`. Shared by the current header and
+/// the v0.9.7 one, whose create blocks carry the same four fields.
+pub(super) fn create_meta(
+    description: String,
+    pinned: bool,
+    dice_floor: Option<f64>,
+    semantic_floor: Option<f32>,
+) -> ContextMeta {
+    ContextMeta {
+        description,
+        pinned,
+        dice_floor: dice_floor.map(|floor| floor.clamp(0.0, 1.0)),
+        semantic_floor: semantic_floor.map(|floor| floor.clamp(0.0, 1.0)),
+    }
+}
+
+impl Batch {
+    /// The batch a header at line `number` opens: no op lines yet.
+    pub(super) fn opened(
+        context_id: String,
+        source: String,
+        create: Option<CreateSpec>,
+        number: usize,
+    ) -> Batch {
+        Batch {
+            context_id,
+            source,
+            create,
+            passage: None,
+            questions: Vec::new(),
+            sections: Vec::new(),
+            locators: Vec::new(),
+            stored_at: None,
+            date: None,
+            tags: Vec::new(),
+            associations: Vec::new(),
+            concepts: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            header_line: number,
+            first_question_line: None,
+            first_section_line: None,
+            first_locator_line: None,
+            first_paragraph_line: None,
+        }
+    }
 }
 
 /// Classifies an op line by its distinguishing key, then parses the
@@ -981,7 +1139,7 @@ fn parse_op(
     Ok(())
 }
 
-fn check_size(number: usize, field: &str, text: &str, cap: usize) -> Result<(), String> {
+pub(super) fn check_size(number: usize, field: &str, text: &str, cap: usize) -> Result<(), String> {
     if text.len() > cap {
         return Err(format!(
             "line {number}: {field} of {} bytes exceeds the {cap}-byte cap",
@@ -1038,7 +1196,7 @@ fn check_group_id_in(number: usize, field: &str, value: &str) -> Result<(), Stri
 /// Companion to `check_size`, at the other end of the range: an empty
 /// subject/label/object is not a degenerate name, it is no name — see
 /// `api::empty`, which guards the same triple at the HTTP boundary.
-fn check_nonempty(number: usize, field: &str, text: &str) -> Result<(), String> {
+pub(super) fn check_nonempty(number: usize, field: &str, text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Err(format!("line {number}: {field} must not be empty"));
     }

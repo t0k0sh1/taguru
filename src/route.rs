@@ -2,14 +2,17 @@
 //! a stateless scatter-gather router over sharded
 //! instances (issue #130) — the write-scaling leg beside the replica
 //! pool's read scaling. One URL serves the whole HTTP surface over a
-//! static `context`→shard map; `groups` and multi-`context` search span
-//! shards with the exact single-instance merge semantics.
+//! static `context`-name→shard map; `groups` and multi-`context` search
+//! span shards with the exact single-instance merge semantics.
 //!
 //! **What the router is.** A mode of the same binary with no data
 //! directory, no lock, and no durable state of any kind — run as many
 //! as the load balancer wants. Config is one file (`TAGURU_ROUTE_MAP`):
-//! `context = shard-url` lines plus an optional `* = shard-url`
-//! fallback for `contexts` the map does not name. The map hot-reloads
+//! `name = shard-url` lines plus an optional `* = shard-url`
+//! fallback for names the map does not list. The map decides where NEW
+//! `contexts` land — by the display name a `POST /contexts` body or an
+//! import header's `create` block carries; it says nothing about a
+//! `context` that already exists. The map hot-reloads
 //! (issue #515) exactly like the keyring: SIGHUP, or the map file's
 //! own content-digest watch (~5s), swaps it at runtime — a broken
 //! edit is refused whole and the old map keeps serving; requests
@@ -17,24 +20,41 @@
 //! Moving a `context` between shards, in order: quiesce its writes,
 //! `taguru export` it, DELETE it through the router (the old shard
 //! drops it — and sweeps it from its `group` projections), edit the
-//! map, then re-import through the router (which now routes it to
-//! the new shard). The delete must precede the re-import (a copy
-//! left on the old shard keeps answering that shard's slice of every
-//! `group` fan-out — duplicate hits, not just a stale listing), and
-//! EVERY router must have reloaded first too: one still holding the
-//! old map would route the re-import back to the old shard.
+//! map so its name routes to the new shard, then re-import through
+//! the router (the export's `create` block now routes it there). The
+//! delete must precede the re-import (a copy left on the old shard
+//! keeps answering that shard's slice of every `group` fan-out —
+//! duplicate hits, not just a stale listing — and makes the id a
+//! mid-move stray every routed verb refuses), and EVERY router must
+//! have reloaded first too: one still holding the old map would route
+//! the re-import back to the old shard.
 //!
-//! **Routing.** `context`-scoped verbs proxy verbatim (streamed both
-//! ways) to the owning shard, so their responses — including error
-//! shapes, 404s, and exports — are the shard's own bytes. `/import`
-//! splits the batch stream by each batch's `context` header, validates
-//! the WHOLE stream first with the same parser the shard runs, and
-//! dry-run-preflights every chunk so a stream the single instance
-//! would refuse whole is refused whole here too, with nothing applied.
+//! **Routing.** Paths and bodies name `contexts` by id (#964), which
+//! the name-keyed map cannot answer, so the owner of an id is asked of
+//! the shards: one `GET /contexts/{id}` per shard, with the caller's
+//! own credentials ([`proxy::locate_owner`]; a single-shard map skips
+//! it). Each probe is a request every shard's rate limiter charges to
+//! the caller's key, so the verdict is cached per map snapshot (filled
+//! by a probe or by a router create, forgotten on the owner's 404/409,
+//! on a router DELETE, and with every reload): a steady-state call
+//! costs the owner one request, as on a single instance, and only the
+//! first touch of an id costs one probe per shard. `group` writes and
+//! `/import` always probe ([`proxy::probe_owner`]) — they place data
+//! by the verdict, and a stale one would misplace it. `context`-scoped
+//! verbs proxy verbatim (streamed both ways) to the owning shard, so
+//! their responses — including error shapes, 404s, and exports — are
+//! the shard's own bytes. `/import` splits the batch stream by each
+//! batch's `context_id` (the shard holding the id, else the shard the
+//! first batch's `create.name` routes to), validates the WHOLE stream
+//! first with the same parser the shard runs, and dry-run-preflights
+//! every chunk so a stream the single instance would refuse whole is
+//! refused whole here too, with nothing applied. A v0.9.7 stream is
+//! refused outright: its conversion mints ids on the instance that
+//! receives it, so no two shards would agree on them.
 //!
 //! **Scatter-gather.** `POST /recall`, `/query`, and `/sources/search`
-//! fan out to the shards owning the named `contexts` (all shards when
-//! `groups` are named) and merge exactly as one instance merges its own
+//! fan out to the shards owning the named `context_ids` (all shards
+//! when `group_ids` are named) and merge exactly as one instance merges its own
 //! `contexts`: the graph verbs by [`crate::api::cross_rank`] (one weight
 //! scale, `context`/subject/label/object tiebreak) with `total` summed;
 //! the passage verb by per-`context` rank interleaving. Cursors need no
@@ -42,8 +62,9 @@
 //! match itself, not on any per-instance position, so the router
 //! forwards it verbatim and every shard resumes past the same point.
 //!
-//! **Groups.** Every `group` exists on every shard; each shard's copy
-//! holds the member `contexts` the map assigns to that shard, while
+//! **Groups.** Every `group` exists on every shard under one id; each
+//! shard's copy holds the member `contexts` that live on that shard
+//! (placed by probing, as above), while
 //! child-`group` edges are broadcast whole — identical nesting structure
 //! everywhere, so cycle and depth verdicts cannot differ, and a
 //! `group`'s transitive closure on one shard is exactly the global
@@ -56,7 +77,7 @@
 //! request, exactly as one failing `context` fails a single instance's
 //! cross-`context` search. A shard that cannot be REACHED (connect,
 //! timeout, mid-body) degrades the fan-out verbs to labeled partial
-//! results: the envelope gains `"unreached": [{shard, contexts,
+//! results: the envelope gains `"unreached": [{shard, context_ids,
 //! error}]`, omitted entirely when every shard answered — the same
 //! field reaches MCP tool results, whose text is this JSON. Group reads
 //! and writes never serve partials (a partially-unioned group would
@@ -80,16 +101,18 @@
 //!   refusals before anything lands.
 //! - Multi-shard import refusals that survive preflight (mid-apply IO)
 //!   number batches within the failing chunk, not the whole stream.
-//! - A context-scoped key naming an UNMAPPED context in a cross-search gets
-//!   `no_context` from the map's own truth; a single instance checks
-//!   the scope first. The router cannot evaluate grants (it holds no
-//!   keyring), and what the earlier 404 reveals is deployment
-//!   topology, not data.
 //! - `/metrics` is router-shaped (`taguru_router_*`), not server-shaped.
-//! - Renaming a context through the router works but leaves the map
-//!   pointing at the old name until the operator edits it.
+//! - An id held by two shards (a mid-move stray) is refused with 409
+//!   on every routed verb, DELETE included; the stray is deleted on
+//!   its shard directly. A cached owner can mask a stray that appears
+//!   later, until that owner answers 404/409 or the map reloads.
+//! - A cached owner that lost the id outside this router (deleted on
+//!   the shard directly, or through another router) answers that one
+//!   call with its own 404; the router forgets it and re-probes next.
+//! - Renaming a context through the router works, but the map keeps
+//!   placing NEW contexts by the names it lists — it never moves one.
 //! - `/contexts/{id}/promote` (ADR 0018) proxies whole to the shard
-//!   owning the scratch `{name}`, so a destination mapped to another
+//!   owning the scratch `{id}`, so a destination held by another
 //!   shard refuses there (`no_context`) — promotion through the
 //!   router requires the pair on one shard. Cross-shard moves stay
 //!   what they were: export, delete, remap, re-import.
@@ -150,7 +173,9 @@ use groups::{
 };
 use import::route_import;
 use maintenance::{broadcast_flush, broadcast_maintenance};
-use proxy::{Located, locate_owner, proxy_context_root, proxy_context_sub};
+use proxy::{
+    Located, forgets_owner, locate_owner, probe_owner, proxy_context_root, proxy_context_sub,
+};
 #[cfg(test)]
 use scatter::abort_rank;
 use scatter::{gather, plan_scatter, shard_body};
@@ -186,13 +211,14 @@ struct RouterResponse<T: Serialize> {
     unreached: Vec<Unreached>,
 }
 
-/// One unreachable shard in a fan-out: its URL, the directly-named
-/// `contexts` that routed to it (`group` members it may also have held are
-/// not enumerable while it is down), and the transport error.
+/// One unreachable shard in a fan-out: its URL, the ids of the
+/// directly-named `contexts` that routed to it (`group` members it may
+/// also have held are not enumerable while it is down), and the
+/// transport error.
 #[derive(Serialize, Clone)]
 struct Unreached {
     shard: String,
-    contexts: Vec<String>,
+    context_ids: Vec<String>,
     error: String,
 }
 
@@ -246,7 +272,7 @@ fn merge_fate(
         Err(error) => Err(Box::new(unreachable_refusal(
             &[Unreached {
                 shard: map.url(shard).to_string(),
-                contexts: Vec::new(),
+                context_ids: Vec::new(),
                 error,
             }],
             started_at,

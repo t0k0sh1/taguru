@@ -2228,17 +2228,27 @@ fn the_oversized_unit_message_names_unit_size_and_budget() {
     );
 }
 
-/// ADR 0042 §3.5: the spellings earlier releases wrote are not read —
-/// no alias, no fallback. A `taguru_batch` header is just a line with no
-/// `type`, so it is refused as "not a header"; the old `group` / `schema`
-/// version keys name no record type either, so with no source open they
-/// are refused the same way rather than applied as something else.
+/// ADR 0042 §3.5: the spellings earlier releases wrote are not read as
+/// the current format — no alias, no fallback. The v0.9.7 release's
+/// `taguru_batch` / `taguru_group` records are migration input only
+/// (ADR 0057), so `parse_stream` refuses them by what they are, naming
+/// the entrances that read them; the bare `group` / `schema` version
+/// keys name no record type at all, so with no source open they are
+/// refused as "not a header" rather than applied as something else.
 #[test]
 fn the_pre_adr_0042_spellings_are_refused_not_read() {
     for old in [
         r#"{"taguru_batch": 1, "context": "c", "source": "s"}"#,
-        r#"{"group": 1, "name": "kura"}"#,
         r#"{"taguru_group": 1, "name": "kura"}"#,
+    ] {
+        let error = parse_stream(std::io::Cursor::new(format!("{old}\n"))).unwrap_err();
+        assert!(
+            error.contains("v0.9.7 export stream") && error.contains("#upgrading-from-0-9-7"),
+            "{old}: {error}"
+        );
+    }
+    for old in [
+        r#"{"group": 1, "name": "kura"}"#,
         r#"{"schema": 1, "context": "c", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#,
     ] {
         let error = parse_stream(std::io::Cursor::new(format!("{old}\n"))).unwrap_err();

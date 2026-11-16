@@ -201,15 +201,15 @@ services:
     <h2>Pin every layer to the same minor version</h2>
     <p class="section-sub">Server, SDK, and <code>langchain-taguru</code> ship from one repository in lockstep — read all three before trusting a shape.</p>
     <pre><code><span class="c"># the running server answers its own pin</span>
-curl -s localhost:8248/version   <span class="c"># {"server":"0.9.7","http_contract":{"current":1,"supported":[1]},"mcp_contract":{"current":1,"supported":[1]},...}</span>
-grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.9.7 — the deployed pin</span>
+curl -s localhost:8248/version   <span class="c"># {"server":"0.10.0","http_contract":{"current":2,"supported":[2]},...,"record_formats":["2026-11-13"],...}</span>
+grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.10.0 — the deployed pin</span>
 
 <span class="c"># pin the Python side to the matching minor</span>
-pip install <span class="s">'taguru==0.9.*'</span> <span class="s">'langchain-taguru==0.9.*'</span>
+pip install <span class="s">'taguru==0.10.*'</span> <span class="s">'langchain-taguru==0.10.*'</span>
 
 <span class="c"># fail loudly at startup rather than silently on the first odd response shape</span>
 python -c <span class="s">"import taguru, taguru_langchain as tl; \
-assert taguru.__version__.startswith('0.9.') and tl.__version__.startswith('0.9.'); \
+assert taguru.__version__.startswith('0.10.') and tl.__version__.startswith('0.10.'); \
 print(taguru.__version__, tl.__version__)"</span></code></pre>
     <p>
       <code>GET /version</code> also names the wire-contract versions
@@ -217,7 +217,7 @@ print(taguru.__version__, tl.__version__)"</span></code></pre>
       and it answers without auth — the first probe when versions are in doubt. The same build
       identity rides <code>/metrics</code> too:
       <code>curl -s localhost:8248/metrics | grep taguru_build_info</code>. Full triage for a
-      mismatch (a 0.8.x client against a 0.9.x server, or the reverse) is
+      mismatch (a 0.9.x client against a 0.10.x server, or the reverse) is
       <a href="troubleshooting.html#compatibility">Troubleshooting — version skew</a>.
     </p>
   </section>
@@ -427,7 +427,7 @@ print(chain.invoke(question))</code></pre>
       The trace back to the original PDF is one call away, and it reaches the paragraph, not
       just the section:
     </p>
-    <pre><code>citation = client.context(<span class="s">"section/tanaka2024/3"</span>).cite_passage(<span class="s">"tanaka2024/3"</span>, <span class="nu">0</span>)
+    <pre><code>citation = client.context(ids_by_name[<span class="s">"section/tanaka2024/3"</span>]).cite_passage(<span class="s">"tanaka2024/3"</span>, <span class="nu">0</span>)
 print(citation.text)   <span class="c"># the verbatim paragraph the answer's claim came from</span></code></pre>
   </section>
 

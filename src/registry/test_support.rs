@@ -179,3 +179,37 @@ impl EmbeddingProvider for SlowEmbeddings {
 pub(crate) fn test_id(name: &str) -> String {
     crate::registry::derived_context_id(name)
 }
+
+/// The locking contract's observable half: runs `call` on another
+/// thread while THIS thread holds `entry`'s write lock (a cold load or
+/// compaction stand-in), then reports whether the registry lock was
+/// still free for a writer while `call` was parked on that entry lock
+/// — it is not if `call` took the entry lock under a registry guard.
+/// Hands back `call`'s result once the entry lock is released.
+pub(crate) fn registry_free_while_entry_locked<T: Send + 'static>(
+    state: &AppState,
+    entry: &Entry,
+    call: impl FnOnce(&AppState) -> T + Send + 'static,
+) -> (bool, T) {
+    let held = entry.inner.write();
+    let worker = {
+        let state = state.clone();
+        std::thread::spawn(move || call(&state))
+    };
+    // Long enough for the worker to reach — and park on — the entry
+    // lock; a writer that still gets the registry after that proves
+    // the worker holds no registry guard while it waits.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let free = state
+        .0
+        .registry
+        .try_write_for(std::time::Duration::from_millis(500))
+        .is_some();
+    drop(held);
+    (
+        free,
+        worker
+            .join()
+            .expect("the call completes once the entry lock is released"),
+    )
+}

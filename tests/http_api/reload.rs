@@ -941,3 +941,90 @@ fn boot_refuses_a_grant_or_a_quota_keyed_by_a_display_name() {
     );
     assert_eq!(code, None, "a well-formed id must not refuse boot");
 }
+
+/// The pre-0.10.0 grants name, `TAGURU_KEY_SCOPES` (#959), refuses
+/// boot — set in the environment or in a `--config` file — rather
+/// than boot with no grant armed, every key it restricts admin on
+/// every context. The refusal names the replacement.
+#[test]
+fn boot_refuses_the_retired_grants_name_from_the_environment_or_a_config_file() {
+    let (code, stderr) = boot_refusal(
+        "boot-key-scopes-env",
+        &[
+            ("TAGURU_API_TOKENS", "ci:sekrit"),
+            ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
+        ],
+        Duration::from_secs(20),
+    );
+    assert!(code.is_some(), "{stderr}");
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("TAGURU_KEY_SCOPES is set"), "{stderr}");
+    assert!(stderr.contains("TAGURU_KEY_GRANTS"), "{stderr}");
+
+    let dir = scratch("boot-key-scopes-config");
+    let config = dir.join("taguru.env");
+    std::fs::write(
+        &config,
+        "TAGURU_API_TOKENS=ci:sekrit\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+    )
+    .unwrap();
+    let (code, stderr) = boot_refusal(
+        "boot-key-scopes-config-run",
+        &[("TAGURU_CONFIG", config.to_str().unwrap())],
+        Duration::from_secs(20),
+    );
+    assert!(code.is_some(), "{stderr}");
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("TAGURU_KEY_SCOPES is set"), "{stderr}");
+}
+
+/// A live reload whose file carries `TAGURU_KEY_SCOPES` is refused and
+/// the previous table — here a read-only grant — stays armed: applied,
+/// the file would arm no grant and the key would turn admin.
+#[test]
+fn a_reload_carrying_the_retired_grants_name_keeps_the_previous_table_armed() {
+    let dir = scratch("key-scopes");
+    let config = dir.join("taguru.env");
+    let stderr = dir.join("stderr.log");
+    std::fs::write(
+        &config,
+        "TAGURU_API_TOKENS=ci:sekrit-keep\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
+    )
+    .unwrap();
+    let server = Server::start_with_config(
+        "reload-key-scopes",
+        &config,
+        &stderr,
+        &[("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0")],
+    );
+    let refusals = || {
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .matches("keyring reload refused")
+            .count()
+    };
+
+    std::fs::write(
+        &config,
+        "TAGURU_API_TOKENS=ci:sekrit-keep\nTAGURU_KEY_SCOPES={\"ci\": \"read\"}\n",
+    )
+    .unwrap();
+    server.signal("-HUP");
+    eventually(Duration::from_secs(10), "the retired-name refusal", || {
+        refusals() >= 1
+    });
+    assert!(
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .contains("TAGURU_KEY_SCOPES is set"),
+        "the refusal says what is wrong"
+    );
+    // The read-only grant still binds: a write is refused.
+    let (status, body) = server.call_with_token(
+        "POST",
+        "/contexts",
+        Some(serde_json::json!({"name": "would-be-admin"})),
+        Some("sekrit-keep"),
+    );
+    assert_eq!(status, 403, "{body}");
+}

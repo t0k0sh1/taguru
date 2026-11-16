@@ -789,6 +789,9 @@ pub(super) fn quota_refusal_from_apply(
     ))
 }
 
+/// Serializes v0.9.7 `POST /import` bodies — see [`import_batch`].
+static LEGACY_IMPORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
 /// as `GET /contexts/{id}/export` renders — applied to the live
@@ -824,6 +827,16 @@ pub(super) fn quota_refusal_from_apply(
 /// stream is exact, never
 /// double-counted.
 ///
+/// A body in the v0.9.7 release's export format (`taguru_batch`
+/// headers naming contexts, name-addressed `taguru_schema` and
+/// `taguru_group` records) is migration input (ADR 0057): its names
+/// settle on ids against this instance's registry first — a name one
+/// standing `context`/`group` carries reuses its id, an absent one is
+/// minted, a name several carry refuses 409 `conflict` — and the body
+/// then runs as the current-format stream that makes. Under
+/// `?dry_run=true` the ids an absent name would get are minted for the
+/// preview only; the real import mints its own.
+///
 /// `?dry_run=true` reports the same `{batches: [...]}` shape without
 /// writing anything — parsing and scope checks still run in full, so a
 /// malformed or forbidden stream is refused exactly as it would be for
@@ -851,8 +864,48 @@ pub async fn import_batch(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let stream = match crate::ingest::parse_stream(&body[..]) {
-        Ok(stream) => stream,
+    // ADR 0057: a v0.9.7 body settles its names on ids against the
+    // registry it sees, and applies them later; two such bodies naming
+    // the same absent context would each mint an id for it. One at a
+    // time per process, so each resolves against what the one before
+    // it wrote (a current-format body carries its own ids and never
+    // waits here). The guard lives until the response is built.
+    let _legacy_turn = if crate::ingest::is_legacy_stream(&body) {
+        Some(LEGACY_IMPORTS.lock().await)
+    } else {
+        None
+    };
+    let stream = match crate::ingest::parse_any_stream(&body[..]) {
+        Ok(crate::ingest::ParsedStream::Current(stream)) => stream,
+        // ADR 0057: a v0.9.7 export stream names its contexts and
+        // groups; they settle on ids against this instance's registry
+        // here, before any grant check or write, so everything below
+        // judges and applies an ordinary current-format stream. A
+        // refusal (an ambiguous name, a name nothing creates) leaves
+        // the instance untouched.
+        Ok(crate::ingest::ParsedStream::Legacy(legacy)) => {
+            match crate::ingest::resolve_legacy(&state, vec![legacy]) {
+                Ok(mut streams) => streams.pop().expect("one stream in, one stream out"),
+                Err(refusal) => {
+                    let code = match &refusal {
+                        crate::ingest::LegacyRefusal::Ambiguous { .. }
+                        | crate::ingest::LegacyRefusal::DuplicateGroup(_) => ErrorCode::Conflict,
+                        crate::ingest::LegacyRefusal::NoContext { .. } => ErrorCode::NoContext,
+                        crate::ingest::LegacyRefusal::NoGroup { .. } => ErrorCode::NoGroup,
+                    };
+                    return validation_error(
+                        code,
+                        refusal.text(),
+                        RefusalDetail {
+                            integrity: Some("nothing_written"),
+                            retryable_after_correction: Some(true),
+                            ..Default::default()
+                        },
+                        started_at,
+                    );
+                }
+            }
+        }
         // Line-numbered, like the CLI's validation pass. Nothing in the
         // stream has been touched yet — a fixed-up resend is exact.
         Err(message) => {

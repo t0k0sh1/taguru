@@ -194,11 +194,24 @@ pub(crate) enum ScannedMeta {
     /// the family was copied or hand-edited. Refused — trusting
     /// either value would silently rebind the other.
     ForeignId(String),
+    /// The stem itself is not a canonical context id (ADR 0045), and
+    /// the sidecar has nothing sharper to say (it is missing, degraded,
+    /// or records that same non-id stem as its id). Every build since
+    /// ids names a family by a minted or derived UUID, so this is pre-id
+    /// data — typically a pre-id release's percent-encoded name whose
+    /// sidecar is gone, or one a crash mid-rename left under its
+    /// destination stem. Refused like [`ScannedMeta::PreId`]:
+    /// registering it would serve the encoding as identity, no
+    /// `/contexts/{id}` path could ever address it, and the first flush
+    /// would stamp `"id": <stem>` into a sidecar, laundering it into
+    /// the current format.
+    NotAnId,
     /// Missing, unreadable, or corrupt — the same lenient fallback
     /// [`read_meta_file`] serves (already logged there when it is a
     /// real degradation). The id and name fall back to the stem; for
-    /// the id that is even exact (the stem IS the id), for the name
-    /// it is a display fallback an operator can rename away.
+    /// the id that is even exact (the stem IS the id — checked
+    /// canonical, see [`ScannedMeta::NotAnId`]), for the name it is a
+    /// display fallback an operator can rename away.
     Degraded(MetaFile),
 }
 
@@ -206,21 +219,24 @@ impl ScannedMeta {
     /// The display name this classification yields for `stem`, with
     /// the same fallback the boot scan applies (the stem itself for a
     /// degraded sidecar, or one that records no name); `None` for the
-    /// two refused shapes, which have no honest name to report.
+    /// three refused shapes, which have no honest name to report.
     pub(crate) fn display_name(&self, stem: &str) -> Option<String> {
         match self {
             ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => {
                 Some(meta_file.name.clone().unwrap_or_else(|| stem.to_string()))
             }
-            ScannedMeta::PreId | ScannedMeta::ForeignId(_) => None,
+            ScannedMeta::PreId | ScannedMeta::ForeignId(_) | ScannedMeta::NotAnId => None,
         }
     }
 }
 
 /// [`read_meta_file`] plus the id-vs-stem classification above — the
-/// boot scan's one read of a candidate's sidecar.
+/// boot scan's one read of a candidate's sidecar. The stem's own shape
+/// is judged last, so a pre-id or copied sidecar keeps its sharper
+/// refusal and only the shapes that would otherwise register under a
+/// non-id stem become [`ScannedMeta::NotAnId`].
 pub(crate) fn read_scanned_meta(dir: &Path, stem: &str) -> ScannedMeta {
-    match fs::read(meta_path(dir, stem)) {
+    let scanned = match fs::read(meta_path(dir, stem)) {
         Ok(bytes) => match serde_json::from_slice::<MetaFile>(&bytes) {
             Ok(meta_file) => match meta_file.id.as_deref() {
                 Some(id) if id == stem => ScannedMeta::Current(meta_file),
@@ -239,6 +255,12 @@ pub(crate) fn read_scanned_meta(dir: &Path, stem: &str) -> ScannedMeta {
             tracing::warn!("sidecar for '{stem}' unreadable, falling back to defaults: {error}");
             ScannedMeta::Degraded(MetaFile::degraded())
         }
+    };
+    match scanned {
+        ScannedMeta::Current(_) | ScannedMeta::Degraded(_) if !is_context_id(stem) => {
+            ScannedMeta::NotAnId
+        }
+        scanned => scanned,
     }
 }
 
@@ -434,7 +456,7 @@ mod tests {
     fn a_missing_sidecar_scans_as_a_plain_zeroed_default() {
         let dir = scratch_dir("scanned-meta-missing");
         fs::create_dir_all(&dir).unwrap();
-        match read_scanned_meta(&dir, "never-written") {
+        match read_scanned_meta(&dir, &mint_context_id()) {
             ScannedMeta::Degraded(meta_file) => {
                 assert_eq!(
                     meta_file.revision.config, 0,
@@ -443,6 +465,62 @@ mod tests {
             }
             _ => panic!("a missing sidecar is the degraded-shape fallback"),
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A stem that is not a canonical context id is pre-id data
+    /// whatever its sidecar's state — missing, unreadable, corrupt, or
+    /// recording that same non-id stem — never a degraded or healthy
+    /// family that would register with the stem as its id. A pre-id or
+    /// foreign-id sidecar keeps its own, sharper classification.
+    #[test]
+    fn a_non_id_stem_scans_as_not_an_id_unless_the_sidecar_says_more() {
+        let dir = scratch_dir("scanned-meta-not-an-id");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(
+            read_scanned_meta(&dir, "sake"),
+            ScannedMeta::NotAnId
+        ));
+        fs::write(meta_path(&dir, "corrupt"), b"not json").unwrap();
+        assert!(matches!(
+            read_scanned_meta(&dir, "corrupt"),
+            ScannedMeta::NotAnId
+        ));
+        fs::write(
+            meta_path(&dir, "self-named"),
+            br#"{"id":"self-named","name":"sake"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_scanned_meta(&dir, "self-named"),
+            ScannedMeta::NotAnId
+        ));
+        // An uppercase spelling of a real UUID is still not the one
+        // canonical spelling a file family may sit under.
+        let id = mint_context_id();
+        assert!(matches!(
+            read_scanned_meta(&dir, &id.to_uppercase()),
+            ScannedMeta::NotAnId
+        ));
+        assert!(matches!(
+            read_scanned_meta(&dir, &id),
+            ScannedMeta::Degraded(_)
+        ));
+        fs::write(meta_path(&dir, "pre-id"), br#"{"name":"sake"}"#).unwrap();
+        assert!(matches!(
+            read_scanned_meta(&dir, "pre-id"),
+            ScannedMeta::PreId
+        ));
+        fs::write(
+            meta_path(&dir, "copied"),
+            format!(r#"{{"id":"{id}","name":"sake"}}"#),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_scanned_meta(&dir, "copied"),
+            ScannedMeta::ForeignId(recorded) if recorded == id
+        ));
+        assert_eq!(ScannedMeta::NotAnId.display_name("sake"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -455,9 +533,10 @@ mod tests {
         // something other than NotFound, deterministically (root and
         // CAP_DAC_OVERRIDE ignore permission bits; they cannot read a
         // directory as a file).
-        fs::create_dir_all(meta_path(&dir, "sake")).unwrap();
+        let stem = mint_context_id();
+        fs::create_dir_all(meta_path(&dir, &stem)).unwrap();
         let before = crate::clock::now_unix_secs();
-        match read_scanned_meta(&dir, "sake") {
+        match read_scanned_meta(&dir, &stem) {
             ScannedMeta::Degraded(meta_file) => {
                 let after = crate::clock::now_unix_secs();
                 assert!(

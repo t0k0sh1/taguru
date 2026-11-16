@@ -762,7 +762,11 @@ impl Hydrator {
     /// download. (Every caller's removal is unconditional once
     /// started — `AppState::delete` and the boot-time deletion sweep;
     /// renames stopped touching files when the stem became the id —
-    /// so the veto has no undo any more.)
+    /// so the veto has no undo any more.) A same-id recreate after the
+    /// veto (`AppState::create_if_absent`: an import header, a derived
+    /// id) needs none either: it writes its own local family, and a
+    /// vetoed stem never fetches again, so no bucket copy of the
+    /// deleted generation can land over the new one.
     pub(crate) fn veto(&self, stem: &str) {
         let mut inner = self.inner.lock();
         while matches!(inner.states.get(stem), Some(StemState::InFlight)) {
@@ -1372,6 +1376,19 @@ mod tests {
     use crate::ship::{ShipProgress, Shipper};
     use crate::wal::{self, WalOp};
 
+    /// The hand-laid fixture families' ids: canonical context ids, the
+    /// only stem shape a boot registers (ADR 0045). Their sidecars keep
+    /// the display names `ctx_a`, `ctx_b`, … the assertions read.
+    const CTX_A: &str = "00000000-0000-4000-8000-00000000000a";
+    const CTX_B: &str = "00000000-0000-4000-8000-00000000000b";
+    const CTX_C: &str = "00000000-0000-4000-8000-00000000000c";
+    const CTX_D: &str = "00000000-0000-4000-8000-00000000000d";
+
+    /// A fixture family's sidecar as a writer of this build lays it.
+    fn meta_json(stem: &str, name: &str, description: &str) -> String {
+        format!(r#"{{"id":"{stem}","name":"{name}","description":"{description}","pinned":false}}"#)
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("taguru-hydrate-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1451,7 +1468,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .files
-            .insert("sake.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+            .insert(format!("{CTX_A}.ctx"), ManifestFile { len: 1, crc: 1 });
 
         let hydrator = Arc::new(Hydrator::new(
             local_store(&bucket),
@@ -1473,13 +1490,13 @@ mod tests {
         )
         .unwrap();
 
-        // "sake" is registered cold from the manifest's own stem
+        // CTX_A is registered cold from the manifest's own stem
         // (boot's hydrator-registration loop), but the bucket never
         // actually shipped anything for it — the first passages touch
         // must fail hydrating rather than treat a missing local file
         // as "empty".
         let outcome = state
-            .source_effective_times(&state.id_of("sake"))
+            .source_effective_times(CTX_A)
             .expect("the manifest-registered stem must exist");
         assert!(
             outcome.is_err(),
@@ -1504,7 +1521,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .files
-            .insert("sake.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+            .insert(format!("{CTX_A}.ctx"), ManifestFile { len: 1, crc: 1 });
 
         let hydrator = Arc::new(Hydrator::new(
             local_store(&bucket),
@@ -1527,7 +1544,7 @@ mod tests {
         .unwrap();
 
         let error = state
-            .read_context(&state.id_of("sake"), |context| context.association_count())
+            .read_context(CTX_A, |context| context.association_count())
             .unwrap_err();
         assert!(
             matches!(error, crate::registry::AccessError::Load(_)),
@@ -1553,16 +1570,16 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .files
-            .insert("id-a.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+            .insert(format!("{CTX_A}.ctx"), ManifestFile { len: 1, crc: 1 });
         manifest
             .files
-            .insert("id-b.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+            .insert(format!("{CTX_B}.ctx"), ManifestFile { len: 1, crc: 1 });
         // The shared hydration pass normally lands every sidecar meta
-        // before registration; plant id-a's by hand. id-b has none —
+        // before registration; plant CTX_A's by hand. CTX_B has none —
         // the degraded posture — and must fall back to its stem.
         std::fs::write(
-            target.join("id-a.meta.json"),
-            br#"{"id":"id-a","name":"sake","description":"d","pinned":false}"#,
+            target.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "sake", "d"),
         )
         .unwrap();
 
@@ -1591,11 +1608,11 @@ mod tests {
             "the display name comes from the sidecar, never the stem"
         );
         assert!(
-            state.directory_entry("id-a").is_none(),
+            state.directory_entry(CTX_A).is_none(),
             "the stem is an id, not a name"
         );
         assert!(
-            state.directory_entry("id-b").is_some(),
+            state.directory_entry(CTX_B).is_some(),
             "a stem with no sidecar yet registers under the stem as a display fallback"
         );
         assert_eq!(state.context_count(), 2);
@@ -1621,13 +1638,18 @@ mod tests {
     async fn shipped_bucket(tag: &str, retire: bool) -> (PathBuf, PathBuf) {
         let bucket = scratch(&format!("{tag}-bucket"));
         let writer = scratch(&format!("{tag}-writer"));
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"d","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "d"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1661,13 +1683,18 @@ mod tests {
     async fn a_mismatch_against_a_moving_lineage_heals_through_a_manifest_reread() {
         let bucket = scratch("race-bucket");
         let writer = scratch("race-writer");
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v1").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"d","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "d"),
         )
         .unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            1,
+            &[associate("a")],
+        )
+        .unwrap();
         let state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
         let mut shipper = Shipper::claim(
             local_store(&bucket),
@@ -1690,19 +1717,24 @@ mod tests {
             .await
             .unwrap()
             .expect("cycle 1 wrote a manifest");
-        let stale_series = stale.lanes["ctx_a.wal.jsonl"].series;
+        let stale_series = stale.lanes[format!("{CTX_A}.wal.jsonl").as_str()].series;
 
         // Cycle 2: the image and meta are replaced, and the WAL's
         // series resets (the writer's flush truncated it) — every
         // extent the stale snapshot describes is now wrong.
-        std::fs::write(writer.join("ctx_a.ctx"), b"image-v2-and-longer").unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.ctx")), b"image-v2-and-longer").unwrap();
         std::fs::write(
-            writer.join("ctx_a.meta.json"),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"moved on","pinned":false}"#,
+            writer.join(format!("{CTX_A}.meta.json")),
+            meta_json(CTX_A, "ctx_a", "moved on"),
         )
         .unwrap();
-        std::fs::write(writer.join("ctx_a.wal.jsonl"), b"").unwrap();
-        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 9, &[associate("b")]).unwrap();
+        std::fs::write(writer.join(format!("{CTX_A}.wal.jsonl")), b"").unwrap();
+        wal::append_batch(
+            &writer.join(format!("{CTX_A}.wal.jsonl")),
+            9,
+            &[associate("b")],
+        )
+        .unwrap();
         shipper.cycle().await.unwrap();
         // The old series' segments age out of the bucket (a cleanup a
         // future shipper may run; simulated here) — the stale lane
@@ -1738,16 +1770,16 @@ mod tests {
             .await
             .expect("a moving lineage heals through the manifest re-read");
         assert_eq!(
-            std::fs::read(target.join("ctx_a.meta.json")).unwrap(),
-            br#"{"id":"ctx_a","name":"ctx_a","description":"moved on","pinned":false}"#
+            std::fs::read_to_string(target.join(format!("{CTX_A}.meta.json"))).unwrap(),
+            meta_json(CTX_A, "ctx_a", "moved on")
         );
         // First touch fetches the image and the lane: both stale.
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.ctx"))).unwrap(),
             b"image-v2-and-longer"
         );
-        let lane = std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap();
+        let lane = std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap();
         assert!(
             String::from_utf8_lossy(&lane).contains("\"b\""),
             "the healed lane carries cycle 2's records"
@@ -1787,7 +1819,7 @@ mod tests {
         let object_path = bucket
             .join(format!("gen-{:020}", 1))
             .join("files")
-            .join("ctx_a.meta.json");
+            .join(format!("{CTX_A}.meta.json"));
         assert!(object_path.is_file(), "the shipper published this object");
         let original = std::fs::read(&object_path).unwrap();
         std::fs::remove_file(&object_path).unwrap();
@@ -1817,7 +1849,7 @@ mod tests {
             .await
             .expect("a transiently-missing published object heals through the arbiter");
         assert_eq!(
-            std::fs::read(target.join("ctx_a.meta.json")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.meta.json"))).unwrap(),
             original
         );
 
@@ -1842,7 +1874,7 @@ mod tests {
         // The object rots in place; the manifest never moves.
         let meta = walk_files(&bucket)
             .into_iter()
-            .find(|path| path.ends_with("files/ctx_a.meta.json"))
+            .find(|path| path.ends_with(format!("files/{CTX_A}.meta.json")))
             .expect("the shipped meta object exists");
         std::fs::write(&meta, b"rotten").unwrap();
 
@@ -2053,9 +2085,10 @@ mod tests {
             .await
             .unwrap()
             .expect("generation 1 shipped a manifest");
+        let lane_name = format!("{CTX_A}.wal.jsonl");
         let lane = *manifest
             .lanes
-            .get("ctx_a.wal.jsonl")
+            .get(&lane_name)
             .expect("the family ships a wal lane");
 
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2074,7 +2107,7 @@ mod tests {
         );
 
         let error = hydrator
-            .fetch_lane_if_stale(&root, "ctx_a.wal.jsonl", lane)
+            .fetch_lane_if_stale(&root, &lane_name, lane)
             .await
             .expect_err("a permanent failure must surface, not heal");
         assert_eq!(
@@ -2188,9 +2221,10 @@ mod tests {
             .await
             .unwrap()
             .expect("generation 1 shipped a manifest");
+        let lane_name = format!("{CTX_A}.wal.jsonl");
         let lane = *manifest
             .lanes
-            .get("ctx_a.wal.jsonl")
+            .get(&lane_name)
             .expect("the family ships a wal lane");
 
         let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2199,7 +2233,7 @@ mod tests {
             gets: Arc::clone(&gets),
         });
         let target = scratch("lane-not-a-file-target");
-        std::fs::create_dir(target.join("ctx_a.wal.jsonl")).unwrap();
+        std::fs::create_dir(target.join(&lane_name)).unwrap();
         let hydrator = Hydrator::new(
             store,
             1,
@@ -2209,7 +2243,7 @@ mod tests {
             LanePolicy::ShippedExact,
         );
         let error = hydrator
-            .fetch_lane_if_stale(&root, "ctx_a.wal.jsonl", lane)
+            .fetch_lane_if_stale(&root, &lane_name, lane)
             .await
             .expect_err("a directory in place of the lane file is not NotFound");
         assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
@@ -2245,7 +2279,10 @@ mod tests {
             .unwrap()
             .expect("generation 1 shipped a manifest");
 
-        let fails_on = root.clone().join("files").join("ctx_a.meta.json");
+        let fails_on = root
+            .clone()
+            .join("files")
+            .join(format!("{CTX_A}.meta.json").as_str());
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let store: Arc<dyn ObjectStore> = Arc::new(PermanentGetFailStore {
             inner,
@@ -2322,10 +2359,10 @@ mod tests {
 
         // Shared pass: the sidecar meta landed (enumeration needs it);
         // the image and the log did not (they are the lazy payload).
-        assert!(target.join("ctx_a.meta.json").exists());
-        assert!(!target.join("ctx_a.ctx").exists());
-        assert!(!target.join("ctx_a.wal.jsonl").exists());
-        assert_eq!(hydrator.context_stems(), ["ctx_a".to_string()]);
+        assert!(target.join(format!("{CTX_A}.meta.json")).exists());
+        assert!(!target.join(format!("{CTX_A}.ctx")).exists());
+        assert!(!target.join(format!("{CTX_A}.wal.jsonl")).exists());
+        assert_eq!(hydrator.context_stems(), [CTX_A.to_string()]);
         assert!(!hydrator.drained());
 
         // The directory is durably marked as a cache of generation 1,
@@ -2338,18 +2375,18 @@ mod tests {
 
         // First touch materializes the family, verified; a second
         // touch (and an unknown stem) is a no-op.
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.ctx"))).unwrap(),
             b"image-v1"
         );
-        assert!(target.join("ctx_a.wal.jsonl").exists());
+        assert!(target.join(format!("{CTX_A}.wal.jsonl")).exists());
         assert!(hydrator.drained());
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         hydrator.ensure_context("never-shipped").unwrap();
 
         // A vetoed family stays vetoed (drained, but never refetched).
-        hydrator.veto("ctx_a");
+        hydrator.veto(CTX_A);
         assert!(hydrator.drained());
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&target);
@@ -2390,7 +2427,7 @@ mod tests {
             "the background fill thread must land the pending family on its own"
         );
         assert_eq!(
-            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.ctx"))).unwrap(),
             b"image-v1"
         );
 
@@ -2413,11 +2450,11 @@ mod tests {
     async fn spawn_background_fill_lands_several_pending_families_in_parallel() {
         let bucket = scratch("bgfill-many-bucket");
         let writer = scratch("bgfill-many-writer");
-        for stem in ["ctx_a", "ctx_b", "ctx_c", "ctx_d"] {
+        for stem in [CTX_A, CTX_B, CTX_C, CTX_D] {
             std::fs::write(writer.join(format!("{stem}.ctx")), format!("image-{stem}")).unwrap();
             std::fs::write(
                 writer.join(format!("{stem}.meta.json")),
-                format!(r#"{{"id":"{stem}","name":"{stem}","description":"d","pinned":false}}"#),
+                meta_json(stem, stem, "d"),
             )
             .unwrap();
             wal::append_batch(
@@ -2464,7 +2501,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(hydrator.drained(), "every pending family must land");
-        for stem in ["ctx_a", "ctx_b", "ctx_c", "ctx_d"] {
+        for stem in [CTX_A, CTX_B, CTX_C, CTX_D] {
             assert_eq!(
                 std::fs::read(target.join(format!("{stem}.ctx"))).unwrap(),
                 format!("image-{stem}").as_bytes(),
@@ -2488,7 +2525,10 @@ mod tests {
             .unwrap()
             .expect("generation 1 shipped a manifest");
 
-        let fails_on = root.clone().join("files").join("ctx_a.ctx");
+        let fails_on = root
+            .clone()
+            .join("files")
+            .join(format!("{CTX_A}.ctx").as_str());
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let store: Arc<dyn ObjectStore> = Arc::new(PermanentGetFailStore {
             inner: inner_store,
@@ -2637,7 +2677,7 @@ mod tests {
             .await
             .unwrap()
             .expect("generation 1 shipped a manifest");
-        let sig = FamilySig::of(&manifest, "ctx_a");
+        let sig = FamilySig::of(&manifest, CTX_A);
         let target = scratch("family-counters-target");
         let hydrator = Hydrator::new(
             store,
@@ -2648,10 +2688,10 @@ mod tests {
             LanePolicy::ShippedExact,
         );
 
-        let (fetched, reused) = hydrator.hydrate_family("ctx_a", &root, &sig).await.unwrap();
+        let (fetched, reused) = hydrator.hydrate_family(CTX_A, &root, &sig).await.unwrap();
         assert_eq!((fetched, reused), (3, 0), "image + meta + wal lane");
 
-        let (fetched, reused) = hydrator.hydrate_family("ctx_a", &root, &sig).await.unwrap();
+        let (fetched, reused) = hydrator.hydrate_family(CTX_A, &root, &sig).await.unwrap();
         assert_eq!((fetched, reused), (0, 3), "every file already matches");
 
         let _ = std::fs::remove_dir_all(&bucket);
@@ -2794,7 +2834,7 @@ mod tests {
             .unwrap();
 
         let target = scratch("delete-resume-veto-target");
-        std::fs::write(target.join("ctx_a.deleted"), b"").unwrap();
+        std::fs::write(target.join(format!("{CTX_A}.deleted")), b"").unwrap();
 
         let hydrator = Arc::new(Hydrator::new(
             Arc::clone(&store),
@@ -2816,10 +2856,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!target.join("ctx_a.deleted").exists());
-        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(!target.join(format!("{CTX_A}.deleted")).exists());
+        hydrator.ensure_context(CTX_A).unwrap();
         assert!(
-            !target.join("ctx_a.ctx").exists(),
+            !target.join(format!("{CTX_A}.ctx")).exists(),
             "a boot-resumed deletion must veto the hydrator, or a later \
              ensure_context (the background fill, or any first touch) \
              re-fetches the family the deletion just tore down"
@@ -2972,7 +3012,7 @@ mod tests {
             .await
             .unwrap()
             .expect("hydrates");
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         std::fs::write(bucket.join("fence").join(format!("{:020}", 2)), b"{}").unwrap();
         ship::write_replication_record(
             &target,
@@ -3020,12 +3060,17 @@ mod tests {
         // Seed the target as a cache-mode directory holding: the exact
         // shipped image, the shipped log plus a genuine appended tail,
         // and a relic file the lineage does not carry.
-        let image = std::fs::read(writer.join("ctx_a.ctx")).unwrap();
-        std::fs::write(target.join("ctx_a.ctx"), &image).unwrap();
-        let shipped_wal = std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap();
-        std::fs::write(target.join("ctx_a.wal.jsonl"), &shipped_wal).unwrap();
-        wal::append_batch(&target.join("ctx_a.wal.jsonl"), 2, &[associate("tail")]).unwrap();
-        let with_tail = std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap();
+        let image = std::fs::read(writer.join(format!("{CTX_A}.ctx"))).unwrap();
+        std::fs::write(target.join(format!("{CTX_A}.ctx")), &image).unwrap();
+        let shipped_wal = std::fs::read(writer.join(format!("{CTX_A}.wal.jsonl"))).unwrap();
+        std::fs::write(target.join(format!("{CTX_A}.wal.jsonl")), &shipped_wal).unwrap();
+        wal::append_batch(
+            &target.join(format!("{CTX_A}.wal.jsonl")),
+            2,
+            &[associate("tail")],
+        )
+        .unwrap();
+        let with_tail = std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap();
         assert!(with_tail.len() > shipped_wal.len());
         std::fs::write(target.join("ctx_b.ctx"), b"relic of a deleted context").unwrap();
         ship::write_replication_record(
@@ -3038,7 +3083,7 @@ mod tests {
         )
         .unwrap();
 
-        let image_ino = ino(&target.join("ctx_a.ctx"));
+        let image_ino = ino(&target.join(format!("{CTX_A}.ctx")));
         let hydrator = prepare(&store, &StorePath::default(), &url, &target, false)
             .await
             .unwrap()
@@ -3047,14 +3092,14 @@ mod tests {
             !target.join("ctx_b.ctx").exists(),
             "a relic the lineage does not carry is removed before boot could resurrect it"
         );
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            ino(&target.join("ctx_a.ctx")),
+            ino(&target.join(format!("{CTX_A}.ctx"))),
             image_ino,
             "matching bytes are reused in place, not re-downloaded"
         );
         assert_eq!(
-            std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
             with_tail,
             "a log whose shipped prefix matches keeps its acknowledged tail"
         );
@@ -3063,7 +3108,7 @@ mod tests {
         // replaced by the lineage's own bytes.
         let diverged_target = scratch("reuse-diverged");
         std::fs::write(
-            diverged_target.join("ctx_a.wal.jsonl"),
+            diverged_target.join(format!("{CTX_A}.wal.jsonl")),
             b"not the shipped bytes",
         )
         .unwrap();
@@ -3080,9 +3125,9 @@ mod tests {
             .await
             .unwrap()
             .expect("hydrates");
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            std::fs::read(diverged_target.join("ctx_a.wal.jsonl")).unwrap(),
+            std::fs::read(diverged_target.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
             shipped_wal,
             "a diverged log is replaced by the shipped stream"
         );
@@ -3153,9 +3198,14 @@ mod tests {
         // Seed a cache directory holding the shipped log PLUS a
         // genuine acked tail — exactly the writer-cache reuse case.
         let target = scratch("replica-tail-target");
-        let shipped_wal = std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap();
-        std::fs::write(target.join("ctx_a.wal.jsonl"), &shipped_wal).unwrap();
-        wal::append_batch(&target.join("ctx_a.wal.jsonl"), 2, &[associate("tail")]).unwrap();
+        let shipped_wal = std::fs::read(writer.join(format!("{CTX_A}.wal.jsonl"))).unwrap();
+        std::fs::write(target.join(format!("{CTX_A}.wal.jsonl")), &shipped_wal).unwrap();
+        wal::append_batch(
+            &target.join(format!("{CTX_A}.wal.jsonl")),
+            2,
+            &[associate("tail")],
+        )
+        .unwrap();
         ship::write_replication_record(
             &target,
             &ship::ReplicationRecord {
@@ -3169,9 +3219,9 @@ mod tests {
         let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
             .await
             .expect("a cache re-verifies");
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert_eq!(
-            std::fs::read(target.join("ctx_a.wal.jsonl")).unwrap(),
+            std::fs::read(target.join(format!("{CTX_A}.wal.jsonl"))).unwrap(),
             shipped_wal,
             "a replica serves the shipped stream exactly: the tail is truncated away"
         );
@@ -3198,8 +3248,8 @@ mod tests {
         let url = url_of("replica-tail-exact");
 
         let target = scratch("replica-tail-exact-target");
-        let shipped_wal = std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap();
-        let wal_path = target.join("ctx_a.wal.jsonl");
+        let shipped_wal = std::fs::read(writer.join(format!("{CTX_A}.wal.jsonl"))).unwrap();
+        let wal_path = target.join(format!("{CTX_A}.wal.jsonl"));
         std::fs::write(&wal_path, &shipped_wal).unwrap();
         ship::write_replication_record(
             &target,
@@ -3217,7 +3267,7 @@ mod tests {
 
         std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o444)).unwrap();
         hydrator
-            .ensure_context("ctx_a")
+            .ensure_context(CTX_A)
             .expect("an exact-length match must never try to open the file for writing");
         std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(std::fs::read(&wal_path).unwrap(), shipped_wal);
@@ -3318,14 +3368,17 @@ mod tests {
         let meta_key = bucket
             .join("gen-00000000000000000001")
             .join("files")
-            .join("ctx_a.meta.json");
+            .join(format!("{CTX_A}.meta.json"));
         let aside = bucket.join("meta-aside");
         std::fs::rename(&meta_key, &aside).unwrap();
 
         let error = prepare_replica(&store, &StorePath::default(), &url, &target)
             .await
             .expect_err("a shared hydration that cannot land refuses the boot");
-        assert!(error.to_string().contains("ctx_a.meta.json"), "{error}");
+        assert!(
+            error.to_string().contains(&format!("{CTX_A}.meta.json")),
+            "{error}"
+        );
         let record = ship::read_replication_record(&target)
             .unwrap()
             .expect("phase one marked the directory as this URL's replica workspace");
@@ -3358,7 +3411,7 @@ mod tests {
         let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
             .await
             .expect("hydrates");
-        hydrator.ensure_context("ctx_a").unwrap();
+        hydrator.ensure_context(CTX_A).unwrap();
         assert!(hydrator.drained());
 
         let generation_root = ship::gen_root(&StorePath::default(), 1);
@@ -3376,24 +3429,24 @@ mod tests {
         let mut moved = manifest.clone();
         moved
             .lanes
-            .get_mut("ctx_a.wal.jsonl")
+            .get_mut(format!("{CTX_A}.wal.jsonl").as_str())
             .expect("the lane exists")
             .seq += 1;
         let report = hydrator.retarget(1, generation_root.clone(), moved);
-        assert_eq!(report.stale, ["ctx_a"], "{report:?}");
+        assert_eq!(report.stale, [CTX_A], "{report:?}");
         assert!(!hydrator.drained(), "a stale family is pending again");
 
         // A manifest without the family vetoes it, exactly once.
         let report = hydrator.retarget(2, generation_root.clone(), Manifest::default());
-        assert_eq!(report.vanished, ["ctx_a"], "{report:?}");
+        assert_eq!(report.vanished, [CTX_A], "{report:?}");
         assert!(hydrator.drained(), "vetoed counts as settled");
         let report = hydrator.retarget(2, generation_root.clone(), Manifest::default());
         assert!(report.vanished.is_empty(), "vanished reports once");
 
         // A later manifest carrying it again revives it.
         let report = hydrator.retarget(3, generation_root.clone(), manifest);
-        assert_eq!(report.stale, ["ctx_a"], "{report:?}");
-        hydrator.ensure_context("ctx_a").unwrap();
+        assert_eq!(report.stale, [CTX_A], "{report:?}");
+        hydrator.ensure_context(CTX_A).unwrap();
         assert!(hydrator.drained());
 
         for dir in [bucket, target] {

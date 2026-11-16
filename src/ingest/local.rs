@@ -3,12 +3,190 @@
 //! (Pass 1) before applying any of them (Pass 2) — see the hub's own
 //! module doc for the two-pass contract this mirrors from `run_remote`.
 
+use super::legacy::{LegacyGroup, LegacyStream};
+use super::model::Stream;
 use super::*;
 
 /// Ops applied between mid-run flushes. Import batches can dwarf any
 /// live traffic; flushing every so often keeps each `context`'s WAL far
 /// from `TAGURU_WAL_MAX_BYTES` (past which writes are refused).
 const FLUSH_EVERY_OPS: usize = 100_000;
+
+/// Pass 1's tally: every claim admitted so far, keyed by id, and the
+/// sources the sensitive gate refused. A current-format file is
+/// admitted as it is read; a v0.9.7 one once its names are settled on
+/// ids, after the boot that settling needs (ADR 0057) — so its claims
+/// are checked against every earlier file's by id all the same.
+#[derive(Default)]
+struct Admission<'a> {
+    batches: Vec<(&'a PathBuf, Batch)>,
+    schemas: Vec<(&'a PathBuf, String, schema::InstalledSchema)>,
+    groups: Vec<(&'a PathBuf, StoredGroup)>,
+    // ADR 0038 §3.4: batches the gate refused — named on stderr as
+    // they are met, skipped (the rest of their file still applies),
+    // and reported under `failed_batches` with the exit code.
+    refused: Vec<FailedBatch>,
+    // Keyed claims → the file that made them (#863): a later file's
+    // duplicate is refused naming the earlier file, not just "an
+    // earlier file".
+    owners: HashMap<(String, String), PathBuf>,
+    schema_owners: HashMap<String, PathBuf>,
+    group_owners: HashMap<String, PathBuf>,
+}
+
+impl<'a> Admission<'a> {
+    /// Admits one parsed file's batches, schemas and groups; `true`
+    /// when the file conflicts with an earlier one (the run then
+    /// refuses whole). A stream file can carry several batches,
+    /// schemas, or groups, so it can trip several of the checks below;
+    /// the caller counts files, not events.
+    fn admit(
+        &mut self,
+        path: &'a PathBuf,
+        stream: Stream,
+        sensitive_rules: Option<&crate::sensitive::RuleSet>,
+    ) -> bool {
+        let mut file_broken = false;
+        for (index, batch) in stream.batches.into_iter().enumerate() {
+            if let Some(earlier) = self
+                .owners
+                .get(&(batch.context_id.clone(), batch.source.clone()))
+            {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_source_message(batch.label(), &batch.source, earlier)
+                );
+                file_broken = true;
+                continue;
+            }
+            self.owners.insert(
+                (batch.context_id.clone(), batch.source.clone()),
+                path.clone(),
+            );
+            if gate_refuses(path, index, &batch, sensitive_rules, &mut self.refused) {
+                continue;
+            }
+            self.batches.push((path, batch));
+        }
+        for (context, installed) in stream.schemas {
+            if let Some(earlier) = self.schema_owners.get(&context) {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_schema_message(&context, earlier)
+                );
+                file_broken = true;
+                continue;
+            }
+            self.schema_owners.insert(context.clone(), path.clone());
+            self.schemas.push((path, context, installed));
+        }
+        for record in stream.groups {
+            if let Some(earlier) = self.group_owners.get(&record.id) {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_group_message(&record.id, earlier)
+                );
+                file_broken = true;
+                continue;
+            }
+            self.group_owners.insert(record.id.clone(), path.clone());
+            self.groups.push((path, record));
+        }
+        file_broken
+    }
+}
+
+/// ADR 0038 §3.4's gate over one batch: `true` (and the refusal named
+/// on stderr and recorded) when the batch carries sensitive content.
+fn gate_refuses(
+    path: &Path,
+    index: usize,
+    batch: &Batch,
+    sensitive_rules: Option<&crate::sensitive::RuleSet>,
+    refused: &mut Vec<FailedBatch>,
+) -> bool {
+    let Some(rules) = sensitive_rules else {
+        return false;
+    };
+    let hits = sensitive_hits(batch, index, rules);
+    if hits.is_empty() {
+        return false;
+    }
+    for hit in &hits {
+        eprintln!("taguru: import: {}: {}", path.display(), hit.text());
+    }
+    eprintln!(
+        "taguru: import: {}: {}",
+        path.display(),
+        refused_batch_message(index, batch)
+    );
+    refused.push(FailedBatch {
+        context_id: batch.context_id.clone(),
+        source_id: batch.source.clone(),
+        error: refused_batch_error(&hits),
+    });
+    true
+}
+
+/// The cross-file duplicate checks for v0.9.7 files (ADR 0057), keyed
+/// by name the way those files address everything — run in Pass 1, so
+/// a conflict among them refuses before the boot. Once their names
+/// are settled, [`Admission::admit`] checks them by id again, against
+/// the current-format files too.
+#[derive(Default)]
+struct LegacyClaims {
+    owners: HashMap<(String, String), PathBuf>,
+    schema_owners: HashMap<String, PathBuf>,
+    group_owners: HashMap<String, PathBuf>,
+}
+
+impl LegacyClaims {
+    fn conflicts(&mut self, path: &Path, stream: &LegacyStream) -> bool {
+        let mut file_broken = false;
+        for (name, batch) in &stream.batches {
+            let key = (name.clone(), batch.source.clone());
+            if let Some(earlier) = self.owners.get(&key) {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_source_message(name, &batch.source, earlier)
+                );
+                file_broken = true;
+            } else {
+                self.owners.insert(key, path.to_path_buf());
+            }
+        }
+        for (name, _) in &stream.schemas {
+            if let Some(earlier) = self.schema_owners.get(name) {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_schema_message(name, earlier)
+                );
+                file_broken = true;
+            } else {
+                self.schema_owners.insert(name.clone(), path.to_path_buf());
+            }
+        }
+        for record in &stream.groups {
+            if let Some(earlier) = self.group_owners.get(&record.name) {
+                eprintln!(
+                    "taguru: import: {}: {}",
+                    path.display(),
+                    duplicate_group_message(&record.name, earlier)
+                );
+                file_broken = true;
+            } else {
+                self.group_owners
+                    .insert(record.name.clone(), path.to_path_buf());
+            }
+        }
+        file_broken
+    }
+}
 
 pub(super) fn run_local(
     files: &[PathBuf],
@@ -22,100 +200,29 @@ pub(super) fn run_local(
     // knowable up front, so it must never cost a write. A file may
     // carry one batch or a whole stream (`taguru export` output);
     // either way each batch stands alone from here on.
-    let mut batches = Vec::new();
-    let mut schemas: Vec<(&PathBuf, String, schema::InstalledSchema)> = Vec::new();
-    let mut groups: Vec<(&PathBuf, StoredGroup)> = Vec::new();
+    let mut admission = Admission::default();
+    // v0.9.7 files (ADR 0057), held until the boot settles their names.
+    let mut legacy: Vec<(&PathBuf, LegacyStream)> = Vec::new();
+    let mut legacy_claims = LegacyClaims::default();
     let mut broken = 0;
-    // ADR 0038 §3.4: batches the gate refused — named on stderr as
-    // they are met, skipped (the rest of their file still applies),
-    // and reported under `failed_batches` with the exit code.
-    let mut refused: Vec<FailedBatch> = Vec::new();
-    // Keyed claims → the file that made them (#863): a later file's
-    // duplicate is refused naming the earlier file, not just "an
-    // earlier file".
-    let mut owners: HashMap<(String, String), PathBuf> = HashMap::new();
-    let mut schema_owners: HashMap<String, PathBuf> = HashMap::new();
-    let mut group_owners: HashMap<String, PathBuf> = HashMap::new();
     for path in files {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
-            .and_then(|file| parse_stream(std::io::BufReader::new(file)));
-        // A stream file can carry several batches, schemas, or groups,
-        // so it can trip several of the checks below; `broken` counts
-        // files, not events, so one file's several conflicts must
-        // still add only 1.
-        let mut file_broken = false;
-        match parsed {
-            Ok(stream) => {
-                for (index, batch) in stream.batches.into_iter().enumerate() {
-                    if let Some(earlier) =
-                        owners.get(&(batch.context_id.clone(), batch.source.clone()))
-                    {
-                        eprintln!(
-                            "taguru: import: {}: {}",
-                            path.display(),
-                            duplicate_source_message(batch.label(), &batch.source, earlier)
-                        );
-                        file_broken = true;
-                        continue;
-                    }
-                    owners.insert(
-                        (batch.context_id.clone(), batch.source.clone()),
-                        path.clone(),
-                    );
-                    if let Some(rules) = sensitive_rules {
-                        let hits = sensitive_hits(&batch, index, rules);
-                        if !hits.is_empty() {
-                            for hit in &hits {
-                                eprintln!("taguru: import: {}: {}", path.display(), hit.text());
-                            }
-                            eprintln!(
-                                "taguru: import: {}: {}",
-                                path.display(),
-                                refused_batch_message(index, &batch)
-                            );
-                            refused.push(FailedBatch {
-                                context_id: batch.context_id.clone(),
-                                source_id: batch.source.clone(),
-                                error: refused_batch_error(&hits),
-                            });
-                            continue;
-                        }
-                    }
-                    batches.push((path, batch));
-                }
-                for (context, installed) in stream.schemas {
-                    if let Some(earlier) = schema_owners.get(&context) {
-                        eprintln!(
-                            "taguru: import: {}: {}",
-                            path.display(),
-                            duplicate_schema_message(&context, earlier)
-                        );
-                        file_broken = true;
-                        continue;
-                    }
-                    schema_owners.insert(context.clone(), path.clone());
-                    schemas.push((path, context, installed));
-                }
-                for record in stream.groups {
-                    if let Some(earlier) = group_owners.get(&record.id) {
-                        eprintln!(
-                            "taguru: import: {}: {}",
-                            path.display(),
-                            duplicate_group_message(&record.id, earlier)
-                        );
-                        file_broken = true;
-                        continue;
-                    }
-                    group_owners.insert(record.id.clone(), path.clone());
-                    groups.push((path, record));
-                }
+            .and_then(|file| parse_any_stream(std::io::BufReader::new(file)));
+        // `broken` counts files, not events: one file's several
+        // conflicts still add only 1.
+        let file_broken = match parsed {
+            Ok(ParsedStream::Current(stream)) => admission.admit(path, stream, sensitive_rules),
+            Ok(ParsedStream::Legacy(stream)) => {
+                let conflicts = legacy_claims.conflicts(path, &stream);
+                legacy.push((path, stream));
+                conflicts
             }
             Err(message) => {
                 eprintln!("taguru: import: {}: {message}", path.display());
-                file_broken = true;
+                true
             }
-        }
+        };
         if file_broken {
             broken += 1;
         }
@@ -135,7 +242,7 @@ pub(super) fn run_local(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                refused,
+                admission.refused,
                 Some(message),
             );
         }
@@ -143,55 +250,7 @@ pub(super) fn run_local(
     }
 
     if dry_run {
-        if as_json {
-            // Offline never boots the registry for a dry run (that's
-            // the whole point — a validate-only pass needs no
-            // directory lock), so nothing here can know created/
-            // retracted or any of the *_dropped counts the way
-            // preview_batch (the server's own dry-run path) can.
-            // Reported as 0/false rather than guessed — see the
-            // --help text. Groups are always empty here for the same
-            // reason POST /import's own dry run omits them: restoring
-            // a group has no read-only twin to preview through.
-            let batches: Vec<crate::api::ImportOutcome> = batches
-                .iter()
-                .map(|(_, batch)| dry_run_outcome_of(batch))
-                .collect();
-            let exit = if refused.is_empty() { 0 } else { 1 };
-            print_import_json(true, batches, Vec::new(), Vec::new(), refused, None);
-            return exit;
-        }
-        for (path, batch) in &batches {
-            println!("{}: {}", path.display(), batch.describe());
-        }
-        // Schema records, like group records, have no read-only twin
-        // to preview through (installing one can depend on a batch of
-        // this same run having just created its context) — described
-        // structurally from the parse alone, same as `describe_group`.
-        for (path, context, installed) in &schemas {
-            println!(
-                "{}: {}",
-                path.display(),
-                describe_schema(context, installed)
-            );
-        }
-        for (path, record) in &groups {
-            println!("{}: {}", path.display(), describe_group(record));
-        }
-        let mut summary = format!("dry run: {} source(s)", batches.len());
-        if !schemas.is_empty() {
-            summary.push_str(&format!(", {} schema record(s)", schemas.len()));
-        }
-        if !groups.is_empty() {
-            summary.push_str(&format!(" and {} group record(s)", groups.len()));
-        }
-        summary.push_str(" valid, nothing applied");
-        println!("{summary}");
-        if refused.is_empty() {
-            return 0;
-        }
-        println!("import: {} source(s) refused (sensitive)", refused.len());
-        return 1;
+        return dry_run_report(admission, &legacy, as_json, sensitive_rules);
     }
 
     // Registry warnings (WAL replay notes, load errors) must reach the
@@ -228,13 +287,64 @@ pub(super) fn run_local(
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                    refused,
+                    admission.refused,
                     Some(error.to_string()),
                 );
             }
             return 1;
         }
     };
+
+    // ADR 0057: the v0.9.7 files' names settle on ids against the
+    // directory just booted — all of them in one pass, so a create
+    // block, a group's members and its child groups resolve across
+    // files — and only then are their claims admitted. A refusal here
+    // (an ambiguous name, a name nothing creates, a conflict by id)
+    // stops the run before anything is written. They apply after the
+    // current-format files of the same run; every batch is
+    // independent, and schemas and groups apply after all of them.
+    if !legacy.is_empty() {
+        let (paths, streams): (Vec<&PathBuf>, Vec<LegacyStream>) = legacy.into_iter().unzip();
+        let refusal = match resolve_legacy(&state, streams) {
+            Ok(streams) => {
+                let mut conflicting = 0;
+                for (path, stream) in paths.into_iter().zip(streams) {
+                    if admission.admit(path, stream, sensitive_rules) {
+                        conflicting += 1;
+                    }
+                }
+                (conflicting > 0).then(|| {
+                    format!(
+                        "{conflicting} of {} file(s) refused during validation; nothing was \
+                         applied",
+                        files.len()
+                    )
+                })
+            }
+            Err(refusal) => Some(refusal.text()),
+        };
+        if let Some(message) = refusal {
+            eprintln!("taguru: import: {message}");
+            if as_json {
+                print_import_json(
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    admission.refused,
+                    Some(message),
+                );
+            }
+            return 1;
+        }
+    }
+    let Admission {
+        batches,
+        schemas,
+        groups,
+        refused,
+        ..
+    } = admission;
 
     // Pass 2 — apply, one file at a time, in the order given.
     let mut failures = 0;
@@ -475,6 +585,111 @@ pub(super) fn run_local(
     }
 }
 
+/// Offline `--dry-run`: reports what Pass 1 parsed and touches nothing.
+/// Offline never boots the registry for a dry run (that's the whole
+/// point — a validate-only pass needs no directory lock), so nothing
+/// here can know created/retracted or any of the *_dropped counts the
+/// way preview_batch (the server's own dry-run path) can; they are
+/// reported as 0/false rather than guessed — see the --help text.
+/// Schemas and groups are listed as text but always empty under
+/// --json, for the same reason POST /import's own dry run omits them:
+/// they have no read-only twin to preview through. A v0.9.7 file's
+/// batches are gated like any and named by the context name their
+/// header carried, since no id is settled until the import runs —
+/// under --json their `context_id` is empty (ADR 0057).
+fn dry_run_report(
+    admission: Admission<'_>,
+    legacy: &[(&PathBuf, LegacyStream)],
+    as_json: bool,
+    sensitive_rules: Option<&crate::sensitive::RuleSet>,
+) -> i32 {
+    let Admission {
+        batches,
+        schemas,
+        groups,
+        mut refused,
+        ..
+    } = admission;
+    let mut legacy_batches: Vec<(&PathBuf, &str, &Batch)> = Vec::new();
+    for (path, stream) in legacy {
+        for (index, (name, batch)) in stream.batches.iter().enumerate() {
+            if !gate_refuses(path, index, batch, sensitive_rules, &mut refused) {
+                legacy_batches.push((*path, name.as_str(), batch));
+            }
+        }
+    }
+    if as_json {
+        let outcomes: Vec<crate::api::ImportOutcome> = batches
+            .iter()
+            .map(|(_, batch)| batch)
+            .chain(legacy_batches.iter().map(|(_, _, batch)| *batch))
+            .map(dry_run_outcome_of)
+            .collect();
+        let exit = if refused.is_empty() { 0 } else { 1 };
+        print_import_json(true, outcomes, Vec::new(), Vec::new(), refused, None);
+        return exit;
+    }
+    for (path, batch) in &batches {
+        println!("{}: {}", path.display(), batch.describe());
+    }
+    for (path, name, batch) in &legacy_batches {
+        println!("{}: {}", path.display(), batch.describe_as(name));
+    }
+    // Schema records, like group records, have no read-only twin to
+    // preview through (installing one can depend on a batch of this
+    // same run having just created its context) — described
+    // structurally from the parse alone, same as `describe_group`.
+    let legacy_schemas = legacy
+        .iter()
+        .flat_map(|(path, stream)| stream.schemas.iter().map(move |schema| (*path, schema)));
+    for (path, context, installed) in schemas
+        .iter()
+        .map(|(path, context, installed)| (*path, context, installed))
+        .chain(legacy_schemas.map(|(path, (context, installed))| (path, context, installed)))
+    {
+        println!(
+            "{}: {}",
+            path.display(),
+            describe_schema(context, installed)
+        );
+    }
+    for (path, record) in &groups {
+        println!("{}: {}", path.display(), describe_group(record));
+    }
+    for (path, stream) in legacy {
+        for record in &stream.groups {
+            println!("{}: {}", path.display(), describe_legacy_group(record));
+        }
+    }
+    let schema_count = schemas.len()
+        + legacy
+            .iter()
+            .map(|(_, stream)| stream.schemas.len())
+            .sum::<usize>();
+    let group_count = groups.len()
+        + legacy
+            .iter()
+            .map(|(_, stream)| stream.groups.len())
+            .sum::<usize>();
+    let mut summary = format!(
+        "dry run: {} source(s)",
+        batches.len() + legacy_batches.len()
+    );
+    if schema_count > 0 {
+        summary.push_str(&format!(", {schema_count} schema record(s)"));
+    }
+    if group_count > 0 {
+        summary.push_str(&format!(" and {group_count} group record(s)"));
+    }
+    summary.push_str(" valid, nothing applied");
+    println!("{summary}");
+    if refused.is_empty() {
+        return 0;
+    }
+    println!("import: {} source(s) refused (sensitive)", refused.len());
+    1
+}
+
 /// The pre-application counts `--dry-run --json` reports offline: read
 /// straight off the parsed [`Batch`] (the same numbers `Batch::describe`
 /// already prints as text), never touching state. `created`/
@@ -588,6 +803,18 @@ fn describe_group(record: &StoredGroup) -> String {
         record.id,
         record.context_ids.len(),
         record.group_ids.len()
+    )
+}
+
+/// [`describe_group`] for a v0.9.7 record, whose id is settled only
+/// when the import runs (ADR 0057).
+fn describe_legacy_group(record: &LegacyGroup) -> String {
+    format!(
+        "group '{}' (v0.9.7 record, id settled at import): {} member context(s), {} child \
+         group(s)",
+        record.name,
+        record.contexts.len(),
+        record.groups.len()
     )
 }
 

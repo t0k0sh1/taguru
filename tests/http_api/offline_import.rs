@@ -2714,3 +2714,475 @@ fn an_offline_dry_run_counts_every_alias_kind_and_describes_schemas() {
     );
     let _ = std::fs::remove_dir_all(&batches);
 }
+
+/// A v0.9.7 export directory as that release's `taguru export --out`
+/// wrote it (ADR 0057): a schema record first, then the source batches
+/// with the create block on the first, a context whose name carries a
+/// `/`, a header-only context, and nested groups whose parent's file
+/// (`all`) sorts before its child's (`drinks`).
+const V097_KURA: &str = concat!(
+    "{\"taguru_schema\":1,\"context\":\"sake/kura\",\"mode\":\"warn\",\"closed_labels\":false,",
+    "\"types\":{\"Brewery\":{}},\"relations\":{}}\n",
+    "{\"taguru_batch\":1,\"context\":\"sake/kura\",\"source\":\"a.md\",",
+    "\"create\":{\"description\":\"酒蔵\",\"pinned\":true,\"dice_floor\":0.5}}\n",
+    "{\"passage\":\"青嶺酒造の杜氏は高瀬。\\n\\n高瀬は新潟の出身。\",\"stored_at\":1700000000,",
+    "\"date\":1600000000,\"tags\":[\"kura\",\"新潟\"]}\n",
+    "{\"paragraph\":0,\"question\":\"青嶺酒造の杜氏は誰?\"}\n",
+    "{\"paragraph\":1,\"section\":\"人物\"}\n",
+    "{\"paragraph\":0,\"locator\":{\"kind\":\"page\",\"value\":\"3\"}}\n",
+    "{\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":2.0,\"paragraph\":0}\n",
+    "{\"taguru_batch\":1,\"context\":\"sake/kura\",\"source\":\"b.md\"}\n",
+    "{\"subject\":\"高瀬\",\"label\":\"出身\",\"object\":\"新潟\",\"weight\":1.0}\n",
+    "{\"alias\":\"Aomine\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
+);
+const V097_WINE: &str = "{\"taguru_batch\":1,\"context\":\"wine\",\"source\":\"export:empty\",\
+                         \"create\":{\"description\":\"ワイン\"}}\n";
+const V097_ALL: &str = "{\"taguru_group\":1,\"name\":\"all\",\"groups\":[\"drinks\"]}\n";
+const V097_DRINKS: &str = "{\"taguru_group\":1,\"name\":\"drinks\",\"description\":\"飲み物\",\
+                           \"contexts\":[\"sake/kura\",\"wine\"]}\n";
+
+fn write_v097_export(tag: &str) -> std::path::PathBuf {
+    let dir = batch_dir(tag);
+    std::fs::write(dir.join("sake%2Fkura.jsonl"), V097_KURA).unwrap();
+    std::fs::write(dir.join("wine.jsonl"), V097_WINE).unwrap();
+    std::fs::write(dir.join("all.group.jsonl"), V097_ALL).unwrap();
+    std::fs::write(dir.join("drinks.group.jsonl"), V097_DRINKS).unwrap();
+    dir
+}
+
+/// The same data in the current format, under ids chosen here — what a
+/// v0.9.7 import must read back equal to.
+fn write_current_equivalent(tag: &str) -> std::path::PathBuf {
+    let kura = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
+    let wine = "1d8b4cf8-54cd-42f4-8688-49c4ce329da7";
+    let all = "00000000-0000-4000-9000-0000000000a1";
+    let drinks = "00000000-0000-4000-9000-0000000000a2";
+    let dir = batch_dir(tag);
+    let current = V097_KURA
+        .replace(
+            "{\"taguru_schema\":1,\"context\":\"sake/kura\",",
+            &format!("{{\"type\":\"schema\",\"context_id\":\"{kura}\","),
+        )
+        .replace(
+            "{\"taguru_batch\":1,\"context\":\"sake/kura\",\"source\":\"a.md\",\"create\":{",
+            &format!(
+                "{{\"type\":\"source\",\"context_id\":\"{kura}\",\"id\":\"a.md\",\"create\":{{\
+                 \"name\":\"sake/kura\","
+            ),
+        )
+        .replace(
+            "{\"taguru_batch\":1,\"context\":\"sake/kura\",\"source\":\"b.md\"}",
+            &format!("{{\"type\":\"source\",\"context_id\":\"{kura}\",\"id\":\"b.md\"}}"),
+        );
+    assert!(!current.contains("taguru_"), "{current}");
+    std::fs::write(dir.join("kura.jsonl"), current).unwrap();
+    std::fs::write(
+        dir.join("wine.jsonl"),
+        format!(
+            "{{\"type\":\"source\",\"context_id\":\"{wine}\",\"id\":\"export:empty\",\
+             \"create\":{{\"name\":\"wine\",\"description\":\"ワイン\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("groups.jsonl"),
+        format!(
+            "{{\"type\":\"group\",\"id\":\"{all}\",\"name\":\"all\",\"group_ids\":[\"{drinks}\"]}}\n\
+             {{\"type\":\"group\",\"id\":\"{drinks}\",\"name\":\"drinks\",\"description\":\"飲み物\",\
+             \"context_ids\":[\"{kura}\",\"{wine}\"]}}\n"
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+/// What `data_dir` exports, offline, with every id replaced by the name
+/// it stands for (and id lists sorted after that), so two directories
+/// that hold the same data under different ids compare equal.
+fn export_by_name(
+    data_dir: &std::path::Path,
+    tag: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let out = common::scratch_dir(&format!("legacy-export-{tag}"));
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--out", out.to_str().unwrap()],
+        &[("TAGURU_DATA_DIR", data_dir.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for name in ["sake/kura", "wine"] {
+        renames.push((
+            common::context_stem(data_dir, name),
+            format!("<context {name}>"),
+        ));
+    }
+    for name in ["all", "drinks"] {
+        renames.push((
+            common::group_stem(data_dir, name),
+            format!("<group {name}>"),
+        ));
+    }
+    let rename = |text: &str| {
+        renames
+            .iter()
+            .fold(text.to_string(), |text, (id, name)| text.replace(id, name))
+    };
+    let mut files = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(&out).unwrap() {
+        let path = entry.unwrap().path();
+        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let text = rename(&std::fs::read_to_string(&path).unwrap());
+        let text = if file_name.ends_with(".group.jsonl") {
+            let mut record: Value = serde_json::from_str(text.trim()).unwrap();
+            for field in ["context_ids", "group_ids"] {
+                if let Some(list) = record[field].as_array_mut() {
+                    list.sort_by_key(|value| value.as_str().unwrap_or_default().to_string());
+                }
+            }
+            record.to_string()
+        } else {
+            text
+        };
+        files.insert(rename(&file_name), text);
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    files
+}
+
+/// ReviewImportExport BLOCKER 1 (ADR 0057): a v0.9.7 export imports
+/// offline into an empty data directory and reads back exactly as the
+/// same data imported in the current format; importing it again
+/// changes nothing.
+#[test]
+fn a_v097_export_imports_offline_and_reads_back_equal() {
+    let legacy = write_v097_export("legacy-offline");
+    let reference = write_current_equivalent("legacy-offline-reference");
+    let data_dir = common::scratch_dir("http-import-legacy-offline");
+    let reference_dir = common::scratch_dir("http-import-legacy-offline-reference");
+
+    // A dry run names each v0.9.7 batch by the context name its header
+    // carried (no id is settled before the import runs) and writes
+    // nothing.
+    let (code, stdout, stderr) = run_import(&data_dir, &["--dry-run", legacy.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("context 'sake/kura' ← source 'a.md'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("dry run: 3 source(s), 1 schema record(s) and 2 group record(s) valid"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("group 'drinks' (v0.9.7 record, id settled at import): 2 member context(s), 0 child group(s)"),
+        "{stdout}"
+    );
+    assert!(common::try_context_stem(&data_dir, "sake/kura").is_none());
+
+    let (code, stdout, stderr) = run_import(&data_dir, &[legacy.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("3 of 3 source(s) applied across 2 context(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("1 of 1 schema record(s) installed"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("2 of 2 group record(s) restored"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = run_import(&reference_dir, &[reference.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let imported = export_by_name(&data_dir, "offline");
+    assert_eq!(
+        imported,
+        export_by_name(&reference_dir, "offline-reference")
+    );
+    assert_eq!(imported.len(), 4, "{imported:?}");
+
+    // Idempotent: every name now resolves to the id the first run minted.
+    let kura = common::context_stem(&data_dir, "sake/kura");
+    let (code, stdout, stderr) = run_import(&data_dir, &[legacy.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("(created)"), "{stdout}");
+    assert_eq!(common::context_stem(&data_dir, "sake/kura"), kura);
+    assert_eq!(export_by_name(&data_dir, "offline-again"), imported);
+
+    // The server boots on the imported directory and serves it by id.
+    let server = Server::start_on("legacy-offline-serve", data_dir);
+    let row = server.ok("GET", &format!("/contexts/{kura}"), None);
+    assert_eq!(row["name"], json!("sake/kura"), "{row}");
+    assert_eq!(row["pinned"], json!(true), "{row}");
+    let brewer = server.ok(
+        "POST",
+        &format!("/contexts/{kura}/query"),
+        Some(json!({"subject": "Aomine", "label": "杜氏"})),
+    );
+    assert_eq!(brewer["matches"][0]["object"], json!("高瀬"), "{brewer}");
+    let drinks = server.ok("GET", &format!("/groups/{}", server.gx("drinks")), None);
+    assert_eq!(
+        drinks["context_ids"],
+        server.cx_sorted(&["sake/kura", "wine"])
+    );
+    let _ = std::fs::remove_dir_all(&legacy);
+    let _ = std::fs::remove_dir_all(&reference);
+}
+
+/// Concurrent v0.9.7 bodies naming the same absent context: each one
+/// resolves names against what the ones before it wrote, so the name
+/// mints one id, never one per request.
+#[test]
+fn concurrent_v097_imports_of_one_absent_name_create_it_once() {
+    let server = Server::start("legacy-concurrent");
+    std::thread::scope(|scope| {
+        let posts: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| post_import(&server, V097_WINE, None)))
+            .collect();
+        for post in posts {
+            let (status, body) = post.join().unwrap();
+            assert_eq!(status, 200, "{body}");
+        }
+    });
+    let rows = server.ok("GET", "/contexts", None);
+    let wines: Vec<&Value> = rows["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"] == json!("wine"))
+        .collect();
+    assert_eq!(wines.len(), 1, "{rows}");
+}
+
+/// The same export through `POST /import` on a single instance: each
+/// context file on its own, then every group file in one body (the
+/// parent's record first), and again to prove idempotence.
+#[test]
+fn a_v097_export_imports_over_post_import_and_reads_back_equal() {
+    let reference = write_current_equivalent("legacy-post-reference");
+    let reference_dir = common::scratch_dir("http-import-legacy-post-reference");
+    let (code, stdout, stderr) = run_import(&reference_dir, &[reference.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let data_dir = common::scratch_dir("http-import-legacy-post");
+    let server = Server::start_on("legacy-post", data_dir.clone());
+    let groups = format!("{V097_ALL}{V097_DRINKS}");
+    for round in 0..2 {
+        for body in [V097_KURA, V097_WINE, groups.as_str()] {
+            let (status, answer) = post_import(&server, body, None);
+            assert_eq!(status, 200, "round {round}: {answer}");
+        }
+    }
+    let (_, answer) = post_import(&server, V097_WINE, None);
+    assert_eq!(
+        answer["result"]["batches"][0]["created"],
+        json!(false),
+        "{answer}"
+    );
+    let data_dir = server.stop_gracefully();
+
+    assert_eq!(
+        export_by_name(&data_dir, "post"),
+        export_by_name(&reference_dir, "post-reference")
+    );
+    let _ = std::fs::remove_dir_all(&reference);
+}
+
+/// A v0.9.7 name several standing contexts carry is refused by name,
+/// offline and over HTTP, and nothing of the import is written.
+#[test]
+fn a_v097_name_several_contexts_carry_is_refused_and_nothing_written() {
+    let legacy = write_v097_export("legacy-ambiguous");
+    let twins = batch_dir("legacy-ambiguous-twins");
+    std::fs::write(
+        twins.join("twins.jsonl"),
+        "{\"type\":\"source\",\"context_id\":\"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63\",\
+         \"id\":\"seed\",\"create\":{\"name\":\"wine\"}}\n\
+         {\"type\":\"source\",\"context_id\":\"1d8b4cf8-54cd-42f4-8688-49c4ce329da7\",\
+         \"id\":\"seed\",\"create\":{\"name\":\"wine\"}}\n",
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-ambiguous");
+    let (code, stdout, stderr) = run_import(&data_dir, &[twins.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let (code, stdout, stderr) = run_import(&data_dir, &[legacy.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("2 contexts on this server are named 'wine'")
+            && stderr.contains("nothing was applied"),
+        "{stderr}"
+    );
+    assert!(
+        common::try_context_stem(&data_dir, "sake/kura").is_none(),
+        "a refused import creates nothing"
+    );
+    assert!(common::try_group_stem(&data_dir, "drinks").is_none());
+
+    let server = Server::start_on("legacy-ambiguous", data_dir);
+    let (status, body) = post_import(&server, V097_WINE, None);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["code"], json!("conflict"), "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    // The caller resolves the ambiguity (rename or delete a twin) and
+    // re-sends: the refusal says that retry is expected to work.
+    assert_eq!(body["retryable_after_correction"], json!(true), "{body}");
+    let (status, body) = post_import(&server, V097_KURA, None);
+    assert_eq!(status, 200, "an unambiguous name still imports: {body}");
+    let _ = std::fs::remove_dir_all(&legacy);
+    let _ = std::fs::remove_dir_all(&twins);
+}
+
+/// A file mixing v0.9.7 records with current-format ones is refused by
+/// line, offline and over HTTP, before anything is written.
+#[test]
+fn a_file_mixing_v097_and_current_records_is_refused() {
+    let batches = batch_dir("legacy-mixed");
+    let file = batches.join("mixed.jsonl");
+    let mixed = format!(
+        "{V097_WINE}{{\"type\":\"source\",\"context_id\":\"3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63\",\
+         \"id\":\"a.md\",\"create\":{{\"name\":\"sake\"}}}}\n"
+    );
+    std::fs::write(&file, &mixed).unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-mixed");
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("line 2: ") && stderr.contains("may not be mixed in one file"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("nothing was applied"), "{stderr}");
+
+    let server = Server::start_on("legacy-mixed", data_dir);
+    let (status, body) = post_import(&server, &mixed, None);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    assert!(server.try_cx("wine").is_none() && server.try_cx("sake").is_none());
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// Two v0.9.7 files stating the same source of the same context conflict
+/// once their names settle on one id: the run refuses whole, counting the
+/// file that lost, and writes nothing.
+#[test]
+fn two_v097_files_stating_one_source_refuse_the_run() {
+    let batches = batch_dir("legacy-duplicate");
+    let first = batches.join("wine-a.jsonl");
+    let second = batches.join("wine-b.jsonl");
+    std::fs::write(&first, V097_WINE).unwrap();
+    std::fs::write(&second, V097_WINE).unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-duplicate");
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &[first.to_str().unwrap(), second.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("is already stated by an earlier file"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 2 file(s) refused during validation; nothing was applied"),
+        "{stderr}"
+    );
+    assert!(common::try_context_stem(&data_dir, "wine").is_none());
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The conflict only ids reveal: a v0.9.7 file naming a standing
+/// context and a current-format file addressing that context's id state
+/// the same source. Neither the per-file name check nor the id check of
+/// current files can see it before boot; once the name settles on the id
+/// the run refuses whole and writes nothing.
+#[test]
+fn a_v097_file_and_a_current_file_claiming_one_source_by_id_refuse_the_run() {
+    let id = "3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63";
+    let batches = batch_dir("legacy-id-conflict");
+    let seed = batches.join("seed.jsonl");
+    std::fs::write(
+        &seed,
+        format!(
+            "{{\"type\":\"source\",\"context_id\":\"{id}\",\"id\":\"seed.md\",\
+             \"create\":{{\"name\":\"sake\"}}}}\n\
+             {{\"subject\":\"蔵\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-id-conflict");
+    let (code, stdout, stderr) = run_import(&data_dir, &[seed.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let current = batches.join("a-current.jsonl");
+    std::fs::write(
+        &current,
+        format!(
+            "{{\"type\":\"source\",\"context_id\":\"{id}\",\"id\":\"a.md\"}}\n\
+             {{\"subject\":\"蔵\",\"label\":\"所在地\",\"object\":\"霧沢\",\"weight\":1.0}}\n"
+        ),
+    )
+    .unwrap();
+    let old = batches.join("b-legacy.jsonl");
+    std::fs::write(
+        &old,
+        "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\"}\n\
+         {\"subject\":\"蔵\",\"label\":\"銘柄\",\"object\":\"青嶺\",\"weight\":1.0}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &[current.to_str().unwrap(), old.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("is already stated by an earlier file")
+            && stderr.contains("1 of 2 file(s) refused during validation; nothing was applied"),
+        "{stderr}"
+    );
+
+    let server = Server::start_on("legacy-id-conflict", data_dir);
+    // Only the seed's fact stands: neither file of the refused run
+    // wrote its association.
+    let facts = server.ok(
+        "POST",
+        &format!("/contexts/{id}/query"),
+        Some(json!({"subject": "蔵"})),
+    );
+    let labels: Vec<&str> = facts["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fact| fact["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        ["杜氏"],
+        "nothing of the refused run landed: {facts}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// `import --url` does not read a v0.9.7 file: it refuses before
+/// sending anything, naming the entrances that do.
+#[test]
+fn import_url_refuses_a_v097_file_naming_the_entrances_that_read_it() {
+    let legacy = write_v097_export("legacy-url");
+    let server = Server::start("legacy-url");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            legacy.join("wine.jsonl").to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("v0.9.7 export stream") && stderr.contains("#upgrading-from-0-9-7"),
+        "{stderr}"
+    );
+    assert!(server.try_cx("wine").is_none());
+    let _ = std::fs::remove_dir_all(&legacy);
+}

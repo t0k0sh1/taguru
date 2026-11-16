@@ -39,7 +39,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FakeListChatModel } from "@langchain/core/utils/testing";
-import { Taguru } from "taguru";
+import { PermissionDeniedError, Taguru } from "taguru";
 import { describe, expect, test, vi } from "vitest";
 
 import { docxBytes, para } from "../docx.js";
@@ -97,6 +97,9 @@ class FakeServer {
    * simulate what the server already holds, then assert `retracted`. */
   sources: string[] = [];
   retracted: string[] = [];
+  /** When set, GET /contexts answers this status — mirrors the Python
+   * conftest's `contexts_listing_status` knob. */
+  contextsListingStatus: number | null = null;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -114,6 +117,12 @@ class FakeServer {
     if (path === "/contexts" && method === "GET") {
       // The ingester resolves its configured context NAME to the id
       // every /contexts/{id}/… route takes (#964).
+      if (this.contextsListingStatus !== null) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "simulated", error: "simulated listing failure", time: 0.001 }),
+          { status: this.contextsListingStatus },
+        );
+      }
       const row = {
         id: "id-sake",
         name: "sake",
@@ -600,6 +609,23 @@ describe("syncObjectStorage", () => {
 
     expect(report.retracted).toBe(1);
     expect(server.retracted).toEqual(["s3://reports/phantom.md"]);
+  });
+
+  test("mirror sweep reports a failed context listing, not a missing context", async () => {
+    // A context directory that refuses to list (here 403) is the sweep's
+    // real failure — never "does not resolve to a context", which would
+    // send the operator hunting for a context that exists.
+    const server = new FakeServer();
+    const store = new FakeObjectStore("reports"); // empty: only the mirror sweep runs
+    server.contextsListingStatus = 403;
+    await expect(
+      syncObjectStorage(store, "", {
+        ingester: ingester(server),
+        checkpoints: new RecordingCheckpointStore(),
+        deletionPolicy: "mirror",
+      }),
+    ).rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(server.retracted).toEqual([]);
   });
 
   // No test mirrors the Python original's

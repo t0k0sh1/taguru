@@ -20,17 +20,17 @@ use super::{
 // (ADR 0050), so nothing here resolves one.
 impl AppState {
     /// Registers a `group` under a freshly minted id and persists it
-    /// immediately — the create twin for `groups`, without the
-    /// `pending.creates` choreography: the one fsync happens under the
-    /// `groups` lock, which blocks only other `group` writes (see the
-    /// field's doc), so nothing here needs the reservation dance.
+    /// immediately — the create twin for `groups`, without a
+    /// reservation set: the one fsync happens under the `groups` lock,
+    /// which blocks only other `group` writes (see the field's doc), so
+    /// nothing here needs the reservation dance.
     ///
     /// Member validation happens under both locks (`groups` before
     /// `registry` — the documented order): `contains_id` already
     /// answers false for a `context` mid-delete, because delete()
-    /// removes it and reserves it in `pending.deletes` inside one
-    /// critical section. Child ids are checked against the same table
-    /// the write lock already holds.
+    /// unregisters it in one critical section before any of its disk
+    /// work. Child ids are checked against the same table the write
+    /// lock already holds.
     ///
     /// The name is a label, not a key: another `group` may already
     /// carry it. `id` is the caller's (a router hands every shard the

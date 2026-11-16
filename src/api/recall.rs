@@ -506,6 +506,12 @@ pub struct CrossRecallRequest {
     /// `context` is searched once however many ways it was named.
     #[serde(default)]
     pub group_ids: Vec<String>,
+    /// The pre-0.10.0 target keys, which held names; caught only to be
+    /// refused by name ([`super::cross_target_rename_refusal`]).
+    #[serde(default, skip_serializing)]
+    pub contexts: super::RenamedField,
+    #[serde(default, skip_serializing)]
+    pub groups: super::RenamedField,
     pub cue: String,
     /// Omitted means 100.
     pub limit: Option<usize>,
@@ -617,6 +623,11 @@ pub async fn cross_recall(
         return deadline_exceeded(started_at);
     }
     if let Some(refusal) = refuse_cross_window(request.since, request.until, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) =
+        super::cross_target_rename_refusal(&request.contexts, &request.groups, started_at)
+    {
         return refusal;
     }
     let targets = match cross_targets(
@@ -979,6 +990,11 @@ pub struct CrossQueryRequest {
     /// `group` ids, resolved and deduped as in [`CrossRecallRequest`].
     #[serde(default)]
     pub group_ids: Vec<String>,
+    /// The pre-0.10.0 target keys — see [`CrossRecallRequest::contexts`].
+    #[serde(default, skip_serializing)]
+    pub contexts: super::RenamedField,
+    #[serde(default, skip_serializing)]
+    pub groups: super::RenamedField,
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
@@ -1010,6 +1026,11 @@ pub async fn cross_query(
 ) -> Response {
     let started_at = Instant::now();
     if let Some(refusal) = refuse_cross_window(request.since, request.until, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) =
+        super::cross_target_rename_refusal(&request.contexts, &request.groups, started_at)
+    {
         return refusal;
     }
     if let Some(refusal) = validate_positions(
@@ -1210,6 +1231,8 @@ mod tests {
         let request = CrossRecallRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             group_ids: Vec::new(),
+            contexts: Default::default(),
+            groups: Default::default(),
             cue: "AAA".to_string(),
             limit: None,
             after: None,
@@ -1245,6 +1268,8 @@ mod tests {
         let request = CrossQueryRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             group_ids: Vec::new(),
+            contexts: Default::default(),
+            groups: Default::default(),
             subject: Some(OneOrMany::One("蔵".to_string())),
             label: None,
             object: None,
