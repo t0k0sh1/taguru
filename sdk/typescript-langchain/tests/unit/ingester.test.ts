@@ -4,6 +4,7 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
 import type { ChatResult } from "@langchain/core/outputs";
 import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing";
+import { NotFoundError, PermissionDeniedError } from "taguru";
 import { describe, expect, it } from "vitest";
 
 import { MAX_PASSAGE_BYTES } from "../../src/extract.js";
@@ -833,5 +834,50 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
     expect(failed.validation_issues).toEqual([
       'associations[0].weight: expected finite non-zero number, got string "strong"',
     ]);
+  });
+});
+
+// The id lookup (contextId): only "no such context" reads as null; any
+// other listing failure carries its real cause out, so callers (the S3
+// mirror sweep, refresh_embeddings) never misreport it as absent. Pinned
+// identically in the Python suite.
+describe("TaguruIngester.contextId", () => {
+  it("resolves the name, and reads an absent name as null", async () => {
+    const server = new FakeServer();
+    expect(await make(server, []).contextId()).toBe("id-sake");
+    expect(await make(server, [], { context: "no-such-context" }).contextId()).toBeNull();
+  });
+
+  it("reads a 404 listing as null unless strict", async () => {
+    const server = new FakeServer();
+    server.contextsListingStatus = 404;
+    const ingester = make(server, []);
+    expect(await ingester.contextId()).toBeNull();
+    await expect(ingester.contextId(true)).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("propagates a listing failure that is not absence", async () => {
+    const server = new FakeServer();
+    server.contextsListingStatus = 403;
+    await expect(make(server, []).contextId()).rejects.toBeInstanceOf(PermissionDeniedError);
+  });
+
+  it("lets refresh_embeddings report a forbidden listing, not a missing context", async () => {
+    // The listing turns forbidden once the import has landed, so only the
+    // refresh's own id lookup hears it: the real 403 must surface, never a
+    // synthetic "context not found".
+    const server = new FakeServer();
+    const ingester = make(server, [MODEL_ANSWER], {
+      refresh_embeddings: true,
+      on_event: (event: IngestEvent) => {
+        if (event.kind === "import_completed") {
+          server.contextsListingStatus = 403;
+        }
+      },
+    });
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+    expect(server.imported).toHaveLength(1);
   });
 });

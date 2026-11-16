@@ -119,7 +119,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "rename_context",
-            "Rename a `context` (admin role): a display-name change and nothing else — the id, the files, and every path stay put; every `group` naming it is rewritten to match. Names are not unique, so the destination may already be in use.",
+            "Rename a `context` (admin role): a display-name change and nothing else — the id, the files, every path, every `group` membership, and every grant stay put (they all hold the id, never the name). Names are not unique, so the destination may already be in use.",
             object_schema(
                 json!({
                     "context_id": { "type": "string", "description": "Context id: a UUID — the id column of list_contexts (look a name up there)" },
@@ -928,7 +928,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "get_context",
-            "One directory row by name — the cheap existence-and-stats check, without listing everything else.",
+            "One directory row by id — the cheap existence-and-stats check, without listing everything else.",
             object_schema(json!({ "context_id": context }), &["context_id"]),
         ),
         (

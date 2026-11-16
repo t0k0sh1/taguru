@@ -735,8 +735,9 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
 
     // A manifest that is not one this build reads is refused, and the
     // refusal judges nothing and rewrites nothing (ADR 0042): another
-    // format revision, another kind of record, a null version, and the
-    // two shapes earlier releases stored — which name no `type` at all.
+    // format revision that is not an earlier one, another kind of
+    // record, a null version, and an untyped record that is not the
+    // v0.9.7 release's `taguru_consolidation` one.
     for (stored_manifest, expected) in [
         (
             json!({"type": "consolidation_manifest", "version": "2008-10-17",
@@ -754,10 +755,6 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         ),
         (
             json!({"consolidation": 1, "detector": "consolidation/1", "context": "sake"}),
-            "no `type` column",
-        ),
-        (
-            json!({"taguru_consolidation": 1, "detector": "consolidation/1", "context": "sake"}),
             "no `type` column",
         ),
     ] {
@@ -791,6 +788,35 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         );
     }
 
+    // A manifest an earlier format revision wrote — the v0.9.7
+    // release's untyped `taguru_consolidation` record, or a typed one
+    // stamped with an earlier revision — is incomparable, not refused:
+    // every candidate re-judges, and the manifest is rewritten as this
+    // build's (SHOULD-FIX 3).
+    let mut expected_calls = 10;
+    for stored_manifest in [
+        json!({"taguru_consolidation": 1, "detector": "consolidation/1", "context": "sake"}),
+        json!({"type": "consolidation_manifest", "version": "2026-10-01",
+               "detector": "consolidation/1", "context_id": server.cx("sake")}),
+    ] {
+        overwrite_manifest(&server, &stored_manifest.to_string());
+        let (code, stdout, stderr) = run_consolidation(
+            &["--context", &server.cx("sake"), &server.base],
+            &extract_env,
+        );
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stderr.contains("the stored manifest is from an earlier format revision"),
+            "{stderr}"
+        );
+        expected_calls += 5;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            expected_calls,
+            "every candidate re-judges"
+        );
+    }
+
     // The version column is optional on read: a manifest that names its
     // type and no version is this build's own, and everything is reused.
     overwrite_manifest(
@@ -807,5 +833,5 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         stdout.contains("judgments up to date (5 reused, no LLM calls)"),
         "{stdout}"
     );
-    assert_eq!(*calls.lock().unwrap(), 10);
+    assert_eq!(*calls.lock().unwrap(), expected_calls);
 }

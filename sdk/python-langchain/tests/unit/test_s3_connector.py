@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from taguru import AsyncTaguru, Taguru
+from taguru import AsyncTaguru, PermissionDeniedError, Taguru
 
 from taguru_langchain import TaguruIngester
 from taguru_langchain.ingest_connectors import (
@@ -440,6 +440,25 @@ def test_deletion_mirror_policy_self_heals_even_without_a_prior_inventory(
 
     assert report.retracted == 1
     assert fake_server.retracted == ["s3://reports/phantom.md"]
+
+
+def test_mirror_sweep_reports_a_failed_context_listing_not_a_missing_context(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """A context directory that refuses to list (here 403) is the sweep's
+    real failure — never "does not resolve to a context", which would send
+    the operator hunting for a context that exists."""
+    store = FakeObjectStore("reports")  # empty: only the mirror sweep runs
+    fake_server.contexts_listing_status = 403
+    with pytest.raises(PermissionDeniedError):
+        sync_object_storage(
+            store,
+            "",
+            ingester=_ingester(sync_client, async_client),
+            checkpoints=RecordingCheckpointStore(),
+            deletion_policy="mirror",
+        )
+    assert fake_server.retracted == []
 
 
 def test_retract_without_a_sync_client_raises_instead_of_guessing(

@@ -1,5 +1,60 @@
 use super::*;
 
+/// One id held in a reservation set (`pending_creates` or
+/// `pending_deletes`) for as long as this lives — released by `Drop` on
+/// every exit path (a normal return, an early `?`, a panic unwind), so
+/// no failed operation can leave its id reserved until restart.
+struct IdReservation<'set> {
+    set: &'set Mutex<HashSet<String>>,
+    id: String,
+}
+
+impl<'set> IdReservation<'set> {
+    /// Reserves `id` in `set`, or `None` when someone already holds it.
+    fn claim(set: &'set Mutex<HashSet<String>>, id: &str) -> Option<Self> {
+        set.lock().insert(id.to_string()).then(|| Self {
+            set,
+            id: id.to_string(),
+        })
+    }
+}
+
+impl Drop for IdReservation<'_> {
+    fn drop(&mut self) {
+        self.set.lock().remove(&self.id);
+    }
+}
+
+// Test-only checkpoint between a rename's two halves (the entry's name
+// swap and the index move) — the window two unserialized renames of
+// one `context` used to interleave in. A closure, not a barrier: with
+// `Entry::rename` doing its job a second rename cannot reach this point
+// while the first is parked here, so the test's hook waits for it with
+// a timeout instead of a rendezvous that would deadlock.
+#[cfg(test)]
+thread_local! {
+    static RENAME_HALVES_CHECKPOINT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Arms [`hit_rename_halves_checkpoint`] on the CALLING thread: its next
+/// rename that swaps a name runs `hook` before moving the index.
+#[cfg(test)]
+fn arm_rename_halves_checkpoint(hook: impl FnOnce() + 'static) {
+    RENAME_HALVES_CHECKPOINT.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn hit_rename_halves_checkpoint() {
+    if let Some(hook) = RENAME_HALVES_CHECKPOINT.with(|cell| cell.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors passages.rs's hit_quota_write_checkpoint
+fn hit_rename_halves_checkpoint() {}
+
 impl AppState {
     /// Registers an empty `context` under a freshly minted id and
     /// persists it immediately, so its existence (and description)
@@ -66,9 +121,10 @@ impl AppState {
                 0,
                 usage,
                 ContextRevision::default(),
-                // A brand-new generation never has a schema — and
-                // under a freshly minted stem there is no earlier
-                // generation's stray file to inherit one from.
+                // A brand-new generation never has a schema, and no
+                // earlier generation's stray file is there to inherit
+                // one from: a minted stem never had a family, and
+                // `create_if_absent` clears a reused one first.
                 None,
                 None,
             )),
@@ -88,11 +144,19 @@ impl AppState {
     /// it reports `Ok(false)` exactly as if the winner had already
     /// registered.
     ///
-    /// Unlike [`Self::create`], the stem here is NOT freshly minted, so
-    /// the clean-slate argument does not hold: an image already on disk
-    /// under an id the registry does not know (a context whose load
-    /// failed hard enough to be left unregistered) refuses with `Io`
-    /// rather than being written over.
+    /// Unlike [`Self::create`], the stem here is NOT freshly minted —
+    /// import headers and derived ids (`derived_context_id`'s analysis
+    /// artifacts) recreate a deleted id on purpose — so the clean-slate
+    /// argument does not hold, three ways:
+    /// - an image already on disk under an id the registry does not
+    ///   know (a context whose load failed hard enough to be left
+    ///   unregistered) refuses with `Io` rather than being written over;
+    /// - an id a [`Self::delete`] is still unlinking (`pending_deletes`)
+    ///   refuses with `Io`: landing now would put the fresh family into
+    ///   the tail of that delete's unlink loop. The caller retries once
+    ///   the delete has answered;
+    /// - what an earlier family under the id left behind is cleared
+    ///   before anything is written ([`Self::clear_stale_family`]).
     pub fn create_if_absent(
         &self,
         id: &str,
@@ -102,37 +166,85 @@ impl AppState {
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
-        {
+        let _reservation = {
             let registry = self.0.registry.read();
             if registry.get_id(id).is_some() {
                 return Ok(false);
             }
-            // Reserved under the registry read guard, so this
-            // check-then-insert cannot interleave with another
-            // create_if_absent of the same id (both would need the
-            // pending lock inside the same registry guard).
-            if !self.0.pending_creates.lock().insert(id.to_string()) {
-                return Ok(false);
+            // Both sets are consulted under the registry read guard:
+            // `delete` enters `pending_deletes` under the WRITE guard,
+            // in the same section that unregisters the id, so "not
+            // registered and not being deleted" is one observation;
+            // and two create_if_absent calls of one id cannot both
+            // claim `pending_creates`.
+            if self.0.pending_deletes.lock().contains(id) {
+                return Err(CreateError::Io(io::Error::other(format!(
+                    "context id {id} is still being deleted; retry once the delete has completed"
+                ))));
             }
-        }
-        let outcome = if image_path(&self.0.data_dir, id).exists() {
-            Err(CreateError::Io(io::Error::other(format!(
+            match IdReservation::claim(&self.0.pending_creates, id) {
+                Some(reservation) => reservation,
+                None => return Ok(false),
+            }
+        };
+        if image_path(&self.0.data_dir, id).exists() {
+            return Err(CreateError::Io(io::Error::other(format!(
                 "files for context id {id} already exist in the data directory but no \
                  context is registered under it"
-            ))))
-        } else {
-            self.create_registered(id, name, meta).map(|()| true)
-        };
-        self.0.pending_creates.lock().remove(id);
-        outcome
+            ))));
+        }
+        self.clear_stale_family(id).map_err(CreateError::Io)?;
+        // Registered before the reservation drops, so a concurrent
+        // batch of the same id goes from "reserved" straight to
+        // "registered" — never to a gap that would create twice.
+        self.create_registered(id, name, meta)?;
+        Ok(true)
     }
 
-    /// The disk half of [`AppState::create`], run WITHOUT the registry
-    /// lock — the `pending.creates` reservation is what keeps the name
-    /// taken meanwhile. The freshly minted `id` stem starts from a
-    /// clean slate by construction; `save_files` lands the image last,
-    /// so a crash anywhere before it commits leaves no image and
-    /// nothing registers (the scan keys on `.ctx`).
+    /// Clears what an earlier family under `id` may have left behind
+    /// before [`Self::create_if_absent`] writes a fresh one there: a
+    /// delete that failed partway leaves its `.deleted` marker plus
+    /// whichever of the WAL lanes, sidecars, schema file, and import
+    /// markers it could not unlink, and a create that crashed before its
+    /// image landed leaves an orphan sidecar. Inherited, the marker
+    /// would have the next boot delete the new `context`, an old WAL
+    /// would replay into it, a stray schema file would fail its digest
+    /// check and refuse the whole boot, and an old import marker would
+    /// report a tear it never had.
+    ///
+    /// The caller holds the id's `pending_creates` reservation and has
+    /// seen no image, no registration, and no delete in flight, so
+    /// nothing else is working under this stem. The family files and
+    /// import markers go first and the `.deleted` marker last — a crash
+    /// midway leaves the marker, and boot's resume finishes the same
+    /// sweep — and `save_files`' parent-directory fsync makes the
+    /// unlinks durable before the new image can commit. A leftover that
+    /// cannot be removed fails the create: registering on top of it
+    /// would hand out a `context` haunted by the old generation.
+    fn clear_stale_family(&self, id: &str) -> io::Result<()> {
+        let dir = &self.0.data_dir;
+        let stale = context_files(id)
+            .into_iter()
+            .map(|file| dir.join(file))
+            .chain(import_marker_paths(dir, id))
+            .chain(std::iter::once(deleted_marker_path(dir, id)));
+        for path in stale {
+            if let Err(error) = remove_persisted_file(&path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// The disk half of [`AppState::create`] and
+    /// [`AppState::create_if_absent`], run WITHOUT the registry lock —
+    /// nothing else can be writing under `id` meanwhile (a freshly
+    /// minted one is unique; a caller-supplied one is reserved in
+    /// `pending_creates`). `save_files` lands the image last, so a
+    /// crash anywhere before it commits leaves no image and nothing
+    /// registers (the scan keys on `.ctx`).
     fn create_files(
         &self,
         id: &str,
@@ -170,13 +282,14 @@ impl AppState {
     /// backs off instead of recreating the files. Any unflushed writes
     /// are discarded — deletion destroys the `context`.
     ///
-    /// The name enters `pending.deletes` in the same critical section
-    /// that unregisters it and leaves only after the unlink loop: to a
-    /// concurrent create() the name stays taken for the delete's whole
-    /// run, so no new generation of files can appear under the tail of
-    /// this one's removals.
+    /// The id enters `pending_deletes` in the same critical section
+    /// that unregisters it and leaves only after the unlink loop: a
+    /// minted id is never reused, but an import header or a derived id
+    /// can recreate this one through [`AppState::create_if_absent`],
+    /// which refuses while the reservation stands — so no new family
+    /// can appear under the tail of this one's removals.
     pub fn delete(&self, id: &str) -> Option<Result<(), DeleteError>> {
-        let (entry, name) = {
+        let (entry, name, _reservation) = {
             let mut registry = self.0.registry.write();
             // The name hint is the index's own reverse scan: `inner`
             // must not be locked while the registry lock is held (the
@@ -184,15 +297,20 @@ impl AppState {
             // covers a hint gone stale anyway.
             let name = registry.name_of(id)?;
             let entry = registry.remove_id(id, &name)?;
-            (entry, name)
+            // Always claimable: a second delete finds the id already
+            // unregistered above, and `create_if_absent` cannot
+            // re-register it while this reservation exists.
+            let reservation = IdReservation::claim(&self.0.pending_deletes, id);
+            (entry, name, reservation)
         };
         let mut in_flight = entry.inner.write();
         self.tombstone_locked(&mut in_flight, &entry);
         // The rest of this function is disk I/O (marker, group sweep,
-        // unlinks). No reservation set guards it anymore: the entry is
-        // out of the registry (nothing new can address it), a create
-        // can never re-mint this stem, and a rename that raced this
-        // far finds the tombstone under `inner` and backs off.
+        // unlinks), guarded by the `pending_deletes` reservation, not
+        // by `inner`: the entry is out of the registry (nothing new can
+        // address it), a same-id create refuses while the reservation
+        // stands, and a rename that raced this far finds the tombstone
+        // under `inner` and backs off.
         drop(in_flight);
         let stem = entry.id.clone();
         // A lazy bucket boot: the bucket's copy of this family must
@@ -261,7 +379,10 @@ impl AppState {
     /// No availability check and no reservation: the destination name
     /// may already be in use (issue #961 decision 1 — names are not
     /// unique), so there is nothing for a concurrent create or rename
-    /// to collide with. The sidecar write happens under the entry
+    /// of ANOTHER `context` to collide with. Two renames of the SAME
+    /// `context` are serialized end to end by `Entry::rename`, so the
+    /// index always moves from the name the sidecar held to the one it
+    /// now holds. The sidecar write happens under the entry
     /// lock and BEFORE the index moves: a success response always
     /// means the new name is durable, and a crash mid-call leaves at
     /// worst a sidecar already renamed whose index entry still says
@@ -274,12 +395,16 @@ impl AppState {
         let Some(entry) = self.lookup_id(id) else {
             return Err(RenameContextError::NotFound);
         };
+        // Held across both halves below — see `Entry::rename` for the
+        // interleaving that would otherwise leave a stale index row.
+        let _serialized = entry.rename.lock();
         let from = match self.rename_entry(&entry, to)? {
             // A self-rename: the sidecar was not rewritten and the
             // index has nothing to move.
             None => return Ok(()),
             Some(previous) => previous,
         };
+        hit_rename_halves_checkpoint();
         {
             let mut registry = self.0.registry.write();
             // A delete that raced this rename has already unindexed
@@ -713,7 +838,7 @@ fn rollback_meta(inner: &mut EntryInner, previous: ContextMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_support::{assoc_op, scratch_dir};
+    use crate::registry::test_support::{assoc_op, scratch_dir, test_id};
 
     /// An empty `context` name is refused at the registry boundary — the
     /// last guard against a bare `.ctx` file that `scan_data_dir` (which
@@ -985,9 +1110,11 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A failed create must release its `pending.creates` reservation —
-    /// otherwise one disk refusal would leave the name reading as taken
-    /// until restart.
+    /// A failed create leaves nothing behind that blocks the retry —
+    /// for `create_if_absent` that is its `pending_creates`
+    /// reservation, which would otherwise answer every later attempt
+    /// at the id with "taken" (`Ok(false)`, nothing created) until
+    /// restart.
     #[test]
     fn a_failed_create_releases_the_name() {
         let dir = scratch_dir("create-release");
@@ -995,7 +1122,7 @@ mod tests {
 
         // Fail the create's own sidecar write (its fresh uuid stem
         // has no leftovers to trip over any more — the disk refusal
-        // is injected instead), after the name is already reserved.
+        // is injected instead).
         fail_persistence_ops_after(0);
         assert!(matches!(
             state.create("sake", ContextMeta::default()),
@@ -1003,12 +1130,28 @@ mod tests {
         ));
         clear_persistence_fault();
 
-        // Fault gone, the same name must create cleanly — the failed
-        // attempt's reservation may not linger.
+        // Fault gone, the same name must create cleanly.
         state
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
+
+        // The same for a caller-supplied id, refused after it was
+        // already reserved.
+        let id = test_id("restored");
+        fail_persistence_ops_after(0);
+        assert!(matches!(
+            state.create_if_absent(&id, "restored", ContextMeta::default()),
+            Err(CreateError::Io(_))
+        ));
+        clear_persistence_fault();
+        assert!(
+            matches!(
+                state.create_if_absent(&id, "restored", ContextMeta::default()),
+                Ok(true)
+            ),
+            "the failed attempt's reservation may not linger"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1047,6 +1190,183 @@ mod tests {
         assert!(image_path(&dir, &new_id).exists());
         assert!(!image_path(&dir, &old_id).exists());
         assert_eq!(state.stem_of("sake").unwrap(), new_id);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An import header or a derived id recreates a deleted id on
+    /// purpose. While the delete of that id is still unlinking — here
+    /// stalled after it unregistered the id, with its loop standing in
+    /// as already past the image, so an image check alone reads the id
+    /// as free — the recreate must refuse: written now, its fresh
+    /// family would be destroyed by the rest of that unlink loop.
+    #[test]
+    fn a_same_id_create_refuses_while_a_delete_of_that_id_is_still_unlinking() {
+        let dir = scratch_dir("delete-recreate-same-id");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = test_id("communities");
+        assert!(
+            state
+                .create_if_absent(&id, "communities", ContextMeta::default())
+                .unwrap()
+        );
+
+        let entry = state.lookup_id(&id).unwrap();
+        let stall = entry.inner.read();
+        let deleter = {
+            let state = state.clone();
+            let id = id.clone();
+            std::thread::spawn(move || state.delete(&id).unwrap().unwrap())
+        };
+        while state.lookup_id(&id).is_some() {
+            std::thread::yield_now();
+        }
+        fs::remove_file(image_path(&dir, &id)).unwrap();
+        let refused = state.create_if_absent(&id, "communities", ContextMeta::default());
+        assert!(
+            matches!(
+                &refused,
+                Err(CreateError::Io(error)) if error.to_string().contains("still being deleted")
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            !state.context_id_exists(&id),
+            "nothing registered under the doomed id"
+        );
+
+        drop(stall);
+        deleter.join().unwrap();
+        // The delete answered: the id is free, and the recreate's
+        // family survives because nothing is unlinking under it.
+        assert!(
+            state
+                .create_if_absent(&id, "communities", ContextMeta::default())
+                .unwrap()
+        );
+        assert!(image_path(&dir, &id).exists());
+        assert!(meta_path(&dir, &id).exists());
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state.context_id_exists(&id),
+            "the recreate survives a restart"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A delete whose unlinks partly failed leaves its `.deleted`
+    /// marker and whatever it could not remove. A same-id recreate must
+    /// not inherit any of it: the marker would have the next boot delete
+    /// the recreate, the old WAL would replay into it, a schema file its
+    /// sidecar records no digest for would refuse the whole boot, and
+    /// an old import marker would report a tear it never had.
+    #[test]
+    fn a_same_id_recreate_clears_what_a_partial_delete_left_behind() {
+        let dir = scratch_dir("recreate-clears-leftovers");
+        let id = test_id("communities");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert!(
+                state
+                    .create_if_absent(&id, "communities", ContextMeta::default())
+                    .unwrap()
+            );
+            state.delete(&id).unwrap().unwrap();
+            fs::write(deleted_marker_path(&dir, &id), b"").unwrap();
+            wal::append_batch(
+                &wal_path(&dir, &id),
+                1,
+                &[WalOp::Associate(assoc_op("蔵", "杜氏", "高瀬", 1.0, None))],
+            )
+            .unwrap();
+            fs::write(schema_path(&dir, &id), b"{\"stale\": true}").unwrap();
+            fs::write(
+                import_marker_path(&dir, &id, "doc-1"),
+                format!(r#"{{"context":"{id}","source":"doc-1"}}"#),
+            )
+            .unwrap();
+
+            assert!(
+                state
+                    .create_if_absent(&id, "communities", ContextMeta::default())
+                    .unwrap(),
+                "the id is free again once its delete answered"
+            );
+            for leftover in [
+                deleted_marker_path(&dir, &id),
+                wal_path(&dir, &id),
+                schema_path(&dir, &id),
+            ] {
+                assert!(!leftover.exists(), "{} survived", leftover.display());
+            }
+            assert!(import_marker_paths(&dir, &id).is_empty());
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None)
+            .expect("no stray schema file may refuse the boot");
+        assert!(
+            state.context_id_exists(&id),
+            "the next boot must not resume the old delete over the recreate"
+        );
+        let count = state
+            .read_context(&id, |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 0, "the old generation's WAL must not replay into it");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Two renames of one `context` racing: A (sake → b) has swapped the
+    /// name and written the sidecar, and B (b → c) tries to run whole
+    /// before A moves the index. Unserialized, B found no `b` row to
+    /// unindex yet and A's late move re-added one — the listing showed
+    /// the `context` twice, once under a name it no longer has.
+    /// `Entry::rename` makes B wait A out; the checkpoint gives B ample
+    /// time to try.
+    #[test]
+    fn two_renames_of_one_context_leave_exactly_one_listing_row() {
+        let dir = scratch_dir("rename-rename-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+
+        type Renamer = std::thread::JoinHandle<Result<(), RenameContextError>>;
+        let second: Arc<Mutex<Option<Renamer>>> = Arc::default();
+        {
+            let state = state.clone();
+            let id = id.clone();
+            let second = Arc::clone(&second);
+            arm_rename_halves_checkpoint(move || {
+                let (done, finished) = std::sync::mpsc::channel();
+                let renamer = std::thread::spawn(move || {
+                    let outcome = state.rename_context(&id, "c");
+                    let _ = done.send(());
+                    outcome
+                });
+                let _ = finished.recv_timeout(std::time::Duration::from_millis(300));
+                *second.lock() = Some(renamer);
+            });
+        }
+        state.rename_context(&id, "b").unwrap();
+        let renamer = second.lock().take().expect("the checkpoint ran");
+        renamer.join().unwrap().unwrap();
+
+        let rows = state.directory();
+        assert_eq!(
+            rows.iter().filter(|row| row.id == id).count(),
+            1,
+            "one context, one listing row: {rows:?}"
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, "c", "the later rename wins");
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            state.directory_entry_by_id(&id).unwrap().name,
+            "c",
+            "the sidecar agrees with the listing"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

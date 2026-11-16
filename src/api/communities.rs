@@ -259,6 +259,11 @@ pub struct SearchCommunitiesRequest {
     /// of the path's `context` ([`derived_context_id_of`]). For
     /// artifacts built with `--into`.
     pub derived_id: Option<String>,
+    /// The pre-0.10.0 key, which held the artifact's name; caught only
+    /// to be refused by name ([`super::renamed_field_refusal`]) — dropped
+    /// silently it would search the DEFAULT artifact instead.
+    #[serde(default)]
+    pub derived: super::RenamedField,
 }
 
 /// [`search_communities`]' result: the staleness verdict beside the
@@ -676,6 +681,11 @@ pub async fn search_communities(
     AppJson(request): AppJson<SearchCommunitiesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) =
+        super::renamed_field_refusal(&[(&request.derived, "derived", "'derived_id'")], started_at)
+    {
+        return refusal;
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

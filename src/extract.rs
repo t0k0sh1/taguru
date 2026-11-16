@@ -436,7 +436,7 @@ chat endpoint:
                       appended across runs. Default (unset): no sidecar,
                       stdout/stderr unchanged. Ignored under --dry-run, which
                       calls nothing to record.
-  --source-id ID      write ID as the header line's source instead of the
+  --source-id ID      write ID as the header line's id instead of the
                       document path — the promotion runbook's
                       session:{agent}:{id} convention (docs/promotion.html).
                       With several documents, each gets ID/{file stem}; two

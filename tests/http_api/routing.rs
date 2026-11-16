@@ -682,7 +682,7 @@ fn a_dead_shard_yields_labeled_partials_and_auth_passes_through() {
         .as_array()
         .expect("unreached must be labeled");
     assert_eq!(unreached.len(), 1, "{body}");
-    assert_eq!(unreached[0]["contexts"], json!([glossary_id]), "{body}");
+    assert_eq!(unreached[0]["context_ids"], json!([glossary_id]), "{body}");
     assert!(
         unreached[0]["shard"]
             .as_str()
@@ -2007,4 +2007,259 @@ fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would(
     assert_eq!(refusal["code"], "over_limit", "{refusal}");
     let entry = router.ok("GET", &format!("/groups/{g}"), None);
     assert_eq!(entry["context_ids"], json!([]), "{entry}");
+}
+
+/// Ownership probes are requests the shards' rate limiters charge to
+/// the caller's key, so the router caches the verdict: a context
+/// created through the router is known from its create, one created
+/// elsewhere is probed on its first call only, and every later
+/// proxied or fan-out call reaches the owner alone — one request, as
+/// on a single instance. A router `DELETE` of the context forgets the
+/// verdict, so the next call asks the shards again.
+#[test]
+fn repeated_calls_to_one_context_probe_the_shards_once() {
+    let shard_a = Server::start("probe-cache-a");
+    let shard_b = Server::start("probe-cache-b");
+    let router = Server::start_router(
+        "probe-cache",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    // Placed on shard A by name through the router — no probe — and a
+    // second context the router has never seen, made on A directly.
+    let sake = router.create_context("sake");
+    let direct = shard_a.create_context("direct");
+    for _ in 0..5 {
+        for id in [&sake, &direct] {
+            router.ok("GET", &format!("/contexts/{id}"), None);
+            router.ok(
+                "POST",
+                &format!("/contexts/{id}/recall"),
+                Some(json!({"cue": "麹"})),
+            );
+        }
+        router.ok(
+            "POST",
+            "/recall",
+            Some(json!({"context_ids": [sake, direct], "cue": "麹"})),
+        );
+    }
+    assert_eq!(
+        shard_request_count(&router, &shard_b.base, "http_error"),
+        1,
+        "only the first call naming the directly-made context may probe shard B \
+         (its 404 says 'not here'); the router-made one never probes"
+    );
+    assert_eq!(shard_request_count(&router, &shard_b.base, "ok"), 0);
+
+    router.ok("DELETE", &format!("/contexts/{sake}"), None);
+    let (status, body) = router.call("GET", &format!("/contexts/{sake}"), None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(
+        shard_request_count(&router, &shard_b.base, "http_error"),
+        2,
+        "a deleted context's verdict must be forgotten and re-probed"
+    );
+
+    // Deleted behind the router's back: the first search still trusts
+    // the cached owner (whose 404 is the answer, as on one instance)
+    // and forgets it; the next one asks the shards again.
+    shard_a.ok("DELETE", &format!("/contexts/{direct}"), None);
+    for expected_probes in [2, 3] {
+        let (status, body) = router.call(
+            "POST",
+            "/recall",
+            Some(json!({"context_ids": [direct], "cue": "麹"})),
+        );
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["code"], "no_context", "{body}");
+        assert_eq!(
+            shard_request_count(&router, &shard_b.base, "http_error"),
+            expected_probes,
+            "a search's stale owner must be forgotten after its 404, and only then"
+        );
+    }
+}
+
+/// `"id": null` is an omitted id to the typed extractor, so the router
+/// mints one and broadcasts it: every shard holds the `group` under
+/// that one id, each with its own slice of the members.
+#[test]
+fn a_null_group_id_creates_on_every_shard_under_one_id() {
+    let shard_a = Server::start("gnull-a");
+    let shard_b = Server::start("gnull-b");
+    let router = Server::start_router(
+        "gnull",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let sake = router.create_context("sake");
+    let row = router.ok(
+        "POST",
+        "/groups",
+        Some(json!({"name": "g", "id": null, "context_ids": [sake]})),
+    );
+    let id = row["id"].as_str().expect("the created row names its id");
+    assert_eq!(shard_a.gx("g"), id, "shard A holds the group under the id");
+    assert_eq!(shard_b.gx("g"), id, "shard B holds the group under the id");
+    assert_eq!(
+        shard_a.ok("GET", &format!("/groups/{id}"), None)["context_ids"],
+        json!([sake])
+    );
+    assert_eq!(
+        shard_b.ok("GET", &format!("/groups/{id}"), None)["context_ids"],
+        json!([])
+    );
+    assert_eq!(
+        router.ok("GET", &format!("/groups/{id}"), None)["context_ids"],
+        json!([sake])
+    );
+}
+
+/// A v0.9.7 stream converts on the instance that receives it, minting
+/// ids there, so the router cannot route it: it refuses whole with a
+/// 400 that names where the stream does import, before asking any
+/// shard anything.
+#[test]
+fn a_legacy_import_stream_is_refused_at_the_router_naming_the_alternative() {
+    let shard_a = Server::start("legacy-a");
+    let shard_b = Server::start("legacy-b");
+    let router = Server::start_router(
+        "legacy",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc\"}\n",
+        "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
+    );
+    for (status, body) in [
+        post_import(&router, stream, None),
+        post_import_dry_run(&router, stream, None),
+    ] {
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_argument", "{body}");
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("v0.9.7"), "{body}");
+        assert!(error.contains("single instance"), "{body}");
+        assert!(error.contains("each shard directly"), "{body}");
+        assert!(error.contains("upgrading-from-0-9-7"), "{body}");
+    }
+    for shard in [&shard_a, &shard_b] {
+        for outcome in ["ok", "http_error"] {
+            assert_eq!(
+                shard_request_count(&router, &shard.base, outcome),
+                0,
+                "no shard may be asked about a refused legacy stream"
+            );
+        }
+    }
+    assert_eq!(router.ok("GET", "/contexts", None)["total"], json!(0));
+}
+
+/// A mid-move stray (one id on two shards) refuses every verb through
+/// the router, DELETE included — so the conflict must send the
+/// operator to the shard itself, not back to the router. A stray that
+/// appears after the router cached the first copy's shard is caught by
+/// the next fresh probe (a `group` write), which drops the cached
+/// owner so plain proxied calls see the conflict from then on too.
+#[test]
+fn a_mid_move_conflict_sends_the_operator_to_the_shard() {
+    let deterministic = &[("TAGURU_TEST_DETERMINISTIC_IDS", "1")][..];
+    let shard_a = Server::start_with_env("conflict-a", deterministic);
+    let shard_b = Server::start_with_env("conflict-b", deterministic);
+    let router = Server::start_router(
+        "conflict",
+        &format!("ctx = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let id = shard_a.create_context("ctx");
+    // Cached on shard A before the stray exists.
+    router.ok("GET", &format!("/contexts/{id}"), None);
+    assert_eq!(shard_b.create_context("ctx"), id, "the stray must collide");
+    let (status, body) = router.call(
+        "POST",
+        "/groups",
+        Some(json!({"name": "g", "context_ids": [id]})),
+    );
+    assert_eq!(status, 409, "a group write probes afresh: {body}");
+    let (status, body) = router.call("DELETE", &format!("/contexts/{id}"), None);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["code"], "conflict", "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("DELETE included"), "{body}");
+    assert!(error.contains("directly on the shard"), "{body}");
+    for shard in [&shard_a, &shard_b] {
+        assert_eq!(shard.call("GET", &format!("/contexts/{id}"), None).0, 200);
+    }
+}
+
+/// An import never trusts the cache: an id the router last saw on
+/// shard A, since deleted there directly, is created where its
+/// `create` name routes — and the fresh probe that found it nowhere
+/// drops the stale owner, so the next proxied call finds the new copy
+/// instead of shard A's 404.
+#[test]
+fn an_import_past_a_stale_owner_lands_where_its_create_routes() {
+    let shard_a = Server::start("stale-import-a");
+    let shard_b = Server::start("stale-import-b");
+    let router = Server::start_router(
+        "stale-import",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let id = shard_a.create_context("sake");
+    router.ok("GET", &format!("/contexts/{id}"), None);
+    shard_a.ok("DELETE", &format!("/contexts/{id}"), None);
+    let header = json!({
+        "type": "source", "context_id": id, "id": "doc",
+        "create": {"name": "elsewhere"},
+    });
+    let (status, body) = post_import(&router, &format!("{header}\n"), None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(shard_b.call("GET", &format!("/contexts/{id}"), None).0, 200);
+    assert_eq!(shard_a.call("GET", &format!("/contexts/{id}"), None).0, 404);
+    let row = router.ok("GET", &format!("/contexts/{id}"), None);
+    assert_eq!(row["name"], json!("elsewhere"), "{row}");
+}
+
+/// The router re-serializes cross requests before projecting them per
+/// shard, which drops the pre-0.10.0 `contexts`/`groups` keys — so it
+/// must refuse them itself, as one instance would, rather than forward
+/// a request the shards can no longer see was stale.
+#[test]
+fn the_router_refuses_pre_rename_cross_target_keys() {
+    let shard_a = Server::start("xrename-a");
+    let shard_b = Server::start("xrename-b");
+    let router = Server::start_router(
+        "xrename",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let sake = router.create_context("sake");
+    let verbs = [
+        ("/recall", json!({"cue": "x"})),
+        ("/query", json!({"subject": "x"})),
+        ("/sources/search", json!({"query": "x"})),
+    ];
+    for (path, base) in verbs {
+        let mut valid = base.clone();
+        valid["context_ids"] = json!([sake]);
+        assert_eq!(
+            router.call("POST", path, Some(valid.clone())).0,
+            200,
+            "{path}"
+        );
+        for (old, new) in [("contexts", "'context_ids'"), ("groups", "'group_ids'")] {
+            let mut stale = valid.clone();
+            stale[old] = json!(["sake"]);
+            let (status, refused) = router.call("POST", path, Some(stale));
+            assert_eq!(status, 400, "{path} {old}: {refused}");
+            let message = refused["error"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("'{old}'")) && message.contains(new),
+                "{refused}"
+            );
+        }
+    }
 }

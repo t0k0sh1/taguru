@@ -166,7 +166,9 @@ def main() -> int:
                 f"questions={applied.questions_stored} passage={applied.passage_stored}"
             )
 
-        context_id = next(row.id for row in client.contexts.iter() if row.name == "sougetsu-kb")
+        context_id = ingester.context_id()
+        if context_id is None:
+            raise SystemExit("context sougetsu-kb was not created")
         ctx = client.context(context_id)
         print("\n== 3. read the graph back with the core SDK ==")
         print(f"sources: {[entry.id for entry in ctx.list_sources().entries]}")

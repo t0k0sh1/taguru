@@ -63,15 +63,6 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
 }
 
 /**
- * Retrieve Documents from Taguru `contexts`, graph lane + text lane.
- *
- * Passage-backed hits carry `page_content` = the verbatim paragraph and
- * metadata `{context, source, paragraph, section, lane, associations?,
- * score?, lanes?}`. Graph facts with no stored passage still become Documents
- * (`page_content` = "subject label object") when `include_graph_only_facts`
- * is on.
- */
-/**
  * Every `context` id the `group` ids in `roots` reach, nested children
  * included, walked over one read of the directory (`rows`). A root id no row
  * carries (a deleted `group`) contributes nothing, and the rest of the walk
@@ -104,6 +95,15 @@ function groupMembers(rows: GroupEntry[], roots: string[]): Set<string> {
   return members;
 }
 
+/**
+ * Retrieve Documents from Taguru `contexts`, graph lane + text lane.
+ *
+ * Passage-backed hits carry `page_content` = the verbatim paragraph and
+ * metadata `{context, source, paragraph, section, lane, associations?,
+ * score?, lanes?}`. Graph facts with no stored passage still become Documents
+ * (`page_content` = "subject label object") when `include_graph_only_facts`
+ * is on.
+ */
 export class TaguruRetriever extends BaseRetriever {
   static lc_name(): string {
     return "TaguruRetriever";
@@ -164,12 +164,19 @@ export class TaguruRetriever extends BaseRetriever {
   }
 
   /**
-   * Direct `contexts` lead in declaration order; `group`-resolved members follow
-   * in id order, overlaps deduped — the server's own cross-search tie order.
-   * Targets are context ids, as are the members group records hold.
+   * Direct `contexts` (`context_id`, then `context_ids`) lead in declaration
+   * order; `group`-resolved members follow in id order, overlaps deduped —
+   * the server's own cross-search tie order. Targets are context ids, as
+   * are the members group records hold. Mirrors the Python
+   * `_direct_targets`/`_with_members` pair, so a `context_id` combined with
+   * the cross fields is searched — and kept as the fallback when the group
+   * walk fails — never dropped.
    */
   private async resolveTargets(): Promise<string[]> {
     const targets: string[] = [];
+    if (this.context_id !== undefined) {
+      targets.push(this.context_id);
+    }
     for (const id of this.context_ids ?? []) {
       if (!targets.includes(id)) {
         targets.push(id);

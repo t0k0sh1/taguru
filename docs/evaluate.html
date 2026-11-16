@@ -512,7 +512,7 @@
       "normalized": ["expected_concepts", "expected_labels"],
       "sources": "exact (source, paragraph) match — no normalization" },
   "inputs": { "eval": { "path": "eval.jsonl", "name": "sake retrieval cases", "cases": 12 },
-      "context": "sake", "url": "http://localhost:8248", "out": "evaluation.json",
+      "context": "cef2e28b-43f0-4b6c-8201-abab0785399f", "url": "http://localhost:8248", "out": "evaluation.json",
       "default_limit": 10, "resolve_limit": 5,
       "mode": "assembly",
       "budget": {"max_items": 40, "max_bytes": 65536, "max_tokens": 4000},
@@ -690,8 +690,8 @@
       file, or malformed/out-of-range JSON.
     </p>
     <pre><code>{"type":"evaluation_changes","version":"2026-11-13","generated_at":"...",
- "base":{"path":"base.json","context":"sake","...":"..."},
- "head":{"path":"head.json","context":"sake","...":"..."},
+ "base":{"path":"base.json","context":"cef2e28b-43f0-4b6c-8201-abab0785399f","...":"..."},
+ "head":{"path":"head.json","context":"cef2e28b-43f0-4b6c-8201-abab0785399f","...":"..."},
  "counts":{"improved":2,"regressed":1,"added":0,"removed":0,"unchanged":9,
    "cases_base":12,"cases_head":12},
  "metrics":[{"metric":"recall.recall_at_k","statistic":"distribution",

@@ -1,6 +1,7 @@
 //! `group` verbs: every `group` exists on every shard, so directory reads
 //! union the per-shard projections and writes broadcast sequentially,
-//! member lists projected per shard by the map.
+//! member lists projected per shard by where each member lives (asked
+//! of the shards, never the route map — it places only NEW contexts).
 
 use super::*;
 
@@ -84,7 +85,7 @@ pub(super) async fn merge_groups(
 }
 
 /// Unions one shard's row into the merged directory, by the row's id:
-/// member `context_ids` are per-shard projections (disjoint by the map),
+/// member `context_ids` are per-shard projections (disjoint: each id lives on one shard),
 /// children are broadcast whole, the name and description are identical
 /// everywhere a non-drifted record lives. Fingerprints are folded together — each
 /// shard's token covers the members that shard holds, so the union's
@@ -130,7 +131,7 @@ struct StoppedBroadcast {
 }
 
 /// Runs one `group` write against every shard IN ORDER, the request's
-/// member lists projected per shard by the map. The first refusal
+/// member lists projected per shard by where each member lives. The first refusal
 /// stops the broadcast — shards before it have applied (deltas converge
 /// on retry; a create converges when retried under the same id;
 /// documented divergence) — and comes back with which shards those are.
@@ -327,7 +328,7 @@ async fn project_body(
             if owner_of.contains_key(member) {
                 continue;
             }
-            match locate_owner(state, map, member, headers, deadline, started_at).await {
+            match probe_owner(state, map, member, headers, deadline, started_at).await {
                 Located::Shard(shard) => {
                     owner_of.insert(member.clone(), shard);
                 }
@@ -419,7 +420,11 @@ pub(super) async fn create_group_broadcast(
         // `project_body` refuses a non-object body before any shard
         // sees it; there is nothing to stamp an id onto.
         _ if !base.is_object() => (String::new(), false),
-        None => {
+        // `null` is what the typed extractor reads as "no id"
+        // (`CreateGroupRequest.id` is an `Option`), so the router mints
+        // for it too — sent on as `null`, every shard would mint its
+        // own id and the fleet would disagree on the group.
+        None | Some(Value::Null) => {
             let id = crate::groups::mint_group_id();
             base["id"] = json!(id);
             (id, true)
@@ -430,7 +435,7 @@ pub(super) async fn create_group_broadcast(
             }
             (id.clone(), false)
         }
-        // An id that is not a string is the typed extractor's refusal.
+        // Any other non-string id is the typed extractor's refusal.
         Some(_) => return probe(body).await,
     };
     let body_for = match project_body(
@@ -578,7 +583,7 @@ async fn forward_group_probe(
         Err(error) => unreachable_refusal(
             &[Unreached {
                 shard: map.url(0).to_string(),
-                contexts: Vec::new(),
+                context_ids: Vec::new(),
                 error,
             }],
             started_at,

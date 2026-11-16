@@ -615,15 +615,15 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("ctx"))
         .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(String::from))
         .collect();
-    // Context EXISTENCE is file presence — a corrupt image still
-    // occupies its name at boot — so this set is what the group
-    // reference warnings below judge against. The name lives in the
-    // sidecar meta (ADR 0045: the stem is the id), read with the
-    // same classification and fallbacks the boot scan applies.
-    let context_names: BTreeSet<String> = stems
-        .iter()
-        .filter_map(|stem| read_scanned_meta(dir, stem).display_name(stem))
-        .collect();
+    // Context EXISTENCE is file presence, keyed by id — the stem IS the
+    // id (ADR 0045), and a corrupt image still holds its id (boot
+    // refuses it rather than dropping it) — so this set is what the
+    // import-marker and `group` reference checks below judge against:
+    // markers and `group` records both name their `context` by id.
+    let context_ids: BTreeSet<String> = stems.iter().cloned().collect();
+    // id → display name, for labelling a marker's warning with the
+    // name its context row reports under.
+    let mut display_names: BTreeMap<String, String> = BTreeMap::new();
 
     let mut failures = 0usize;
     let mut contexts = 0usize;
@@ -642,7 +642,10 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         // server will not start on this directory.
         let scanned = read_scanned_meta(dir, stem);
         let name = match (scanned.display_name(stem), scanned) {
-            (Some(name), _) => name,
+            (Some(name), _) => {
+                display_names.insert(stem.clone(), name.clone());
+                name
+            }
             (None, ScannedMeta::PreId) => {
                 if as_json {
                     context_rows.push(ContextRow::corrupt(
@@ -657,6 +660,27 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                 } else {
                     println!(
                         "{stem}.meta.json: FAILURE — records no context id (pre-ADR 0045 \
+                         directory); {}",
+                        crate::format::migration_hint()
+                    );
+                }
+                failures += 1;
+                continue;
+            }
+            (None, ScannedMeta::NotAnId) => {
+                if as_json {
+                    context_rows.push(ContextRow::corrupt(
+                        stem.clone(),
+                        "pre_id_stem",
+                        format!(
+                            "file family is not named by a context id: written before ADR \
+                             0045 — the server refuses this directory; {}",
+                            crate::format::migration_hint()
+                        ),
+                    ));
+                } else {
+                    println!(
+                        "{stem}.ctx: FAILURE — not named by a context id (pre-ADR 0045 \
                          directory); {}",
                         crate::format::migration_hint()
                     );
@@ -987,11 +1011,15 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ImportMarker>(&bytes).ok());
         match parsed {
-            Some(marker) if context_names.contains(&marker.context) => {
+            Some(marker) if context_ids.contains(&marker.context) => {
+                let label = display_names
+                    .get(&marker.context)
+                    .cloned()
+                    .unwrap_or_else(|| marker.context.clone());
                 if as_json {
                     notices.push(Notice::warning(
                         "incomplete_import",
-                        marker.context.clone(),
+                        label,
                         format!(
                             "the import of source '{}' never completed; its truth may be \
                              half-applied — re-import its source file or retract the source",
@@ -1000,9 +1028,9 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                     ));
                 } else {
                     println!(
-                        "{}: WARNING — the import of source '{}' never completed; its truth \
+                        "{label}: WARNING — the import of source '{}' never completed; its truth \
                          may be half-applied — re-import its source file or retract the source",
-                        marker.context, marker.source
+                        marker.source
                     );
                 }
             }
@@ -1044,7 +1072,7 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
     }
 
     let (group_count, group_failures, group_rows, group_notices) =
-        inspect_groups(&entries, &stems.iter().cloned().collect(), as_json);
+        inspect_groups(&entries, &context_ids, as_json);
     failures += group_failures;
     notices.extend(group_notices);
 

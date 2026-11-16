@@ -15,11 +15,11 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from taguru import AsyncTaguru, Taguru
+from taguru import AsyncTaguru, NotFoundError, PermissionDeniedError, Taguru
 
 from taguru_langchain import TaguruIngester
 from taguru_langchain._extract import MAX_PASSAGE_BYTES
-from taguru_langchain.events import AttemptFailed, AttemptStarted
+from taguru_langchain.events import AttemptFailed, AttemptStarted, ImportCompleted
 
 from .conftest import FakeServer
 
@@ -1180,3 +1180,82 @@ def test_structured_output_invalid_args_get_a_validation_corrective_turn(
     assert failed[0].validation_issues == [
         'associations[0].weight: expected finite non-zero number, got string "strong"'
     ]
+
+
+# The id lookup (context_id / acontext_id): only "no such context" reads as
+# None; any other listing failure carries its real cause out, so callers
+# (the S3 mirror sweep, refresh_embeddings) never misreport it as absent.
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_resolves_the_name_and_reads_an_absent_name_as_none(
+    sync_client: Taguru, async_client: AsyncTaguru, lane: str
+) -> None:
+    present, _llm = make_ingester(sync_client, async_client, [])
+    absent = TaguruIngester(
+        context="no-such-context",
+        llm=present.llm,
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        assert present.context_id() == "id-sake"
+        assert absent.context_id() is None
+    else:
+        assert await present.acontext_id() == "id-sake"
+        assert await absent.acontext_id() is None
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_reads_a_404_listing_as_none_unless_strict(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    fake_server.contexts_listing_status = 404
+    ingester, _llm = make_ingester(sync_client, async_client, [])
+    if lane == "sync":
+        assert ingester.context_id() is None
+        with pytest.raises(NotFoundError):
+            ingester.context_id(strict=True)
+    else:
+        assert await ingester.acontext_id() is None
+        with pytest.raises(NotFoundError):
+            await ingester.acontext_id(strict=True)
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_propagates_a_listing_failure_that_is_not_absence(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    fake_server.contexts_listing_status = 403
+    ingester, _llm = make_ingester(sync_client, async_client, [])
+    with pytest.raises(PermissionDeniedError):
+        if lane == "sync":
+            ingester.context_id()
+        else:
+            await ingester.acontext_id()
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_refresh_embeddings_reports_a_forbidden_listing_not_a_missing_context(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    # The listing turns forbidden once the import has landed, so only the
+    # refresh's own id lookup hears it: the real 403 must surface, never a
+    # synthetic "context not found".
+    def forbid_after_import(event: object) -> None:
+        if isinstance(event, ImportCompleted):
+            fake_server.contexts_listing_status = 403
+
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [MODEL_ANSWER],
+        refresh_embeddings=True,
+        on_event=forbid_after_import,
+    )
+    with pytest.raises(PermissionDeniedError):
+        if lane == "sync":
+            ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+        else:
+            await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert len(fake_server.imported) == 1

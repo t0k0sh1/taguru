@@ -7,7 +7,53 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Upgrading from 0.9.7
+
+0.10.0 changes the data directory, the wire and the configuration
+incompatibly. Upgrade in this order (the details are in the entries
+below and in
+[docs/import.html#upgrading-from-0-9-7](https://t0k0sh1.github.io/taguru/import.html#upgrading-from-0-9-7)):
+
+1. **Data.** A 0.9.7 data directory does not boot on 0.10.0. Export it
+   with 0.9.7 (`taguru export --out DIR`), start 0.10.0 on an empty data
+   directory, and import the export into it — `taguru import DIR`
+   offline, or `POST /import` on a single instance (not through
+   `taguru router`, not with `taguru import --url`). Contexts and groups
+   keep their names and get new ids. Derived communities and
+   consolidation artifacts come over as plain contexts: re-run
+   `taguru communities` / `taguru consolidation` once.
+2. **Configuration.** Rename `TAGURU_KEY_SCOPES` to `TAGURU_KEY_GRANTS`
+   (a deployment still setting the old name refuses to boot).
+   Rewrite the `contexts` lists in `TAGURU_KEY_GRANTS` and the keys of
+   `TAGURU_CONTEXT_QUOTAS` from names to the new ids
+   (`taguru contexts --name NAME` prints them). Key names in
+   `TAGURU_API_TOKENS` must be 1–64 characters of `A-Z a-z 0-9 . _ -`.
+3. **Clients.** Upgrade the server and the SDKs together
+   (`http_contract` 2, `mcp_contract` 2). Paths and request bodies take
+   context and group ids, never names; fields that name a source say
+   `source_id`.
+
 ### Added
+
+- **A v0.9.7 export imports into this build** (ADR 0057; supersedes in
+  part ADR 0045 §2.7 and ADR 0053 §3): the last release's export is
+  accepted as migration input by `taguru import FILE|DIR...` offline and
+  by `POST /import` on a single instance. Context and group names are
+  matched against the receiving instance: a name exactly one context or
+  group carries keeps its id, an absent one gets a newly minted id, and
+  a name several share is refused (409) with nothing written. Child
+  groups resolve within one run, so group file order does not matter,
+  and re-importing changes nothing. A file cannot mix the two formats;
+  `taguru import --url` and `taguru router` refuse v0.9.7 bodies, naming
+  the two entrances that read them. Every pre-id refusal (boot,
+  `taguru inspect`) points at the upgrade section of docs/import.html.
+  Export always writes the current format, and its help now gives the
+  real file names (`{name}.jsonl`, `{name}.{id}.jsonl` for twin names).
+
+- **The LangChain ingesters' context-id lookup is public**:
+  `TaguruIngester.contextId()` (TypeScript) and `context_id()` /
+  `acontext_id()` (Python) return the id the ingester's context name
+  resolves to, or `null`/`None` when no context carries the name.
 
 - **`taguru contexts` — find a context's id by its name** (#967, ADR 0045
   §2.4): lists a running server's contexts as `ID<TAB>NAME` lines (or
@@ -27,6 +73,35 @@ Entries that change an on-disk format or a response shape say so.
   wire is unchanged.
 
 ### Changed
+
+- **Breaking (configuration and wire) — pre-0.10.0 auth and request
+  names refuse instead of being ignored.** A deployment still setting
+  `TAGURU_KEY_SCOPES` refuses to boot, and a SIGHUP/`--config` reload
+  carrying it is refused with the previous table kept, naming
+  `TAGURU_KEY_GRANTS` — unread, it left every key with the default admin
+  grant. A grant object with any key besides `role`/`contexts` (say
+  `groups`, or a typo'd `context`) is refused the same way, because
+  unread it granted every context. A context-scoped key (a grant listing
+  `contexts`) can no longer create contexts: `POST /contexts` and MCP
+  `create_context` answer 403 `forbidden`, since the minted id would lie
+  outside its grant. The pre-rename request keys are refused with 400
+  `invalid_argument` naming their replacement, over HTTP and MCP alike,
+  instead of being dropped under a 200: `POST /groups` `contexts`/
+  `groups`; `PATCH /groups/{id}` `add_contexts`/`remove_contexts`/
+  `add_groups`/`remove_groups`/`contexts`/`groups`;
+  `communities/search` `derived`; and the cross-context `/recall`,
+  `/query` and `/sources/search` `contexts`/`groups` (which, sent beside
+  a valid `group_ids`, used to narrow the search silently) — on a single
+  instance and through `taguru router` alike.
+
+- **Breaking — `mcp_contract` is 2.** `retrieve`'s `citations[].source`
+  became `source_id`, and required tool arguments were renamed
+  (`context` → `context_id`, `name` → `group_id`, `sources` →
+  `source_ids`); `GET /version` and MCP `initialize` report it.
+
+- **Breaking (wire) — a partial router fan-out names unreached contexts
+  by id**: `unreached` entries are `{shard, context_ids, error}` (was
+  `contexts`; they already held ids). Rides `http_contract` 2.
 
 - **Breaking (wire) — community ids are valid within one analysis; hits
   carry the fingerprint that survives re-runs** (#1050, ADR 0056;
@@ -202,8 +277,8 @@ Entries that change an on-disk format or a response shape say so.
   `group` now rewrites only its own record: no file moves, no parent is
   rewritten, and the `.grouprenaming` rename marker and its boot-time
   resume are removed. A data directory whose `.group` files predate ids
-  refuses to boot, and the error names the migration (export with the
-  release that wrote it, import here). `taguru inspect` reports such a
+  refuses to boot, and the error names the migration (import a v0.9.7
+  export into this build — see *Upgrading from 0.9.7*). `taguru inspect` reports such a
   file as a FAILURE. The wire follows in #995 and #996 (above).
 
 - **Breaking (Python SDKs) — Python 3.10 is no longer supported**:
@@ -233,7 +308,7 @@ Entries that change an on-disk format or a response shape say so.
   `list_contexts`, which is also how a name is looked up), mirroring the
   wire's `context_id` / `context_ids`. A call still passing `context` is
   refused with `missing required argument 'context_id'`; the search tools'
-  "one of `context_id` / `context_ids` / `groups`" rule and its
+  "one of `context_id` / `context_ids` / `group_ids`" rule and its
   "not both" refusal follow the rename. `langchain-taguru`'s
   `TaguruRetriever` renames its `context` / `contexts` fields to
   `context_id` / `context_ids` (Python and TypeScript; a name was already
@@ -245,8 +320,8 @@ Entries that change an on-disk format or a response shape say so.
   points at `taguru contexts --name`, and the docs, READMEs, SDK
   quick-starts and examples show the create → `id` → find-by-name flow
   and the `context_id` argument. `TAGURU_KEY_GRANTS` keeps its `contexts`
-  key (a grant lists the contexts a key reaches, values are ids, beside
-  `groups` — which stay names); a Document's `context` metadata key in
+  key (a grant lists the contexts a key reaches, values are ids); a
+  Document's `context` metadata key in
   `langchain-taguru` is unchanged.
 
 - **Breaking (configuration + wire) — grants and quotas are keyed by
@@ -389,14 +464,9 @@ Entries that change an on-disk format or a response shape say so.
   id, and the display name lives in `{id}.meta.json` (`id` and `name`
   fields, recorded on every sidecar write). A data directory written
   by an earlier release is refused at boot with a migration message —
-  export with the release that wrote it, then import here (§2.7: no
-  compatibility). The wire is unchanged in this step: every route
-  still addresses contexts by name, resolved through an in-memory
-  name index. Names are display strings and no longer unique by
-  construction (issue #961 decision 1) — duplicates can only arise
-  from a hand-assembled directory while creates are name-addressed,
-  and every name-addressed operation refuses an ambiguous name as a
-  409 conflict instead of picking a claimant. `POST
+  import a v0.9.7 export into this build (see *Upgrading from 0.9.7*).
+  Names are display strings and no longer unique by construction
+  (issue #961 decision 1). `POST
   /contexts/{name}/rename` is now a sidecar write plus an index move:
   no file moves, no durable rename marker, no boot resume, and a
   renamed context stays loaded. `taguru inspect` reports the id/name
@@ -408,7 +478,9 @@ Entries that change an on-disk format or a response shape say so.
   […]}}`), and so is everything it configures — only the variable
   name changed, so `--config` files and deployment secrets must rename
   the key on upgrade; the server does not read the old name as a
-  fallback. Terminology throughout the codebase and docs now reserves
+  fallback, and a deployment that still sets it refuses to boot (a hot
+  reload keeps the previous table) rather than run with no grants.
+  Terminology throughout the codebase and docs now reserves
   "scope"/"scoped" for the context-range portion of a grant (as in "a
   context-scoped key") and uses "grant"/"granted" for the whole
   concept (role plus context range) — so, for example, "an unscoped
@@ -589,6 +661,66 @@ Entries that change an on-disk format or a response shape say so.
   types are unchanged.
 
 ### Fixed
+
+- **Storage hardening.** A `.ctx` family whose stem is not a canonical
+  context id is refused at boot as pre-id data, with the migration
+  message; before, with a missing sidecar, it registered under an id no
+  `/contexts/{id}` path could address. The replica tailer skips such a
+  family and `taguru inspect` fails it (status `pre_id_stem`). `taguru
+  inspect` matches import markers against context ids, so a live
+  half-finished import is reported as a warning instead of being
+  dismissed as an orphan. Two concurrent renames of one context can no
+  longer leave a stale name row (the context listed twice). A same-id
+  create (an import header's id, a derived analysis id) refuses while a
+  delete of that id is still unlinking, and clears anything a partially
+  failed delete left behind (`.deleted` marker, WAL lanes, schema file,
+  import markers), so the next boot no longer deletes the recreated
+  context or replays the old WAL into it. Name lookups for metrics and
+  the replica tailer no longer wait on a context's lock while holding
+  the registry lock, so one slow load cannot stall every lookup.
+
+- **Earlier format revisions on disk no longer fail hard.** A
+  `{stem}.schema.json` stamped `2026-09-17` or `2026-10-01` loads (the
+  document's shape is unchanged) instead of refusing the whole boot, and
+  `taguru communities` / `taguru consolidation` treat a manifest from an
+  earlier revision as incomparable and rebuild instead of erroring.
+
+- **The router no longer charges every proxied call twice against the
+  shards' rate limits.** It caches which shard owns each context id,
+  learned from its ownership probe or from a create made through the
+  router, and forgets the entry when the owner answers 404 or 409, when
+  the context is deleted through the router, and on every route-map
+  reload. A steady-state call costs the owning shard one request, as on
+  a single instance; only the first request naming an id probes every
+  shard, and `group` writes and imports still probe, because they decide
+  where data lands. `POST /groups` with `"id": null` now gets a
+  router-minted id on every shard like an omitted id — before, it
+  created the group on the first shard only, under that shard's own id.
+  The mid-move-stray 409 now tells the operator to delete the stray copy
+  on its shard, since the router refuses that DELETE too.
+
+- **LangChain:** the TypeScript `TaguruRetriever` again searches
+  `context_id` when it is combined with `context_ids`/`group_ids`,
+  leading the target list and serving as the fallback when the group
+  directory cannot be read — matching the Python retriever. The
+  ingesters' context lookup returns `None`/`null` only when no context
+  carries the name; any other listing failure (403, 503, transport) now
+  propagates, so the S3 connector's retract/mirror sweep and
+  `refresh_embeddings` report the real cause instead of "context not
+  found". Dry runs still render NDJSON when the context directory cannot
+  be listed.
+
+- **Documentation and examples address contexts by id throughout.** The
+  `http_benchmark` example creates its scratch context with `POST
+  /contexts` and uses the minted id (it panicked on its first request).
+  The Python snippets in the long-running and local-RAG guides look the
+  id up by name before calling `client.context(...)`. The LLM manual
+  (`GET /protocol`) shows the schema document as `{type:"schema",
+  version?, …}`, single-context recall's `plan.context_ids`, `{context_id,
+  context_name, …}` search plan entries, and the `explain_resolve_label`
+  tool; MCP's `rename_context`/`get_context` descriptions no longer
+  speak of names; the deployment and troubleshooting guides say a
+  pre-0.10 data directory refuses to boot and link the upgrade path.
 
 - The `--config` watch no longer misses a key rotation that lands
   between boot's read of the file and the watch's first read (#942):

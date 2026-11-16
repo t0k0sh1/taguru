@@ -2,7 +2,9 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{assoc_op, scratch_dir, stem_on_disk};
+    use super::test_support::{
+        assoc_op, registry_free_while_entry_locked, scratch_dir, stem_on_disk,
+    };
     use super::*;
     use crate::context_proptest::{config as proptest_config, wal_op_strategy};
     use proptest::prelude::*;
@@ -648,6 +650,36 @@ mod tests {
             hot_ratio, cold_ratio,
             "a hot context's live dead_ratio and its own cold cached \
              snapshot must agree exactly"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `name_of_stem` (request paths and replication labels) must not
+    /// wait on an entry lock while it holds the registry: a cold load
+    /// or compaction holding one `context`'s write lock would then park
+    /// it on the registry, and every create, delete, and — behind those
+    /// — every lookup of every `context` would queue up after it.
+    #[test]
+    fn name_of_stem_never_waits_on_an_entry_while_holding_the_registry() {
+        let dir = scratch_dir("name-of-stem-lock-order");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        let entry = state.lookup_id(&id).unwrap();
+
+        let (registry_free, name) = registry_free_while_entry_locked(&state, &entry, {
+            let id = id.clone();
+            move |state: &AppState| state.name_of_stem(&id)
+        });
+        assert!(
+            registry_free,
+            "name_of_stem held the registry lock while parked on the entry lock"
+        );
+        assert_eq!(name, "sake");
+        assert_eq!(
+            state.name_of_stem("no-such-stem"),
+            "no-such-stem",
+            "an unregistered stem labels as itself"
         );
 
         let _ = fs::remove_dir_all(dir);

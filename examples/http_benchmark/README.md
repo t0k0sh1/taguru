@@ -7,8 +7,11 @@ and answers the capacity-planning question the library benchmark
 cannot: what does one instance sustain, at what tail latency, under
 this configuration?
 
-Three phases against one scratch context (`http-benchmark`, created
-and deleted by the run):
+Three phases against one scratch context, created by the run with
+`POST /contexts` (display name `http-benchmark`) and addressed by the
+id the server mints; the run deletes it afterwards, and deletes any
+`http-benchmark` left over from an aborted run (found by name in
+`GET /contexts`) before it starts:
 
 1. **seed writes** — batches of 100 associations, the shape
    extract-driven ingest produces;

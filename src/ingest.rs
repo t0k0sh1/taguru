@@ -49,7 +49,8 @@
 //! Split into submodules by concern: `local` runs the offline
 //! (non-`--url`) apply path, `remote` runs `import --url`'s chunked
 //! wire path, `model` is the batch/stream data model and JSONL line
-//! parser, `rejection` predicts and applies pre-write refusals
+//! parser, `legacy` reads the v0.9.7 release's export records and
+//! settles their names on ids (ADR 0057), `rejection` predicts and applies pre-write refusals
 //! ([`apply_batch`]/[`preview_batch`]), `schema_apply` installs a
 //! parsed `schema` record, and `report` formats the CLI's
 //! per-batch line and sets up logging. This hub keeps the `run`
@@ -77,6 +78,8 @@ use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 use crate::remote::{Api, ImportFailure};
 use crate::schema;
 
+#[path = "ingest/legacy.rs"]
+mod legacy;
 #[path = "ingest/local.rs"]
 mod local;
 #[path = "ingest/model.rs"]
@@ -104,7 +107,10 @@ use remote::{never_sent_lines, refusal_issue_lines};
 use report::report;
 use sensitive_gate::{refused_batch_error, refused_batch_message, sensitive_hits};
 
-pub(crate) use model::{Batch, parse_batch, parse_stream, split_batches};
+pub(crate) use legacy::{LegacyRefusal, is_legacy_stream, resolve_legacy};
+pub(crate) use model::{
+    Batch, ParsedStream, parse_any_stream, parse_batch, parse_stream, split_batches,
+};
 pub(crate) use rejection::{
     AliasRejection, Applied, ApplyRefusal, PreviewSeeds, apply_batch, preview_batch,
 };
@@ -144,6 +150,13 @@ truth the same way; groups restore AFTER every source and schema of
 the run (create-or-replace of the whole record), so group files
 re-apply in any order. A directory expands to its *.jsonl files,
 sorted by name. Format: docs/import.html.
+
+A v0.9.7 export (`taguru_batch` headers naming contexts, name-keyed
+`taguru_schema`/`taguru_group` records) is read as migration input
+(ADR 0057): its names settle on ids against TAGURU_DATA_DIR before
+anything applies. A name one context (or group) carries reuses its id,
+an absent one is minted, and a name several carry is refused. --url
+does not read it. See docs/import.html#upgrading-from-0-9-7.
 
   --dry-run    validate every file and report; touch nothing (with
                --url, POSTs every chunk as ?dry_run=true instead)

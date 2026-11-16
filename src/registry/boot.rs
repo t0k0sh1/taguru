@@ -58,10 +58,10 @@ impl AppState {
                 // The name lives in the sidecar the shared hydration
                 // already landed; the stem is the id (ADR 0045). The
                 // stem fallback is the boot scan's degraded posture,
-                // and the scan's two refusals apply here identically —
-                // a pre-id or copied-family sidecar registered from a
-                // bucket would otherwise be stamped with `id: <stem>`
-                // by the first flush.
+                // and the scan's three refusals apply here identically
+                // — a pre-id stem or sidecar, or a copied family,
+                // registered from a bucket would otherwise be stamped
+                // with `id: <stem>` by the first flush.
                 let meta_file = scanned_meta_or_refuse(&data_dir, &stem)?;
                 let name = meta_file.name.clone().unwrap_or_else(|| stem.clone());
                 // Not schema-verified here (see the comment above):
@@ -180,6 +180,7 @@ impl AppState {
             hydrator: options.hydrator,
             replica: options.replica,
             pending_creates: Mutex::new(HashSet::new()),
+            pending_deletes: Mutex::new(HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
             budget_saturated: AtomicBool::new(false),
@@ -276,13 +277,14 @@ fn passage_vector_limit_leaves_ann_dormant(
     embed_passages && passage_vector_limit < crate::embedding::PASSAGE_ANN_THRESHOLD
 }
 
-/// [`read_scanned_meta`] with the two refused shapes mapped to the
+/// [`read_scanned_meta`] with the three refused shapes mapped to the
 /// boot refusal they mean — shared by the `.ctx` scan and the lazy
 /// bucket registration (`boot_with`'s hydrator loop), so neither path
-/// can register a pre-id or copied-family sidecar that a later flush
-/// would then stamp with `id: <stem>`, laundering it into the current
-/// format. `Degraded` (missing or unreadable) passes through: for the
-/// hydrator path a not-yet-hydrated sidecar is the ordinary case.
+/// can register a pre-id stem or sidecar, or a copied family, that a
+/// later flush would then stamp with `id: <stem>`, laundering it into
+/// the current format. `Degraded` (missing or unreadable) passes
+/// through: for the hydrator path a not-yet-hydrated sidecar is the
+/// ordinary case.
 fn scanned_meta_or_refuse(data_dir: &Path, stem: &str) -> io::Result<MetaFile> {
     match read_scanned_meta(data_dir, stem) {
         ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => Ok(meta_file),
@@ -291,6 +293,15 @@ fn scanned_meta_or_refuse(data_dir: &Path, stem: &str) -> io::Result<MetaFile> {
             format!(
                 "sidecar '{stem}.meta.json' records no context id: this data \
                  directory was written before contexts had ids (ADR 0045) and \
+                 this build does not read it — {}",
+                crate::format::migration_hint()
+            ),
+        )),
+        ScannedMeta::NotAnId => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "context file family '{stem}' is not named by a context id: this \
+                 data directory was written before contexts had ids (ADR 0045) and \
                  this build does not read it — {}",
                 crate::format::migration_hint()
             ),
@@ -346,11 +357,8 @@ fn scan_data_dir(
                 );
             }
             // Import markers go with the family, as `delete`'s own
-            // sweep already removes them: a survivor would have the
-            // marker report below blame a half-applied import on a
-            // recreated NAMESAKE of the deleted context — the marker
-            // names its context by display name, which a recreate
-            // (under a fresh id) legitimately reuses.
+            // sweep already removes them: the batch a marker witnessed
+            // targeted the family just removed, so it is moot.
             for stale in import_marker_paths(data_dir, &stem) {
                 remove_persisted_file_quietly(
                     &stale,
@@ -411,9 +419,9 @@ fn scan_data_dir(
             let stem = stem.as_str();
             // The sidecar is where identity lives now (ADR 0045): the
             // stem must BE the recorded id, and the display name is
-            // read (never derived) — see `ScannedMeta` for the two
-            // refused shapes (a pre-id directory, a copied family)
-            // and the tolerated degraded ones.
+            // read (never derived) — see `ScannedMeta` for the three
+            // refused shapes (a pre-id sidecar, a non-id stem, a copied
+            // family) and the tolerated degraded ones.
             let meta_file = match scanned_meta_or_refuse(data_dir, stem) {
                 Ok(meta_file) => meta_file,
                 Err(error) => return (index, Err(error)),
@@ -988,6 +996,44 @@ mod tests {
             "the refusal must name the migration path: {error}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `.ctx` stem that is not a canonical context id is pre-id data
+    /// even when nothing else says so — no sidecar at all (a pre-id
+    /// family whose sidecar is gone, or one a crash mid-rename left at
+    /// its destination stem), or a sidecar recording that same non-id
+    /// stem. Registered, it would get `id: <stem>` (no `/contexts/{id}`
+    /// path accepts it) and the first flush would stamp that id into
+    /// its sidecar; boot refuses it with the migration message instead.
+    #[test]
+    fn a_non_id_stem_refuses_the_boot_with_a_migration_message() {
+        for sidecar in [None, Some(&br#"{"id":"sake","name":"sake"}"#[..])] {
+            let dir = scratch_dir("boot-non-id-stem");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("sake.ctx"), Context::default().to_bytes()).unwrap();
+            if let Some(sidecar) = sidecar {
+                fs::write(dir.join("sake.meta.json"), sidecar).unwrap();
+            }
+
+            let error = AppState::boot(dir.clone(), usize::MAX, None)
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("is not named by a context id"),
+                "{error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .ends_with(&crate::format::migration_hint()),
+                "the refusal must name the migration path: {error}"
+            );
+            assert!(
+                !dir.join("sake.meta.json").exists() || sidecar.is_some(),
+                "a refused boot writes nothing"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     /// A sidecar recording an id other than its own stem means the

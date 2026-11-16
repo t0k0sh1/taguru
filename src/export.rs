@@ -69,17 +69,18 @@ const USAGE: &str = "\
 usage: taguru export [--config FILE] [--url URL] --out DIR [ID...]
 
 Writes each context back out as a JSONL source stream —
-{out}/{context}.jsonl, the exact format `taguru import` and POST
-/import apply. A context's own schema (ADR 0009 §13) rides inside
-that same stream as one schema record — no separate file —
-when the context has one installed and its mode is not \"off\". No
-CONTEXT arguments means every context, plus every group as
+{out}/{name}.jsonl, its display name as a file stem ({name}.{id}.jsonl
+when several exported contexts share the name), the exact format
+`taguru import` and POST /import apply. A context's own schema (ADR
+0009 §13) rides inside that same stream as one schema record — no
+separate file — when the context has one installed and its mode is not
+\"off\". No ID arguments means every context, plus every group as
 {out}/{id}.group.jsonl (one group record each, named by the group's
 id; import
 restores groups after every source and schema, so the files re-apply
 in any order). A full export owns DIR's *.jsonl files: one left by a
 previous export whose context or group no longer exists is removed,
-so importing DIR never resurrects a deleted entity. Naming CONTEXTs
+so importing DIR never resurrects a deleted entity. Naming context IDs
 exports just those, groups omitted and nothing removed.
 Re-importing a stream is idempotent (per-source retract-then-apply;
 per-group replace); `taguru import --dry-run` validates an exported
@@ -1207,8 +1208,8 @@ fn remote_export_group(
 /// (batches, lines) counted back out of a fetched `context` stream — the
 /// counts a remote fetch can honestly claim, since (unlike the local
 /// render) there is no in-process [`Rendered`] to report from. A
-/// batch is any line whose object carries `taguru_batch`; the key
-/// check (rather than a text prefix match) survives field reordering.
+/// batch is any line whose `type` column is `source`; the key check
+/// (rather than a text prefix match) survives field reordering.
 fn stream_counts(stream: &str) -> (usize, usize) {
     let mut batches = 0usize;
     let mut lines = 0usize;

@@ -131,6 +131,14 @@ pub(super) fn gather(
         match outcome {
             Ok(answer) if answer.status.is_success() => answers.push((shard, answer.body)),
             Ok(answer) => {
+                // The cached owner refusing an id it was sent (moved,
+                // deleted out from under the router): forget what this
+                // shard was trusted with, so the next search re-probes.
+                if forgets_owner(answer.status, false, &Method::POST) {
+                    for id in scatter.per_shard.get(&shard).into_iter().flatten() {
+                        map.owners.forget(id);
+                    }
+                }
                 let code = serde_json::from_slice::<Value>(&answer.body)
                     .ok()
                     .and_then(|body| body.get("code").and_then(Value::as_str).map(str::to_string));
@@ -144,7 +152,7 @@ pub(super) fn gather(
             }
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
-                contexts: scatter.per_shard.get(&shard).cloned().unwrap_or_default(),
+                context_ids: scatter.per_shard.get(&shard).cloned().unwrap_or_default(),
                 error,
             }),
         }

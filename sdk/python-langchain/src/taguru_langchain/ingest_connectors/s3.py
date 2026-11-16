@@ -563,7 +563,9 @@ def _handle_deletions(
                 "(an async-only TaguruIngester has no synchronous Context to retract "
                 "through)"
             )
-        context_id = ingester._context_id()
+        # A listing failure other than "no such context" propagates out of
+        # context_id(), so the sweep reports the real cause (403, 503, …).
+        context_id = ingester.context_id()
         if context_id is None:
             raise ValueError(
                 f"context {ingester.context!r} does not resolve to a context — nothing to "

@@ -317,13 +317,20 @@ fn derive(
     let derived_name = derived_context_name(name);
     // The previous manifest, if an artifact exists: the fingerprint
     // ledger this run diffs against. An algorithm change invalidates
-    // every fingerprint — incomparable digests must not "match".
+    // every fingerprint — incomparable digests must not "match" — and
+    // so does a manifest an earlier format revision wrote.
     let previous = read_manifest(api, &artifact_id)?;
-    let comparable = previous
-        .as_ref()
-        .is_some_and(|manifest| manifest.algorithm == analysis.header.algorithm);
+    let comparable_manifest = match &previous {
+        Some(StoredManifest::Current(manifest))
+            if manifest.algorithm == analysis.header.algorithm =>
+        {
+            Some(manifest)
+        }
+        _ => None,
+    };
+    let comparable = comparable_manifest.is_some();
     let mut previous_by_fingerprint: BTreeMap<&str, &ManifestCommunity> = BTreeMap::new();
-    if let Some(manifest) = previous.as_ref().filter(|_| comparable) {
+    if let Some(manifest) = comparable_manifest {
         for community in &manifest.communities {
             previous_by_fingerprint.insert(community.fingerprint.as_str(), community);
         }
@@ -353,10 +360,9 @@ fn derive(
         .as_ref()
         .map(|manifest| {
             manifest
-                .communities
-                .iter()
-                .filter(|community| !new_ids.contains(community.id.as_str()))
-                .map(|community| community.id.clone())
+                .community_ids()
+                .into_iter()
+                .filter(|id| !new_ids.contains(id.as_str()))
                 .collect()
         })
         .unwrap_or_default();
@@ -376,6 +382,7 @@ fn derive(
         summaries_reused: reused_sources.len(),
         retracted: vanished.len(),
         rebuilt_from_scratch: previous.is_some() && !comparable,
+        earlier_format: matches!(previous, Some(StoredManifest::Earlier(_))),
     };
     if dry_run {
         return Ok(report);
@@ -635,11 +642,82 @@ fn render_batches(
     Ok(batches)
 }
 
+/// What the previous artifact's stored manifest is to this run.
+enum StoredManifest {
+    /// This build's manifest: its fingerprints are comparable when its
+    /// algorithm is the analysis's.
+    Current(CommunitiesManifest),
+    /// A manifest an earlier format revision wrote — a build stamping
+    /// one of [`crate::format::EARLIER_VERSIONS`], or the v0.9.7
+    /// release's `taguru_communities` record. Its fingerprints are
+    /// incomparable, so every summary re-derives (the
+    /// `rebuilt_from_scratch` path); the community ids it lists, read
+    /// leniently whatever its other fields say, are what the vanished-
+    /// community retraction needs.
+    Earlier(Vec<String>),
+}
+
+impl StoredManifest {
+    /// Every community id the manifest lists.
+    fn community_ids(&self) -> Vec<String> {
+        match self {
+            Self::Current(manifest) => manifest
+                .communities
+                .iter()
+                .map(|community| community.id.clone())
+                .collect(),
+            Self::Earlier(ids) => ids.clone(),
+        }
+    }
+}
+
+/// Whether a stored manifest was written by an earlier format revision
+/// rather than this one: typed and stamped with an earlier revision, or
+/// untyped with the v0.9.7 release's `taguru_communities` stamp.
+/// Anything else this build does not read — another `type`, a newer
+/// revision — stays a refusal.
+fn is_earlier_manifest(value: &Value) -> bool {
+    match value.get("type") {
+        Some(kind) => {
+            kind.as_str() == Some(crate::api::communities::MANIFEST_TYPE)
+                && value
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .is_some_and(crate::format::is_earlier_version)
+        }
+        None => value.get("taguru_communities").is_some(),
+    }
+}
+
+/// Judges a stored manifest's text — the pure half of [`read_manifest`].
+fn judge_stored_manifest(text: &str) -> Result<StoredManifest, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|error| format!("does not parse ({error})"))?;
+    if is_earlier_manifest(&value) {
+        let ids = value["communities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|community| community["id"].as_str())
+            .map(str::to_string)
+            .collect();
+        return Ok(StoredManifest::Earlier(ids));
+    }
+    let manifest: CommunitiesManifest =
+        serde_json::from_value(value).map_err(|error| format!("does not parse ({error})"))?;
+    manifest
+        .judge()
+        .map_err(|error| format!("is not a manifest this build reads ({error})"))?;
+    Ok(StoredManifest::Current(manifest))
+}
+
 /// The previous artifact's manifest: `None` when the artifact `context`
 /// or its manifest record does not exist yet (a first run), an error
-/// only for a manifest that exists but does not parse — that needs a
-/// human, not a silent full rebuild.
-fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManifest>, String> {
+/// only for a manifest that exists but this build cannot place — one
+/// that does not parse, or one of another `type` or a newer revision;
+/// that needs a human, not a silent full rebuild. A manifest an
+/// earlier revision wrote is not an error: it is incomparable.
+fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<StoredManifest>, String> {
     let body = json!({"source_ids": [MANIFEST_SOURCE]});
     let result = match api.post_envelope(&["contexts", derived_id, "sources", "lookup"], &body) {
         Ok(result) => result,
@@ -649,19 +727,12 @@ fn read_manifest(api: &Api, derived_id: &str) -> Result<Option<CommunitiesManife
     let Some(text) = result["passages"][MANIFEST_SOURCE].as_str() else {
         return Ok(None);
     };
-    let manifest: CommunitiesManifest = serde_json::from_str(text).map_err(|error| {
+    judge_stored_manifest(text).map(Some).map_err(|error| {
         format!(
-            "the previous '{MANIFEST_SOURCE}' record in context {derived_id} does not parse \
-                 ({error}) — delete the artifact context to rebuild from scratch"
+            "the previous '{MANIFEST_SOURCE}' record in context {derived_id} {error} — delete \
+             the artifact context to rebuild from scratch"
         )
-    })?;
-    manifest.judge().map_err(|error| {
-        format!(
-            "the previous '{MANIFEST_SOURCE}' record in context {derived_id} is not a manifest \
-             this build reads ({error}) — delete the artifact context to rebuild from scratch"
-        )
-    })?;
-    Ok(Some(manifest))
+    })
 }
 
 /// A `group`'s transitive member `context` ids, child `groups` included —
@@ -713,9 +784,15 @@ struct Report {
     summaries_generated: usize,
     summaries_reused: usize,
     retracted: usize,
-    /// True when a previous artifact existed but its algorithm differs
-    /// — every fingerprint was incomparable and everything re-derived.
+    /// True when a previous artifact existed but its manifest is not
+    /// comparable — its algorithm differs, or an earlier format revision
+    /// wrote it — so every fingerprint was incomparable and everything
+    /// re-derived.
     rebuilt_from_scratch: bool,
+    /// Which of the two made it incomparable: the human line names the
+    /// cause; `--json` carries `rebuilt_from_scratch` alone, as before.
+    #[serde(skip)]
+    earlier_format: bool,
 }
 
 impl Report {
@@ -748,7 +825,12 @@ impl Report {
                 },
             ));
         }
-        if self.rebuilt_from_scratch {
+        if self.earlier_format {
+            text.push_str(
+                " · manifest from an earlier format revision: previous fingerprints \
+                 incomparable",
+            );
+        } else if self.rebuilt_from_scratch {
             text.push_str(" · algorithm changed: previous fingerprints incomparable");
         }
         text.push_str(&format!(
@@ -950,12 +1032,87 @@ mod tests {
             summaries_reused: 1,
             retracted: 1,
             rebuilt_from_scratch: false,
+            earlier_format: false,
         };
         let text = report.render();
         assert!(text.contains("would generate"));
         assert!(text.contains("would retract"));
         assert!(text.contains("would update"));
         assert!(text.contains("graph revision 7"));
+    }
+
+    /// SHOULD-FIX 3: a manifest an earlier format revision wrote — a
+    /// typed one stamped with an earlier revision, or the v0.9.7
+    /// release's untyped `taguru_communities` record — is incomparable
+    /// (its listed ids kept for retraction), never an error; a current
+    /// one is read whole; another `type`, a newer revision, or bytes
+    /// that are not JSON still refuse.
+    #[test]
+    fn an_earlier_revisions_manifest_is_incomparable_not_an_error() {
+        let body = r#""algorithm":"louvain-cc/1","source_context_id":"c","revision":{"graph":1,"passages":0,"config":0},"levels":1,"communities":[{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2}]"#;
+        for version in crate::format::EARLIER_VERSIONS {
+            let text = format!(r#"{{"type":"communities_manifest","version":"{version}",{body}}}"#);
+            assert!(
+                matches!(judge_stored_manifest(&text), Ok(StoredManifest::Earlier(ids)) if ids == ["L0-0"]),
+                "{version}"
+            );
+        }
+        let v097 = r#"{"taguru_communities":1,"algorithm":"louvain-cc/1","source_context":"sake","communities":[{"id":"L0-3"}]}"#;
+        assert!(matches!(
+            judge_stored_manifest(v097),
+            Ok(StoredManifest::Earlier(ids)) if ids == ["L0-3"]
+        ));
+
+        let current = format!(
+            r#"{{"type":"communities_manifest","version":"{}",{body}}}"#,
+            crate::format::FORMAT_VERSION
+        );
+        let Ok(StoredManifest::Current(manifest)) = judge_stored_manifest(&current) else {
+            panic!("the current manifest reads whole");
+        };
+        assert_eq!(manifest.communities.len(), 1);
+
+        let newer = format!(r#"{{"type":"communities_manifest","version":"2099-01-01",{body}}}"#);
+        let error = judge_stored_manifest(&newer)
+            .err()
+            .expect("a newer revision refuses");
+        assert!(
+            error.starts_with("is not a manifest this build reads"),
+            "{error}"
+        );
+        let other = format!(r#"{{"type":"group","version":"2026-10-01",{body}}}"#);
+        assert!(judge_stored_manifest(&other).is_err());
+        let error = judge_stored_manifest("not a manifest")
+            .err()
+            .expect("refuses");
+        assert!(error.starts_with("does not parse"), "{error}");
+    }
+
+    #[test]
+    fn an_earlier_format_rebuild_names_its_cause() {
+        let report = Report {
+            context: "sake".to_string(),
+            derived_id: "d".to_string(),
+            derived_name: "sake::communities".to_string(),
+            dry_run: false,
+            algorithm: "louvain-cc/1".to_string(),
+            revision_graph: 1,
+            concept_count: 2,
+            edge_count: 1,
+            levels: 1,
+            communities: 1,
+            summaries_generated: 1,
+            summaries_reused: 0,
+            retracted: 0,
+            rebuilt_from_scratch: true,
+            earlier_format: true,
+        };
+        let text = report.render();
+        assert!(
+            text.contains("manifest from an earlier format revision"),
+            "{text}"
+        );
+        assert!(!text.contains("algorithm changed"), "{text}");
     }
 
     /// Issue #753: a member with no intra-community strength (a

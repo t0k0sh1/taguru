@@ -87,6 +87,11 @@ export class FakeServer {
    * prompt/checkpoint path unchanged. Mirrors the Python conftest's
    * `schema_document` knob. */
   schemaDocument: Record<string, unknown> | null = null;
+  /** When set, GET /contexts answers this status (e.g. 403, 404) — to
+   * exercise the ingester's id lookup telling "no such context" apart
+   * from a listing that failed for another reason. Mirrors the Python
+   * conftest's `contexts_listing_status` knob. */
+  contextsListingStatus: number | null = null;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -107,6 +112,12 @@ export class FakeServer {
       // to the ids every /contexts/{id}/… route takes (#964) — routed
       // above `calls.push` like /version, so the resolution round trip
       // doesn't pollute the exact call-list assertions below.
+      if (this.contextsListingStatus !== null) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "simulated", error: "simulated listing failure", time: 0.001 }),
+          { status: this.contextsListingStatus },
+        );
+      }
       const row = (name: string) => ({
         id: `id-${name}`,
         name,

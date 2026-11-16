@@ -147,15 +147,27 @@ pub fn route_tool(
             (
                 "POST",
                 "/groups".to_string(),
+                // The pre-0.10.0 member keys ride along so the server
+                // refuses them by name (`api::renamed_field_refusal`)
+                // instead of this pick dropping them without a word.
                 Some(pick(
                     arguments,
-                    &["name", "description", "context_ids", "group_ids"],
+                    &[
+                        "name",
+                        "description",
+                        "context_ids",
+                        "group_ids",
+                        "contexts",
+                        "groups",
+                    ],
                 )),
             )
         }
         "update_group" => (
             "PATCH",
             group_path("group_id")?,
+            // As in `create_group`, the pre-0.10.0 keys ride along to be
+            // refused by name server-side.
             Some(pick(
                 arguments,
                 &[
@@ -164,6 +176,12 @@ pub fn route_tool(
                     "remove_context_ids",
                     "add_group_ids",
                     "remove_group_ids",
+                    "add_contexts",
+                    "remove_contexts",
+                    "add_groups",
+                    "remove_groups",
+                    "contexts",
+                    "groups",
                 ],
             )),
         ),
@@ -483,9 +501,11 @@ pub fn route_tool(
             (
                 "POST",
                 path,
+                // `derived` (pre-0.10.0) rides along to be refused by
+                // name server-side, not silently search the default.
                 Some(pick(
                     arguments,
-                    &["query", "limit", "semantic_floor", "derived_id"],
+                    &["query", "limit", "semantic_floor", "derived_id", "derived"],
                 )),
             )
         }

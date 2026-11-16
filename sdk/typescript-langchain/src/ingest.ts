@@ -801,8 +801,9 @@ export class TaguruIngester {
       text_bytes: Buffer.byteLength(text, "utf-8"),
     });
 
-    const vocabulary = await this.fetchVocabulary();
-    const schema = await this.fetchSchema();
+    const dryRun = options.dry_run === true;
+    const vocabulary = await this.fetchVocabulary(dryRun);
+    const schema = await this.fetchSchema(dryRun);
     const system = systemPrompt(vocabulary, this.questions, this.fact_budget, schema);
     const paragraphCount = splitParagraphs(text).length;
     const rules = this.itemRules(paragraphCount);
@@ -1117,12 +1118,30 @@ export class TaguruIngester {
 
   /**
    * The id behind the ingester's context NAME, read off the directory —
-   * `null` when nothing carries the name yet (first ingest) or a listing
-   * fails; several contexts sharing it throw, since writing into "one of
-   * them" would be a coin flip.
+   * `null` when no context carries the name yet (before the first ingest
+   * creates it). Several contexts sharing the name throw, since writing
+   * into "one of them" would be a coin flip. Public so callers that hold
+   * only the name (examples, the S3 connector's deletion sweep) address
+   * the id-keyed `client.context(id)` routes through the same lookup; the
+   * Python twin is `TaguruIngester.context_id()`.
+   *
+   * Only "no such context" — no matching row, or a 404 from the listing —
+   * reads as `null`. Any other listing failure (403, 503, transport)
+   * propagates, so a caller reports the real cause instead of a
+   * misleading "not found". `strict` makes the 404 propagate too: the
+   * batch header must not mint a second id for a context the directory
+   * merely failed to show.
    */
-  /** @internal — the S3 connector's deletion sweep resolves through it too. */
   async contextId(strict = false): Promise<string | null> {
+    return this.lookupContextId(strict, false);
+  }
+
+  /**
+   * `contextId`'s body. `offline` reads ANY listing failure as "not there
+   * yet" — only for a dry run, which renders NDJSON and must keep working
+   * when the directory cannot be listed at all.
+   */
+  private async lookupContextId(strict: boolean, offline: boolean): Promise<string | null> {
     const matches: string[] = [];
     try {
       for await (const row of this.client.contexts.iter()) {
@@ -1131,10 +1150,10 @@ export class TaguruIngester {
         }
       }
     } catch (error) {
-      if (strict) {
-        throw error;
+      if (error instanceof NotFoundError ? !strict : offline) {
+        return null;
       }
-      return null;
+      throw error;
     }
     if (matches.length > 1) {
       throw new Error(
@@ -1153,7 +1172,7 @@ export class TaguruIngester {
    * run only renders NDJSON, so it keeps the offline-tolerant read.
    */
   private async headerContextId(dryRun: boolean): Promise<string> {
-    const existing = await this.contextId(!dryRun);
+    const existing = await this.lookupContextId(!dryRun, dryRun);
     if (existing !== null) {
       return existing;
     }
@@ -1163,10 +1182,11 @@ export class TaguruIngester {
 
   /**
    * The `context`'s live relation vocabulary — an advantage the offline
-   * extractor structurally lacks. Best-effort: an absent `context` is fine.
+   * extractor structurally lacks. Best-effort: an absent `context` is fine,
+   * and a dry run reads an unlistable directory as no vocabulary.
    */
-  private async fetchVocabulary(): Promise<string[]> {
-    const contextId = await this.contextId();
+  private async fetchVocabulary(dryRun: boolean): Promise<string[]> {
+    const contextId = await this.lookupContextId(false, dryRun);
     if (contextId === null) {
       return [];
     }
@@ -1188,8 +1208,8 @@ export class TaguruIngester {
    * posture as `fetchVocabulary`: a schema-unaware server or a schema-free
    * `context` is fine, and this ingester works unchanged either way.
    */
-  private async fetchSchema(): Promise<SchemaDocument | null> {
-    const contextId = await this.contextId();
+  private async fetchSchema(dryRun: boolean): Promise<SchemaDocument | null> {
+    const contextId = await this.lookupContextId(false, dryRun);
     if (contextId === null) {
       return null;
     }

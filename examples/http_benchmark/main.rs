@@ -16,7 +16,8 @@
 //! Treat the numbers as RELATIVE — across commits, across
 //! configurations (WAL on/off, cache sizes), across `--concurrency` —
 //! never as absolutes. The benchmark writes into (and afterwards
-//! deletes) one context named `http-benchmark`.
+//! deletes) one context named `http-benchmark`, created through
+//! `POST /contexts` and addressed by the id the server mints for it.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -29,7 +30,9 @@ struct Config {
     seed: usize,
 }
 
-const CONTEXT: &str = "http-benchmark";
+/// The scratch context's display name. Names are not unique and paths
+/// take ids, so the name only finds leftovers from aborted runs.
+const CONTEXT_NAME: &str = "http-benchmark";
 
 fn main() {
     let config = parse_args();
@@ -46,15 +49,37 @@ fn main() {
     };
 
     // Fresh context, always: a leftover from an aborted run would
-    // skew the seed phase.
-    let _ = client.call("DELETE", &format!("/contexts/{CONTEXT}"), None);
-    client
-        .call(
-            "PUT",
-            &format!("/contexts/{CONTEXT}"),
-            Some(serde_json::json!({"description": "http_benchmark scratch"})),
+    // skew the seed phase. Leftovers are found by name, since only the
+    // directory listing maps a name to its ids.
+    let listing = client
+        .call_json("GET", "/contexts", None)
+        .expect("listing contexts must succeed — is the server up, and the token right?");
+    for row in listing["result"]["contexts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if row["name"] == CONTEXT_NAME
+            && let Some(id) = row["id"].as_str()
+        {
+            let _ = client.call("DELETE", &format!("/contexts/{id}"), None);
+        }
+    }
+    let created = client
+        .call_json(
+            "POST",
+            "/contexts",
+            Some(serde_json::json!({
+                "name": CONTEXT_NAME,
+                "description": "http_benchmark scratch",
+            })),
         )
         .expect("create must succeed — is the server up, and the token right?");
+    let context_id = created["result"]["id"]
+        .as_str()
+        .expect("the create response carries the minted id")
+        .to_string();
+    let context_id = context_id.as_str();
 
     println!(
         "target {} · concurrency {} · {} requests per phase\n",
@@ -80,7 +105,7 @@ fn main() {
             .collect();
         client.call(
             "POST",
-            &format!("/contexts/{CONTEXT}/associations"),
+            &format!("/contexts/{context_id}/associations"),
             Some(serde_json::Value::Array(batch)),
         )
     });
@@ -95,13 +120,13 @@ fn main() {
         if index.is_multiple_of(2) {
             client.call(
                 "POST",
-                &format!("/contexts/{CONTEXT}/recall"),
+                &format!("/contexts/{context_id}/recall"),
                 Some(serde_json::json!({"cue": cue})),
             )
         } else {
             client.call(
                 "POST",
-                &format!("/contexts/{CONTEXT}/activate"),
+                &format!("/contexts/{context_id}/activate"),
                 Some(serde_json::json!({"origins": [cue], "limit": 20})),
             )
         }
@@ -122,7 +147,7 @@ fn main() {
             if index.is_multiple_of(10) {
                 client.call(
                     "POST",
-                    &format!("/contexts/{CONTEXT}/associations"),
+                    &format!("/contexts/{context_id}/associations"),
                     Some(serde_json::json!([{
                         "subject": cue, "label": "追記", "object": format!("値{index}"),
                         "weight": 1.0, "source_id": "mixed.md",
@@ -131,7 +156,7 @@ fn main() {
             } else {
                 client.call(
                     "POST",
-                    &format!("/contexts/{CONTEXT}/recall"),
+                    &format!("/contexts/{context_id}/recall"),
                     Some(serde_json::json!({"cue": cue})),
                 )
             }
@@ -139,7 +164,7 @@ fn main() {
     );
     mixed_stats.print(config.requests, "request");
 
-    let _ = client.call("DELETE", &format!("/contexts/{CONTEXT}"), None);
+    let _ = client.call("DELETE", &format!("/contexts/{context_id}"), None);
 }
 
 struct Client {
@@ -155,6 +180,27 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<(), String> {
+        self.send(method, path, body).map(drop)
+    }
+
+    /// `call`, answering the parsed JSON body — for the setup calls
+    /// that need the server's reply (the listing, the minted id).
+    fn call_json(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let text = self.send(method, path, body)?;
+        serde_json::from_str(&text).map_err(|error| format!("unparseable reply: {error}"))
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<String, String> {
         let mut request = ureq::http::Request::builder()
             .method(method)
             .uri(format!("{}{path}", self.url));
@@ -177,9 +223,9 @@ impl Client {
             // probing the server's own 429/503 ceilings.
             Ok(mut reply) => {
                 let code = reply.status().as_u16();
-                let _ = reply.body_mut().read_to_string();
+                let text = reply.body_mut().read_to_string().unwrap_or_default();
                 if code < 400 {
-                    Ok(())
+                    Ok(text)
                 } else {
                     Err(format!("HTTP {code}"))
                 }

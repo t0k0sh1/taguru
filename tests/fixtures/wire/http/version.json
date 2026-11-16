@@ -19,9 +19,9 @@
       6
     ],
     "mcp_contract": {
-      "current": 1,
+      "current": 2,
       "supported": [
-        1
+        2
       ]
     },
     "mcp_protocol": {

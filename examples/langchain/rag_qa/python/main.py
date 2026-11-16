@@ -185,8 +185,10 @@ def main() -> int:
 
         # -- read: the retriever composes like any other LCEL component --------
         # The retriever addresses a context by its id (#964); the ingester
-        # created it by name, so read the id off the directory.
-        context_id = next(row.id for row in client.contexts.iter() if row.name == "aomine-qa")
+        # created it by name, so ask it for the id.
+        context_id = ingester.context_id()
+        if context_id is None:
+            raise SystemExit("context aomine-qa was not created")
         retriever = TaguruRetriever(context_id=context_id, client=client, k=6)
         llm = make_llm(FAKE_ANSWERS)
         chain = (

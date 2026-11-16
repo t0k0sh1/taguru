@@ -343,7 +343,7 @@ load-bearing ones:
 | `TAGURU_DATA_DIR` | `./data` | Data directory |
 | `TAGURU_API_TOKEN` | — | Bearer token (everything but `/health`, `/live`, `/metrics`). Unset = unauthenticated, localhost only |
 | `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation. A key's name is its id (grants, rate limits and OAuth delegations key on it): 1–64 characters of `A-Z a-z 0-9 . _ -`, anything else refuses boot |
-| `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to `contexts` listed by context **id** (the `id` column of `GET /contexts`; a display name refuses boot — a rename never moves a grant). These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
+| `TAGURU_KEY_GRANTS` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to `contexts` listed by context **id** (the `id` column of `GET /contexts`; a display name refuses boot — a rename never moves a grant). A full grant object takes only `role` and `contexts`: any other key (`groups`, a typo like `context`) refuses boot and reload rather than silently granting every context, and a still-set `TAGURU_KEY_SCOPES` (the pre-0.10.0 name) refuses boot and refuses a reload (the previous table stays armed). These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
@@ -450,18 +450,29 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   and is rehearsed by an integration test.
 - **Sharding, with one front door.** `taguru router` is a stateless
   scatter-gather router over sharded instances: `TAGURU_ROUTE_MAP`
-  names a file of `context = shard-url` lines (plus an optional
-  `* = shard-url` fallback), `context` verbs proxy to the owning shard,
-  and cross-`context` `recall`/`query`/`sources/search` and `groups` span
+  names a file of `context-name = shard-url` lines (plus an optional
+  `* = shard-url` fallback) that decides where NEW `contexts` land, by
+  the name a create carries. Existing `contexts` are addressed by id:
+  the router asks the shards which one holds an id (a `GET
+  /contexts/{id}` probe with the caller's own credentials, which each
+  shard's rate limit counts) and caches the answer, so only the first
+  request naming an id (per router, and again after a map reload)
+  pays a probe on every shard; `group` writes and imports always
+  probe, because they decide where data lands. `context` verbs proxy
+  to the owning shard, and cross-`context` `recall`/`query`/`sources/search` and `groups` span
   every shard with the exact single-instance merge semantics — the
   equivalence is pinned by an integration test, cursors included
   (`after` anchors on the last match itself, so it forwards to every
-  shard verbatim). `groups` exist on every shard with members projected
-  by the map; `/import` splits its source stream by `context` and
-  dry-run-preflights chunks of whole source files and projected
-  `group` records alike,
+  shard verbatim). `groups` exist on every shard under one id, each
+  copy holding the members that live on its shard; `/import` splits
+  its source stream by `context_id` (the shard holding the id, else
+  the shard its `create` name routes to) and dry-run-preflights chunks
+  of whole source files and projected `group` records alike,
   so a stream one instance would refuse with nothing applied is
-  refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
+  refused the same way here (a v0.9.7 stream is refused outright:
+  import it into a single instance or into each shard directly — see
+  [upgrading from 0.9.7](https://t0k0sh1.github.io/taguru/import.html#upgrading-from-0-9-7));
+  `/mcp` works unchanged. No data directory, no state — run any number of routers
   behind one LB. Auth passes through: shards enforce keys and grants
   (keep their keyrings identical), the router holds none. A shard that
   answers an error fails the request whole; a shard that cannot be
@@ -469,10 +480,13 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   in the envelope) and refuses routed verbs with 502
   `shard_unreachable`. Moving a `context`, in order: quiesce its
   writes → `taguru export` → DELETE it through the router (the old
-  shard also sweeps its `group` projections) → edit the map + rolling
-  router restart → re-import through the router, which now routes it
-  to the new shard. Delete before re-import — a leftover copy keeps
-  answering the old shard's slice of every `group` fan-out.
+  shard also sweeps its `group` projections) → edit the map so its
+  name routes to the new shard, and let every router reload it →
+  re-import through the router, which now routes it to the new shard.
+  Delete before re-import — a leftover copy keeps answering the old
+  shard's slice of every `group` fan-out, and the router refuses every
+  verb on an id two shards hold (delete the stray on its shard
+  directly).
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart) and its `200`
   body names the server's own version (`{"status": "ok", "version":

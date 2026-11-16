@@ -554,6 +554,17 @@ pub struct Entry {
     /// loser of this lock re-diffs against the winner's hashes and
     /// no-ops.
     passage_refresh: Mutex<()>,
+    /// Serializes whole renames of this `context`: the name swap and
+    /// sidecar write (under `inner`) and the index move (under the
+    /// registry lock) are two critical sections, and the entry-before-
+    /// registry ban means no single guard can span both. Unserialized,
+    /// rename A (x → b) could swap the name, rename B (b → c) could
+    /// then run whole — finding no `b` row to unindex yet — and A's
+    /// late index move would re-add `b`: the listing would show the
+    /// `context` twice, under its real name and a stale one. Lock
+    /// order: this → `inner` (released) → the registry; nothing takes
+    /// this while holding either.
+    rename: Mutex<()>,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
     /// skips the `contexts` nobody touched.
@@ -690,6 +701,7 @@ impl Entry {
             passage_vectors_load_failure: Mutex::new(None),
             passages_embed_dirty: AtomicBool::new(false),
             passage_refresh: Mutex::new(()),
+            rename: Mutex::new(()),
             usage: UsageCounters::seeded(&usage),
             usage_dirty: AtomicBool::new(false),
             passages_load_failure: Mutex::new(None),
@@ -2279,17 +2291,19 @@ impl Drop for MaintenanceGuard {
 /// `TAGURU_SEMANTIC_FLOOR≈0.2` next to its `TAGURU_EMBED_MODEL`.
 const DEFAULT_SEMANTIC_FLOOR: f32 = 0.35;
 
-/// The in-memory `context` table: entries keyed by id, plus the name
-/// index the wire — which still addresses `contexts` by name until
-/// #964 — resolves through. Names are display strings and NOT unique
-/// (issue #961 decision 1): the index holds every id a name maps to,
-/// and [`ContextTable::resolve`] refuses an ambiguous name explicitly
-/// rather than picking one. Duplicate names cannot arise through the
-/// API while creates are name-addressed, but the boot scan tolerates
-/// them (two sidecars are free to record the same display name), so
-/// this table must represent them. Both maps are BTreeMaps so the
-/// directory listing (and `directory_page`'s keyset seek) stays in
-/// name order for free — ties broken by id, deterministically.
+/// The in-memory `context` table: entries keyed by id — the one key the
+/// wire addresses `contexts` by (#964) — plus a name index that keeps
+/// the directory listing in name order and serves the few name-boundary
+/// lookups left (tests and the offline `taguru-code sync`). Names are
+/// display strings and NOT unique (issue #961 decision 1): the index
+/// holds every id a name maps to, and [`ContextTable::resolve`] refuses
+/// an ambiguous name explicitly rather than picking one. Duplicates are
+/// ordinary — `POST /contexts` of a name already in use mints a second
+/// `context`, a rename may land on a taken name, and two sidecars are
+/// free to record the same display name — so this table must represent
+/// them. Both maps are BTreeMaps so the directory listing (and
+/// `directory_page`'s keyset seek) stays in name order for free — ties
+/// broken by id, deterministically.
 #[derive(Default)]
 struct ContextTable {
     by_id: BTreeMap<String, Arc<Entry>>,
@@ -2299,8 +2313,7 @@ struct ContextTable {
 }
 
 /// [`ContextTable::resolve`]'s outcome: a name maps to one `context`,
-/// none, or — reachable only from a hand-assembled data directory
-/// while the wire still addresses `contexts` by name — several.
+/// none, or — names being display strings, not keys — several.
 enum NameResolution<'table> {
     One(&'table Arc<Entry>),
     None,
@@ -2435,9 +2448,11 @@ impl ContextTable {
     }
 
     /// Every entry in `(name, id)` order — the directory listing's
-    /// iteration. The name is the index's copy, which agrees with
-    /// `EntryInner::name` for any caller holding this table's lock
-    /// (renames update both under it).
+    /// iteration. The name is the index's copy: it trails
+    /// `EntryInner::name` only inside a rename's window (sidecar
+    /// written, index not yet moved), and `Entry::rename` serializes
+    /// renames so each `context` holds exactly one index row whatever
+    /// the interleaving.
     fn iter_named(&self) -> impl Iterator<Item = (&String, &Arc<Entry>)> {
         let by_id = &self.by_id;
         self.by_name.iter().flat_map(move |(name, ids)| {
@@ -2675,12 +2690,22 @@ struct StateInner {
     /// write-refusal names: the writer's URL and the bucket's fence
     /// holder.
     replica: Option<Arc<crate::replica::ReplicaInfo>>,
-    /// Names an [`AppState::create_if_absent`] is currently minting a
-    /// `context` for — the one remaining name reservation now that
-    /// plain create, delete, and rename operate on collision-free ids
-    /// (#964). Checked and inserted under the registry read guard so
-    /// two racing at-most-one-per-name creates cannot both pass.
+    /// Ids an [`AppState::create_if_absent`] is currently writing a
+    /// family under — the import header's own id, or a derived one.
+    /// Checked and inserted under the registry read guard so two
+    /// racing at-most-one-per-id creates cannot both pass. Plain
+    /// [`AppState::create`] needs no entry here: its id is minted on
+    /// the spot, so nothing else can be working under it.
     pending_creates: Mutex<HashSet<String>>,
+    /// Ids an [`AppState::delete`] has unregistered but is still
+    /// unlinking the files of. Inserted in the same registry write
+    /// section that unregisters the id and released after the unlink
+    /// loop; [`AppState::create_if_absent`] refuses an id in here
+    /// (checked under the registry read guard, so the two cannot
+    /// interleave) — otherwise a same-id recreate would write its
+    /// fresh family into the tail of the delete's unlink loop and have
+    /// it destroyed.
+    pending_deletes: Mutex<HashSet<String>>,
     /// Running estimate of unpinned resident graph bytes — the cheap
     /// gate in front of the budget sweep. Adjusted by absolute
     /// per-entry recounts (see `EntryInner::counted_bytes`); the
@@ -3378,13 +3403,18 @@ impl AppState {
     /// vanished lane, a stem mid-hydration) — the replication metric
     /// labels' bridge back from file stems to the names operators
     /// know (`taguru_replica_behind_seconds{context=...}` and its
-    /// shipper-side twins).
+    /// shipper-side twins), and the request paths' label for a
+    /// `context` they hold only the id of.
+    ///
+    /// The `Arc` is cloned out and the registry guard dropped BEFORE
+    /// the entry lock is taken (the module's locking contract): a cold
+    /// load or compaction holding this entry's write lock for seconds
+    /// must stall this one caller, not park it on the registry lock
+    /// where every create and delete — and, behind those, every
+    /// lookup of every `context` — would queue up after it.
     pub(crate) fn name_of_stem(&self, stem: &str) -> String {
-        let registry = self.0.registry.read();
-        registry
-            .get_id(stem)
-            .map(|entry| entry.inner.read().name.clone())
-            .unwrap_or_else(|| stem.to_string())
+        let entry = self.lookup_id(stem);
+        entry.map_or_else(|| stem.to_string(), |entry| entry.inner.read().name.clone())
     }
 
     /// Every entry, cloned out under one short read lock — the sweeps'

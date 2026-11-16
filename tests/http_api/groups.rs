@@ -1211,3 +1211,111 @@ fn the_groups_verb_finds_ids_by_exact_name_and_lists_twins() {
     assert!(stderr.contains("unknown argument '--bogus'"), "{stderr}");
     let _ = std::fs::remove_dir_all(server.stop_gracefully());
 }
+
+/// The pre-0.10.0 member keys are refused by name, each naming its
+/// replacement, instead of being dropped by the defaulting structs — a
+/// v0.9.7 caller's `PATCH {"add_contexts": [...]}` used to answer 200
+/// with the row unchanged. Over MCP too: the tool forwards the old
+/// keys so the server refuses them the same way.
+#[test]
+fn pre_rename_group_fields_are_refused_by_name() {
+    let server = Server::start("groups-renamed-fields");
+    let sake = server.create_context("sake");
+    let kura = server.create_group("kura", None);
+    let before = server.ok("GET", &format!("/groups/{kura}"), None);
+    let groups_total = || server.ok("GET", "/groups", None)["total"].clone();
+    let total_before = groups_total();
+
+    for (old, new) in [("contexts", "'context_ids'"), ("groups", "'group_ids'")] {
+        let (status, refused) = server.call(
+            "POST",
+            "/groups",
+            group_body("fresh", Some(json!({ old: [sake] }))),
+        );
+        assert_eq!(status, 400, "{old}: {refused}");
+        assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
+        let message = refused["error"].as_str().unwrap();
+        assert!(message.contains(&format!("'{old}'")), "{refused}");
+        assert!(message.contains(new), "{refused}");
+    }
+    assert_eq!(groups_total(), total_before, "no refused create landed");
+
+    for (old, new) in [
+        ("add_contexts", "'add_context_ids'"),
+        ("remove_contexts", "'remove_context_ids'"),
+        ("add_groups", "'add_group_ids'"),
+        ("remove_groups", "'remove_group_ids'"),
+        ("contexts", "'add_context_ids' / 'remove_context_ids'"),
+        ("groups", "'add_group_ids' / 'remove_group_ids'"),
+    ] {
+        let (status, refused) = server.call(
+            "PATCH",
+            &format!("/groups/{kura}"),
+            Some(json!({ "description": "changed", old: [sake] })),
+        );
+        assert_eq!(status, 400, "{old}: {refused}");
+        assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
+        let message = refused["error"].as_str().unwrap();
+        assert!(message.contains(&format!("'{old}'")), "{refused}");
+        assert!(message.contains(new), "{refused}");
+    }
+    assert_eq!(
+        server.ok("GET", &format!("/groups/{kura}"), None),
+        before,
+        "nothing a refused update carried was applied"
+    );
+
+    let answer = server.call_tool(
+        1,
+        "update_group",
+        json!({"group_id": kura, "add_contexts": [sake]}),
+    );
+    assert_eq!(answer["isError"], json!(true), "{answer}");
+    let text = answer["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("'add_context_ids'"), "{text}");
+    let answer = server.call_tool(2, "create_group", json!({"name": "x", "groups": [kura]}));
+    assert_eq!(answer["isError"], json!(true), "{answer}");
+
+    // The current keys still apply.
+    let updated = server.ok(
+        "PATCH",
+        &format!("/groups/{kura}"),
+        Some(json!({"add_context_ids": [sake]})),
+    );
+    assert_eq!(updated["context_ids"], json!([sake]));
+}
+
+/// The cross-`context` verbs' pre-0.10.0 `contexts`/`groups` keys are
+/// refused by name even beside a valid `group_ids` — otherwise the
+/// search ran over the group alone under a 200, silently dropping the
+/// contexts the caller named the old way.
+#[test]
+fn pre_rename_cross_target_keys_are_refused_beside_valid_targets() {
+    let server = Server::start("groups-cross-renamed");
+    let sake = server.create_context("sake");
+    let kura = server.create_group("kura", Some(json!({"context_ids": [sake]})));
+    let verbs = [
+        ("/recall", json!({"cue": "x"})),
+        ("/query", json!({"subject": "x"})),
+        ("/sources/search", json!({"query": "x"})),
+    ];
+    for (path, base) in verbs {
+        let mut valid = base.clone();
+        valid["group_ids"] = json!([kura]);
+        assert_eq!(
+            server.call("POST", path, Some(valid.clone())).0,
+            200,
+            "{path}"
+        );
+        for (old, new) in [("contexts", "'context_ids'"), ("groups", "'group_ids'")] {
+            let mut stale = valid.clone();
+            stale[old] = json!(["sake"]);
+            let (status, refused) = server.call("POST", path, Some(stale));
+            assert_eq!(status, 400, "{path} {old}: {refused}");
+            assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
+            let message = refused["error"].as_str().unwrap();
+            assert!(message.contains(&format!("'{old}'")), "{refused}");
+            assert!(message.contains(new), "{refused}");
+        }
+    }
+}

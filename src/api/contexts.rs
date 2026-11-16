@@ -328,12 +328,37 @@ pub struct CreateContextRequest {
 /// `POST /contexts` — mints the id (ADR 0045) and answers with the
 /// new `context`'s directory row, `id` included: the caller needs it
 /// to build every subsequent path.
+///
+/// A `context`-scoped key is refused outright, like `flush`: the route
+/// carries no `{id}` for the middleware's per-`context` grant check,
+/// and the id it would mint is in no grant (grants list ids the
+/// operator wrote down). Allowing it would let a key held to one
+/// `context` fill the disk and the shared routing directory with
+/// `contexts` it can never touch again — the v0.9.7 `PUT
+/// /contexts/{name}` path held it to the names its grant listed.
+/// MCP's `create_context` dispatches here, so it is covered too.
 pub async fn create_context(
     State(state): State<AppState>,
+    grant: Option<axum::Extension<crate::auth::KeyGrant>>,
+    key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
     AppBytes(body): AppBytes,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(axum::Extension(grant)) = &grant
+        && grant.contexts.is_some()
+    {
+        return error(
+            ErrorCode::Forbidden,
+            format!(
+                "key '{}' is context-scoped: a new context's id is minted by the server, so it \
+                 would lie outside the key's grant (TAGURU_KEY_GRANTS lists context ids) — \
+                 create it with a key whose grant covers every context",
+                key_name(&key)
+            ),
+            started_at,
+        );
+    }
     let request: CreateContextRequest = match optional_body(&body, started_at) {
         Ok(request) => request,
         Err(refusal) => return *refusal,

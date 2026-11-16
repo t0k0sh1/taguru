@@ -226,7 +226,9 @@ docker compose up -d</code></pre>
     </p>
     <p class="note warn">
       <b>Back up before crossing a format bump.</b> Image formats migrate forward on load and
-      never write the old version back out — rolling the binary back past a format bump means
+      never write the old version back out (a pre-0.10 data directory is the exception: this
+      build refuses to boot on it — see <a href="import.html#upgrading-from-0-9-7">Import —
+      upgrading from 0.9.7</a>) — rolling the binary back past a format bump means
       rolling the volume back with it. See <a href="docker-compose.html#model">Docker Compose —
       the model</a> for why a rollback is a restore, and
       <a href="docker-compose.html#backup">Docker Compose — backups</a> for <code>POST
@@ -349,7 +351,7 @@ curl -X POST localhost:8248/contexts/$CTX/compact</code></pre>
       <code>latency_ms</code>. With <code>TAGURU_LOG_FORMAT=json</code> it's one JSON object per
       request — the least ambiguous way to read it:
     </p>
-    <pre><code>{"fields":{"message":"http","method":"POST","route":"/contexts/{id}/sources/search","context":"0be6e28e-9f21-4a49-9dd6-3a9f24246b3e","group":null,"status":200,"key":"-","latency_ms":6.2}}</code></pre>
+    <pre><code>{"fields":{"message":"http","method":"POST","route":"/contexts/{id}/sources/search","context":"0be6e28e-9f21-4a49-9dd6-3a9f24246b3e","group":"-","status":200,"key":"-","latency_ms":6.2}}</code></pre>
     <p>
       The default, human-readable stderr format carries the same fields on one line per request,
       timestamp and level first. <code>TAGURU_LOG_SEARCHES=1</code> adds a second,

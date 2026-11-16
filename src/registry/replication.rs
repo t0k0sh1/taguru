@@ -17,18 +17,20 @@ impl AppState {
     /// lands every meta before families are touched).
     /// Returns the display name the `context` registered (or was
     /// already registered) under — the tailer's log label — or `None`
-    /// for a sidecar the boot scan would refuse (pre-id, or recording
-    /// a foreign id): registering one would let a later local write
-    /// stamp it with `id: <stem>`, laundering it into the current
-    /// format, so the tailer treats the stem as failed instead. A
-    /// replica cannot refuse its whole poll the way boot refuses a
-    /// directory — it is already serving.
+    /// for a family the boot scan would refuse (a pre-id sidecar or
+    /// stem, or a sidecar recording a foreign id): registering one
+    /// would let a later local write stamp it with `id: <stem>`,
+    /// laundering it into the current format, so the tailer treats the
+    /// stem as failed instead. A replica cannot refuse its whole poll
+    /// the way boot refuses a directory — it is already serving.
+    ///
+    /// An already-registered entry's name is read only after the
+    /// registry guard is gone (the module's locking contract): the
+    /// entry may be mid-load under its write lock, and parking on it
+    /// while holding the registry would stall every lookup behind it.
     pub(crate) fn replica_register(&self, stem: &str) -> Option<String> {
-        {
-            let registry = self.0.registry.read();
-            if let Some(entry) = registry.get_id(stem) {
-                return Some(entry.inner.read().name.clone());
-            }
+        if let Some(entry) = self.lookup_id(stem) {
+            return Some(entry.inner.read().name.clone());
         }
         let meta_file = match read_scanned_meta(&self.0.data_dir, stem) {
             ScannedMeta::Current(meta_file) | ScannedMeta::Degraded(meta_file) => meta_file,
@@ -36,6 +38,14 @@ impl AppState {
                 tracing::warn!(
                     stem,
                     "tailed sidecar records no context id (pre-ADR 0045); the stem is \
+                     not registered — the lineage needs an export → import migration"
+                );
+                return None;
+            }
+            ScannedMeta::NotAnId => {
+                tracing::warn!(
+                    stem,
+                    "tailed family's stem is not a context id (pre-ADR 0045); the stem is \
                      not registered — the lineage needs an export → import migration"
                 );
                 return None;
@@ -53,27 +63,36 @@ impl AppState {
         // build always records it, so the fallback to the stem is the
         // same degraded-sidecar posture the boot scan takes.
         let name = meta_file.name.clone().unwrap_or_else(|| stem.to_string());
-        let mut registry = self.0.registry.write();
-        if let Some(entry) = registry.get_id(stem) {
-            return Some(entry.inner.read().name.clone());
+        let raced = {
+            let mut registry = self.0.registry.write();
+            match registry.get_id(stem) {
+                Some(entry) => Some(Arc::clone(entry)),
+                None => {
+                    // Not schema-verified here, same asymmetry as
+                    // boot's hydrator registration (`boot_with`): the
+                    // family this digest describes is not necessarily
+                    // local yet, only the meta is. `ensure_hot`'s own
+                    // copy of ADR 0009 §5.2's check runs once a load
+                    // actually needs the bytes.
+                    registry.insert(
+                        &name,
+                        Arc::new(Entry::cold_from_meta(
+                            stem.to_string(),
+                            name.clone(),
+                            meta_file,
+                            0,
+                            0,
+                            None,
+                        )),
+                    );
+                    None
+                }
+            }
+        };
+        match raced {
+            Some(entry) => Some(entry.inner.read().name.clone()),
+            None => Some(name),
         }
-        // Not schema-verified here, same asymmetry as boot's
-        // hydrator registration (`boot_with`): the family this
-        // digest describes is not necessarily local yet, only the
-        // meta is. `ensure_hot`'s own copy of ADR 0009 §5.2's check
-        // runs once a load actually needs the bytes.
-        registry.insert(
-            &name,
-            Arc::new(Entry::cold_from_meta(
-                stem.to_string(),
-                name.clone(),
-                meta_file,
-                0,
-                0,
-                None,
-            )),
-        );
-        Some(name)
     }
 
     /// Replica tailer: the in-memory half of applying one tailed
@@ -210,12 +229,14 @@ impl AppState {
     /// swept by the writer that deleted the `context`).
     /// Returns the dropped `context`'s display name (the tailer's log
     /// and metrics label), or `None` when the stem was not registered.
+    /// The name is the index's own (`delete`'s posture): the entry
+    /// lock is taken only after the registry guard is released.
     pub(crate) fn replica_deregister(&self, stem: &str) -> Option<String> {
-        let name = {
-            let registry = self.0.registry.read();
-            registry.get_id(stem)?.inner.read().name.clone()
+        let (entry, name) = {
+            let mut registry = self.0.registry.write();
+            let name = registry.name_of(stem)?;
+            (registry.remove_id(stem, &name)?, name)
         };
-        let entry = self.0.registry.write().remove_id(stem, &name)?;
         let mut inner = entry.inner.write();
         self.tombstone_locked(&mut inner, &entry);
         Some(name)
@@ -325,7 +346,19 @@ fn tailed_rename(tailed_name: Option<String>, current: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_support::scratch_dir;
+    use crate::registry::test_support::{registry_free_while_entry_locked, scratch_dir, test_id};
+
+    /// A tailed sidecar as a writer of this build lands it: the stem's
+    /// own id, plus a display name and description.
+    fn land_meta(dir: &Path, stem: &str, name: &str, description: &str) {
+        fs::write(
+            meta_path(dir, stem),
+            format!(
+                r#"{{"id":"{stem}","name":"{name}","description":"{description}","pinned":false}}"#
+            ),
+        )
+        .unwrap();
+    }
 
     /// The retrieval cache's guard against a replica lineage switch: a
     /// tailed refresh `max`es the revision counters (they must never
@@ -615,12 +648,8 @@ mod tests {
             "nothing registered before the tailer touches it"
         );
 
-        let stem = "sake-id";
-        fs::write(
-            dir.join(format!("{stem}.meta.json")),
-            br#"{"id":"sake-id","name":"sake","description":"sake","pinned":false}"#,
-        )
-        .unwrap();
+        let stem = &test_id("sake");
+        land_meta(&dir, stem, "sake", "sake");
         state.replica_register(stem);
         assert_eq!(
             state
@@ -664,10 +693,11 @@ mod tests {
         )
         .unwrap();
         let before = state.context_count();
-        let name = state.replica_register("some-fresh-stem");
+        let stem = test_id("fresh");
+        let name = state.replica_register(&stem);
         assert_eq!(
             name.as_deref(),
-            Some("some-fresh-stem"),
+            Some(stem.as_str()),
             "the fallback name is the stem"
         );
         assert_eq!(
@@ -675,7 +705,7 @@ mod tests {
             before + 1,
             "the stem registers even before its sidecar lands"
         );
-        assert!(state.directory_entry("some-fresh-stem").is_some());
+        assert!(state.directory_entry(&stem).is_some());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -695,12 +725,8 @@ mod tests {
             },
         )
         .unwrap();
-        let stem = "sake-id";
-        fs::write(
-            dir.join(format!("{stem}.meta.json")),
-            br#"{"id":"sake-id","name":"sake","description":"sake","pinned":false}"#,
-        )
-        .unwrap();
+        let stem = &test_id("sake");
+        land_meta(&dir, stem, "sake", "sake");
         state.replica_register(stem);
         assert!(state.lookup_named("sake").is_some());
 
@@ -733,22 +759,14 @@ mod tests {
             },
         )
         .unwrap();
-        let stem = "sake-id";
-        fs::write(
-            dir.join(format!("{stem}.meta.json")),
-            br#"{"id":"sake-id","name":"sake","description":"d","pinned":false}"#,
-        )
-        .unwrap();
+        let stem = &test_id("sake");
+        land_meta(&dir, stem, "sake", "d");
         state.replica_register(stem);
         assert!(state.lookup_named("sake").is_some());
 
         // The writer renamed it; the tailer lands the new meta bytes
         // and refreshes.
-        fs::write(
-            dir.join(format!("{stem}.meta.json")),
-            br#"{"id":"sake-id","name":"shochu","description":"d","pinned":false}"#,
-        )
-        .unwrap();
+        land_meta(&dir, stem, "shochu", "d");
         state.replica_refresh(stem);
 
         assert!(
@@ -758,7 +776,78 @@ mod tests {
         let entry = state
             .lookup_named("shochu")
             .expect("the new name must answer");
-        assert_eq!(entry.id, stem, "same entry, same id — nothing moved");
+        assert_eq!(&entry.id, stem, "same entry, same id — nothing moved");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A tailed family the boot scan would refuse is refused here too
+    /// rather than registered under a stem no `/contexts/{id}` path can
+    /// address: a non-id stem (pre-ADR 0045 data) whatever its sidecar
+    /// says, and a pre-id sidecar under a real id.
+    #[test]
+    fn a_replica_register_refuses_a_non_id_stem_and_a_pre_id_sidecar() {
+        let dir = scratch_dir("replica-register-refusals");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(state.replica_register("sake"), None, "no sidecar at all");
+        land_meta(&dir, "ctx_a", "ctx_a", "d");
+        assert_eq!(
+            state.replica_register("ctx_a"),
+            None,
+            "a sidecar recording its own non-id stem"
+        );
+        let pre_id = test_id("pre-id");
+        fs::write(meta_path(&dir, &pre_id), br#"{"name":"sake"}"#).unwrap();
+        assert_eq!(state.replica_register(&pre_id), None, "a pre-id sidecar");
+        assert_eq!(state.context_count(), 0, "nothing registered");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The tailer's register (of an already-registered stem) and
+    /// deregister read the entry's name only after dropping the
+    /// registry guard: a load holding that entry's write lock must not
+    /// park them on the registry, where every lookup would queue up
+    /// behind them.
+    #[test]
+    fn the_tailer_never_waits_on_an_entry_while_holding_the_registry() {
+        let dir = scratch_dir("replica-lock-order");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        let entry = state.lookup_id(&id).unwrap();
+
+        let (registry_free, name) = registry_free_while_entry_locked(&state, &entry, {
+            let id = id.clone();
+            move |state: &AppState| state.replica_register(&id)
+        });
+        assert!(
+            registry_free,
+            "replica_register held the registry lock while parked on the entry lock"
+        );
+        assert_eq!(name.as_deref(), Some("sake"));
+
+        let (registry_free, name) = registry_free_while_entry_locked(&state, &entry, {
+            let id = id.clone();
+            move |state: &AppState| state.replica_deregister(&id)
+        });
+        assert!(
+            registry_free,
+            "replica_deregister held the registry lock while parked on the entry lock"
+        );
+        assert_eq!(name.as_deref(), Some("sake"));
+        assert!(!state.context_id_exists(&id), "the deregister went through");
+        assert!(
+            entry.lock_unless_deleted().is_none(),
+            "and tombstoned the entry"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -1601,6 +1601,12 @@ pub struct CrossSearchPassagesRequest {
     /// [`super::CrossRecallRequest`].
     #[serde(default)]
     pub group_ids: Vec<String>,
+    /// The pre-0.10.0 target keys — see
+    /// [`super::CrossRecallRequest::contexts`].
+    #[serde(default, skip_serializing)]
+    pub contexts: super::RenamedField,
+    #[serde(default, skip_serializing)]
+    pub groups: super::RenamedField,
     pub query: String,
     /// Omitted means 5.
     pub limit: Option<usize>,
@@ -1645,6 +1651,11 @@ pub async fn cross_search_passages(
     AppJson(request): AppJson<CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) =
+        super::cross_target_rename_refusal(&request.contexts, &request.groups, started_at)
+    {
+        return refusal;
+    }
     let targets = match cross_targets(
         &state,
         &grant,
@@ -2802,6 +2813,8 @@ mod tests {
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
             group_ids: Vec::new(),
+            contexts: None,
+            groups: None,
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,
@@ -2838,6 +2851,8 @@ mod tests {
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
             group_ids: Vec::new(),
+            contexts: None,
+            groups: None,
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,

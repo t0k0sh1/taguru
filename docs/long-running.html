@@ -322,7 +322,8 @@ signal.signal(signal.SIGINT, on_signal)
 signal.signal(signal.SIGTERM, on_signal)
 
 client = Taguru()  <span class="c"># $TAGURU_URL / $TAGURU_API_TOKEN</span>
-done = set(client.context("sake").iter_sources())  <span class="c"># the completion test — import stage</span>
+sake_id = next(row.id <span class="k">for</span> row <span class="k">in</span> client.contexts.iter() <span class="k">if</span> row.name == <span class="s">"sake"</span>)  <span class="c"># paths take ids, never names</span>
+done = set(client.context(sake_id).iter_sources())  <span class="c"># the completion test — import stage</span>
 
 ingester = TaguruIngester(
     context="sake",

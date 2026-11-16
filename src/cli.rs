@@ -173,9 +173,10 @@ USAGE:
                                         server's context: server-side
                                         detection, LLM summaries of what
                                         changed only, written back as an
-                                        ordinary context (default
-                                        'NAME::communities', or --into's
-                                        name) that
+                                        ordinary context (default: the id
+                                        derived from the source context's
+                                        id, named 'NAME::communities'; or
+                                        the --into ID) that
                                         POST /contexts/{id}/communities/search
                                         serves with a staleness verdict;
                                         --group derives one artifact per
