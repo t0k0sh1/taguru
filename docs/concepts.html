@@ -169,7 +169,10 @@
     <p>
       When ingesting a document, the skeleton of its facts is written as associations and,
       at the same time, the original text itself is registered with the sources API
-      (source id → passage). The server splits the passage into paragraphs at blank-line
+      (source id → passage). A source's id is the string you choose for the document — a
+      path, a URL, a title — never one the server mints, and it is the key re-ingesting hangs
+      on: importing the same document under the same id replaces it (retract-then-apply). The server
+      splits the passage into paragraphs at blank-line
       boundaries, and every association's attribution can point at a paragraph via
       <code>source_id</code> and <code>paragraph</code> — which is what lets the <code>citations</code>
       API pull back the original sentence for verification. Give paragraphs a

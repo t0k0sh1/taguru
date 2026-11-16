@@ -710,7 +710,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "cite_passage",
-            "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source, section, and typed locator (page/slide/sheet/table position) provenance.",
+            "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source_id, section, and typed locator (page/slide/sheet/table position) provenance.",
             json!({
                 "type": "object",
                 "properties": {
@@ -728,7 +728,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "retrieve",
-            "The composed retrieval loop the SDKs' Context.retrieve() runs, as one call: resolve each origin cue to an anchor (auto-picking the top candidate; every candidate, gloss included, still comes back under resolved so a bad auto-pick is visible), describe each anchor, gather associations (query when labels pins the facets, activate always), fetch a citation for every located attribution, and optionally fall back to passage search. origins must already be extracted entity names, not a question — decomposing a question and phrasing a declarative text_fallback_query are the caller's job. citations rides back as a list of {source, paragraph, citation} (paragraphs missing a stored passage are silently skipped, same as the SDKs). When the fallback search ran, its hits land in passage_hits and its execution plan in search_plan (null when no fallback ran).",
+            "The composed retrieval loop the SDKs' Context.retrieve() runs, as one call: resolve each origin cue to an anchor (auto-picking the top candidate; every candidate, gloss included, still comes back under resolved so a bad auto-pick is visible), describe each anchor, gather associations (query when labels pins the facets, activate always), fetch a citation for every located attribution, and optionally fall back to passage search. origins must already be extracted entity names, not a question — decomposing a question and phrasing a declarative text_fallback_query are the caller's job. citations rides back as a list of {source_id, paragraph, citation} (paragraphs missing a stored passage are silently skipped, same as the SDKs). When the fallback search ran, its hits land in passage_hits and its execution plan in search_plan (null when no fallback ran).",
             object_schema(
                 json!({
                     "context_id": context,

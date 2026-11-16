@@ -28,68 +28,65 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
-- **Breaking (wire) — the evidence package, consolidation audit and change
-  feed name sources by `source_id`** (#1041, ADR 0054; `http_contract` 2).
-  The last read-side columns of #1038's rename: the evidence package's
-  `citation_refs[]`, `corroboration.attributions[]` and `citations[]` say
-  `source_id`, and `corroboration.sources` is `corroboration.source_ids`;
-  `POST /contexts/{id}/consolidation/audit`'s `objects[].sources` and
-  staleness candidates' `sources` are `source_ids`, and a contested
-  candidate's `supporting_sources`/`disputing_sources` are
-  `supporting_source_ids`/`disputing_source_ids` — so are the judgment
-  payloads `taguru consolidation` stores in its derived context from this
-  build on; the change feed's `source_stored`/`source_retracted` events
-  carry `source_id`. The Python and TypeScript SDKs' `CitationRef`,
-  `CitationEntry`, `Corroboration` and `ChangeEvent` follow. A `taguru
-  evaluate` report's evidence items embed the wire `citation_refs`
-  verbatim, so those entries say `source_id` too; the report's own
-  locator fields keep `source`. Unchanged: counts (`stats.sources`) and
-  the data directory's internal keys.
-
-- **Breaking (wire) — fields that read a source say `source_id`** (#1040,
-  ADR 0054; `http_contract` 2). The read-side twin of #1039 (below): every
-  attribution (`recall`, `query`, `explore`, `activate`, `paths`,
-  `unreachable_from`, and associations inside the evidence package) says
-  `source_id`; `POST /contexts/{id}/citations` takes `{source_id,
-  paragraph}` and answers `{text, source_id, section, locator}`;
-  `POST /contexts/{id}/sources/lookup` takes `source_ids`; passage search
-  hits (`/contexts/{id}/sources/search` and the cross-context
-  `/sources/search`) say `source_id`; and `sources/search/explain` takes
-  and answers `source_id`. A request still sending `source`/`sources` is
-  refused 422 `malformed_request`, naming the missing `source_id`/`source_ids`.
-  MCP's `cite_passage`, `lookup_passages`
-  and `explain_search` take the same fields, and the composed `retrieve`
-  tool's citations say `source_id`. The Python and TypeScript SDKs follow
-  (`cite_passage(source_id, paragraph)`, `lookup_passages(source_ids)`,
-  `explain_search(query, source_id)`, and the attribution, hit, citation and
-  explanation models' `source_id`); LangChain still writes it to
-  `metadata["source"]`. Unchanged: eval-set files
-  (`expected_sources[].source`, `expected_citations[].source`),
-  `taguru evaluate` reports and benchmark run logs — file formats on the
-  shared format revision, left as they are — and the evidence package's own
-  reference fields (`citation_refs`, `corroboration`, `citations[].source`),
-  consolidation and the change feed, which follow in #1041 (above).
-
-- **Breaking (wire) — fields that write or list a source say `source_id`**
-  (#1039, ADR 0054; `http_contract` 2). A source's id is still the string
-  its caller chose — nothing is minted — and only the field names change:
-  the `POST /contexts/{id}/associations` element's `source` is `source_id`
-  (an element still carrying `source` is refused 400 on
-  `associations[i].source`, so an old caller's facts never land unsourced
-  silently); `POST /contexts/{id}/sources/retract` takes `{source_id}`;
-  `POST /contexts/{id}/promote` takes `source_ids`; every import report row
-  (`POST /import`, promote, promote dry run, `taguru import --json`'s
-  `batches` and `failed_batches`) names `source_id`; and
-  `GET /contexts/{id}/sources` answers `{total, entries: [{id, …}]}` — the
-  duplicate bare `sources` list is gone and `entries[].name` is `id`. MCP's
-  `add_associations`, `retract_source` and `promote` take the same fields.
-  The Python and TypeScript SDKs follow: the association input's `source_id`,
-  `retract_source(source_id)`, `promote(into, source_ids)`,
-  `ImportOutcome.source_id`, `SourceEntry.id`, and `SourcePage` without
-  `sources` (`iter_sources` still yields source ids). The import stream's
-  source header keeps `id`, and the data directory and file format are
-  unchanged. The read side followed in #1040 (above); LangChain Documents
-  keep `metadata["source"]`.
+- **Breaking (wire) — every field that names a source says `source_id` /
+  `source_ids`** (#1038: #1039, #1040, #1041, #1042; ADR 0054;
+  `http_contract` 2). A source's id is still the string its caller chose —
+  a path, a URL, a title; nothing is minted — and it stays the key that
+  makes re-ingesting idempotent (import replaces per source id). Only the
+  field names change:
+  - **Writes:** the `POST /contexts/{id}/associations` element's `source`
+    is `source_id` (an element still carrying `source` is refused 400 on
+    `associations[i].source`, so an old caller's facts never land unsourced
+    silently); `POST /contexts/{id}/sources/retract` takes `{source_id}`;
+    `POST /contexts/{id}/promote` takes `source_ids`; every import report
+    row (`POST /import`, promote, promote dry run, `taguru import --json`'s
+    `batches` and `failed_batches`) names `source_id`.
+  - **Listing:** `GET /contexts/{id}/sources` answers `{total, entries:
+    [{id, …}]}` — the duplicate bare `sources` list is gone and
+    `entries[].name` is `id`.
+  - **Reads:** every attribution (`recall`, `query`, `explore`, `activate`,
+    `paths`, `unreachable_from`, and associations inside the evidence
+    package) says `source_id`; `POST /contexts/{id}/citations` takes
+    `{source_id, paragraph}` and answers `{text, source_id, section,
+    locator}`; `POST /contexts/{id}/sources/lookup` takes `source_ids`;
+    passage search hits (`/contexts/{id}/sources/search` and the
+    cross-context `/sources/search`) say `source_id`; and
+    `sources/search/explain` takes and answers `source_id`. A request that
+    still sends only the old `source`/`sources` is refused 422
+    `malformed_request`, naming the missing `source_id`/`source_ids`; an old
+    key sent beside the new one is ignored, not refused.
+  - **Evidence, audit and change feed:** the evidence package's
+    `citation_refs[]`, `corroboration.attributions[]` and `citations[]` say
+    `source_id`, and `corroboration.sources` is `corroboration.source_ids`;
+    `POST /contexts/{id}/consolidation/audit`'s `objects[].sources` and
+    staleness candidates' `sources` are `source_ids`, and a contested
+    candidate's `supporting_sources`/`disputing_sources` are
+    `supporting_source_ids`/`disputing_source_ids` — so are the judgment
+    payloads `taguru consolidation` stores in its derived context from this
+    build on; the change feed's `source_stored`/`source_retracted` events
+    carry `source_id`.
+  - **MCP:** `add_associations`, `retract_source`, `promote`,
+    `cite_passage`, `lookup_passages` and `explain_search` take the same
+    fields, and the composed `retrieve` tool's citations say `source_id`.
+  - **SDKs:** Python and TypeScript follow — the association input's
+    `source_id`, `retract_source(source_id)`, `promote(into, source_ids)`,
+    `cite_passage(source_id, paragraph)`, `lookup_passages(source_ids)`,
+    `explain_search(query, source_id)`, `ImportOutcome.source_id`,
+    `SourceEntry.id`, `SourcePage` without `sources` (`iter_sources` still
+    yields source ids), and the attribution, hit, citation, explanation,
+    `CitationRef`, `CitationEntry`, `Corroboration` and `ChangeEvent`
+    models' `source_id`/`source_ids`. LangChain Documents keep
+    `metadata["source"]` (LangChain's loader convention), and so do
+    LangChain's own ingest outcomes and events.
+  - **Unchanged:** counts (`stats.sources`, the search plan's `filter`
+    counts), the `/contexts/{id}/sources/…` routes (a collection name), the
+    import stream's source header (`id`), the data directory's internal keys
+    and file format, and the file formats on the shared format revision —
+    eval-set files (`expected_sources[].source`,
+    `expected_citations[].source`), `taguru evaluate` reports and benchmark
+    run logs. A `taguru evaluate` report's evidence items embed the wire
+    `citation_refs` verbatim, so those entries say `source_id`; the report's
+    own locator fields keep `source`.
 
 - **Breaking (MCP and LangChain) — the last `group` arguments take ids**
   (#997, closes #993). MCP's `get_group`, `update_group`, `delete_group`,

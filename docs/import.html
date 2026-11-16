@@ -193,7 +193,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       <li><b>Retryable</b> — a file that failed midway (capacity, disk) is fixed and re-imported. The retraction is what makes the retry exact.</li>
     </ul>
     <p>
-      This is also why an association line <b>cannot</b> carry its own <code>source</code> field
+      This is also why an association line <b>cannot</b> carry its own <code>source_id</code> field
       (it is refused): a source the header does not declare would survive the retraction and
       double itself on every re-import. The header's source is stamped onto every association in
       the file.
@@ -234,6 +234,11 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
     <p>
       <code>type</code> must be <code>"source"</code> — it is how a line says it opens a source
       file. <code>id</code> (the source's id) and <code>context_id</code> are required.
+      Unlike a <code>context</code>'s or a <code>group</code>'s id, a source's id is <b>never
+      minted</b>: it is the string you choose for the document (a path, a URL, <code>工程書</code>),
+      and the same string is what every <code>source_id</code> on the wire reports back. Keep it
+      stable — re-importing under the same id is what replaces the source instead of adding a
+      second one beside it.
       <code>context_id</code> names the target <code>context</code> <b>by its id</b> — the
       <code>id</code> column of <code>GET /contexts</code>, a lowercase hyphenated UUID — never by
       its name: names are display labels, free-form and not unique, so a name cannot address
@@ -255,7 +260,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
     <h3>Association lines</h3>
     <p>
       <code>subject</code> / <code>label</code> / <code>object</code> / <code>weight</code> —
-      exactly the fields of the associations endpoint minus <code>source</code> (for the reason
+      exactly the fields of the associations endpoint minus <code>source_id</code> (for the reason
       above).
     </p>
 
@@ -624,7 +629,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     </p>
     <ul>
       <li><b>Fidelity</b>: a fact the same source asserted n times reproduces as n association lines (corroboration <code>count</code> survives the round trip). Paragraph locators ride the first assertion line (reproducing first-write-wins).</li>
-      <li><b>Sourceless weight</b> (entered via the API with <code>source</code> omitted) rides under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
+      <li><b>Sourceless weight</b> (entered via the API with <code>source_id</code> omitted) rides under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
       <li><b>Fully retracted edges (weight 0) are not emitted</b>: an export → import round trip sheds the dead records an append-only image accumulates — doubling as offline compaction.</li>
       <li>An alias whose canonical has no live associations is dropped and the count reported (under the import contract, canonicals are minted by association lines).</li>
       <li><code>POST /import</code> always answers <code>{"status": "ok", "result": {"batches": [per-source results…]}, "time": ...}</code> (a single source is the same shape with one element — one shape to parse), <code>result</code> gaining <code>schemas</code>/<code>groups</code> whenever the stream carried either. If the stream is refused midway, the earlier sources (and any schema record that already installed) have landed — each source is retract-then-apply and each schema install is independent, so re-POSTing the corrected stream converges exactly.</li>
