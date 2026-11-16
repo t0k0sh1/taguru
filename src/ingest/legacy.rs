@@ -310,7 +310,9 @@ impl ContextNames<'_> {
         }
         let answer = match self.standing.get(name).map(Vec::as_slice) {
             Some([id]) => (id.clone(), None),
-            Some(ids) if ids.len() > 1 => {
+            // Two or more: an empty list cannot occur (names are indexed
+            // from rows), and a slice pattern says so without a guard.
+            Some(ids @ [_, _, ..]) => {
                 return Err(LegacyRefusal::Ambiguous {
                     kind: "context",
                     name: name.to_string(),
@@ -419,7 +421,7 @@ pub(crate) fn resolve_legacy(
             }
             let id = match standing_groups.get(child).map(Vec::as_slice) {
                 Some([id]) => id.clone(),
-                Some(ids) if ids.len() > 1 => {
+                Some(ids @ [_, _, ..]) => {
                     return Err(LegacyRefusal::Ambiguous {
                         kind: "group",
                         name: child.clone(),
@@ -590,6 +592,13 @@ mod tests {
             let error = parse_any_stream(std::io::Cursor::new(text.as_str())).unwrap_err();
             assert!(error.starts_with(&format!("line {line}: ")), "{error}");
             assert!(error.contains("may not be mixed in one file"), "{error}");
+            // The message names both formats, so the caller knows which
+            // lines to split into their own file.
+            assert!(
+                error.contains("v0.9.7 (`taguru_batch`/`taguru_schema`/`taguru_group`)")
+                    && error.contains("current-format (`type`)"),
+                "{error}"
+            );
         }
     }
 
@@ -706,6 +715,62 @@ mod tests {
                 name: "all".to_string(),
                 count: 2
             }
+        );
+    }
+
+    /// A child group the stream names but does not define resolves
+    /// against the standing groups; several carrying that name is the
+    /// same ambiguity refusal as for a group record's own name — never
+    /// "no such group".
+    #[test]
+    fn a_child_name_several_standing_groups_carry_is_refused_as_ambiguous() {
+        let state = scratch_state("ambiguous-child");
+        for _ in 0..2 {
+            state
+                .create_group(
+                    None,
+                    "kids",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+        }
+        let refusal = resolve_legacy(
+            &state,
+            vec![legacy(
+                "{\"taguru_group\":1,\"name\":\"parent\",\"groups\":[\"kids\"]}\n",
+            )],
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal,
+            LegacyRefusal::Ambiguous {
+                kind: "group",
+                name: "kids".to_string(),
+                count: 2
+            }
+        );
+    }
+
+    /// A v0.9.7 group record holds at most [`MAX_GROUP_MEMBERS`] members
+    /// per list — exactly the cap parses, one past it is refused by line.
+    #[test]
+    fn a_v097_group_list_is_capped_at_the_member_limit() {
+        let record = |count: usize| {
+            let names: Vec<String> = (0..count).map(|index| format!("\"c{index}\"")).collect();
+            format!(
+                "{{\"taguru_group\":1,\"name\":\"g\",\"contexts\":[{}]}}\n",
+                names.join(",")
+            )
+        };
+        let at_cap = legacy(&record(MAX_GROUP_MEMBERS));
+        assert_eq!(at_cap.groups[0].contexts.len(), MAX_GROUP_MEMBERS);
+        let error = parse_any_stream(std::io::Cursor::new(record(MAX_GROUP_MEMBERS + 1).as_str()))
+            .unwrap_err();
+        assert!(
+            error.starts_with("line 1: ") && error.contains("a group holds at most"),
+            "{error}"
         );
     }
 

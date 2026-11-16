@@ -2873,6 +2873,10 @@ fn a_v097_export_imports_offline_and_reads_back_equal() {
         stdout.contains("dry run: 3 source(s), 1 schema record(s) and 2 group record(s) valid"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("group 'drinks' (v0.9.7 record, id settled at import): 2 member context(s), 0 child group(s)"),
+        "{stdout}"
+    );
     assert!(common::try_context_stem(&data_dir, "sake/kura").is_none());
 
     let (code, stdout, stderr) = run_import(&data_dir, &[legacy.to_str().unwrap()]);
@@ -3028,6 +3032,34 @@ fn a_file_mixing_v097_and_current_records_is_refused() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
     assert!(server.try_cx("wine").is_none() && server.try_cx("sake").is_none());
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// Two v0.9.7 files stating the same source of the same context conflict
+/// once their names settle on one id: the run refuses whole, counting the
+/// file that lost, and writes nothing.
+#[test]
+fn two_v097_files_stating_one_source_refuse_the_run() {
+    let batches = batch_dir("legacy-duplicate");
+    let first = batches.join("wine-a.jsonl");
+    let second = batches.join("wine-b.jsonl");
+    std::fs::write(&first, V097_WINE).unwrap();
+    std::fs::write(&second, V097_WINE).unwrap();
+    let data_dir = common::scratch_dir("http-import-legacy-duplicate");
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &[first.to_str().unwrap(), second.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("is already stated by an earlier file"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 2 file(s) refused during validation; nothing was applied"),
+        "{stderr}"
+    );
+    assert!(common::try_context_stem(&data_dir, "wine").is_none());
     let _ = std::fs::remove_dir_all(&batches);
 }
 

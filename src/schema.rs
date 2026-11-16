@@ -1159,4 +1159,23 @@ mod tests {
         assert!(!schema_corrupt_path(&dir, "sake").exists());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// A revision that is neither this build's nor an earlier one it
+    /// reads (a newer build wrote it) is named as such — not dismissed as
+    /// a hand edit, which is what every other violation is.
+    #[test]
+    fn an_unknown_revision_is_named_as_a_newer_build_not_a_hand_edit() {
+        let dir = scratch_dir("schema-unknown-revision");
+        fs::create_dir_all(&dir).unwrap();
+        let bytes = br#"{"type":"schema","version":"2099-01-01","mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
+        let digest = sha256_hex(bytes);
+
+        let error = load_schema(&dir, "sake", Some(&digest), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a newer one, or a hand edit"), "{error}");
+        assert!(!error.contains("a hand-edited file only"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
