@@ -162,6 +162,24 @@ enum GrantSpec {
     },
 }
 
+/// Longest key name `TAGURU_API_TOKENS` accepts, in bytes (ADR 0055).
+const MAX_KEY_NAME_BYTES: usize = 64;
+
+/// A key name is its id (ADR 0055): the operator's string, never one the
+/// server mints, and it lands verbatim in access logs, audit lines, 403/429
+/// texts and `oauth.json`'s `key@client` delegation identities. So it is
+/// held to 1..=[`MAX_KEY_NAME_BYTES`] of `[A-Za-z0-9._-]`. The set also
+/// keeps '@' out, which OAuth reserves: delegations act as "key@client",
+/// and `grant_of` strips at the last '@' to inherit the underlying key's
+/// grant, so a raw key named with '@' would silently inherit an unrelated
+/// key's grant.
+fn valid_key_name(name: &str) -> bool {
+    (1..=MAX_KEY_NAME_BYTES).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// The configured credentials. Empty = auth disabled (development
 /// mode, warned about loudly at boot).
 pub struct Keyring {
@@ -206,16 +224,14 @@ impl Keyring {
                         position + 1
                     ));
                 }
-                // '@' is reserved: OAuth delegations act as "key@client",
-                // and `grant_of` strips at the last '@' to inherit the
-                // underlying key's grant. A raw key whose name contains
-                // '@' would collide with that fallback — silently
-                // inheriting an unrelated key's grant instead of
-                // the documented default. Refuse it at boot, keyring-style.
-                if name.contains('@') {
+                // Named by position only: a name outside the set is as
+                // likely a token pasted where the name belongs.
+                if !valid_key_name(name) {
                     return Err(format!(
-                        "key name '{name}' must not contain '@' (reserved for OAuth \
-                         delegation, 'key@client')"
+                        "TAGURU_API_TOKENS entry #{}: a key name is 1-{MAX_KEY_NAME_BYTES} \
+                         characters of A-Z a-z 0-9 . _ - ('@' is reserved for OAuth \
+                         delegation, 'key@client')",
+                        position + 1
                     ));
                 }
                 if keys.iter().any(|(existing, _)| existing.as_ref() == name) {
@@ -1119,13 +1135,39 @@ mod tests {
                 .key_count(),
             1
         );
-        // '@' in a key name collides with the OAuth-delegation grant
-        // fallback, so it is refused at boot rather than silently
-        // inheriting an unrelated key's grant.
-        let error = Keyring::parse(None, Some("bot@internal:sekrit-z".to_string()))
-            .err()
-            .expect("an '@' key name must be refused");
-        assert!(error.contains('@') && !error.contains("sekrit"), "{error}");
+        // A key name outside 1-64 of [A-Za-z0-9._-] is refused by
+        // position (ADR 0055) - '@' included, which would collide with
+        // the OAuth-delegation grant fallback - and the text never
+        // echoes the name, which may be a misplaced token.
+        for name in [
+            "bot@internal",
+            "sekrit space",
+            "日本語",
+            "sekrit\u{202e}x",
+            &"k".repeat(MAX_KEY_NAME_BYTES + 1),
+        ] {
+            let error = Keyring::parse(None, Some(format!("ci:tok-a,{name}:sekrit-z")))
+                .err()
+                .unwrap_or_else(|| panic!("key name {name:?} must be refused"));
+            assert!(
+                error.contains("entry #2") && !error.contains("sekrit") && !error.contains(name),
+                "{error}"
+            );
+        }
+        let longest = "k".repeat(MAX_KEY_NAME_BYTES);
+        let keyring = Keyring::parse(
+            None,
+            Some(format!("ops.prod_1-a:tok-a,{longest}:tok-b,Z:tok-c")),
+        )
+        .expect("names inside the set and at the length cap are accepted");
+        assert_eq!(
+            keyring.authenticate("tok-b").as_deref(),
+            Some(longest.as_str())
+        );
+        assert_eq!(
+            keyring.authenticate("tok-a").as_deref(),
+            Some("ops.prod_1-a")
+        );
     }
 
     /// Two names sharing one token value would make `authenticate`'s

@@ -273,7 +273,9 @@ ENVIRONMENT (every knob; unset = the shown default):
                                — a broken edit keeps the previous map
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
-                               log carries the key name; rotate by overlap
+                               log carries the key name; rotate by overlap.
+                               A name is the key's id: 1-64 of A-Z a-z 0-9
+                               . _ - (anything else refuses boot)
   TAGURU_KEY_GRANTS            JSON grants per key name: {\"ci\": \"read\",
                                \"bot\": {\"role\": \"write\", \"contexts\":
                                [\"<context id>\"]}} — roles read ⊂ write ⊂

@@ -28,6 +28,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (configuration) — an API key's name is its id, and is held to
+  1–64 characters of `A-Z a-z 0-9 . _ -`** (#1049, ADR 0055). The name in
+  `TAGURU_API_TOKENS=name:token` stays the operator's own string — nothing
+  is minted — and keeps keying grants (`TAGURU_KEY_GRANTS`), the per-key
+  rate limit, OAuth delegations (`key@client` in `oauth.json`), the access
+  log and audit lines. What changes is the accepted set: a name outside it
+  (a space, non-ASCII, a control character, more than 64 bytes; `@` was
+  already refused, reserved for OAuth) now refuses boot, or keeps the
+  previous table on a hot reload, and the refusal names the entry by its
+  position, never its content. Renaming a key to fit means renaming its
+  `TAGURU_KEY_GRANTS` entry in the same edit, and OAuth clients delegated
+  under the old name consent again. No wire change; 403/429 texts keep
+  naming the key, and `TAGURU_API_TOKEN`'s implicit `default` is unchanged.
+
 - **Breaking (wire) — every field that names a source says `source_id` /
   `source_ids`** (#1038: #1039, #1040, #1041, #1042; ADR 0054;
   `http_contract` 2). A source's id is still the string its caller chose —
