@@ -25,7 +25,8 @@ retired `TAGURU_KEY_SCOPES` are refused by name, never silently
 ignored. **On-disk format change**: a 0.9.7 data directory does not
 boot — export it with 0.9.7 and import it into this build, which reads
 the 0.9.7 export as migration input (ADR 0057; see *Upgrading from
-0.9.7* below). Python 3.11+ and Node.js 22.13+ are required; MSRV 1.96.
+0.9.7* below). Python 3.11+ is required, and Node.js 22.13+ on the 22
+line or 24+ (not 23: `engines.node` is `^22.13.0 || >=24`); MSRV 1.96.
 
 ### Upgrading from 0.9.7
 
