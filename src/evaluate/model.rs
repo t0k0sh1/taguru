@@ -382,7 +382,7 @@ fn evidence_item_locator(item: &EvidenceItem) -> Option<(String, u32)> {
     }
     if let Some(community) = &item.community {
         return Some((
-            format!("community:{}", community.community),
+            format!("community:{}", community.community_id),
             community.paragraph,
         ));
     }

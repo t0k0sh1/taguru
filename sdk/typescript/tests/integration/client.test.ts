@@ -404,7 +404,8 @@ describe("sources and citations", () => {
     expect(page.derived_id).toBe(derivedId);
     expect(page.derived_name).toBe(derived);
     expect(page.stale).toBe(false);
-    expect(page.hits[0]!.community).toBe("L0-0");
+    expect(page.hits[0]!.community_id).toBe("L0-0");
+    expect(page.hits[0]!.fingerprint).toBe("00aa00aa00aa00aa");
     expect(page.hits[0]!.level).toBe(0);
     expect(page.hits[0]!.members![0]!.name).toBe("青嶺酒造");
 

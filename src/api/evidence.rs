@@ -265,7 +265,7 @@ impl EvidenceCandidate {
     /// hit can never share a `(source, paragraph)` locator — community
     /// summaries live in a source-id space passage sources never use.
     pub(crate) fn from_community(context: &str, hit: CommunityHit, lane_rank: usize) -> Self {
-        let source = format!("community:{}", hit.community);
+        let source = format!("community:{}", hit.community_id);
         let paragraph = hit.paragraph;
         let canonical_key = passage_key(context, &source, paragraph);
         let origins = BTreeSet::from([(source.clone(), paragraph)]);
@@ -739,12 +739,13 @@ mod tests {
 
     fn community_hit(id: &str, paragraph: u32) -> CommunityHit {
         CommunityHit {
-            community: id.to_string(),
+            community_id: id.to_string(),
             score: 1.0,
             text: "summary".to_string(),
             paragraph,
             level: None,
-            parent: None,
+            parent_id: None,
+            fingerprint: None,
             concept_count: None,
             members: Vec::new(),
             members_truncated: false,

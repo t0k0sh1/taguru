@@ -194,7 +194,10 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     assert_eq!(page["stale"], false, "{page}");
     assert_eq!(page["algorithm"], "louvain-cc/1");
     let hit = &page["hits"][0];
-    assert_eq!(hit["community"], "L0-0");
+    assert_eq!(hit["community_id"], "L0-0");
+    // The manifest's fingerprint rides the hit: the identity that
+    // survives a re-run, where `community_id` does not (ADR 0056).
+    assert_eq!(hit["fingerprint"], "00aa00aa00aa00aa", "{page}");
     assert_eq!(hit["level"], 0);
     assert_eq!(hit["concept_count"], 4);
     assert!(hit["text"].as_str().unwrap().contains("夏目漱石"));
@@ -432,7 +435,7 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     assert_eq!(hit["concept_count"], 4);
 
     // Membership landed as queryable edges on the artifact.
-    let community = hit["community"].as_str().unwrap();
+    let community = hit["community_id"].as_str().unwrap();
     let members = server.ok(
         "POST",
         &format!("/contexts/{}/query", server.cx("corp::communities")),
@@ -503,7 +506,10 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     // longer holds. The graph is unchanged (zero fresh communities),
     // so this is exactly the case where the chat client must still
     // come up — the run repairs the hole with one LLM call.
-    let community = page["hits"][0]["community"].as_str().unwrap().to_string();
+    let community = page["hits"][0]["community_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     server.ok(
         "POST",
         &format!(
@@ -914,9 +920,10 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
         Some(json!({"query": "夏目漱石"})),
     );
     let hit = &page["hits"][0];
-    assert_eq!(hit["community"], json!("L0-0"), "{page}");
+    assert_eq!(hit["community_id"], json!("L0-0"), "{page}");
     assert!(hit["level"].is_null(), "{page}");
-    assert!(hit["parent"].is_null(), "{page}");
+    assert!(hit["parent_id"].is_null(), "{page}");
+    assert!(hit["fingerprint"].is_null(), "{page}");
     assert!(hit["concept_count"].is_null(), "{page}");
     // Membership itself is unaffected — it comes straight off the
     // graph, not the manifest.
@@ -1215,7 +1222,7 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
 
     // Hierarchy landed as queryable `includes` edges.
     let parent_id = parents[0]["id"].as_str().unwrap();
-    let children = parents[0]["children"].as_array().unwrap();
+    let children = parents[0]["child_ids"].as_array().unwrap();
     let includes = server.ok(
         "POST",
         &format!("/contexts/{}/query", server.cx("deep::communities")),
@@ -1436,7 +1443,7 @@ fn the_manifest_slot_never_crowds_a_community_off_a_full_page() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|hit| hit["community"].as_str().unwrap())
+        .map(|hit| hit["community_id"].as_str().unwrap())
         .collect();
     assert_eq!(
         communities,

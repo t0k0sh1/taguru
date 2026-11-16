@@ -95,14 +95,16 @@ pub struct CommunityAnalysis {
 /// the leaves, and the hierarchy is edges between community records.
 #[derive(Debug, Serialize)]
 pub struct Community {
-    /// `"L{level}-{index}"` — stable only within one analysis; the
-    /// fingerprint, not the id, is the cross-run identity.
+    /// `"L{level}-{index}"` — positional, so valid only within the one
+    /// analysis that produced it (ADR 0056): a re-run can hand the same
+    /// id to a different cluster. The fingerprint, not the id, is the
+    /// cross-run identity.
     pub id: String,
     pub level: usize,
     /// Id of the community one level up that contains this one, absent
     /// on the top level.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
+    pub parent_id: Option<String>,
     /// FNV-1a content digest, `{:016x}` — the incremental-derivation
     /// key: equal fingerprint means equal summarizable content.
     pub fingerprint: String,
@@ -115,7 +117,7 @@ pub struct Community {
     pub members: Vec<CommunityMember>,
     /// Parent only: ids of the communities one level down.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<String>,
+    pub child_ids: Vec<String>,
     /// Leaf only: the strongest live associations with both endpoints
     /// inside the community — the summary prompt's raw material.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -436,7 +438,7 @@ impl Context {
             communities.push(Community {
                 id: format!("L0-{community}"),
                 level: 0,
-                parent: (levels > 1).then(|| format!("L1-{}", level_assignments[1][community])),
+                parent_id: (levels > 1).then(|| format!("L1-{}", level_assignments[1][community])),
                 fingerprint: format!("{digest:016x}"),
                 concept_count: member_list.len(),
                 members: member_list
@@ -446,7 +448,7 @@ impl Context {
                         strength,
                     })
                     .collect(),
-                children: Vec::new(),
+                child_ids: Vec::new(),
                 top_associations: top
                     .into_iter()
                     .map(|&(edge_id, sum, count)| {
@@ -496,13 +498,13 @@ impl Context {
                 communities.push(Community {
                     id: format!("L{level}-{community}"),
                     level,
-                    parent: (level + 1 < levels).then(|| {
+                    parent_id: (level + 1 < levels).then(|| {
                         format!("L{}-{}", level + 1, level_assignments[level + 1][community])
                     }),
                     fingerprint: format!("{digest:016x}"),
                     concept_count: concept_counts[community],
                     members: Vec::new(),
-                    children: child_list
+                    child_ids: child_list
                         .iter()
                         .map(|&child| format!("L{}-{child}", level - 1))
                         .collect(),
@@ -892,14 +894,14 @@ mod tests {
 
         let analysis = context.communities(Deadline::unbounded()).unwrap();
         for community in &analysis.communities {
-            if let Some(parent_id) = &community.parent {
+            if let Some(parent_id) = &community.parent_id {
                 let parent = analysis
                     .communities
                     .iter()
                     .find(|candidate| &candidate.id == parent_id)
                     .expect("a named parent must exist");
                 assert_eq!(parent.level, community.level + 1);
-                assert!(parent.children.contains(&community.id));
+                assert!(parent.child_ids.contains(&community.id));
                 assert!(parent.concept_count >= community.concept_count);
             }
         }

@@ -968,12 +968,13 @@ mod tests {
 
     fn community_hit(id: &str, paragraph: u32, text: &str) -> CommunityHit {
         CommunityHit {
-            community: id.to_string(),
+            community_id: id.to_string(),
             score: 1.0,
             text: text.to_string(),
             paragraph,
             level: None,
-            parent: None,
+            parent_id: None,
+            fingerprint: None,
             concept_count: None,
             members: vec![CommunityHitMember {
                 name: "member".to_string(),

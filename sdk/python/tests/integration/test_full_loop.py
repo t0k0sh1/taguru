@@ -511,7 +511,8 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     assert page.derived_name == derived
     assert page.stale is False
     hit = page.hits[0]
-    assert hit.community == "L0-0"
+    assert hit.community_id == "L0-0"
+    assert hit.fingerprint == "00aa00aa00aa00aa"
     assert hit.level == 0
     assert hit.members[0].name == "青嶺酒造"
 

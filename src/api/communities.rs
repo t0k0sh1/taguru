@@ -280,9 +280,12 @@ pub struct CommunityRevisions {
 /// dropped.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommunityHit {
-    /// Community id (`L0-3`) — its summary source is
-    /// `community:L0-3` on the artifact.
-    pub community: String,
+    /// Community id (`L0-3`), valid only within the analysis that built
+    /// the artifact (ADR 0056) — a re-run of `taguru communities` can
+    /// give the same id to a different cluster. Its summary source is
+    /// `community:L0-3` on the artifact; `fingerprint` is the identity
+    /// that survives re-runs.
+    pub community_id: String,
     pub score: f32,
     /// The matched paragraph of the summary; the whole summary is one
     /// `sources/lookup` away on the artifact.
@@ -291,7 +294,12 @@ pub struct CommunityHit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
+    pub parent_id: Option<String>,
+    /// The community's content digest from the manifest: equal across
+    /// re-runs exactly when the summarized content is equal, so it is
+    /// what a caller keeping a community beyond one analysis compares.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub concept_count: Option<usize>,
     /// Strongest member concepts (leaf communities; parents carry
@@ -571,9 +579,10 @@ pub(crate) fn community_hits(
             let fact = facts.get(summary.id.as_str());
             CommunityHit {
                 level: fact.map(|fact| fact.level),
-                parent: fact.and_then(|fact| fact.parent.clone()),
+                parent_id: fact.and_then(|fact| fact.parent.clone()),
+                fingerprint: fact.map(|fact| fact.fingerprint.clone()),
                 concept_count: fact.map(|fact| fact.concept_count),
-                community: summary.id,
+                community_id: summary.id,
                 score: summary.score,
                 text: summary.text,
                 paragraph: summary.paragraph,

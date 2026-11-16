@@ -445,7 +445,7 @@ fn derive(
                 level: community.level,
                 fingerprint: community.fingerprint.clone(),
                 concept_count: community.concept_count,
-                parent: community.parent.clone(),
+                parent: community.parent_id.clone(),
             })
             .collect(),
     };
@@ -523,7 +523,7 @@ fn summarize(
         )
     } else {
         let children: Vec<String> = community
-            .children
+            .child_ids
             .iter()
             .filter_map(|child| summaries.get(child.as_str()))
             .map(|summary| {
@@ -536,7 +536,7 @@ fn summarize(
              summaries:\n{}\n\
              Write 1-3 short paragraphs. The first sentence names the shared theme; \
              then what distinguishes the subgroups.",
-            community.children.len(),
+            community.child_ids.len(),
             community.concept_count,
             children.join("\n"),
         )
@@ -606,7 +606,7 @@ fn render_batches(
                 "weight": weight,
             }))?);
         }
-        for child in &community.children {
+        for child in &community.child_ids {
             lines.push(render(&json!({
                 "subject": source,
                 "label": INCLUDES_LABEL,
@@ -785,13 +785,13 @@ struct AnalysisCommunity {
     id: String,
     level: usize,
     #[serde(default)]
-    parent: Option<String>,
+    parent_id: Option<String>,
     fingerprint: String,
     concept_count: usize,
     #[serde(default)]
     members: Vec<AnalysisMember>,
     #[serde(default)]
-    children: Vec<String>,
+    child_ids: Vec<String>,
     #[serde(default)]
     top_associations: Vec<AnalysisAssociation>,
 }

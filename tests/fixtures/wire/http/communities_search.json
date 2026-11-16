@@ -12,8 +12,9 @@
       "derived_name": "corpus-d::communities",
       "hits": [
         {
-          "community": "L0-0",
+          "community_id": "L0-0",
           "concept_count": 2,
+          "fingerprint": "00aa00aa00aa00aa",
           "level": 0,
           "members": [
             {

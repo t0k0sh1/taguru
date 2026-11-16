@@ -781,14 +781,21 @@ class CommunityHit:
     """One ranked community from ``search_communities``: the matched summary
     paragraph plus the community's manifest facts. The manifest fields are
     ``None`` when the artifact is mid-rewrite and this summary landed before
-    its manifest line — served honestly rather than dropped."""
+    its manifest line — served honestly rather than dropped.
 
-    community: str
+    ``community_id`` (``"L0-3"``) is positional and valid only within the
+    analysis that built the artifact: a re-run of ``taguru communities``
+    can give the same id to a different cluster. ``fingerprint`` is the
+    identity that survives re-runs — equal exactly when the summarized
+    content is equal."""
+
+    community_id: str
     score: float
     text: str
     paragraph: int
     level: int | None = None
-    parent: str | None = None
+    parent_id: str | None = None
+    fingerprint: str | None = None
     concept_count: int | None = None
     members: list[CommunityHitMember] = field(default_factory=list)
     members_truncated: bool = False
