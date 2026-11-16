@@ -15,9 +15,11 @@ below and in
 [docs/import.html#upgrading-from-0-9-7](https://t0k0sh1.github.io/taguru/import.html#upgrading-from-0-9-7)):
 
 1. **Data.** A 0.9.7 data directory does not boot on 0.10.0. Export it
-   with 0.9.7 (`taguru export --out DIR`), start 0.10.0 on an empty data
-   directory, and import the export into it — `taguru import DIR`
-   offline, or `POST /import` on a single instance (not through
+   with 0.9.7 (`taguru export --out DIR`), then import the export into an
+   empty data directory with 0.10.0 — `taguru import DIR` offline,
+   *before* the server's first start (offline import takes the
+   directory's lock), or start 0.10.0 on the empty directory and use
+   `POST /import` on that single instance (not through
    `taguru router`, not with `taguru import --url`). Contexts and groups
    keep their names and get new ids. Derived communities and
    consolidation artifacts come over as plain contexts: re-run

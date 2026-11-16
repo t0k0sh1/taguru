@@ -2931,6 +2931,31 @@ fn a_v097_export_imports_offline_and_reads_back_equal() {
     let _ = std::fs::remove_dir_all(&reference);
 }
 
+/// Concurrent v0.9.7 bodies naming the same absent context: each one
+/// resolves names against what the ones before it wrote, so the name
+/// mints one id, never one per request.
+#[test]
+fn concurrent_v097_imports_of_one_absent_name_create_it_once() {
+    let server = Server::start("legacy-concurrent");
+    std::thread::scope(|scope| {
+        let posts: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| post_import(&server, V097_WINE, None)))
+            .collect();
+        for post in posts {
+            let (status, body) = post.join().unwrap();
+            assert_eq!(status, 200, "{body}");
+        }
+    });
+    let rows = server.ok("GET", "/contexts", None);
+    let wines: Vec<&Value> = rows["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"] == json!("wine"))
+        .collect();
+    assert_eq!(wines.len(), 1, "{rows}");
+}
+
 /// The same export through `POST /import` on a single instance: each
 /// context file on its own, then every group file in one body (the
 /// parent's record first), and again to prove idempotence.

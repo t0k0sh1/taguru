@@ -1010,7 +1010,8 @@ mod tests {
         for sidecar in [None, Some(&br#"{"id":"sake","name":"sake"}"#[..])] {
             let dir = scratch_dir("boot-non-id-stem");
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("sake.ctx"), Context::default().to_bytes()).unwrap();
+            let image = Context::default().to_bytes();
+            fs::write(dir.join("sake.ctx"), &image).unwrap();
             if let Some(sidecar) = sidecar {
                 fs::write(dir.join("sake.meta.json"), sidecar).unwrap();
             }
@@ -1028,8 +1029,12 @@ mod tests {
                     .ends_with(&crate::format::migration_hint()),
                 "the refusal must name the migration path: {error}"
             );
-            assert!(
-                !dir.join("sake.meta.json").exists() || sidecar.is_some(),
+            // A refused boot writes nothing: the image and a sidecar
+            // that was there keep their bytes, and none is created.
+            assert_eq!(fs::read(dir.join("sake.ctx")).unwrap(), image);
+            assert_eq!(
+                fs::read(dir.join("sake.meta.json")).ok().as_deref(),
+                sidecar,
                 "a refused boot writes nothing"
             );
             let _ = fs::remove_dir_all(&dir);

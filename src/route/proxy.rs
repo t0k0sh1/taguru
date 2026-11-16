@@ -435,6 +435,11 @@ async fn proxy_context(
                 .record_shard(map.url(shard), "unreached");
             span.record("taguru.shard.outcome", "unreached");
             span.record("otel.status_code", "ERROR");
+            // A cached owner that cannot be reached is no longer trusted:
+            // the next request re-probes, so a context moved off a dead
+            // shard is found where it now lives instead of answering 502
+            // until the next map reload.
+            map.owners.forget(&id);
             api::error(
                 ErrorCode::ShardUnreachable,
                 format!(

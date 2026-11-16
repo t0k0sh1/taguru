@@ -789,6 +789,9 @@ pub(super) fn quota_refusal_from_apply(
     ))
 }
 
+/// Serializes v0.9.7 `POST /import` bodies — see [`import_batch`].
+static LEGACY_IMPORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
 /// as `GET /contexts/{id}/export` renders — applied to the live
@@ -861,6 +864,17 @@ pub async fn import_batch(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // ADR 0057: a v0.9.7 body settles its names on ids against the
+    // registry it sees, and applies them later; two such bodies naming
+    // the same absent context would each mint an id for it. One at a
+    // time per process, so each resolves against what the one before
+    // it wrote (a current-format body carries its own ids and never
+    // waits here). The guard lives until the response is built.
+    let _legacy_turn = if crate::ingest::is_legacy_stream(&body) {
+        Some(LEGACY_IMPORTS.lock().await)
+    } else {
+        None
+    };
     let stream = match crate::ingest::parse_any_stream(&body[..]) {
         Ok(crate::ingest::ParsedStream::Current(stream)) => stream,
         // ADR 0057: a v0.9.7 export stream names its contexts and

@@ -2263,3 +2263,55 @@ fn the_router_refuses_pre_rename_cross_target_keys() {
         }
     }
 }
+
+/// A cached owner that stops answering is forgotten, on the proxy path
+/// and on the fan-out path alike: once the context lives on another
+/// shard, the next request re-probes and reaches it there, instead of
+/// answering 502 (or labeling it unreached) until a map reload.
+#[test]
+fn an_unreachable_cached_owner_is_forgotten() {
+    let shard_a = Server::start("dead-owner-a");
+    let shard_b = Server::start("dead-owner-b");
+    let router = Server::start_router(
+        "dead-owner",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    // Two contexts placed on shard A by name (names need not be unique),
+    // and one on shard B; the router caches all three owners.
+    let proxied = router.create_context("sake");
+    let searched = router.create_context("sake");
+    let glossary = router.create_context("glossary");
+    for id in [&proxied, &searched, &glossary] {
+        router.ok("GET", &format!("/contexts/{id}"), None);
+    }
+
+    // Shard A dies; both of its contexts now live on shard B.
+    let _ = shard_a.stop_hard();
+    shard_b.create_with_id(&proxied, json!({"name": "sake"}));
+    shard_b.create_with_id(&searched, json!({"name": "sake"}));
+
+    // Proxy path: one 502 from the cached owner, then the re-probe.
+    let path = format!("/contexts/{proxied}");
+    assert_eq!(
+        router.call("GET", &path, None).0,
+        502,
+        "the cached owner is down"
+    );
+    let row = router.ok("GET", &path, None);
+    assert_eq!(row["id"], json!(proxied), "re-probed onto shard B: {row}");
+
+    // Fan-out path: the cached owner labels the id unreached once (the
+    // envelope's partial), then the next search re-probes and finds it.
+    let search = json!({"context_ids": [searched, glossary], "cue": "麹"});
+    let (status, first) = router.call("POST", "/recall", Some(search.clone()));
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(
+        first["unreached"][0]["context_ids"],
+        json!([searched]),
+        "{first}"
+    );
+    let (status, second) = router.call("POST", "/recall", Some(search));
+    assert_eq!(status, 200, "{second}");
+    assert!(second.get("unreached").is_none(), "{second}");
+}

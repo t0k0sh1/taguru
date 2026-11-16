@@ -1231,8 +1231,8 @@ mod tests {
         let request = CrossRecallRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             group_ids: Vec::new(),
-            contexts: None,
-            groups: None,
+            contexts: Default::default(),
+            groups: Default::default(),
             cue: "AAA".to_string(),
             limit: None,
             after: None,
@@ -1268,8 +1268,8 @@ mod tests {
         let request = CrossQueryRequest {
             context_ids: vec!["00000000-0000-4000-8000-00000000dead".to_string()],
             group_ids: Vec::new(),
-            contexts: None,
-            groups: None,
+            contexts: Default::default(),
+            groups: Default::default(),
             subject: Some(OneOrMany::One("蔵".to_string())),
             label: None,
             object: None,

@@ -295,6 +295,33 @@ fn drive(
 
     let chat = crate::extract::ChatClient::from_env()
         .map_err(|error| format!("{error} (only --dry-run works without it)"))?;
+    // An incomparable manifest (another detector, an earlier format
+    // revision) taints every judgment stored under it, not just this
+    // run's checks: a judgment of a check this run did not ask for
+    // would otherwise survive under the CURRENT manifest written below
+    // and be reused as comparable next time. Withdraw them first — a
+    // crash after this leaves fewer judgments (re-judged later), never
+    // a stale one under a new stamp.
+    if !comparable {
+        let rewritten: BTreeSet<String> = fresh
+            .iter()
+            .map(|candidate| judgment_source(&candidate.fingerprint))
+            .collect();
+        let stale = stale_judgments(&api, &artifact_id, &rewritten)?;
+        for source in &stale {
+            api.post_envelope(
+                &["contexts", artifact_id.as_str(), "sources", "retract"],
+                &json!({"source_id": source}),
+            )
+            .map_err(|failure| failure.into_message())?;
+        }
+        if !stale.is_empty() {
+            report.push_str(&format!(
+                "withdrew {} incomparable judgment(s) of checks this run did not ask for\n",
+                stale.len()
+            ));
+        }
+    }
     let mut batches: Vec<String> = Vec::new();
     let mut applied = 0usize;
     let mut dismissed = 0usize;
@@ -404,6 +431,38 @@ enum StoredManifest {
     Current(Option<String>),
     /// A manifest an earlier format revision wrote: incomparable.
     Earlier,
+}
+
+/// Every `judgment:*` source stored in the artifact except `keep` —
+/// keyset-walked over `GET /contexts/{id}/sources`.
+fn stale_judgments(
+    api: &Api,
+    artifact_id: &str,
+    keep: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let mut stale = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "1000")];
+        if let Some(after) = &after {
+            query.push(("after", after.as_str()));
+        }
+        let page = api.get_with_query(&["contexts", artifact_id, "sources"], &query)?;
+        let ids: Vec<String> = page["entries"]
+            .as_array()
+            .ok_or_else(|| format!("{artifact_id}: not a taguru sources page"))?
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect();
+        let Some(last) = ids.last().cloned() else {
+            return Ok(stale);
+        };
+        stale.extend(
+            ids.into_iter()
+                .filter(|id| id.starts_with("judgment:") && !keep.contains(id)),
+        );
+        after = Some(last);
+    }
 }
 
 /// The stored manifest and the set of judgment sources already stored.

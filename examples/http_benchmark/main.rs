@@ -50,20 +50,39 @@ fn main() {
 
     // Fresh context, always: a leftover from an aborted run would
     // skew the seed phase. Leftovers are found by name, since only the
-    // directory listing maps a name to its ids.
-    let listing = client
-        .call_json("GET", "/contexts", None)
-        .expect("listing contexts must succeed — is the server up, and the token right?");
-    for row in listing["result"]["contexts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        if row["name"] == CONTEXT_NAME
-            && let Some(id) = row["id"].as_str()
-        {
-            let _ = client.call("DELETE", &format!("/contexts/{id}"), None);
-        }
+    // directory listing maps a name to its ids — every page of it,
+    // keyset-walked on `(name, id)`, so a long directory cannot hide one.
+    let mut leftovers: Vec<String> = Vec::new();
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let path = match &cursor {
+            None => "/contexts?limit=1000".to_string(),
+            Some((name, id)) => format!(
+                "/contexts?limit=1000&after={}&after_id={}",
+                query_escape(name),
+                query_escape(id)
+            ),
+        };
+        let page = client
+            .call_json("GET", &path, None)
+            .expect("listing contexts must succeed — is the server up, and the token right?");
+        let rows = page["result"]["contexts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let Some(last) = rows.last() else { break };
+        cursor = Some((
+            last["name"].as_str().unwrap_or_default().to_string(),
+            last["id"].as_str().unwrap_or_default().to_string(),
+        ));
+        leftovers.extend(
+            rows.iter()
+                .filter(|row| row["name"] == CONTEXT_NAME)
+                .filter_map(|row| row["id"].as_str().map(str::to_string)),
+        );
+    }
+    for id in leftovers {
+        let _ = client.call("DELETE", &format!("/contexts/{id}"), None);
     }
     let created = client
         .call_json(
@@ -344,4 +363,18 @@ fn parse_args() -> Config {
     config.requests = config.requests.max(1);
     config.seed = config.seed.max(1);
     config
+}
+
+/// Percent-encodes one query value: display names are free-form, so a
+/// `&`, `=`, `#` or space in the paging cursor must not split the query.
+fn query_escape(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }

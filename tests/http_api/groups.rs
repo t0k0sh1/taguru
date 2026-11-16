@@ -1238,6 +1238,18 @@ fn pre_rename_group_fields_are_refused_by_name() {
         assert!(message.contains(&format!("'{old}'")), "{refused}");
         assert!(message.contains(new), "{refused}");
     }
+    // An explicit `null` is still the old key: refused, not read as
+    // absent (which would create an empty group under a 200).
+    let (status, refused) = server.call(
+        "POST",
+        "/groups",
+        Some(json!({"name": "fresh", "contexts": null})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("'contexts'"),
+        "{refused}"
+    );
     assert_eq!(groups_total(), total_before, "no refused create landed");
 
     for (old, new) in [
@@ -1312,6 +1324,13 @@ fn pre_rename_cross_target_keys_are_refused_beside_valid_targets() {
             stale[old] = json!(["sake"]);
             let (status, refused) = server.call("POST", path, Some(stale));
             assert_eq!(status, 400, "{path} {old}: {refused}");
+            let mut null = valid.clone();
+            null[old] = Value::Null;
+            assert_eq!(
+                server.call("POST", path, Some(null)).0,
+                400,
+                "{path} {old}: null"
+            );
             assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
             let message = refused["error"].as_str().unwrap();
             assert!(message.contains(&format!("'{old}'")), "{refused}");

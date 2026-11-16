@@ -1710,8 +1710,25 @@ fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
 /// A request key 0.10.0 renamed: the struct field that catches it.
 /// Presence is the whole signal, so the value is never parsed — a
 /// wrong-typed old value must not turn into a type error that hides
-/// the rename.
-pub(crate) type RenamedField = Option<serde::de::IgnoredAny>;
+/// the rename — and an explicit `null` counts as present: an
+/// `Option` would read `"contexts": null` as absent and let the old
+/// key through. Every field of this type needs `#[serde(default)]`
+/// (field or container), which is what absence reads as.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RenamedField(bool);
+
+impl RenamedField {
+    /// Whether the request carried the key, whatever its value.
+    pub(crate) fn is_present(self) -> bool {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RenamedField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self(true))
+    }
+}
 
 /// Refuses a request that still carries a key 0.10.0 renamed (#958's
 /// id cutover), naming its replacement — the precedent is the
@@ -1727,7 +1744,7 @@ pub(crate) fn renamed_field_refusal(
     renamed: &[(&RenamedField, &str, &str)],
     started_at: Instant,
 ) -> Option<Response> {
-    let (_, old, new) = renamed.iter().find(|(caught, _, _)| caught.is_some())?;
+    let (_, old, new) = renamed.iter().find(|(caught, _, _)| caught.is_present())?;
     Some(error(
         ErrorCode::InvalidArgument,
         format!(

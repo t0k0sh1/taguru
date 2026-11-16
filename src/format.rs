@@ -32,10 +32,10 @@ pub(crate) fn is_earlier_version(version: &str) -> bool {
 /// that release reads every directory an earlier release wrote, and
 /// this build imports what it exports, minting the ids.
 pub(crate) fn migration_hint() -> String {
-    "boot it on taguru v0.9.7 and export it there (`taguru export --out DIR`), then start \
-     this build on an empty data directory and `taguru import DIR` — this build reads a \
-     v0.9.7 export as migration input and mints the ids (ADR 0057; \
-     docs/import.html#upgrading-from-0-9-7)"
+    "boot it on taguru v0.9.7 and export it there (`taguru export --out DIR`), then point \
+     this build at an empty data directory and run `taguru import DIR` before starting it \
+     (or start it and POST /import) — this build reads a v0.9.7 export as migration input \
+     and mints the ids (ADR 0057; docs/import.html#upgrading-from-0-9-7)"
         .to_string()
 }
 

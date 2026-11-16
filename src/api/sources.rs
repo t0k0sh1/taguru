@@ -2813,8 +2813,8 @@ mod tests {
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
             group_ids: Vec::new(),
-            contexts: None,
-            groups: None,
+            contexts: Default::default(),
+            groups: Default::default(),
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,
@@ -2851,8 +2851,8 @@ mod tests {
         let request = CrossSearchPassagesRequest {
             context_ids: vec![state.id_of("sake")],
             group_ids: Vec::new(),
-            contexts: None,
-            groups: None,
+            contexts: Default::default(),
+            groups: Default::default(),
             query: "AAA".to_string(),
             limit: None,
             semantic_floor: None,

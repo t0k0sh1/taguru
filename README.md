@@ -484,9 +484,11 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   name routes to the new shard, and let every router reload it →
   re-import through the router, which now routes it to the new shard.
   Delete before re-import — a leftover copy keeps answering the old
-  shard's slice of every `group` fan-out, and the router refuses every
-  verb on an id two shards hold (delete the stray on its shard
-  directly).
+  shard's slice of every `group` fan-out. The router refuses an id it
+  finds on two shards, but it only looks when it probes: on its first
+  request naming the id, after a map reload, and after its cached owner
+  answers 404 or 409 or cannot be reached. Until then the cached owner
+  keeps answering, so delete the stray on its shard directly.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart) and its `200`
   body names the server's own version (`{"status": "ok", "version":

@@ -835,3 +835,59 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     );
     assert_eq!(*calls.lock().unwrap(), expected_calls);
 }
+
+/// A subset run (`--checks merge`) over a manifest from an earlier
+/// format revision re-judges its own checks and withdraws the other
+/// checks' judgments, which that manifest made incomparable — so the
+/// next full run re-judges them instead of reusing them under the
+/// current manifest the subset run wrote.
+#[test]
+fn a_subset_run_over_an_earlier_manifest_leaves_no_stale_judgment_behind() {
+    let server = Server::start("consolidation-subset-earlier");
+    seed(&server);
+    let calls = Arc::new(Mutex::new(0usize));
+    let chat_url = stub_judge(Arc::clone(&calls));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let full = ["--context", &server.cx("sake"), &server.base];
+    let (code, stdout, _) = run_consolidation(&full, &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(*calls.lock().unwrap(), 5);
+
+    overwrite_manifest(
+        &server,
+        &json!({"type": "consolidation_manifest", "version": "2026-10-01",
+                "detector": "consolidation/1", "context": "sake"})
+        .to_string(),
+    );
+    let subset = [
+        "--context",
+        &server.cx("sake"),
+        "--checks",
+        "merge",
+        &server.base,
+    ];
+    let (code, stdout, stderr) = run_consolidation(&subset, &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let merges = *calls.lock().unwrap() - 5;
+    assert!(
+        (1..5).contains(&merges),
+        "the fixture must split across checks: {merges} merge judgment(s)"
+    );
+    assert!(
+        stdout.contains(&format!("withdrew {} incomparable judgment(s)", 5 - merges)),
+        "{stdout}"
+    );
+
+    // The full run re-judges exactly what the subset run withdrew.
+    let (code, stdout, _) = run_consolidation(&full, &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(&format!("judged {} ", 5 - merges))
+            && stdout.contains(&format!("{merges} reused")),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10);
+}
