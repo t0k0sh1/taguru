@@ -570,10 +570,15 @@ fn communities_search_community_page() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources", server.cx("corpus-d::communities")),
-        Some(json!({"passages": {
-            "community:L0-0": "この共同体のテーマは酒造りの歴史です。",
-            "communities:manifest": manifest.to_string(),
-        }})),
+        Some(json!({
+            "passages": {
+                "community:L0-0": "この共同体のテーマは酒造りの歴史です。",
+                "communities:manifest": manifest.to_string(),
+            },
+            // As `taguru communities` writes it: the summary names its
+            // own fingerprint (ADR 0056), which the hit then reports.
+            "tags": {"community:L0-0": ["community-fingerprint:00aa00aa00aa00aa"]},
+        })),
     );
     server.ok(
         "POST",

@@ -495,7 +495,10 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
         {
             "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
             "communities:manifest": json.dumps(manifest),
-        }
+        },
+        # As `taguru communities` writes it: the summary names its own
+        # fingerprint, which the hit reports (ADR 0056).
+        tags={"community:L0-0": ["community-fingerprint:00aa00aa00aa00aa"]},
     )
     dctx.add_associations(
         [
@@ -511,7 +514,8 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     assert page.derived_name == derived
     assert page.stale is False
     hit = page.hits[0]
-    assert hit.community == "L0-0"
+    assert hit.community_id == "L0-0"
+    assert hit.fingerprint == "00aa00aa00aa00aa"
     assert hit.level == 0
     assert hit.members[0].name == "青嶺酒造"
 

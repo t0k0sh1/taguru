@@ -28,6 +28,30 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (wire) — community ids are valid within one analysis; hits
+  carry the fingerprint that survives re-runs** (#1050, ADR 0056;
+  `http_contract` 2). A community's id (`L0-3`) is positional, so a re-run
+  of `taguru communities` can give the same id to a different cluster; the
+  contract now says so, and `POST /contexts/{id}/communities/search` hits
+  (and evidence items' embedded `community`) carry the community's
+  `fingerprint` — equal exactly when its content is equal — to recognize
+  it across re-runs. `taguru communities` now tags each summary with its
+  fingerprint and the hit reads it from the same record as its text, so
+  the fingerprint always describes the text served, even while a re-run is
+  rewriting the artifact; the manifest's `level`/`parent_id`/
+  `concept_count` join a hit only when the manifest describes that same
+  fingerprint. `fingerprint` is absent when the summary carries none: an
+  artifact built before this build reports it after its next `taguru
+  communities` run, which reuses every unchanged summary and so makes no
+  LLM calls. Columns that point at a community say `_id`: a hit's
+  `community` is `community_id` and `parent` is `parent_id`, and
+  `GET /contexts/{id}/communities` lines say `parent_id` and `child_ids`
+  (a line's own `id` is unchanged). The MCP `search_communities` tool and
+  the Python and TypeScript SDKs' `CommunityHit` follow. Unchanged: the
+  artifact's stored `communities:manifest` record, and ADR 0006 §9's
+  wording that a hit's community is prefixed `community:` is corrected —
+  the bare id rides the wire, and the prefix is the artifact's source id.
+
 - **Breaking (configuration) — an API key's name is its id, and is held to
   1–64 characters of `A-Z a-z 0-9 . _ -`** (#1049, ADR 0055). The name in
   `TAGURU_API_TOKENS=name:token` stays the operator's own string — nothing

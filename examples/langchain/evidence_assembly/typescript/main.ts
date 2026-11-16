@@ -99,7 +99,7 @@ function describeItem(item: EvidenceItem): string {
     where = "graph fact";
     snippet = `${association.subject} —${association.label}→ ${association.object} (weight ${association.weight >= 0 ? "+" : ""}${association.weight.toFixed(1)})`;
   } else if (item.community) {
-    where = `${item.community.community} ¶${item.community.paragraph}`;
+    where = `${item.community.community_id} ¶${item.community.paragraph}`;
     snippet = item.community.text;
   } else {
     where = "?";

@@ -389,10 +389,15 @@ describe("sources and citations", () => {
       ],
     };
     const dctx = client.context(derivedId);
-    await dctx.storePassages({
-      "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
-      "communities:manifest": JSON.stringify(manifest),
-    });
+    await dctx.storePassages(
+      {
+        "community:L0-0": "青嶺酒造の造りと杜氏についての要約。",
+        "communities:manifest": JSON.stringify(manifest),
+      },
+      // As `taguru communities` writes it: the summary names its own
+      // fingerprint, which the hit reports (ADR 0056).
+      { tags: { "community:L0-0": ["community-fingerprint:00aa00aa00aa00aa"] } },
+    );
     await dctx.addAssociations([
       { subject: "community:L0-0", label: "contains", object: "青嶺酒造", weight: 3.0 },
       { subject: "community:L0-0", label: "contains", object: "高瀬", weight: 2.0 },
@@ -404,7 +409,8 @@ describe("sources and citations", () => {
     expect(page.derived_id).toBe(derivedId);
     expect(page.derived_name).toBe(derived);
     expect(page.stale).toBe(false);
-    expect(page.hits[0]!.community).toBe("L0-0");
+    expect(page.hits[0]!.community_id).toBe("L0-0");
+    expect(page.hits[0]!.fingerprint).toBe("00aa00aa00aa00aa");
     expect(page.hits[0]!.level).toBe(0);
     expect(page.hits[0]!.members![0]!.name).toBe("青嶺酒造");
 

@@ -32,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::communities::{
-    ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest, INCLUDES_LABEL,
-    MANIFEST_SOURCE, ManifestCommunity, derived_context_id_of, derived_context_name,
+    ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest,
+    FINGERPRINT_TAG_PREFIX, INCLUDES_LABEL, MANIFEST_SOURCE, ManifestCommunity,
+    derived_context_id_of, derived_context_name,
 };
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
@@ -445,7 +446,7 @@ fn derive(
                 level: community.level,
                 fingerprint: community.fingerprint.clone(),
                 concept_count: community.concept_count,
-                parent: community.parent.clone(),
+                parent: community.parent_id.clone(),
             })
             .collect(),
     };
@@ -523,7 +524,7 @@ fn summarize(
         )
     } else {
         let children: Vec<String> = community
-            .children
+            .child_ids
             .iter()
             .filter_map(|child| summaries.get(child.as_str()))
             .map(|summary| {
@@ -536,7 +537,7 @@ fn summarize(
              summaries:\n{}\n\
              Write 1-3 short paragraphs. The first sentence names the shared theme; \
              then what distinguishes the subgroups.",
-            community.children.len(),
+            community.child_ids.len(),
             community.concept_count,
             children.join("\n"),
         )
@@ -592,7 +593,13 @@ fn render_batches(
         let summary = summaries
             .get(community.id.as_str())
             .ok_or_else(|| format!("no summary for community {}", community.id))?;
-        lines.push(render(&json!({"passage": summary}))?);
+        // The fingerprint rides the summary's own record, so a search
+        // never pairs this text with another run's manifest entry for
+        // the same positional id (ADR 0056).
+        lines.push(render(&json!({
+            "passage": summary,
+            "tags": [format!("{FINGERPRINT_TAG_PREFIX}{}", community.fingerprint)],
+        }))?);
         for member in &community.members {
             let weight = if member.strength > 0.0 {
                 member.strength.min(1e6)
@@ -606,7 +613,7 @@ fn render_batches(
                 "weight": weight,
             }))?);
         }
-        for child in &community.children {
+        for child in &community.child_ids {
             lines.push(render(&json!({
                 "subject": source,
                 "label": INCLUDES_LABEL,
@@ -785,13 +792,13 @@ struct AnalysisCommunity {
     id: String,
     level: usize,
     #[serde(default)]
-    parent: Option<String>,
+    parent_id: Option<String>,
     fingerprint: String,
     concept_count: usize,
     #[serde(default)]
     members: Vec<AnalysisMember>,
     #[serde(default)]
-    children: Vec<String>,
+    child_ids: Vec<String>,
     #[serde(default)]
     top_associations: Vec<AnalysisAssociation>,
 }

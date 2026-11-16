@@ -114,7 +114,7 @@ def describe_item(item) -> str:
         where = "graph fact"
         snippet = f"{assoc.subject} —{assoc.label}→ {assoc.object} (weight {assoc.weight:+.1f})"
     elif item.community is not None:
-        where = f"{item.community.community} ¶{item.community.paragraph}"
+        where = f"{item.community.community_id} ¶{item.community.paragraph}"
         snippet = item.community.text
     else:
         where, snippet = "?", "?"

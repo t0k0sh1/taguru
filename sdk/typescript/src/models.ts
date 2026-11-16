@@ -779,14 +779,20 @@ export interface CommunityHitMember {
  * paragraph plus the community's manifest facts. The manifest fields are
  * absent when the artifact is mid-rewrite and this summary landed before its
  * manifest line — served honestly rather than dropped.
+ *
+ * `community_id` (`"L0-3"`) is positional and valid only within the analysis
+ * that built the artifact: a re-run of `taguru communities` can give the same
+ * id to a different cluster. `fingerprint` is the identity that survives
+ * re-runs — equal exactly when the summarized content is equal.
  */
 export interface CommunityHit {
-  community: string;
+  community_id: string;
   score: number;
   text: string;
   paragraph: number;
   level?: number;
-  parent?: string;
+  parent_id?: string;
+  fingerprint?: string;
   concept_count?: number;
   members?: CommunityHitMember[];
   members_truncated?: boolean;
