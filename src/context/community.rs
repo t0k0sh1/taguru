@@ -940,9 +940,9 @@ mod tests {
                 let next = (triangle + 1) % UNITS;
                 context
                     .associate(
-                        &format!("r{ring}t{triangle}-1"),
+                        format!("r{ring}t{triangle}-1"),
                         "橋",
-                        &format!("r{ring}t{next}-1"),
+                        format!("r{ring}t{next}-1"),
                         1.5,
                     )
                     .unwrap();
@@ -952,9 +952,9 @@ mod tests {
             let next = (ring + 1) % UNITS;
             context
                 .associate(
-                    &format!("r{ring}t0-2"),
+                    format!("r{ring}t0-2"),
                     "遠い橋",
-                    &format!("r{next}t0-2"),
+                    format!("r{next}t0-2"),
                     0.5,
                 )
                 .unwrap();
