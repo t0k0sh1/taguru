@@ -916,4 +916,65 @@ mod tests {
             assert_eq!(total, analysis.concept_count);
         }
     }
+
+    /// Every community below the top level names its parent, at every
+    /// depth, and the top level names none. The pairwise fixture above
+    /// only reaches two levels, where the one parent-bearing level is the
+    /// leaves; this graph nests one storey deeper — triangles, rings of
+    /// four triangles (bridged at 1.5), and a ring of four such rings
+    /// (bridged at 0.5; any outer weight from 0.1 to 1.5 gives the same
+    /// three levels) — so a middle level must name its parent too.
+    #[test]
+    fn every_community_below_the_top_names_its_parent() {
+        let mut context = Context::default();
+        const UNITS: usize = 4;
+        for ring in 0..UNITS {
+            for triangle in 0..UNITS {
+                let names: Vec<String> = (1..=3)
+                    .map(|index| format!("r{ring}t{triangle}-{index}"))
+                    .collect();
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                clique(&mut context, &refs, 1.0);
+            }
+            for triangle in 0..UNITS {
+                let next = (triangle + 1) % UNITS;
+                context
+                    .associate(
+                        &format!("r{ring}t{triangle}-1"),
+                        "橋",
+                        &format!("r{ring}t{next}-1"),
+                        1.5,
+                    )
+                    .unwrap();
+            }
+        }
+        for ring in 0..UNITS {
+            let next = (ring + 1) % UNITS;
+            context
+                .associate(
+                    &format!("r{ring}t0-2"),
+                    "遠い橋",
+                    &format!("r{next}t0-2"),
+                    0.5,
+                )
+                .unwrap();
+        }
+
+        let analysis = context.communities(Deadline::unbounded()).unwrap();
+        assert!(
+            analysis.levels >= 3,
+            "fixture must nest: levels {}",
+            analysis.levels
+        );
+        for community in &analysis.communities {
+            assert_eq!(
+                community.parent_id.is_some(),
+                community.level + 1 < analysis.levels,
+                "{} at level {} of {}",
+                community.id,
+                community.level,
+                analysis.levels
+            );
+        }
+    }
 }
