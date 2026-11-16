@@ -467,7 +467,7 @@ below and in
   import a v0.9.7 export into this build (see *Upgrading from 0.9.7*).
   Names are display strings and no longer unique by construction
   (issue #961 decision 1). `POST
-  /contexts/{name}/rename` is now a sidecar write plus an index move:
+  /contexts/{id}/rename` is now a sidecar write plus an index move:
   no file moves, no durable rename marker, no boot resume, and a
   renamed context stays loaded. `taguru inspect` reports the id/name
   sidecar states (a pre-id or copied-family sidecar is a failure; a
@@ -489,18 +489,16 @@ below and in
   `regranted`, not `rescoped`, and the boot log's granted-key-count
   field is `granted`, not `scoped`.
 - **Breaking — a `context` row and a `group` row name their own key
-  `id`** (#851): `GET /contexts` / `GET /contexts/{name}` answer
-  `{"id": "sake", "description": …}` and `GET /groups` /
-  `GET /groups/{name}` answer `{"id": "kura", …}` where both said
-  `name`. The value is unchanged (the context's or group's name); the
-  path segments, `?after=`, `PUT` bodies, and the `contexts` / `groups`
-  member lists are untouched. Both SDKs' `DirectoryEntry` and
-  `GroupEntry` rename the field to `id`; `taguru export --url` reads
-  `id` and refuses a `name`-keyed row. Rides this release's
-  `http_contract: 2`. Not changed: `GET /contexts/{name}/sources`'s
-  `entries[].name`, resolve candidates' `name`, and every other `name`.
+  `id`** (#851): `GET /contexts` / `GET /contexts/{id}` and `GET
+  /groups` / `GET /groups/{id}` answer `{"id": …, "name": …, …}`, where
+  the row's own key used to be `name`. The `id` is the minted UUID
+  (#963, #994) and `name` is a separate display column (#964, #995).
+  Both SDKs' `DirectoryEntry` and `GroupEntry` carry both fields;
+  `taguru export --url` reads `id`. Rides this release's
+  `http_contract: 2`. Not changed: resolve candidates' `name` and the
+  other `name` fields that name concepts or labels.
 - **Breaking — the change feed's events say what they are in `type`,
-  not `kind`** (ADR 0042 §3.4): `GET /contexts/{name}/changes` answers
+  not `kind`** (ADR 0042 §3.4): `GET /contexts/{id}/changes` answers
   `{"seq": …, "type": "associations_added", …}`. Same values, same
   extra fields per type; both SDKs' `ChangeEvent` rename the field to
   `type`. Rides this release's `http_contract: 2`.
@@ -548,7 +546,7 @@ below and in
 - **Breaking — a data directory holding a schema installed by an
   earlier release does not boot, and the schema document's shape
   changed for every caller** (ADR 0043, #937). The document — the body
-  of `PUT /contexts/{name}/schema`, MCP's `put_schema` /
+  of `PUT /contexts/{id}/schema`, MCP's `put_schema` /
   `validate_schema` arguments, and `{stem}.schema.json` at rest — opens
   with `"type": "schema"` and carries the shared format `version`:
   `{"type": "schema", "version": "2026-10-01", "mode": …}`. `version`
@@ -565,18 +563,18 @@ below and in
 - **Breaking — a `::communities` or `::consolidation` artifact built by
   an earlier release has to be rebuilt** (ADR 0042, #937 step 4). The
   derivation records stored inside those contexts, and the header line
-  of `GET /contexts/{name}/communities`, name their `type` and the
+  of `GET /contexts/{id}/communities`, name their `type` and the
   format `version` like every other record: `{"type": "communities",
-  "version": "2026-10-01", "context": …}` opens the analysis stream
+  "version": "2026-11-13", "context_id": …}` opens the analysis stream
   (`taguru_communities` is gone — the `type` column is what frees the
   name its own `communities` count already held), the stored manifests
   are `{"type": "communities_manifest", …}` and `{"type":
   "consolidation_manifest", …}`. A manifest stored before this release
   names no `type`, so `search_communities` answers 409 for that context
-  and `taguru communities` / `taguru consolidation` refuse to diff
-  against it: delete the artifact context and run the command again.
+  until it is rebuilt; `taguru communities` / `taguru consolidation`
+  treat such a manifest as incomparable and rebuild, paying the LLM once.
   The source context is untouched. `GET /version` reports the date under
-  `communities_formats`.
+  `record_formats`.
 - **Breaking — a benchmark results directory started by an earlier
   release can no longer be resumed, compared, or searched, and a
   models file written for one is no longer read** (ADR 0042, #937 step
@@ -608,22 +606,21 @@ below and in
   no longer echo an `evaluation` stamp, and the stamp-mismatch warning
   is gone with it.
 - **Breaking — source files, exports, and group files written by an
-  earlier release are no longer read** (ADR 0042, #937 step 1). A
-  record now states three facts in three columns: `type` (what it is),
-  `version` (the file format's revision, as a date), and `id` (which
-  one). The source file header is `{"type": "source", "version":
-  "2026-10-01", "id": "docs/a.md", "context_id": "<uuid>"}` —
-  `taguru_batch` is gone and the header's `source` is `id`; a `group`
-  record is `{"type": "group", "id": "kura", …}` (`name` is `id`); a
-  `schema` record is `{"type": "schema", "context_id": "<uuid>", …}`
-  (the `context_id` column is #965's). `version` may
-  be omitted, and then means the running build's own revision;
-  everything taguru writes carries it, and any other date is refused
-  by name. There is no transition alias: re-extract, or export again
-  with this build (the snapshot and WAL formats did not change). `GET
-  /version` reports the date under `batch_formats`. The schema
-  document itself — `PUT /contexts/{name}/schema` and the data
-  directory's `{stem}.schema.json` — is unchanged in this step.
+  earlier release are no longer read, except a v0.9.7 export as
+  migration input** (ADR 0042, #937 step 1; ADR 0057 for the exception
+  — see *Added*). A record now states three facts in three columns:
+  `type` (what it is), `version` (the file format's revision, as a
+  date), and `id` (which one). The source file header is `{"type":
+  "source", "version": "2026-11-13", "id": "docs/a.md", "context_id":
+  "<uuid>"}` — `taguru_batch` is gone and the header's `source` is `id`;
+  a `group` record is `{"type": "group", "id": "<uuid>", "name": "kura",
+  …}`; a `schema` record is `{"type": "schema", "context_id": "<uuid>",
+  …}`. `version` may be omitted, and then means the running build's own
+  revision; everything taguru writes carries it, and any other date is
+  refused by name. A v0.9.7 source file or export imports through
+  `taguru import` / `POST /import` (see *Upgrading from 0.9.7*); any
+  other earlier file must be re-extracted or exported again with this
+  build. `GET /version` reports the date under `record_formats`.
 - Wording (#851 wave 5, #935): the JSONL file `taguru extract` writes
   for one source, and a stream of them, are called a source file and a
   source stream — `batch` no longer names them in `--help`, CLI output
