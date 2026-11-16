@@ -3026,6 +3026,9 @@ fn a_v097_name_several_contexts_carry_is_refused_and_nothing_written() {
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], json!("conflict"), "{body}");
     assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    // The caller resolves the ambiguity (rename or delete a twin) and
+    // re-sends: the refusal says that retry is expected to work.
+    assert_eq!(body["retryable_after_correction"], json!(true), "{body}");
     let (status, body) = post_import(&server, V097_KURA, None);
     assert_eq!(status, 200, "an unambiguous name still imports: {body}");
     let _ = std::fs::remove_dir_all(&legacy);
