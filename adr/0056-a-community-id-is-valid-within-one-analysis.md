@@ -49,10 +49,19 @@ whenever one fact inside the community changes).
 1. **A community's id stays positional and is valid only within the one
    analysis that produced it.** The docs, `GET /protocol`, the MCP tool
    description and the SDK models say so.
-2. **`CommunityHit` carries the community's `fingerprint`** (from the
-   manifest; absent, like the other manifest fields, when the artifact is
-   mid-rewrite). A caller keeping a community beyond one analysis
-   compares fingerprints.
+2. **`CommunityHit` carries the summary's own `fingerprint`**, and a
+   caller keeping a community beyond one analysis compares fingerprints.
+   `taguru communities` stores each summary with a
+   `community-fingerprint:{fp}` tag, written in the same import batch as
+   the text, and a search reads the tag from the same passage record as
+   the hit's text. The manifest cannot supply it: it is written last, so
+   mid-rewrite the summary under `community:L0-0` can already be the new
+   run's while the manifest's `L0-0` entry is still the old run's, and a
+   positional id cannot tell the two apart. For the same reason the
+   manifest's other facts (`level`, `parent_id`, `concept_count`) join a
+   hit only when the manifest entry's fingerprint equals the summary's.
+   A summary written before summaries carried the tag reports no
+   fingerprint and keeps the id-only join.
 3. **Columns that point at a community say `_id`** (#851):
    `CommunityHit.community` → `community_id`, `CommunityHit.parent` →
    `parent_id`; in the analysis stream, `parent` → `parent_id` and
@@ -67,6 +76,9 @@ whenever one fact inside the community changes).
    unchanged**, `parent` included. It is a record inside the artifact, not
    a response, and renaming it would make every existing artifact fail to
    parse on its next re-run.
+6. **A search hit exposes the passage record it was cut from** (inside
+   the server only), so reading a source's metadata beside its text needs
+   no second read and cannot straddle two writes.
 
 ## 3. Consequences
 
@@ -74,7 +86,9 @@ whenever one fact inside the community changes).
   `communities/search` hit fields, evidence items' embedded `community`,
   the analysis stream's `parent`/`children`, and both SDKs'
   `CommunityHit`.
-- Existing artifacts keep working without a re-run; their hits gain
-  `fingerprint` from the manifest they already store.
+- Existing artifacts keep working without a re-run, but their hits carry
+  no `fingerprint` until the next `taguru communities` run tags the
+  summaries. That run reuses every summary whose fingerprint is unchanged,
+  so it costs no LLM calls.
 - Positional ids can still move between runs; the contract now says so
   instead of implying stability.

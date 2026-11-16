@@ -32,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::communities::{
-    ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest, INCLUDES_LABEL,
-    MANIFEST_SOURCE, ManifestCommunity, derived_context_id_of, derived_context_name,
+    ANALYSIS_TYPE, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest,
+    FINGERPRINT_TAG_PREFIX, INCLUDES_LABEL, MANIFEST_SOURCE, ManifestCommunity,
+    derived_context_id_of, derived_context_name,
 };
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
@@ -592,7 +593,13 @@ fn render_batches(
         let summary = summaries
             .get(community.id.as_str())
             .ok_or_else(|| format!("no summary for community {}", community.id))?;
-        lines.push(render(&json!({"passage": summary}))?);
+        // The fingerprint rides the summary's own record, so a search
+        // never pairs this text with another run's manifest entry for
+        // the same positional id (ADR 0056).
+        lines.push(render(&json!({
+            "passage": summary,
+            "tags": [format!("{FINGERPRINT_TAG_PREFIX}{}", community.fingerprint)],
+        }))?);
         for member in &community.members {
             let weight = if member.strength > 0.0 {
                 member.strength.min(1e6)

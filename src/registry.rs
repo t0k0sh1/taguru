@@ -1582,6 +1582,11 @@ pub struct PassageSearchHit {
     pub text: String,
     pub bm25: Option<(usize, f32)>,
     pub vector: Option<(usize, f32)>,
+    /// The record `text` was cut from — the same snapshot, so a caller
+    /// reading the source's metadata here (a communities artifact reads
+    /// its summary's fingerprint tag) can never pair one write's text
+    /// with another write's metadata. A moved `Arc`, never a copy.
+    pub(crate) record: std::sync::Arc<crate::passages::PassageRecord>,
 }
 
 /// One passage search's whole account: the served hits plus what each

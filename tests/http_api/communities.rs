@@ -167,10 +167,15 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     server.ok(
         "POST",
         &format!("/contexts/{}/sources", server.cx("sci::communities")),
-        Some(json!({"passages": {
-            "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
-            "communities:manifest": manifest.to_string(),
-        }})),
+        Some(json!({
+            "passages": {
+                "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
+                "communities:manifest": manifest.to_string(),
+            },
+            // What `taguru communities` writes beside every summary: its
+            // own fingerprint, read back from the same record (ADR 0056).
+            "tags": {"community:L0-0": ["community-fingerprint:00aa00aa00aa00aa"]},
+        })),
     );
     server.ok(
         "POST",
@@ -433,6 +438,20 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     assert!(hit["text"].as_str().unwrap().contains("要約"));
     assert_eq!(hit["members"].as_array().unwrap().len(), 4);
     assert_eq!(hit["concept_count"], 4);
+    // The run tagged each summary with its fingerprint, so the hit
+    // reports the same digest the analysis gave that community.
+    let (status, analysis) = get_ndjson(
+        &server,
+        &format!("/contexts/{}/communities", server.cx("corp")),
+    );
+    assert_eq!(status, 200, "{analysis}");
+    let analyzed: Value = analysis
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|line| line["id"] == hit["community_id"])
+        .expect("the hit's community is in the analysis");
+    assert_eq!(hit["fingerprint"], analyzed["fingerprint"], "{page}");
 
     // Membership landed as queryable edges on the artifact.
     let community = hit["community_id"].as_str().unwrap();
@@ -921,13 +940,86 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
     );
     let hit = &page["hits"][0];
     assert_eq!(hit["community_id"], json!("L0-0"), "{page}");
-    assert!(hit["level"].is_null(), "{page}");
-    assert!(hit["parent_id"].is_null(), "{page}");
-    assert!(hit["fingerprint"].is_null(), "{page}");
-    assert!(hit["concept_count"].is_null(), "{page}");
+    // Absent, not null: the contract omits a manifest fact it lacks.
+    for field in ["level", "parent_id", "fingerprint", "concept_count"] {
+        assert!(hit.get(field).is_none(), "{field} must be omitted: {page}");
+    }
     // Membership itself is unaffected — it comes straight off the
     // graph, not the manifest.
     assert_eq!(hit["members"].as_array().unwrap().len(), 2, "{page}");
+}
+
+/// Mid-rewrite, a summary can already be the new run's while the
+/// manifest (written last) is still the previous run's, under the same
+/// positional id. The hit reports the summary's own fingerprint and
+/// takes no manifest facts from an entry describing other content; a
+/// summary from before summaries carried a fingerprint keeps the id-only
+/// join and reports no fingerprint (ADR 0056).
+#[test]
+fn search_joins_manifest_facts_only_to_the_summary_they_describe() {
+    let server = Server::start("communities-manifest-generation");
+    seed_two_cliques(&server, "sci");
+    let revision =
+        server.ok("GET", &format!("/contexts/{}", server.cx("sci")), None)["revision"].clone();
+    let manifest = json!({
+        "type": "communities_manifest",
+        "algorithm": "louvain-cc/1",
+        "source_context_id": server.cx("sci"),
+        "revision": revision,
+        "levels": 2,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4,
+             "parent": "L1-0"},
+        ],
+    });
+    seed_manifest_artifact(&server, "sci::communities", &manifest);
+    let search = || {
+        server.ok(
+            "POST",
+            &format!("/contexts/{}/communities/search", server.cx("sci")),
+            Some(json!({"query": "夏目漱石"})),
+        )
+    };
+
+    // Untagged (an artifact from before this build): id-only join.
+    let page = search();
+    let hit = &page["hits"][0];
+    assert!(hit.get("fingerprint").is_none(), "{page}");
+    assert_eq!(hit["level"], 0, "{page}");
+    assert_eq!(hit["parent_id"], "L1-0", "{page}");
+    assert_eq!(hit["concept_count"], 4, "{page}");
+
+    // The new run's summary landed under L0-0; the manifest has not.
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
+        Some(json!({
+            "passages": {"community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。"},
+            "tags": {"community:L0-0": ["community-fingerprint:ffff0000ffff0000"]},
+        })),
+    );
+    let page = search();
+    let hit = &page["hits"][0];
+    assert_eq!(hit["community_id"], "L0-0", "{page}");
+    assert_eq!(hit["fingerprint"], "ffff0000ffff0000", "{page}");
+    for field in ["level", "parent_id", "concept_count"] {
+        assert!(hit.get(field).is_none(), "{field} is the old run's: {page}");
+    }
+
+    // Once the summary and the manifest agree, the facts come back.
+    server.ok(
+        "POST",
+        &format!("/contexts/{}/sources", server.cx("sci::communities")),
+        Some(json!({
+            "passages": {"community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。"},
+            "tags": {"community:L0-0": ["community-fingerprint:00aa00aa00aa00aa"]},
+        })),
+    );
+    let page = search();
+    let hit = &page["hits"][0];
+    assert_eq!(hit["fingerprint"], "00aa00aa00aa00aa", "{page}");
+    assert_eq!(hit["parent_id"], "L1-0", "{page}");
+    assert_eq!(hit["concept_count"], 4, "{page}");
 }
 
 // --- #753: derive-flow branches the #551 sweep found untested -------------

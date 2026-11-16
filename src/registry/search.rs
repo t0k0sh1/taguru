@@ -1096,6 +1096,7 @@ fn fuse_passage_lanes(
                 text: text.to_string(),
                 bm25: ranked.bm25,
                 vector: ranked.vector,
+                record: ranked.record,
             })
         })
         .collect()

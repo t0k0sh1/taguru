@@ -68,6 +68,20 @@ pub(crate) const MANIFEST_SOURCE: &str = "communities:manifest";
 /// Every community's summary is stored under `community:{id}`.
 pub(crate) const COMMUNITY_SOURCE_PREFIX: &str = "community:";
 
+/// Tag a summary source carries naming its community's fingerprint
+/// (ADR 0056). Written in the same import batch as the summary text, so
+/// a search reads both from one record: the fingerprint a hit reports
+/// always describes the text it serves, even mid-rewrite, when the
+/// manifest (written last) can still describe the previous run.
+pub(crate) const FINGERPRINT_TAG_PREFIX: &str = "community-fingerprint:";
+
+/// The summary source's own fingerprint, from its tags; `None` for an
+/// artifact built before summaries carried one.
+fn summary_fingerprint(tags: &[String]) -> Option<&str> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(FINGERPRINT_TAG_PREFIX))
+}
+
 /// Membership edges in a derived `context`: `community:{id} —contains→
 /// member concept`, weighted by the member's intra-community strength.
 pub(crate) const CONTAINS_LABEL: &str = "contains";
@@ -275,9 +289,11 @@ pub struct CommunityRevisions {
 
 /// One ranked community: the matched summary paragraph plus the
 /// community's manifest facts and its strongest members. Manifest
-/// fields are absent when the artifact is mid-rewrite and the summary
-/// landed before its manifest line — served honestly rather than
-/// dropped.
+/// fields are absent when the artifact is mid-rewrite and the manifest
+/// does not (yet) describe this summary — the summary landed before its
+/// manifest line, or the manifest is the previous run's and its entry
+/// for this id carries a different fingerprint — served honestly rather
+/// than dropped.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommunityHit {
     /// Community id (`L0-3`), valid only within the analysis that built
@@ -295,9 +311,12 @@ pub struct CommunityHit {
     pub level: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    /// The community's content digest from the manifest: equal across
-    /// re-runs exactly when the summarized content is equal, so it is
-    /// what a caller keeping a community beyond one analysis compares.
+    /// The summary's own content digest, read from the same record as
+    /// `text` (its `community-fingerprint:` tag): equal across re-runs
+    /// exactly when the summarized content is equal, so it is what a
+    /// caller keeping a community beyond one analysis compares. Absent
+    /// for an artifact built before summaries carried it, until its next
+    /// `taguru communities` run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,9 +336,11 @@ pub struct CommunityHitMember {
 }
 
 /// One passage hit kept for the response, pre-join: its community id,
-/// the ranking evidence, and which lanes surfaced it.
+/// the summary's own fingerprint tag, the ranking evidence, and which
+/// lanes surfaced it.
 struct RankedSummary {
     id: String,
+    fingerprint: Option<String>,
     score: f32,
     text: String,
     paragraph: u32,
@@ -526,6 +547,7 @@ pub(crate) fn community_hits(
         };
         ranked.push(RankedSummary {
             id: id.to_string(),
+            fingerprint: summary_fingerprint(&hit.record.meta.tags).map(str::to_string),
             score: hit.score,
             text: hit.text.clone(),
             paragraph: hit.index,
@@ -576,11 +598,23 @@ pub(crate) fn community_hits(
         .into_iter()
         .zip(members)
         .map(|(summary, (members, members_truncated))| {
-            let fact = facts.get(summary.id.as_str());
+            // Manifest facts join by the positional id, which a re-run
+            // can reassign: mid-rewrite the summary may already be the
+            // new run's while the manifest (written last) is still the
+            // old one's. A summary that names its fingerprint takes the
+            // facts only from the manifest entry with that same
+            // fingerprint; one built before summaries carried it falls
+            // back to the id alone and reports no fingerprint.
+            let fact = facts.get(summary.id.as_str()).filter(|fact| {
+                summary
+                    .fingerprint
+                    .as_deref()
+                    .is_none_or(|own| own == fact.fingerprint)
+            });
             CommunityHit {
                 level: fact.map(|fact| fact.level),
                 parent_id: fact.and_then(|fact| fact.parent.clone()),
-                fingerprint: fact.map(|fact| fact.fingerprint.clone()),
+                fingerprint: summary.fingerprint,
                 concept_count: fact.map(|fact| fact.concept_count),
                 community_id: summary.id,
                 score: summary.score,
