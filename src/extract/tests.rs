@@ -1028,22 +1028,22 @@ fn records_hint_points_at_the_log_and_the_sidecar_that_exist() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ADR 0037 (#850): `user_message_part` is `user_message`'s inverse
-/// for the `part K of N` a multi-chunk turn announces — read by
+/// ADR 0037 (#850): `user_message_chunk` is `user_message`'s inverse
+/// for the `chunk K of N` a multi-chunk turn announces — read by
 /// `taguru inspect` off an attempts log, which records the chunk
 /// index but not the count.
 #[test]
-fn user_message_part_reads_the_part_line_and_declines_a_single_chunk_turn() {
-    let multi = user_message("docs/a, part 1 of 2.md", 1, 3, "[4] text", None);
-    assert_eq!(user_message_part(&multi), Some((2, 3)));
+fn user_message_chunk_reads_the_chunk_line_and_declines_a_single_chunk_turn() {
+    let multi = user_message("docs/a, chunk 1 of 2.md", 1, 3, "[4] text", None);
+    assert_eq!(user_message_chunk(&multi), Some((2, 3)));
     let single = user_message("docs/a.md", 0, 1, "[0] text", None);
-    assert_eq!(user_message_part(&single), None);
-    // A source path that itself contains ", part 9 of 9:" cannot fool
+    assert_eq!(user_message_chunk(&single), None);
+    // A source path that itself contains ", chunk 9 of 9:" cannot fool
     // the parse: the announcement is the line's last such clause.
-    let tricky = user_message("x, part 9 of 9:", 0, 4, "[0] t", None);
-    assert_eq!(user_message_part(&tricky), Some((1, 4)));
-    assert_eq!(user_message_part("Fix these aliases: …"), None);
-    assert_eq!(user_message_part(""), None);
+    let tricky = user_message("x, chunk 9 of 9:", 0, 4, "[0] t", None);
+    assert_eq!(user_message_chunk(&tricky), Some((1, 4)));
+    assert_eq!(user_message_chunk("Fix these aliases: …"), None);
+    assert_eq!(user_message_chunk(""), None);
 }
 
 #[test]
@@ -7898,11 +7898,11 @@ fn overview_user_message_lists_the_units_opening_in_the_chunk() {
     let message = overview_user_message("doc.md", 0, 2, "[0] # A\n\n[1] x", &here);
     assert_eq!(
         message,
-        "Segment 'doc.md', part 1 of 2.\nUnits opening in this part:\n- unit 0: A\n- unit 1: B\n\n[0] # A\n\n[1] x"
+        "Segment 'doc.md', chunk 1 of 2.\nUnits opening in this chunk:\n- unit 0: A\n- unit 1: B\n\n[0] # A\n\n[1] x"
     );
     let none = overview_user_message("doc.md", 0, 1, "[0] plain", &[]);
     assert!(none.starts_with(
-        "Segment 'doc.md', the whole.\nNo structural unit opens in this part; answer cast only.\n\n[0] plain"
+        "Segment 'doc.md', the whole.\nNo structural unit opens in this chunk; answer cast only.\n\n[0] plain"
     ));
     assert!(overview_system_prompt().contains("\"cast\""));
 }
@@ -8532,7 +8532,7 @@ fn user_message_carries_the_block_in_the_preamble_and_the_inverses_split_it_righ
     assert_eq!(
         user,
         format!(
-            "Segment 'doc.md', part 2 of 3:\n{}\nPosition: A › B\nPreceding text: before\n\n[4] chunk text",
+            "Segment 'doc.md', chunk 2 of 3:\n{}\nPosition: A › B\nPreceding text: before\n\n[4] chunk text",
             block_preamble(1, 3)
         )
     );
@@ -8551,7 +8551,7 @@ fn user_message_carries_the_block_in_the_preamble_and_the_inverses_split_it_righ
     assert_eq!(user_message_segment(&plain), "[0] chunk");
     assert_eq!(user_message_occurrence_text(&plain), "\n[0] chunk");
     assert!(block_preamble(0, 1).contains("the segment only"));
-    assert!(block_preamble(2, 5).contains("part 3 of 5 only"));
+    assert!(block_preamble(2, 5).contains("chunk 3 of 5 only"));
 }
 
 #[test]

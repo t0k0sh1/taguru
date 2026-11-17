@@ -9,6 +9,19 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking (re-extraction) — the extraction prompt says "chunk" where
+  it said "part"** (#1057, #851). The user turn's `part K of N`, the
+  chunk-context block's preamble and the overview pass's prompts now
+  read `chunk K of N` / "this chunk", in `taguru extract` and both
+  LangChain SDKs. `PROMPT_VERSION` 6 → 7, so every already-extracted
+  segment re-extracts on its next run. `taguru inspect` reads the
+  chunk count from the new wording only: in an attempts log written
+  before 7, a multi-chunk segment's rows show no `/N` total (a
+  single-chunk segment's rows still read `chunk 1/1`). The docs follow:
+  `docs/modeling.html`'s granularity table lists `chunk` alone, and its
+  long-section example names the two sources `bert/2.2/segment-1` and
+  `bert/2.2/segment-2`.
+
 - **TypeScript SDK tests run on vitest 5** (#1018). Both SDK packages
   move their test runner from vitest 4.1.12 to 5.1.0. ADR 0049 listed
   vitest 5 as an upstream wait on `@stryker-mutator/vitest-runner`;

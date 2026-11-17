@@ -198,7 +198,7 @@ def test_checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_rec
     human_contents = [
         m.content for m in llm2.seen_prompts[0] if getattr(m, "type", None) == "human"
     ]
-    assert any("part 2 of 2" in content for content in human_contents)
+    assert any("chunk 2 of 2" in content for content in human_contents)
     assert len(fake_server.imported) == 1
     assert _unit_count(store, source) == 0  # cleared once the batch landed
 
@@ -763,7 +763,7 @@ def test_a_reused_chunk_still_participates_in_cross_chunk_correction(
     stage2_messages = llm2.seen_prompts[0]
     human_contents = [m.content for m in stage2_messages if getattr(m, "type", None) == "human"]
     ai_contents = [m.content for m in stage2_messages if getattr(m, "type", None) == "ai"]
-    assert any("part 2 of 2" in content for content in human_contents)
+    assert any("chunk 2 of 2" in content for content in human_contents)
     # The replayed prior-answer turn is the STORED (checkpointed) answer,
     # verbatim — proof the reused record's own conversation was rebuilt
     # from checkpoint data, not re-derived some other way.

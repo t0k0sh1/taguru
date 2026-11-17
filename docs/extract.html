@@ -849,7 +849,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>,
       #782). "Context" here is what a reader needs in mind to read a chunk — never the
       <code>context</code> that <code>--context ID</code> targets. By default (<code>--chunk-context
-      off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: part K of
+      off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: chunk K of
       N, and the labeled text. It does not know the chapter it sits in, the definitions an
       earlier article gave, or which act <code>同法</code> names three chunks back — the gap the
       v0.9.5 baseline measured as near-zero cross-unit recall on statutes, minutes, and
@@ -888,7 +888,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       can be credited to the kind of context that carried it. The mode is a computation input:
       switching it re-extracts, and a manifest or checkpoint from before the flag matches
       <code>off</code>. Split sub-pieces (the ladder's split rung) keep their chunk's block — a
-      sub-piece is still part K, read in part K's context.
+      sub-piece is still chunk K, read with chunk K's block.
     </p>
     <p>
       <code>--chunk-context overview</code> adds the model's half. Before any extraction, the
@@ -1077,7 +1077,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       rerun <i>without</i> <code>--force</code> resumes from them, re-asking only what failed.
       There is deliberately no "write what succeeded" mode: a source file is the source's
       complete, valid truth or nothing (ADR 0001 §8), and the checkpoints already make the
-      retry cost only the failed part.
+      retry cost only the failed pieces.
     </p>
     <p>
       <code>--dry-run</code> reads checkpoints too (never writes or calls anything) and folds a

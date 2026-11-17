@@ -144,7 +144,7 @@ pub(crate) use vocabulary::vocabulary_digest;
 // same inverses extract's own trace uses, so the two never disagree
 // about where a user turn's segment starts or which paragraphs a
 // piece spans.
-pub(crate) use prompt::{user_message_part, user_message_segment};
+pub(crate) use prompt::{user_message_chunk, user_message_segment};
 pub(crate) use trace::{PIECE_ID_SHORT, paragraph_range, short_piece_id};
 
 // Cross-submodule wiring: each of these is private to the one
@@ -535,7 +535,13 @@ Contract and discipline: docs/extract.html.
 /// sees). The wording the model reads changed, so an answer cached
 /// under 5 must not be silently reused.
 ///
-pub(crate) const PROMPT_VERSION: u32 = 6;
+/// 7 (#851/#1057): every "part" the model is shown that means a chunk
+/// — the user turn's `part K of N` preamble, the chunk-context block's
+/// preamble, and the overview pass's prompts — is now "chunk" (#851's
+/// terminology split). The wording the model reads changed, so an
+/// answer cached under 6 must not be silently reused.
+///
+pub(crate) const PROMPT_VERSION: u32 = 7;
 
 /// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
 /// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,

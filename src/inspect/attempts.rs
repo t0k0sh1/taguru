@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::extract::{
-    paragraph_range, shell_quote, short_piece_id, user_message_part, user_message_segment,
+    paragraph_range, shell_quote, short_piece_id, user_message_chunk, user_message_segment,
 };
 
 /// What `--piece`/`--paragraph` narrowed the view to.
@@ -315,14 +315,18 @@ fn attempt_row(record: &serde_json::Map<String, Value>) -> AttemptRow {
     // corrective round adds the replayed answer and the ask after it.
     let first_user = user_turns.first().copied();
     let piece_text = first_user.map(|user| user_message_segment(user).to_string());
-    // A single-chunk document's turn carries no `part K of N` clause:
-    // that is chunk 1 of 1. A Stage 2 correction's turn carries none
-    // either, and is no chunk at all.
+    // A single-chunk segment's turn opens with a bare `Segment '…':`
+    // line, no `chunk K of N` clause: that is chunk 1 of 1. Any other
+    // first line — a Stage 2 correction's, or the `part K of N` a log
+    // from before PROMPT_VERSION 7 carries (#1057) — states no count.
     let stage = str_field(record, "stage");
+    let single_chunk = first_user
+        .and_then(|user| user.lines().next())
+        .is_some_and(|line| line.starts_with("Segment '") && line.ends_with("':"));
     let chunk_total = first_user
-        .and_then(user_message_part)
+        .and_then(user_message_chunk)
         .map(|(_, total)| total)
-        .or_else(|| (stage == "item" && first_user.is_some()).then_some(1));
+        .or_else(|| (stage == "item" && single_chunk).then_some(1));
     let corrective_ask = (user_turns.len() > 1)
         .then(|| user_turns.last().copied())
         .flatten()
@@ -730,7 +734,7 @@ mod tests {
         doc: &str,
         answer: Option<&str>,
     ) -> String {
-        let user = format!("Segment 'a.md', part {} of 2:\n\n{doc}", chunk + 1);
+        let user = format!("Segment 'a.md', chunk {} of 2:\n\n{doc}", chunk + 1);
         json!({
             "type": "attempt", "run_id": "r1", "attempt_seq": seq, "piece_id": piece,
             "source": "a.md", "chunk_index": chunk, "stage": "item", "attempt": 1,
@@ -759,6 +763,36 @@ mod tests {
             "{not json".to_string(),
         ]
         .join("\n")
+    }
+
+    /// #1057: the chunk count comes only from a line that states it. A
+    /// bare `Segment '…':` turn is chunk 1 of 1; a pre-PROMPT_VERSION-7
+    /// `part K of N` turn states no count this build reads, so its row
+    /// carries no total rather than a wrong `/1`.
+    #[test]
+    fn chunk_total_comes_only_from_a_line_that_states_it() {
+        let row = |chunk: usize, content: &str| {
+            let line = attempt(1, "abcd000000000000", chunk, "stop_valid", "", None);
+            let mut record: Value = serde_json::from_str(&line).unwrap();
+            record["messages"][1]["content"] = json!(content);
+            let report = build_report("log", &record.to_string(), &Filter::All);
+            render_text(&report, &Filter::All)
+        };
+        let stated = row(1, "Segment 'a.md', chunk 2 of 3:\n\n[4] d");
+        assert!(
+            stated.contains("  #1  chunk 2/3  piece abcd00000000"),
+            "{stated}"
+        );
+        let single = row(0, "Segment 'a.md':\n\n[4] d");
+        assert!(
+            single.contains("  #1  chunk 1/1  piece abcd00000000"),
+            "{single}"
+        );
+        let retired = row(1, "Segment 'a.md', part 2 of 3:\n\n[4] d");
+        assert!(
+            retired.contains("  #1  chunk 2  piece abcd00000000"),
+            "{retired}"
+        );
     }
 
     #[test]
@@ -874,7 +908,7 @@ mod tests {
             "state": "length_limited", "length_limited": true, "transport_retries": 0,
             "elapsed_seconds": 1.0, "requested_max_tokens": 4000, "finish_reason": "length",
             "input_tokens": 1, "output_tokens": 2,
-            "messages": [{"role": "user", "content": "Segment 'a.md', part 2 of 2:\n\n[3] d"}],
+            "messages": [{"role": "user", "content": "Segment 'a.md', chunk 2 of 2:\n\n[3] d"}],
             "answer": "{", "parse_error": null, "validation_issues": null, "removed_items": null
         })
         .to_string();
@@ -885,7 +919,7 @@ mod tests {
             "state": "stop_valid", "length_limited": false, "transport_retries": 0,
             "elapsed_seconds": 1.0, "requested_max_tokens": 8000, "finish_reason": "stop",
             "input_tokens": 1, "output_tokens": 2,
-            "messages": [{"role": "user", "content": "Segment 'a.md', part 2 of 2:\n\n[3] d"}],
+            "messages": [{"role": "user", "content": "Segment 'a.md', chunk 2 of 2:\n\n[3] d"}],
             "answer": "{}", "parse_error": null, "validation_issues": null, "removed_items": null
         })
         .to_string();
@@ -1079,7 +1113,7 @@ mod tests {
         assert!(text.ends_with("--piece bbbb00000000\n"), "{text}");
         // An item attempt with no user turn at all (nothing was sent)
         // is still a chunk, not a cross-chunk row, and an empty
-        // document part earns no byte suffix.
+        // segment text earns no byte suffix.
         let bare = json!({
             "type": "attempt", "run_id": "r1", "attempt_seq": 9, "piece_id": "bare000000000000",
             "source": "a.md", "chunk_index": 2, "stage": "item", "attempt": 1, "max_attempts": 2,

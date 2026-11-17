@@ -347,7 +347,7 @@ struct AttemptFullRecord<'a> {
 /// 0021), as a record instead of a stderr sentence — `escalate` (the
 /// budget raised for one neutral resend), `demote` (the run's
 /// structured-output rung lowered; the piece restarts), `split` (the
-/// piece divided and each part rerun from the ladder's top). The
+/// piece divided and each half rerun as its own piece from the ladder's top). The
 /// per-attempt facts (states, timeouts, token costs) stay on the
 /// `attempt` records; a move record says what the ladder DID next and
 /// why, joinable by `piece_id` and, run-wide, by `run_id`.

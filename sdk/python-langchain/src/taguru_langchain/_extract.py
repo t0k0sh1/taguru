@@ -39,11 +39,12 @@ from taguru import LocatorSpec, SchemaDocument, SectionSpec, TypeDef
 # heading-only paragraph. 6 (#851/#904): every "document" the model is
 # shown (the framing, the user turn's preamble, the candidates/
 # vocabulary/chunk-context blocks) is now "segment" (#851's terminology
-# split). A schema DOCUMENT's own content changing without a prompt
+# split). 7 (#851/#1057): the user turn's "part K of N" is now "chunk K
+# of N". A schema DOCUMENT's own content changing without a prompt
 # revision is instead covered by the checkpoint's schema digest
 # (checkpoints.py) — the same division --fact-budget (a computation input)
 # and PROMPT_VERSION (the prompt's wording) already draw.
-PROMPT_VERSION = 6
+PROMPT_VERSION = 7
 # The file-format revision every record this module writes is stamped
 # with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
 # record's ``version`` column beside its ``type``.
@@ -600,7 +601,7 @@ def _schema_block(document: SchemaDocument, vocabulary: list[str]) -> str:
 
 def user_message(source: str, index: int, total: int, text: str) -> str:
     if total > 1:
-        return f"Segment '{source}', part {index + 1} of {total}:\n\n{text}"
+        return f"Segment '{source}', chunk {index + 1} of {total}:\n\n{text}"
     return f"Segment '{source}':\n\n{text}"
 
 
