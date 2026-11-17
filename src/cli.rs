@@ -340,7 +340,7 @@ ENVIRONMENT (every knob; unset = the shown default):
                                questions) per context (20000); past it the
                                lexical lane still serves every paragraph
   TAGURU_EMBED_AUTO            1 = refresh embeddings with each flush (off)
-  TAGURU_EMBED_PARALLEL        concurrent 128-item chunk dispatch for gloss
+  TAGURU_EMBED_PARALLEL        concurrent 128-item batch dispatch for gloss
                                and passage embedding refresh (1 = old
                                sequential behavior); raise to match the
                                provider's rate limit, not the core count —

@@ -1,4 +1,4 @@
-"""Auto-pagination iterators and association batch chunking."""
+"""Auto-pagination iterators and association batching."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import httpx
 
 from taguru import AliasEntry
-from taguru._shared import chunk_associations, dumps_compact
+from taguru._shared import batch_associations, dumps_compact
 from taguru._types import AssocOp
 
 from .conftest import ok_response, sync_client
@@ -120,38 +120,38 @@ def _op(i: int) -> AssocOp:
     return {"subject": f"s{i}", "label": "l", "object": "o", "weight": 1.0}
 
 
-def test_chunk_associations_splits_by_count() -> None:
+def test_batch_associations_splits_by_count() -> None:
     ops = [_op(i) for i in range(5)]
-    chunks = list(chunk_associations(ops, 2, 10**9))
-    assert [len(c) for c in chunks] == [2, 2, 1]
+    batches = list(batch_associations(ops, 2, 10**9))
+    assert [len(b) for b in batches] == [2, 2, 1]
 
 
-def test_chunk_associations_splits_by_bytes_matching_wire_serialization() -> None:
+def test_batch_associations_splits_by_bytes_matching_wire_serialization() -> None:
     ops = [_op(i) for i in range(4)]
     one = len(dumps_compact(_op(0)))
-    # Room for exactly two ops per chunk: [op,op] = 2 + one + 1 + one bytes.
+    # Room for exactly two ops per batch: [op,op] = 2 + one + 1 + one bytes.
     budget = 2 + one + 1 + one
-    chunks = list(chunk_associations(ops, 10_000, budget))
-    assert [len(c) for c in chunks] == [2, 2]
-    for chunk in chunks:
-        assert len(dumps_compact(chunk)) <= budget
+    batches = list(batch_associations(ops, 10_000, budget))
+    assert [len(b) for b in batches] == [2, 2]
+    for batch in batches:
+        assert len(dumps_compact(batch)) <= budget
 
 
-def test_chunk_associations_yields_oversized_single_op_alone() -> None:
+def test_batch_associations_yields_oversized_single_op_alone() -> None:
     ops = [_op(0), _op(1)]
-    chunks = list(chunk_associations(ops, 10_000, 3))
-    assert [len(c) for c in chunks] == [1, 1]
+    batches = list(batch_associations(ops, 10_000, 3))
+    assert [len(b) for b in batches] == [1, 1]
 
 
-def test_chunk_associations_charges_the_separating_comma_exactly() -> None:
+def test_batch_associations_charges_the_separating_comma_exactly() -> None:
     """One byte under the exact two-op serialization must split — the comma
     between elements is real wire bytes, and undercounting it by one would
-    ship chunks that overshoot ``max_chunk_bytes``."""
+    ship batches that overshoot ``max_batch_bytes``."""
     ops = [_op(0), _op(1)]
     one = len(dumps_compact(_op(0)))
     exactly_two = 2 + one + 1 + one
-    assert [len(c) for c in chunk_associations(ops, 10_000, exactly_two)] == [2]
-    assert [len(c) for c in chunk_associations(ops, 10_000, exactly_two - 1)] == [1, 1]
+    assert [len(b) for b in batch_associations(ops, 10_000, exactly_two)] == [2]
+    assert [len(b) for b in batch_associations(ops, 10_000, exactly_two - 1)] == [1, 1]
 
 
 def test_add_associations_batched_sums_applied_counts() -> None:
@@ -164,10 +164,10 @@ def test_add_associations_batched_sums_applied_counts() -> None:
 
     client = sync_client(handler)
     result = client.context("sake").add_associations_batched(
-        [_op(i) for i in range(5)], chunk_size=2
+        [_op(i) for i in range(5)], batch_size=2
     )
     assert result.applied == 5
-    assert result.chunks == 3
+    assert result.batches == 3
     assert result.issues == []
     assert result.schema_violations == 0
     assert batches == [2, 2, 1]
@@ -204,13 +204,13 @@ def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
         (issue["path"], issue["kind"], issue["expected"], issue["actual"])
     ]
 
-    # Batched aggregation preserves chunk order and sums the true counts.
-    # Each response is derived from the CHUNK THE REQUEST CARRIED, not
+    # Batched aggregation preserves batch order and sums the true counts.
+    # Each response is derived from the BATCH THE REQUEST CARRIED, not
     # from handler call order — so a reordered transmission, a dropped
-    # chunk, or a double-count would all be visible.
+    # batch, or a double-count would all be visible.
     violations_for = {"s0": 1, "s1": 2}
 
-    def chunked_handler(req: httpx.Request) -> httpx.Response:
+    def batched_handler(req: httpx.Request) -> httpx.Response:
         ops = json.loads(req.content)
         subject = ops[0]["subject"]
         return httpx.Response(
@@ -224,9 +224,9 @@ def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
             },
         )
 
-    batched_client = sync_client(chunked_handler)
+    batched_client = sync_client(batched_handler)
     batched = batched_client.context("sake").add_associations_batched(
-        [_op(0), _op(1)], chunk_size=1
+        [_op(0), _op(1)], batch_size=1
     )
     assert batched.applied == 2
     assert batched.schema_violations == 1 + 2

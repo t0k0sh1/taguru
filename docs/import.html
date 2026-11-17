@@ -168,7 +168,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
     <p>
       Every <code>--json</code> exit path prints exactly one JSON document, failures included —
       never silent stdout on a non-zero exit. Validation refusing every file, the registry
-      refusing to boot, and a remote transport error or a server-refused chunk each add a
+      refusing to boot, and a remote transport error or a server-refused request each add a
       top-level <code>error</code> string beside <code>batches</code>/<code>schemas</code>/
       <code>groups</code>, unchanged from the success case's own rule: <code>batches</code> is
       always an array (<code>[]</code> when nothing landed before the failure),
@@ -176,7 +176,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       failure that landed zero sources, zero schemas, and zero <code>groups</code> still answers
       <code>{"dry_run": ..., "error": "...", "batches": []}</code>, no <code>schemas</code> or
       <code>groups</code> key at all. A local source refused mid-run (offline only — a remote
-      refusal fails its whole chunk, never one source within it), and on either path a source
+      refusal fails its whole request, never one source within it), and on either path a source
       <a href="#refuse-sensitive"><code>--refuse-sensitive</code></a> refused, is named under a
       <code>failed_batches</code> array instead of appearing in <code>batches</code>, since there
       is no <code>ImportOutcome</code> to build for a source that was never applied; the
@@ -430,7 +430,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       </table>
     </div>
     <p>
-      There is no cap on operations per file. Apply is internally chunked at the API batch size
+      There is no cap on operations per file. Apply is internally split into batches at the API batch size
       (10,000) and long runs flush periodically, so no <code>context</code>'s WAL ever approaches
       <code>TAGURU_WAL_MAX_BYTES</code>.
     </p>
@@ -521,14 +521,14 @@ curl -X POST localhost:8248/import \
   </section>
 
   <section id="url">
-    <h2><code>import --url</code>: chunked over the wire</h2>
+    <h2><code>import --url</code>: split into requests over the wire</h2>
     <p class="section-sub">
       <code>taguru import --url URL FILE|DIR...</code> drives <code>POST /import</code> for a
       whole file set the same way <code>taguru import</code> drives the local write path —
       without the operator hand-splitting anything to fit under the body cap.
     </p>
     <pre><code>taguru import --url "$TAGURU_URL" backups/
-taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview every chunk first</span></code></pre>
+taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview every request first</span></code></pre>
     <ul>
       <li>
         The input is split on <b>source boundaries only</b>, never mid-source: a source runs from its
@@ -549,16 +549,16 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         the server that owns it.
       </li>
       <li>
-        A <code>413</code> on a chunk still oversized only because the cap is configured lower than
-        assumed halves that chunk (never crossing a source boundary) and resends, halving again on
-        every further <code>413</code> until the chunk lands or hits a single source — safe to
+        A <code>413</code> on a request still oversized only because the cap is configured lower than
+        assumed halves that request (never crossing a source boundary) and resends, halving again on
+        every further <code>413</code> until the request lands or hits a single source — safe to
         automate since the server refuses a <code>413</code> before applying anything.
       </li>
       <li>
-        <code>schema</code> records ride after every source-file chunk, and
-        <code>group</code> records after every schema chunk in turn — the same order the
-        local path already applies them in, so a schema naming a <code>context</code> an earlier chunk's source
-        creates, or a <code>group</code> naming a <code>context</code> an earlier chunk's schema installs onto, always
+        <code>schema</code> records ride after every request of source files, and
+        <code>group</code> records after every request of schemas in turn — the same order the
+        local path already applies them in, so a schema naming a <code>context</code> an earlier request's source
+        creates, or a <code>group</code> naming a <code>context</code> an earlier request's schema installs onto, always
         arrives after it.
       </li>
       <li>
@@ -569,8 +569,8 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         all is refused the same way: it predates the format this build writes.
       </li>
       <li>
-        A refused chunk is reported by what it carried, not just by number (#863): the line
-        after the refusal names the chunk's one unit, or its first and last, as
+        A refused request is reported by what it carried, not just by number (#863): the line
+        after the refusal names the request's one unit, or its first and last, as
         <code>&lt;file&gt;: context '…' source '…'</code>; the server's own <code>issues[]</code>
         follow, each re-addressed from the request-relative <code>batches[N].…</code> to that
         unit's file, <code>context</code>, and source with the in-source remainder kept
@@ -580,9 +580,9 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         source — the resume point.
       </li>
       <li>
-        A lost connection reports which chunk landed and points at <code>--dry-run</code> to
+        A lost connection reports which request landed and points at <code>--dry-run</code> to
         confirm what remains before resuming — nothing past that point is retried automatically.
-        It also names the last unit the server confirmed and what the unconfirmed chunk carried,
+        It also names the last unit the server confirmed and what the unconfirmed request carried,
         by file and source (#863). Import's retract-then-apply contract makes any resend exact,
         so this is a "where," never a "was it safe," question.
       </li>

@@ -132,7 +132,7 @@ classes:
     add_associations_batched:
       route: "POST /contexts/{id}/associations"
       args: [associations]
-      options: [chunk_size, max_chunk_bytes]
+      options: [batch_size, max_batch_bytes]
     retract_association:
       route: "POST /contexts/{id}/associations/retract"
       args: [subject, label, object]

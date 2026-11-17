@@ -87,10 +87,10 @@ from .._shared import (
     DEFAULT_TIMEOUT_SECS,
     ENV_TOKEN,
     ENV_URL,
-    MAX_CHUNK_BYTES,
+    MAX_BATCH_BYTES,
     MAX_OPS_PER_REQUEST,
     ContractState,
-    chunk_associations,
+    batch_associations,
     drop_none,
     dumps_compact,
     encode_name,
@@ -1248,7 +1248,7 @@ class AsyncContext:
         ``context`` would have raised. Weight ACCUMULATES on re-assertion, so
         this call is never blindly retried after an ambiguous transport
         failure. Server cap: 10,000 per request (use
-        ``add_associations_batched`` to auto-chunk).
+        ``add_associations_batched`` to send it in batches).
         """
         result, issues, schema_violations = await self._post_full(
             "/associations", list(associations), retry=RetryClass.UNSAFE_ON_AMBIGUOUS
@@ -1261,29 +1261,29 @@ class AsyncContext:
         self,
         associations: Sequence[AssocOp],
         *,
-        chunk_size: int = MAX_OPS_PER_REQUEST,
-        max_chunk_bytes: int = MAX_CHUNK_BYTES,
+        batch_size: int = MAX_OPS_PER_REQUEST,
+        max_batch_bytes: int = MAX_BATCH_BYTES,
     ) -> BatchApplyResult:
-        """Chunked ``add_associations`` for arbitrarily large batches.
+        """``add_associations`` in batches, for arbitrarily many associations.
 
-        Chunks are independent requests: a failure mid-way leaves earlier
-        chunks applied (that is why this is a separate, opt-in method).
-        ``issues``/``schema_violations`` aggregate every chunk's warn-mode
-        carrier, in chunk order.
+        Batches are independent requests: a failure mid-way leaves earlier
+        batches applied (that is why this is a separate, opt-in method).
+        ``issues``/``schema_violations`` aggregate every batch's warn-mode
+        carrier, in batch order.
         """
         applied = 0
-        chunks = 0
+        batches = 0
         issues: list[Issue] = []
         schema_violations = 0
-        for chunk in chunk_associations(list(associations), chunk_size, max_chunk_bytes):
-            outcome = await self.add_associations(chunk)
+        for batch in batch_associations(list(associations), batch_size, max_batch_bytes):
+            outcome = await self.add_associations(batch)
             applied += outcome.applied
             issues.extend(outcome.issues)
             schema_violations += outcome.schema_violations
-            chunks += 1
+            batches += 1
         return BatchApplyResult(
             applied=applied,
-            chunks=chunks,
+            batches=batches,
             issues=issues,
             schema_violations=schema_violations,
         )

@@ -2118,9 +2118,9 @@ fn never_sent_lines_count_each_kind_across_the_queue_and_name_the_first() {
     assert_eq!(
         never_sent_lines(&queue),
         vec![
-            "3 source(s) after this chunk were never sent, from a.jsonl: context 'a' source 'c.md'"
+            "3 source(s) after this request were never sent, from a.jsonl: context 'a' source 'c.md'"
                 .to_string(),
-            "1 group record(s) after this chunk were never sent, from b.jsonl: group 'g'"
+            "1 group record(s) after this request were never sent, from b.jsonl: group 'g'"
                 .to_string(),
         ]
     );
@@ -2221,7 +2221,7 @@ fn sensitive_hits_name_path_rule_and_paragraph_never_content() {
 #[test]
 fn the_oversized_unit_message_names_unit_size_and_budget() {
     let message = oversized_unit_message("a.jsonl: context 'c' source 's'", 5_000_001, 4_194_304);
-    assert!(message.starts_with("a.jsonl: context 'c' source 's' alone is 5000001 byte(s), over the 4194304-byte chunk budget"), "{message}");
+    assert!(message.starts_with("a.jsonl: context 'c' source 's' alone is 5000001 byte(s), over the 4194304-byte request budget"), "{message}");
     assert!(
         message.contains("TAGURU_MAX_BODY_BYTES alone will not help"),
         "{message}"

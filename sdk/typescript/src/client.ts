@@ -79,9 +79,9 @@ import {
   DEFAULT_TIMEOUT_SECS,
   ENV_TOKEN,
   ENV_URL,
-  MAX_CHUNK_BYTES,
+  MAX_BATCH_BYTES,
   MAX_OPS_PER_REQUEST,
-  chunkAssociations,
+  batchAssociations,
   describeError,
   dropUndefined,
   encodeName,
@@ -1292,7 +1292,7 @@ export class Context {
    * §8.3) — check `result.issues` where a `strict` `context` would have
    * thrown. Weight ACCUMULATES on re-assertion, so this call is never
    * blindly retried after an ambiguous transport failure. Server cap:
-   * 10,000 per request (use `addAssociationsBatched` to auto-chunk).
+   * 10,000 per request (use `addAssociationsBatched` to send it in batches).
    */
   async addAssociations(associations: AssocOp[]): Promise<AddAssociationsResult> {
     const { result, issues, schema_violations } = await this.postFull(
@@ -1304,30 +1304,30 @@ export class Context {
   }
 
   /**
-   * Chunked `addAssociations` for arbitrarily large batches. Chunks are
-   * independent requests: a failure mid-way leaves earlier chunks applied
-   * (that is why this is a separate, opt-in method).
-   * `issues`/`schema_violations` aggregate every chunk's warn-mode carrier,
-   * in chunk order.
+   * `addAssociations` in batches, for arbitrarily many associations.
+   * Batches are independent requests: a failure mid-way leaves earlier
+   * batches applied (that is why this is a separate, opt-in method).
+   * `issues`/`schema_violations` aggregate every batch's warn-mode carrier,
+   * in batch order.
    */
   async addAssociationsBatched(
     associations: AssocOp[],
-    options: { chunk_size?: number; max_chunk_bytes?: number } = {},
+    options: { batch_size?: number; max_batch_bytes?: number } = {},
   ): Promise<BatchApplyResult> {
-    const chunkSize = options.chunk_size ?? MAX_OPS_PER_REQUEST;
-    const maxChunkBytes = options.max_chunk_bytes ?? MAX_CHUNK_BYTES;
+    const batchSize = options.batch_size ?? MAX_OPS_PER_REQUEST;
+    const maxBatchBytes = options.max_batch_bytes ?? MAX_BATCH_BYTES;
     let applied = 0;
-    let chunks = 0;
+    let batches = 0;
     const issues: Issue[] = [];
     let schemaViolations = 0;
-    for (const chunk of chunkAssociations(associations, chunkSize, maxChunkBytes)) {
-      const outcome = await this.addAssociations(chunk);
+    for (const batch of batchAssociations(associations, batchSize, maxBatchBytes)) {
+      const outcome = await this.addAssociations(batch);
       applied += outcome.applied;
       issues.push(...outcome.issues);
       schemaViolations += outcome.schema_violations;
-      chunks += 1;
+      batches += 1;
     }
-    return { applied, chunks, issues, schema_violations: schemaViolations };
+    return { applied, batches, issues, schema_violations: schemaViolations };
   }
 
   /**
@@ -1777,7 +1777,7 @@ export class Context {
   /**
    * Stream the export body without buffering it whole (no retry).
    *
-   * The timeout is re-armed on every chunk, not held once against the whole
+   * The timeout is re-armed on every read from the body, not held once against the whole
    * download — a large export must not be cut off just because it runs
    * longer than one request's timeout budget as long as bytes keep arriving.
    */

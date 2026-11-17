@@ -159,7 +159,7 @@ an absent one is minted, and a name several carry is refused. --url
 does not read it. See docs/import.html#upgrading-from-0-9-7.
 
   --dry-run    validate every file and report; touch nothing (with
-               --url, POSTs every chunk as ?dry_run=true instead)
+               --url, sends every request with ?dry_run=true instead)
   --no-embed   skip the embedding refresh TAGURU_EMBED_URL would enable
                (offline only — combined with --url this is a usage
                error, since the server's own configuration decides
@@ -186,16 +186,16 @@ does not read it. See docs/import.html#upgrading-from-0-9-7.
                misconfiguration, not a no-op
 
   --url URL    import into a RUNNING server instead of TAGURU_DATA_DIR
-               directly: POST /import, one request per chunk. The
-               input is split on source boundaries only — never
-               mid-source — into chunks under the server's body cap
-               (TAGURU_MAX_BODY_BYTES, 8 MiB by default), starting at
+               directly: POST /import, one request per slice of the
+               input. The input is split on source boundaries only —
+               never mid-source — into requests under the server's body
+               cap (TAGURU_MAX_BODY_BYTES, 8 MiB by default), starting at
                a 4 MiB budget and halved (never crossing a source
                boundary) and resent on a 413. A single source file that
                alone exceeds the cap is a hard error naming the
                source: raise TAGURU_MAX_BODY_BYTES on the server, or
                split that source's content upstream of import. A lost
-               connection names which chunk landed and points at
+               connection names which request landed and points at
                --dry-run to confirm before resuming — nothing past
                that is retried automatically (import's
                retract-then-apply contract makes any resend exact).
@@ -218,7 +218,7 @@ does not read it. See docs/import.html#upgrading-from-0-9-7.
                prints exactly one document, failures included: validation
                refusing every file, the
                registry refusing to boot, and a remote transport error
-               or a server-refused chunk each add a top-level 'error'
+               or a server-refused request each add a top-level 'error'
                string beside whatever sources/groups already landed; a
                source file refused mid-run (offline only) is named under a
                failed_batches array instead of batches, since there is

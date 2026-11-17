@@ -1147,14 +1147,14 @@ class PromoteOutcome:
 
 @dataclass(slots=True, frozen=True)
 class BatchApplyResult:
-    """Outcome of ``add_associations_batched``: chunks are independent writes.
+    """Outcome of ``add_associations_batched``: batches are independent writes.
 
-    ``issues``/``schema_violations`` aggregate every chunk's warn-mode
-    carrier (ADR 0009 §8.3), in chunk order.
+    ``issues``/``schema_violations`` aggregate every batch's warn-mode
+    carrier (ADR 0009 §8.3), in batch order.
     """
 
     applied: int
-    chunks: int
+    batches: int
     issues: list[Issue] = field(default_factory=list)
     schema_violations: int = 0
 

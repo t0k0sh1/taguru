@@ -287,7 +287,7 @@ fn a_full_remote_import_matches_the_local_import_of_the_same_stream() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
-/// `--dry-run` sends every chunk as `?dry_run=true` and writes nothing
+/// `--dry-run` sends every request with `?dry_run=true` and writes nothing
 /// — the context named in the batch must not exist afterward.
 #[test]
 fn a_remote_dry_run_previews_every_chunk_and_writes_nothing() {
@@ -437,7 +437,7 @@ fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
 /// chunk fits — and the import still lands every source, across
 /// however many chunks that takes.
 #[test]
-fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
+fn a_small_body_cap_forces_multiple_requests_and_the_import_still_lands() {
     let batches = batch_dir("remote-import-smallcap");
     let file = batches.join("seed.jsonl");
     let mut content = String::new();
@@ -460,8 +460,8 @@ fn a_small_body_cap_forces_multiple_chunks_and_the_import_still_lands() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.matches("chunk ").count() > 1,
-        "a 600-byte cap must force more than one chunk: {stdout}"
+        stdout.matches("request ").count() > 1,
+        "a 600-byte cap must force more than one request: {stdout}"
     );
     assert!(
         stdout.contains("6 source(s) applied across 1 context(s)"),
@@ -613,18 +613,18 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     // line must carry ITS OWN count, never another kind's (issue #728:
     // groups used to be missing from this tally).
     // …and each names the first never-sent unit of its kind by file
-    // and source, and the refused chunk says what it carried (#863).
+    // and source, and the refused request says what it carried (#863).
     let path = file.display();
     for line in [
         format!(
-            "2 source(s) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+            "2 source(s) after this request were never sent, from {path}: context 'c' source 'c.md'"
         ),
         format!(
-            "1 schema record(s) after this chunk were never sent, from {path}: context 'ca978112-ca1b-4dca-bac2-31b39a23dc4d' schema"
+            "1 schema record(s) after this request were never sent, from {path}: context 'ca978112-ca1b-4dca-bac2-31b39a23dc4d' schema"
         ),
-        format!("1 group record(s) after this chunk were never sent, from {path}: group 'g'"),
+        format!("1 group record(s) after this request were never sent, from {path}: group 'g'"),
         format!(
-            "this chunk carried 1 unit: {path}: context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' source 'bad.md'"
+            "this request carried 1 unit: {path}: context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' source 'bad.md'"
         ),
     ] {
         assert!(stderr.contains(&line), "missing {line:?} in: {stderr}");
@@ -1057,9 +1057,9 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
         !stderr.contains("warning:"),
         "the matching health version must not warn: {stderr}"
     );
-    assert!(stdout.contains("chunk 1/2"), "stdout: {stdout}");
+    assert!(stdout.contains("request 1/2"), "stdout: {stdout}");
     assert!(
-        stderr.contains("connection lost after chunk 1/2"),
+        stderr.contains("connection lost after request 1/2"),
         "{stderr}"
     );
     assert!(stderr.contains("--dry-run"), "{stderr}");
@@ -1075,7 +1075,7 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
     );
     assert!(
         stderr.contains(&format!(
-            "not confirmed — this chunk carried 1 unit: {path}: context 'b' source 'b.md'"
+            "not confirmed — this request carried 1 unit: {path}: context 'b' source 'b.md'"
         )),
         "{stderr}"
     );
@@ -1124,7 +1124,7 @@ fn a_refusal_with_issues_names_the_file_and_item_of_each() {
         &[],
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stderr.contains("chunk 1/1 refused"), "{stderr}");
+    assert!(stderr.contains("request 1/1 refused"), "{stderr}");
     let addressed = format!(
         "taguru: import: {}: context 'ca978112-ca1b-4dca-bac2-31b39a23dc4d' source 'b.md': associations[1].subject: expected ",
         violating.display()
@@ -1172,13 +1172,13 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
     );
     assert!(
         stderr.contains(&format!(
-            "not confirmed — this chunk carried 1 unit: {path}: context 'b' source 'b.md'"
+            "not confirmed — this request carried 1 unit: {path}: context 'b' source 'b.md'"
         )),
         "{stderr}"
     );
     assert!(
         stderr.contains(&format!(
-            "2 source(s) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+            "2 source(s) after this request were never sent, from {path}: context 'c' source 'c.md'"
         )),
         "{stderr}"
     );
@@ -1224,11 +1224,11 @@ fn a_queued_chunk_over_the_halved_budget_is_split_before_sending() {
         &[],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(stdout.contains("chunk 1/3: 1 source(s)"), "{stdout}");
-    assert!(stdout.contains("chunk 2/3: 1 source(s)"), "{stdout}");
-    assert!(stdout.contains("chunk 3/3: 2 source(s)"), "{stdout}");
+    assert!(stdout.contains("request 1/3: 1 source(s)"), "{stdout}");
+    assert!(stdout.contains("request 2/3: 1 source(s)"), "{stdout}");
+    assert!(stdout.contains("request 3/3: 2 source(s)"), "{stdout}");
     assert!(
-        stdout.contains("import: 4 source(s) applied across 1 context(s) in 3 chunk(s)"),
+        stdout.contains("import: 4 source(s) applied across 1 context(s) in 3 request(s)"),
         "{stdout}"
     );
     // A run with no schema or group records prints no line for either.
@@ -1387,7 +1387,7 @@ fn the_pre_send_budget_admits_a_unit_exactly_at_it_and_refuses_one_byte_more() {
     );
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("alone is 4194305 byte(s), over the 4194304-byte chunk budget"),
+        stderr.contains("alone is 4194305 byte(s), over the 4194304-byte request budget"),
         "{stderr}"
     );
     assert!(
