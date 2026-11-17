@@ -86,6 +86,63 @@
     </p>
   </header>
 
+  <section id="terms">
+    <h2>Terms: document, segment, chunk, piece, paragraph</h2>
+    <p class="section-sub">The five units this page talks about, largest first. Each one contains the next — except a paragraph longer than the chunk cap, whose slices can land in different chunks and pieces (below).</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Term</th><th>What it is</th><th>Who decides it</th><th>Where you see it</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>document</td>
+            <td>the whole original text you want in Taguru — a paper, a statute, a set of minutes</td>
+            <td>you</td>
+            <td>nowhere: <code>taguru extract</code> never receives a document as such</td>
+          </tr>
+          <tr>
+            <td>segment / segment file</td>
+            <td>a portion of a document a person cut out — a chapter, a section — and the <code>.md</code>/<code>.txt</code> file it is saved as</td>
+            <td><b>you, always</b>: the system never cuts a document into segments</td>
+            <td>the input paths; the <code>taguru: extract: &lt;path&gt;:</code> prefix on every stderr line; the <code>segment</code> record in a trace or attempts log file</td>
+          </tr>
+          <tr>
+            <td>chunk</td>
+            <td>a run of a segment's paragraphs, at most <code>--chunk-bytes</code>, planned as one model call; numbered <code>chunk K/N</code> before any call is made</td>
+            <td><code>extract</code>'s <a href="#pipeline"><code>plan</code></a> step (<a href="#chunking">Chunking</a>)</td>
+            <td><code>chunk K/N</code> in failure lines and <code>inspect</code> rows; <code>--dry-run</code>'s chunk count; <code>chunk_index</code> in trace and attempts records. Never on the server</td>
+          </tr>
+          <tr>
+            <td>piece</td>
+            <td>the text actually sent to the model as one conversation. An unsplit chunk is one piece, with the same text and the same id (the text's sha256). When the <a href="#structured-output">escalation ladder</a> splits a length-limited or timed-out piece, each half is a new piece</td>
+            <td><code>extract</code>, at run time</td>
+            <td><code>piece &lt;id&gt;</code> in failure lines; <code>inspect --piece ID</code>; <code>piece_id</code> in trace and attempts records; a <a href="#checkpoints">checkpoint</a> unit is one piece's output</td>
+          </tr>
+          <tr>
+            <td>paragraph</td>
+            <td>a block of text between blank lines, numbered <code>[N]</code> from 0 across the whole segment</td>
+            <td>the segment's own blank lines</td>
+            <td>the <code>[N]</code> labels in the prompt; <code>paragraphs A–B</code> in failure lines and <code>inspect</code> rows; <code>inspect --paragraph N</code>; the paragraph a citation points back to</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Chunks and pieces are cut at paragraph boundaries. The one exception is a paragraph longer
+      than the cap: it is cut inside, and every slice repeats its <code>[N]</code> label, so a
+      chunk or piece always names the paragraph its text came from. A split never crosses its
+      chunk: a sub-piece is still chunk K. A chunk reused from a <a href="#checkpoints">checkpoint</a>
+      makes no model call, so <code>--dry-run</code>'s chunk count less its reusable count is a
+      lower bound on model calls.
+    </p>
+    <p>
+      Each segment file is extracted on its own. Its result is one source file under
+      <code>--out</code>, which <a href="import.html"><code>taguru import</code></a> applies into
+      the one <code>context</code> that <code>--context ID</code> names. A failure stays inside
+      its segment: the run counts it, writes nothing for it, and moves on to the next segment
+      file — the other segments of the same run are untouched.
+    </p>
+  </section>
+
   <section id="cli">
     <h2>The CLI shape</h2>
     <pre><code>taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --name sake --description "酒蔵の知識" \
@@ -944,7 +1001,8 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
   <section id="chunking">
     <h2>Chunking</h2>
     <p>
-      This is the <a href="#pipeline"><code>plan</code></a> step.
+      This is the <a href="#pipeline"><code>plan</code></a> step (chunk and piece are defined in
+      <a href="#terms">Terms</a>).
       Segments are sent in chunks of at most <code>--chunk-bytes</code> (24 KiB by default;
       <code>TAGURU_EXTRACT_CHUNK_BYTES</code> sets the default), cut at paragraph boundaries (aliases and
       duplicate folding stay coherent across chunks — an alias in chunk 1 whose canonical first
@@ -953,7 +1011,8 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       carries the full segment text as-is. Segments over 8 MiB are refused. Their passage could
       not fit in the source file. Split the segment. Under the escalation ladder
       (<a href="#structured-output">above</a>) a length-limited or timed-out chunk can split further at run
-      time, so <code>--dry-run</code>'s chunk count is a lower bound on model calls, not an
+      time, so <code>--dry-run</code>'s chunk count, less the chunks it reports as reusable from a
+      checkpoint, is a lower bound on model calls, not an
       exact one. The cap is a computation input: a segment extracted under a different
       <code>--chunk-bytes</code> re-extracts (the default cap matches manifests written before the
       flag existed). Lower it for a slow local provider or for output-dense segments — statutes,

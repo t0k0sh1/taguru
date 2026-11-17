@@ -115,7 +115,7 @@
           </tr>
           <tr>
             <td>chunk</td>
-            <td>a size-bounded slice a <em>pipeline</em> feeds to a model (<code>taguru extract</code>: 24 KiB)</td>
+            <td>a size-bounded slice a <em>pipeline</em> feeds to a model (<code>taguru extract</code>: 24 KiB; see <a href="extract.html#terms">its terms</a>)</td>
             <td>nothing on the server — it is transport, not meaning</td>
             <td>your extraction pipeline, never the server</td>
           </tr>
@@ -130,6 +130,10 @@
       unit that exists on the server is the passage (a source's full text) split into paragraphs.
       A chunk boundary that survives into the graph as a <code>context</code> boundary is an accident of the
       pipeline, not a decision about meaning.
+    </p>
+    <p>
+      The units on the extraction side — document, segment, chunk, piece, paragraph — and how
+      they nest are defined once, in <a href="extract.html#terms">Segment extraction: Terms</a>.
     </p>
   </section>
 
