@@ -43,7 +43,10 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: taguru
-          image: ghcr.io/t0k0sh1/taguru:0.9.7 # pin; `latest` moves
+          # Upgrading from 0.9.7? 0.10.0 refuses a data directory (or bucket)
+          # 0.9.7 wrote: export and re-import first - deploy/README.md,
+          # "Upgrading from 0.9.7".
+          image: ghcr.io/t0k0sh1/taguru:0.10.0 # pin; `latest` moves
           ports:
             - containerPort: 8248
               name: http
