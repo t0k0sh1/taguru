@@ -395,6 +395,23 @@ fn derive(
     let mut old_texts: BTreeMap<String, String> = BTreeMap::new();
     if !reused_sources.is_empty() {
         old_texts = lookup_passages(api, &artifact_id, &reused_sources)?;
+        // A torn earlier run can also have REWRITTEN a summary: its
+        // batch for that positional id landed, its manifest did not, so
+        // the old manifest still pairs the id with a fingerprint whose
+        // text is gone. The record's own fingerprint tag (ADR 0056)
+        // says which community the stored text describes — a tag
+        // naming another fingerprint is torn like a missing summary.
+        // An untagged summary predates the tags and is trusted, as the
+        // read side trusts it.
+        let tags = community_fingerprint_tags(api, &artifact_id)?;
+        for old in previous_by_fingerprint.values() {
+            let source = format!("{COMMUNITY_SOURCE_PREFIX}{}", old.id);
+            if let Some(Some(stored)) = tags.get(&source)
+                && *stored != old.fingerprint
+            {
+                old_texts.remove(&source);
+            }
+        }
     }
     let torn = reused_sources
         .iter()
@@ -957,6 +974,43 @@ fn lookup_passages(
         }
     }
     Ok(passages)
+}
+
+/// Every stored `community:*` summary's fingerprint tag (ADR 0056),
+/// `None` for a summary stored before the tags existed — keyset-walked
+/// over `GET /contexts/{id}/sources?prefix=community:`.
+fn community_fingerprint_tags(
+    api: &Api,
+    context: &str,
+) -> Result<BTreeMap<String, Option<String>>, String> {
+    let mut tags = BTreeMap::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "1000"), ("prefix", COMMUNITY_SOURCE_PREFIX)];
+        if let Some(after) = &after {
+            query.push(("after", after.as_str()));
+        }
+        let page = api.get_with_query(&["contexts", context, "sources"], &query)?;
+        let entries = page["entries"]
+            .as_array()
+            .ok_or_else(|| format!("{context}: not a taguru sources page"))?;
+        let Some(last) = entries.last().and_then(|entry| entry["id"].as_str()) else {
+            return Ok(tags);
+        };
+        after = Some(last.to_string());
+        for entry in entries {
+            let Some(id) = entry["id"].as_str() else {
+                continue;
+            };
+            let fingerprint = entry["tags"].as_array().and_then(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .find_map(|tag| tag.strip_prefix(FINGERPRINT_TAG_PREFIX))
+                    .map(str::to_string)
+            });
+            tags.insert(id.to_string(), fingerprint);
+        }
+    }
 }
 
 fn retract_source(api: &Api, context: &str, source: &str) -> Result<(), String> {

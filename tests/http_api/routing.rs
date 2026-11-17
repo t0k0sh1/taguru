@@ -1922,9 +1922,193 @@ fn a_dot_segment_in_a_context_path_never_reaches_a_shard() {
     );
 
     // The same verb without a dot segment is the ordinary hop.
-    let (status, body) = raw_request(&router.base, "POST", "/contexts/sake/recall");
+    let (status, body) = raw_request(
+        &router.base,
+        "POST",
+        "/contexts/3f2a9c1e-5b7d-4e86-9a10-0c4d8e2f7a63/recall",
+    );
     assert_eq!(status, 200, "{body}");
     assert_eq!(shard.requests().len(), 1, "{:?}", shard.requests());
+}
+
+/// A percent-encoded `/` passes the raw dot-segment test but decodes
+/// to a path that would resolve onto another shard endpoint: over
+/// several shards, where the owner is probed, the decoded id is held
+/// to the single instance's context-id rule first, so no shard is ever
+/// asked for `/health` (or anything else) on the id's behalf.
+#[test]
+fn an_encoded_slash_in_a_context_id_never_steers_the_owner_probe() {
+    let shard_a = FakeShard::start(json!({"status": "ok", "result": true, "time": 0.0}));
+    let shard_b = FakeShard::start(json!({"status": "ok", "result": true, "time": 0.0}));
+    let router = Server::start_router(
+        "router-encoded-slash",
+        &format!("sake = {}\n* = {}\n", shard_a.endpoint, shard_b.endpoint),
+        &[],
+    );
+    for target in ["/contexts/..%2F..%2Fhealth", "/contexts/sake"] {
+        let (status, body) = raw_request(&router.base, "GET", target);
+        assert_eq!(status, 400, "{target}: {body}");
+        assert_eq!(body["code"], "invalid_argument", "{target}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("is not a context id"),
+            "{target}: {body}"
+        );
+    }
+    assert!(
+        shard_a.requests().is_empty() && shard_b.requests().is_empty(),
+        "no probe may leave the router: {:?} {:?}",
+        shard_a.requests(),
+        shard_b.requests()
+    );
+}
+
+/// A context-scoped key naming an in-grant id that no shard holds
+/// beside an existing id outside its grant: a single instance checks
+/// the grant over the whole request before existence and answers 403,
+/// and so does the router - for the cross-context search and for a
+/// group's member delta - instead of the first id's 404.
+#[test]
+fn a_scope_refusal_outranks_an_earlier_missing_id_through_the_router() {
+    let ghost = fixed_id("ghost");
+    let grants = format!(
+        r#"{{"limited": {{"role": "write", "contexts": ["{}", "{ghost}"]}}}}"#,
+        fixed_id("sake")
+    );
+    let keyed = &[
+        ("TAGURU_API_TOKENS", "ops:sesame,limited:hush"),
+        ("TAGURU_KEY_GRANTS", grants.as_str()),
+    ][..];
+    let shard_a = Server::start_with_env("router-scope-a", keyed);
+    let shard_b = Server::start_with_env("router-scope-b", keyed);
+    let router = Server::start_router(
+        "router-scope",
+        &format!("sake = {}\nglossary = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    for name in ["sake", "glossary"] {
+        let header = json!({
+            "type": "source", "context_id": fixed_id(name), "id": "seed:create",
+            "create": {"name": name},
+        });
+        let (status, body) = post_import(&router, &format!("{header}\n"), Some("sesame"));
+        assert_eq!(status, 200, "{body}");
+    }
+    let glossary = fixed_id("glossary");
+    let search = json!({"context_ids": [ghost, glossary], "cue": "麹"});
+
+    // The single instance's own order, as the reference.
+    let (status, body) =
+        shard_a.call_with_token("POST", "/recall", Some(search.clone()), Some("hush"));
+    assert_eq!(status, 403, "{body}");
+
+    // The out-of-grant id's owner already sits in the router's cache
+    // (an admin call touched it), so the router does not probe it on
+    // its own way to the held 404 - and still answers its 403.
+    let (status, body) = router.call_with_token(
+        "GET",
+        &format!("/contexts/{glossary}"),
+        None,
+        Some("sesame"),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = router.call_with_token("POST", "/recall", Some(search), Some("hush"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["code"], "forbidden", "{body}");
+
+    let (status, created) = router.call_with_token(
+        "POST",
+        "/groups",
+        Some(json!({"name": "drinks"})),
+        Some("sesame"),
+    );
+    assert_eq!(status, 200, "{created}");
+    let group = created["result"]["id"].as_str().unwrap().to_string();
+    let (status, body) = router.call_with_token(
+        "PATCH",
+        &format!("/groups/{group}"),
+        Some(json!({"add_context_ids": [ghost, glossary]})),
+        Some("hush"),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["code"], "forbidden", "{body}");
+
+    // Without the out-of-grant id, the missing one is the answer.
+    let (status, body) = router.call_with_token(
+        "POST",
+        "/recall",
+        Some(json!({"context_ids": [ghost], "cue": "麹"})),
+        Some("hush"),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "no_context", "{body}");
+}
+
+/// `POST /contexts` through the router refuses the caller first, as a
+/// single instance does: no token is a 401 and a context-scoped key a
+/// 403 even when the body carries no name or a name no shard owns -
+/// cases the router used to answer with its own 400. A caller allowed
+/// to create gets the router's own refusals (no name, "no shard
+/// owns"), and nothing is created on the way.
+#[test]
+fn a_create_through_the_router_refuses_the_caller_before_the_body() {
+    let grants = format!(
+        r#"{{"limited": {{"role": "write", "contexts": ["{}"]}}}}"#,
+        fixed_id("sake")
+    );
+    let keyed = &[
+        ("TAGURU_API_TOKENS", "ops:sesame,limited:hush"),
+        ("TAGURU_KEY_GRANTS", grants.as_str()),
+    ][..];
+    let shard_a = Server::start_with_env("router-create-a", keyed);
+    let shard_b = Server::start_with_env("router-create-b", keyed);
+    let router = Server::start_router(
+        "router-create",
+        &format!("sake = {}\nglossary = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    let unowned = json!({"name": "unmapped"});
+    for body in [json!({}), unowned.clone()] {
+        let (status, answer) = router.call("POST", "/contexts", Some(body.clone()));
+        assert_eq!(status, 401, "{body}: {answer}");
+        let (status, answer) =
+            router.call_with_token("POST", "/contexts", Some(body.clone()), Some("hush"));
+        assert_eq!(status, 403, "{body}: {answer}");
+        assert_eq!(answer["code"], "forbidden", "{body}: {answer}");
+    }
+    // A caller allowed to create gets the router's own refusal for a
+    // body it finds no name in - never the body forwarded as is: serde
+    // reads a struct from a JSON array too, so a shard could create
+    // from what the router cannot route.
+    for body in [json!({}), json!(["glossary", "", false, null, null])] {
+        let (status, answer) =
+            router.call_with_token("POST", "/contexts", Some(body.clone()), Some("sesame"));
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be JSON carrying the context's name"),
+            "{body}: {answer}"
+        );
+    }
+    let (status, answer) =
+        router.call_with_token("POST", "/contexts", Some(unowned), Some("sesame"));
+    assert_eq!(status, 400, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no shard owns context 'unmapped'"),
+        "{answer}"
+    );
+    for shard in [&shard_a, &shard_b] {
+        let (status, listed) = shard.call_with_token("GET", "/contexts", None, Some("sesame"));
+        assert_eq!(status, 200, "{listed}");
+        assert_eq!(listed["result"]["total"], 0, "nothing created: {listed}");
+    }
 }
 
 /// A group write whose body the single-instance extractor would refuse

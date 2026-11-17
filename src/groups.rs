@@ -535,9 +535,10 @@ pub(crate) fn classify_group(stem: &str, bytes: &[u8]) -> ScannedGroup {
             Some(_) => {}
         }
     }
+    // A record that parses carries a string `id`, which the raw check
+    // above has already held to the stem.
     match serde_json::from_slice::<StoredGroup>(bytes) {
-        Ok(record) if record.id == stem => ScannedGroup::Current(record),
-        Ok(record) => ScannedGroup::ForeignId(record.id),
+        Ok(record) => ScannedGroup::Current(record),
         Err(error) => ScannedGroup::Corrupt(error.to_string()),
     }
 }

@@ -1812,6 +1812,9 @@ mod tests {
                 r#"{"reader": "read", "bot": {"role": "write", "contexts": ["cef2e28b-43f0-4b6c-8201-abab0785399f"]}}"#,
             ))
             .unwrap();
+        // The boot and reload audit lines report both counts: every
+        // configured key, and the ones a grant names.
+        assert_eq!(keyring.key_count(), 3);
         assert_eq!(keyring.granted_key_count(), 2);
         // Unnamed keys keep the historical full grant.
         assert_eq!(keyring.grant_of("boss").role, Role::Admin);

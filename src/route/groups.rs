@@ -318,8 +318,11 @@ async fn project_body(
         }
         lists.insert(field.to_string(), (check, members));
     }
-    // Owners, asked once per distinct id of a checked list.
+    // Owners, asked once per distinct id of a checked list. Every id is
+    // probed before a refusal answers, so a scope refusal on a later
+    // member outranks an earlier member's 404 ([`FirstRefusal`]).
     let mut owner_of: BTreeMap<String, usize> = BTreeMap::new();
+    let mut refusal = FirstRefusal::default();
     for (check, members) in lists.values() {
         if !check {
             continue;
@@ -328,26 +331,25 @@ async fn project_body(
             if owner_of.contains_key(member) {
                 continue;
             }
-            match probe_owner(state, map, member, headers, deadline, started_at).await {
+            let noted = match probe_owner(state, map, member, headers, deadline, started_at).await {
                 Located::Shard(shard) => {
                     owner_of.insert(member.clone(), shard);
+                    Ok(())
                 }
-                Located::Missing => {
-                    return Err(Unprojectable::Refusal(Box::new(api::error(
-                        ErrorCode::NoContext,
-                        format!("context '{member}' not found; nothing was applied"),
-                        started_at,
-                    ))));
-                }
+                Located::Missing => refusal.note(api::error(
+                    ErrorCode::NoContext,
+                    format!("context '{member}' not found; nothing was applied"),
+                    started_at,
+                )),
                 Located::Answered(response)
                 | Located::Unreached {
                     refusal: response, ..
-                } => {
-                    return Err(Unprojectable::Refusal(Box::new(response)));
-                }
-            }
+                } => refusal.note(response),
+            };
+            noted.map_err(Unprojectable::Refusal)?;
         }
     }
+    refusal.finish().map_err(Unprojectable::Refusal)?;
     let base = base.clone();
     let shards_projection: Vec<BTreeMap<String, Vec<String>>> = map
         .all()

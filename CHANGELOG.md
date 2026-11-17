@@ -682,6 +682,31 @@ below and in
 
 ### Fixed
 
+- **`taguru communities` no longer reuses a summary a torn run
+  overwrote.** A run that stopped after rewriting a positional id's
+  summary but before its manifest left the old manifest pairing that id
+  with a fingerprint whose text was gone; the next run reused the other
+  cluster's text under the old fingerprint, so a hit served one
+  community's text with another's fingerprint until the content
+  changed. A summary is now reused only when its own
+  `community-fingerprint:` tag matches (or it predates the tags);
+  otherwise it is re-summarized like a missing one (ADR 0056).
+
+- **`taguru router` answers like one instance on refusals.** A
+  `/contexts/{id}` path whose decoded id is not a context id (say
+  `..%2F..%2Fhealth`, which passed the dot-segment check) is refused
+  with the single instance's 400 before any shard is probed, instead of
+  steering the owner probe onto another shard endpoint and answering
+  409. A context-scoped key naming an in-grant id no shard holds beside
+  an existing id outside its grant gets 403, not the first id's 404, on
+  the cross-context searches and on `PATCH /groups/{id}`'s member
+  deltas, even when that id's owner is already cached. `POST /contexts`
+  refuses the caller (401, a context-scoped key's 403) before the
+  router's own refusals of a body without a usable name or a name no
+  shard owns: the router first puts an empty-name create, which no
+  shard can apply, to a shard (the caller's body itself never goes
+  there).
+
 - **Storage hardening.** A `.ctx` family whose stem is not a canonical
   context id is refused at boot as pre-id data, with the migration
   message; before, with a missing sidecar, it registered under an id no
