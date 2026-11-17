@@ -63,11 +63,10 @@ export class FakeServer {
    * isolation. */
   failTextSearch = false;
   /**
-   * When set, GET /groups fails with a 500 — from the first page (0) or
-   * only from the pages after it (1) — to exercise a group directory that
-   * cannot be read, wholly or partway.
+   * Group ids whose GET /groups/{id} fails with a 500 — to exercise a group
+   * walk that cannot read a group, at its root or partway down.
    */
-  failGroupDirectoryAfter: number | null = null;
+  failGroups = new Set<string>();
   /** /embeddings/refresh's status: 501 (default, no provider configured),
    * 200 (success — served with embeddingsRefreshResult), or 502 (provider
    * error). Mirrors the Python conftest's FakeServer knob of the same
@@ -171,29 +170,15 @@ export class FakeServer {
         { status: 500 },
       );
     }
-    if (path === "/groups") {
-      // The server's keyset page: rows in (name, id) order strictly after
-      // the (after, after_id) cursor, `limit` of them. Rows are keyed by id
-      // (#995); they name children by name.
-      const after = url.searchParams.get("after");
-      const page = after === null ? 0 : 1;
-      if (this.failGroupDirectoryAfter !== null && page >= this.failGroupDirectoryAfter) {
+    if (path.startsWith("/groups/")) {
+      const id = path.slice("/groups/".length);
+      if (this.failGroups.has(id)) {
         return new Response(
           JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
           { status: 500 },
         );
       }
-      const before = (a: { id: string; name: string }, b: { id: string; name: string }): boolean =>
-        a.name === b.name ? a.id < b.id : a.name < b.name;
-      const rows = Object.values(GROUP_ROWS) as { id: string; name: string }[];
-      rows.sort((a, b) => (before(a, b) ? -1 : 1));
-      const cursor = after === null ? null : { name: after, id: url.searchParams.get("after_id") ?? "" };
-      const limit = Number(url.searchParams.get("limit") ?? "100");
-      const rest = cursor === null ? rows : rows.filter((row) => before(cursor, row));
-      return ok({ total: rows.length, groups: rest.slice(0, limit) });
-    }
-    if (path.startsWith("/groups/")) {
-      const row = GROUP_ROWS[path.slice("/groups/".length)];
+      const row = GROUP_ROWS[id];
       if (row === undefined) {
         return new Response(
           JSON.stringify({ status: "error", code: "no_group", error: "group not found", time: 0.001 }),

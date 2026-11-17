@@ -28,6 +28,19 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **LangChain `TaguruRetriever(group_ids=…)` reads only the groups it
+  searches** (#1024). It used to read the whole group directory
+  (`GET /groups`) on every search to expand nested groups. The server
+  computes a fingerprint for every row of that listing, so each search
+  cost grew with every group and member in the deployment. It now
+  walks down from the named groups with one `GET /groups/{id}` per
+  group reached, in both the Python and TypeScript SDKs. The async
+  Python and TypeScript retrievers fetch each nesting level
+  concurrently, so a search costs at most 3 round trips. A deleted
+  group (404) still contributes nothing. A group that fails to read
+  keeps the members already reached beside any direct target, and with
+  no direct target the failure still raises.
+
 - **Breaking (CLI output) — `taguru import --url` counts requests, not
   chunks** (#1059, #851). "Chunk" now means only the slice of a segment
   `taguru extract` shows the model. The per-request progress line reads

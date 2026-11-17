@@ -63,36 +63,34 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
 }
 
 /**
- * Every `context` id the `group` ids in `roots` reach, nested children
- * included, walked over one read of the directory (`rows`). A root id no row
- * carries (a deleted `group`) contributes nothing, and the rest of the walk
- * still stands: one unresolvable `group` must not blank out every other
- * member. Children are ids too (#996), followed through the same read.
+ * Folds one storey of fetched `group` rows into `members` and answers the
+ * child `group` ids to fetch next — each id once, however many parents name
+ * it (`seen` carries every id already asked for). A `null` entry is a
+ * `group` that answered 404 (deleted): it contributes nothing, and the rest
+ * of the walk still stands — one unresolvable `group` must not blank out
+ * every other member.
  */
-function groupMembers(rows: GroupEntry[], roots: string[]): Set<string> {
-  const byId = new Map<string, GroupEntry>();
-  for (const row of rows) {
-    byId.set(row.id, row);
-  }
-  const members = new Set<string>();
-  const seen = new Set<string>();
-  const stack = [...roots];
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    if (seen.has(id)) {
+function nextStorey(
+  entries: Array<GroupEntry | null>,
+  seen: Set<string>,
+  members: Set<string>,
+): string[] {
+  const children: string[] = [];
+  for (const entry of entries) {
+    if (entry === null) {
       continue;
     }
-    seen.add(id);
-    const row = byId.get(id);
-    if (row === undefined) {
-      continue;
-    }
-    for (const member of row.context_ids) {
+    for (const member of entry.context_ids) {
       members.add(member);
     }
-    stack.push(...row.group_ids);
+    for (const child of entry.group_ids) {
+      if (!seen.has(child)) {
+        seen.add(child);
+        children.push(child);
+      }
+    }
   }
-  return members;
+  return children;
 }
 
 /**
@@ -182,24 +180,53 @@ export class TaguruRetriever extends BaseRetriever {
         targets.push(id);
       }
     }
-    // One directory read resolves every `group` id and its nested
-    // children, instead of a `groups.get` per storey. A directory that
-    // fails to read partway keeps the rows already read beside the
-    // direct targets — and with no direct target, the failure is the
-    // caller's to hear, never an empty search that looks complete.
-    let members = new Set<string>();
+    // Walk down from the named `groups`, one `groups.get` per `group`
+    // reached (#1024), each storey fetched concurrently: only the rows this
+    // search needs are read — never the whole directory, whose every row
+    // costs the server a fingerprint — in as many round trips as the
+    // nesting is deep (at most 3). A walk that fails partway keeps the
+    // members already reached beside the direct targets — every sibling of
+    // a failed `group` is still fetched and counted, so the outcome does
+    // not hang on which fetch settled first — and with no direct target,
+    // the failure is the caller's to hear, never an empty search that
+    // looks complete.
+    const members = new Set<string>();
     if ((this.group_ids?.length ?? 0) > 0) {
-      const rows: GroupEntry[] = [];
+      let storey = [...new Set(this.group_ids)];
+      const seen = new Set(storey);
       try {
-        for await (const row of this.client.groups.iter()) {
-          rows.push(row);
+        while (storey.length > 0) {
+          const settled = await Promise.allSettled(
+            storey.map(async (id) => {
+              try {
+                return await this.client.groups.get(id);
+              } catch (error) {
+                if (error instanceof NotFoundError) {
+                  return null;
+                }
+                throw error;
+              }
+            }),
+          );
+          const entries: Array<GroupEntry | null> = [];
+          let failure: { reason: unknown } | undefined;
+          for (const outcome of settled) {
+            if (outcome.status === "fulfilled") {
+              entries.push(outcome.value);
+            } else {
+              failure ??= outcome;
+            }
+          }
+          storey = nextStorey(entries, seen, members);
+          if (failure !== undefined) {
+            throw failure.reason;
+          }
         }
       } catch (error) {
         if (targets.length === 0) {
           throw error;
         }
       }
-      members = groupMembers(rows, this.group_ids ?? []);
     }
     for (const id of [...members].sort()) {
       if (!targets.includes(id)) {

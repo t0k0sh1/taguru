@@ -69,6 +69,32 @@ def test_contexts_iter_walks_pages_with_keyset_cursor() -> None:
     assert cursors == [(None, None), ("b", "id-b"), ("c", "id-c")]
 
 
+def test_groups_iter_pages_through_rows_that_share_a_name() -> None:
+    # Group names are not unique (#995): a page boundary between two rows
+    # named alike resumes on the (name, id) pair, never skipping the twin.
+    rows = [
+        {"id": id_, "name": "twin", "description": "", "context_ids": [], "group_ids": []}
+        for id_ in ["gid-a", "gid-b"]
+    ]
+    cursors: list[tuple[str | None, str | None]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        after = req.url.params.get("after")
+        after_id = req.url.params.get("after_id")
+        cursors.append((after, after_id))
+        if after is None:
+            return ok_response({"total": 2, "groups": rows[:1]})
+        if (after, after_id) == ("twin", "gid-a"):
+            return ok_response({"total": 2, "groups": rows[1:]})
+        if (after, after_id) == ("twin", "gid-b"):
+            return ok_response({"total": 2, "groups": []})
+        raise AssertionError((after, after_id))
+
+    client = sync_client(handler)
+    assert [entry.id for entry in client.groups.iter(limit=1)] == ["gid-a", "gid-b"]
+    assert cursors == [(None, None), ("twin", "gid-a"), ("twin", "gid-b")]
+
+
 def test_iter_labels_pages_until_an_empty_page() -> None:
     cursors: list[str | None] = []
 

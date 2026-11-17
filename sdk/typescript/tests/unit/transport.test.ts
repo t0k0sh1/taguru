@@ -467,6 +467,33 @@ describe("pagination iterators", () => {
     ]);
   });
 
+  it("pages groups through rows that share a name", async () => {
+    // Group names are not unique (#995): a page boundary between two rows
+    // named alike resumes on the (name, id) pair, never skipping the twin.
+    const row = (id: string) => ({ id, name: "twin", description: "", context_ids: [], group_ids: [] });
+    const cursors: Array<[string | null, string | null]> = [];
+    const client = stubClient((req) => {
+      const url = new URL(req.url);
+      const after = url.searchParams.get("after");
+      const afterId = url.searchParams.get("after_id");
+      cursors.push([after, afterId]);
+      if (after === null) return okBody({ total: 2, groups: [row("gid-a")] });
+      if (afterId === "gid-a") return okBody({ total: 2, groups: [row("gid-b")] });
+      if (afterId === "gid-b") return okBody({ total: 2, groups: [] });
+      throw new Error(`${after}/${afterId}`);
+    });
+    const ids: string[] = [];
+    for await (const entry of client.groups.iter({ limit: 1 })) {
+      ids.push(entry.id);
+    }
+    expect(ids).toEqual(["gid-a", "gid-b"]);
+    expect(cursors).toEqual([
+      [null, null],
+      ["twin", "gid-a"],
+      ["twin", "gid-b"],
+    ]);
+  });
+
   it("flattens both alias namespaces and advances the two-namespace cursor", async () => {
     const cursors: Array<string | null> = [];
     const client = stubClient((req) => {

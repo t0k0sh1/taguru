@@ -144,13 +144,18 @@ describe("TaguruRetriever cross-context", () => {
 
   it("resolves groups to members, nested children included", async () => {
     const server = new FakeServer();
-    const retriever = new TaguruRetriever({ group_ids: ["gid-parent"], client: server.client() });
+    // gid-childg is named twice — as a root and as gid-parent's child.
+    const retriever = new TaguruRetriever({
+      group_ids: ["gid-parent", "gid-childg"],
+      client: server.client(),
+    });
     const documents = await retriever.invoke("青嶺酒造");
 
     // parent reaches sake directly and tea through its child group —
-    // walked over one read of the directory, never a per-group fetch.
+    // walked one get per group reached (#1024), each group once, never the
+    // whole directory listing.
     const fetched = server.calls.filter(([path]) => path.startsWith("/groups")).map(([p]) => p);
-    expect(fetched).toEqual(["/groups", "/groups"]);
+    expect(fetched.sort()).toEqual(["/groups/gid-childg", "/groups/gid-parent"]);
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
@@ -209,25 +214,43 @@ describe("TaguruRetriever cross-context", () => {
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 
-  it("refuses a groups-only retrieval whose group directory fails to read", async () => {
-    // Nothing but groups to search: an unreadable directory is the
-    // caller's error, never an empty result that looks complete.
-    for (const after of [0, 1]) {
+  it("refuses a groups-only retrieval whose group fails to read", async () => {
+    // Nothing but groups to search: an unreadable group — the root or one
+    // partway down — is the caller's error, never an empty result that
+    // looks complete.
+    for (const failing of ["gid-parent", "gid-childg"]) {
       const server = new FakeServer();
-      server.failGroupDirectoryAfter = after;
+      server.failGroups.add(failing);
       const retriever = new TaguruRetriever({ group_ids: ["gid-parent"], client: server.client() });
       await expect(retriever.invoke("青嶺酒造")).rejects.toBeInstanceOf(TaguruError);
       expect(server.calls.filter(([path]) => path === "/sources/search")).toEqual([]);
     }
   });
 
-  it("keeps the rows read before a directory failure beside the direct targets", async () => {
-    // The first page reads (every row fits on it); the closing page fails.
+  it("keeps the members reached before a walk failure beside the direct targets", async () => {
+    // gid-parent reads; its child gid-childg fails.
     const server = new FakeServer();
-    server.failGroupDirectoryAfter = 1;
+    server.failGroups.add("gid-childg");
     const retriever = new TaguruRetriever({
       context_ids: ["id-tea"],
-      group_ids: ["gid-brewery"],
+      group_ids: ["gid-parent"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
+  it("keeps a failed group's siblings' members in the same storey", async () => {
+    // gid-brewery fails and is named first; its sibling gid-parent still
+    // reads, and its member (sake) stands beside the direct target.
+    const server = new FakeServer();
+    server.failGroups.add("gid-brewery");
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-tea"],
+      group_ids: ["gid-brewery", "gid-parent"],
       client: server.client(),
     });
     await retriever.invoke("青嶺酒造");
@@ -271,9 +294,9 @@ describe("TaguruRetriever cross-context", () => {
     expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
   });
 
-  it("falls back to context_id when the group directory fails to read", async () => {
+  it("falls back to context_id when the group fails to read", async () => {
     const server = new FakeServer();
-    server.failGroupDirectoryAfter = 0;
+    server.failGroups.add("gid-brewery");
     const retriever = new TaguruRetriever({
       context_id: "id-sake",
       group_ids: ["gid-brewery"],
@@ -284,25 +307,6 @@ describe("TaguruRetriever cross-context", () => {
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
     expect(crossSearches).toEqual([{ context_ids: ["id-sake"], query: "青嶺酒造", limit: 5 }]);
-  });
-
-  it("pages the group walk through rows that share a name", async () => {
-    // A page boundary between two rows named alike: the (name, id) cursor
-    // resumes after the first, never skipping the second.
-    GROUP_ROWS["gid-twin"] = { id: "gid-twin", name: "childg", description: "", context_ids: [], group_ids: [] };
-    try {
-      const server = new FakeServer();
-      const walked: string[] = [];
-      for await (const row of server.client().groups.iter({ limit: 1 })) {
-        walked.push(`${row.name}/${row.id}`);
-      }
-      const expected = (Object.values(GROUP_ROWS) as { id: string; name: string }[])
-        .map((row) => `${row.name}/${row.id}`)
-        .sort();
-      expect(walked).toEqual(expected);
-    } finally {
-      delete GROUP_ROWS["gid-twin"];
-    }
   });
 
   it("keeps a healthy target's graph docs when another target's graph lane errors", async () => {
