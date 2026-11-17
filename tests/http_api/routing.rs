@@ -2004,6 +2004,16 @@ fn a_scope_refusal_outranks_an_earlier_missing_id_through_the_router() {
         shard_a.call_with_token("POST", "/recall", Some(search.clone()), Some("hush"));
     assert_eq!(status, 403, "{body}");
 
+    // The out-of-grant id's owner already sits in the router's cache
+    // (an admin call touched it), so the router does not probe it on
+    // its own way to the held 404 - and still answers its 403.
+    let (status, body) = router.call_with_token(
+        "GET",
+        &format!("/contexts/{glossary}"),
+        None,
+        Some("sesame"),
+    );
+    assert_eq!(status, 200, "{body}");
     let (status, body) = router.call_with_token("POST", "/recall", Some(search), Some("hush"));
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["code"], "forbidden", "{body}");
@@ -2040,8 +2050,8 @@ fn a_scope_refusal_outranks_an_earlier_missing_id_through_the_router() {
 /// single instance does: no token is a 401 and a context-scoped key a
 /// 403 even when the body carries no name or a name no shard owns -
 /// cases the router used to answer with its own 400. A caller allowed
-/// to create still gets the shard's empty-name refusal and the
-/// router's "no shard owns" one, and nothing is created on the way.
+/// to create gets the router's own refusals (no name, "no shard
+/// owns"), and nothing is created on the way.
 #[test]
 fn a_create_through_the_router_refuses_the_caller_before_the_body() {
     let grants = format!(
@@ -2068,16 +2078,22 @@ fn a_create_through_the_router_refuses_the_caller_before_the_body() {
         assert_eq!(status, 403, "{body}: {answer}");
         assert_eq!(answer["code"], "forbidden", "{body}: {answer}");
     }
-    let (status, answer) =
-        router.call_with_token("POST", "/contexts", Some(json!({})), Some("sesame"));
-    assert_eq!(status, 400, "{answer}");
-    assert!(
-        answer["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("must not be empty"),
-        "the shard's own refusal: {answer}"
-    );
+    // A caller allowed to create gets the router's own refusal for a
+    // body it finds no name in - never the body forwarded as is: serde
+    // reads a struct from a JSON array too, so a shard could create
+    // from what the router cannot route.
+    for body in [json!({}), json!(["glossary", "", false, null, null])] {
+        let (status, answer) =
+            router.call_with_token("POST", "/contexts", Some(body.clone()), Some("sesame"));
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be JSON carrying the context's name"),
+            "{body}: {answer}"
+        );
+    }
     let (status, answer) =
         router.call_with_token("POST", "/contexts", Some(unowned), Some("sesame"));
     assert_eq!(status, 400, "{answer}");

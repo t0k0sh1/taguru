@@ -82,10 +82,12 @@ pub(super) async fn proxy_context_sub(
 /// A single instance refuses the caller (401, a context-scoped key's
 /// 403) before it reads the body, and the router holds no keyring, so
 /// it never answers a create refusal of its own ahead of the shards':
-/// a body without a usable name goes to a shard as it is (no shard can
-/// create from it, so the answer is the shard's own refusal), and a
-/// name no shard owns is first put to a shard as an empty-name create
-/// ([`create_refused_by_a_shard`]).
+/// before refusing a body without a usable name, or a name no shard
+/// owns, it puts an empty-name create to a shard
+/// ([`create_refused_by_a_shard`]). The caller's body itself is never
+/// sent there - serde also reads a struct from a JSON array, so a body
+/// the router finds no name in can still create on a shard that does
+/// not own it.
 pub(super) async fn route_create_context(
     State(state): State<RouterState>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -102,20 +104,8 @@ pub(super) async fn route_create_context(
         });
     let map = state.map();
     let Some(name) = name else {
-        if let Some(shard) = map.all().next()
-            && let Ok(answer) = state
-                .call_shard(
-                    &map,
-                    shard,
-                    Method::POST,
-                    "/contexts",
-                    &hop_headers(&headers),
-                    Some(body),
-                    deadline,
-                )
-                .await
-        {
-            return passthrough(answer);
+        if let Some(refusal) = create_refused_by_a_shard(&state, &map, &headers, deadline).await {
+            return refusal;
         }
         return api::error(
             ErrorCode::InvalidArgument,
@@ -257,6 +247,11 @@ impl FirstRefusal {
         }
         self.0.get_or_insert(refusal);
         Ok(())
+    }
+
+    /// Whether a refusal is held, waiting for every id's probe.
+    pub(super) fn holds(&self) -> bool {
+        self.0.is_some()
     }
 
     /// The held refusal, once every id has been probed.

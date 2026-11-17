@@ -700,10 +700,12 @@ below and in
   409. A context-scoped key naming an in-grant id no shard holds beside
   an existing id outside its grant gets 403, not the first id's 404, on
   the cross-context searches and on `PATCH /groups/{id}`'s member
-  deltas. `POST /contexts` refuses the caller (401, a context-scoped
-  key's 403) before the router's own body refusals: a body without a
-  usable name goes to a shard as is, and a name no shard owns is first
-  put to a shard as an empty-name create, which no shard can apply.
+  deltas, even when that id's owner is already cached. `POST /contexts`
+  refuses the caller (401, a context-scoped key's 403) before the
+  router's own refusals of a body without a usable name or a name no
+  shard owns: the router first puts an empty-name create, which no
+  shard can apply, to a shard (the caller's body itself never goes
+  there).
 
 - **Storage hardening.** A `.ctx` family whose stem is not a canonical
   context id is refused at boot as pre-id data, with the migration

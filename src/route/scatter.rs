@@ -62,7 +62,13 @@ pub(super) async fn plan_scatter(
         .collect();
     let mut per_shard: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut refusal = FirstRefusal::default();
+    // Ids answered from the owner cache, never probed: their shard has
+    // not judged this caller's grant on them yet.
+    let mut cached: Vec<&String> = Vec::new();
     for id in &direct {
+        if map.owners.get(id).is_some() {
+            cached.push(id);
+        }
         match locate_owner(state, map, id, headers, deadline, started_at).await {
             Located::Shard(shard) => per_shard.entry(shard).or_default().push(id.clone()),
             Located::Missing => refusal.note(api::error(
@@ -79,6 +85,17 @@ pub(super) async fn plan_scatter(
                 for shard in shards {
                     per_shard.entry(shard).or_default().push(id.clone());
                 }
+            }
+        }
+    }
+    // A held refusal answers without any fan-out, so the scope refusal
+    // a cached id would have drawn from its shard must be asked for now.
+    if refusal.holds() {
+        for id in cached {
+            if let Located::Answered(response) =
+                probe_owner(state, map, id, headers, deadline, started_at).await
+            {
+                refusal.note(response)?;
             }
         }
     }
