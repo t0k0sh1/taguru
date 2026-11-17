@@ -116,3 +116,29 @@ cross-zone failover with no snapshot restore in the path — is the
 `kubernetes.yaml` applies to GKE Autopilot as-is, verified live: the
 only changes Autopilot makes are additive (an `ephemeral-storage`
 default, a `seccompProfile`), never an override.
+
+## Upgrading from 0.9.7
+
+0.10.0 does not boot a data directory 0.9.7 wrote, and so does not boot
+from a replication bucket 0.9.7 shipped either: contexts and groups now
+have ids, and the old directory is refused at startup, naming the
+migration. Moving the image tag alone therefore stops the server. Migrate
+first, keeping the old directory or bucket as your backup:
+
+1. With 0.9.7 still installed, stop the server and export the whole
+   directory offline: `taguru export --out DIR`. For bucket-backed data,
+   first materialize the directory with 0.9.7's
+   `taguru restore --out DATA URL`, then export that.
+2. Volume-backed (`docker-compose.yml`, `kubernetes.yaml`): give 0.10.0
+   a new, empty volume and run `taguru import DIR` against it before the
+   first start.
+3. Bucket-backed (`kubernetes-stateless.yaml`, and the writer the
+   replicas of `kubernetes-replicas.yaml` tail): point
+   `TAGURU_REPLICATE_URL` at a new, empty bucket or prefix, start the
+   0.10.0 writer, and load the export with `POST /import` on that
+   instance; start the replicas against the new bucket afterwards.
+4. Behind `taguru router`, migrate each shard on its own, as above.
+   `POST /import` through the router refuses 0.9.7 files.
+
+The steps in full, and how the 0.9.7 records map onto ids, are in
+[Upgrading from 0.9.7](https://t0k0sh1.github.io/taguru/import.html#upgrading-from-0-9-7).

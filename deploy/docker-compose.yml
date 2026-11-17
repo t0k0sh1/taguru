@@ -8,6 +8,9 @@
 # credential), and set TAGURU_RATE_LIMIT_PER_MIN when you do.
 services:
   taguru:
+    # Upgrading from 0.9.7? 0.10.0 refuses a data directory (or bucket)
+    # 0.9.7 wrote: export and re-import first - deploy/README.md,
+    # "Upgrading from 0.9.7".
     image: ghcr.io/t0k0sh1/taguru:0.10.0 # pin; `latest` moves
     ports:
       - "127.0.0.1:8248:8248"
