@@ -14,5 +14,13 @@ ignore = [
     # feature). Revisit when tokenizers moves off paste or fastembed
     # is promoted out of the local-embed spike (#474).
     "RUSTSEC-2024-0436",
+    # chrono@0.4.45 / humantime@2.4.0: unmaintained notices, not
+    # vulnerabilities (humantime is flagged because it wraps chrono).
+    # Neither is used by taguru directly: both are hard dependencies of
+    # object_store 0.14.2, the latest release, so no upgrade clears
+    # them. Revisit when object_store drops them, or at once if either
+    # gains a vulnerability advisory (#1062).
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0542",
 ]
 yanked = "deny"
