@@ -165,9 +165,10 @@ class TaguruRetriever(BaseRetriever):
         # reached (#1024): only the rows this search needs are read — never
         # the whole directory, whose every row costs the server a
         # fingerprint. A walk that fails partway keeps the members already
-        # reached beside the direct targets — and with no direct target, the
-        # failure is the caller's to hear, never an empty search that looks
-        # complete.
+        # reached beside the direct targets — every sibling of a failed
+        # ``group`` is still fetched and counted, so the outcome does not hang
+        # on fetch order — and with no direct target, the failure is the
+        # caller's to hear, never an empty search that looks complete.
         direct = self._direct_targets()
         members: set[str] = set()
         storey = list(dict.fromkeys(self.group_ids))
@@ -175,12 +176,17 @@ class TaguruRetriever(BaseRetriever):
         try:
             while storey:
                 entries: list[GroupEntry | None] = []
+                failure: Exception | None = None
                 for group_id in storey:
                     try:
                         entries.append(client.groups.get(group_id))
                     except NotFoundError:
                         entries.append(None)
+                    except Exception as error:
+                        failure = failure or error
                 storey = _next_storey(entries, seen, members)
+                if failure is not None:
+                    raise failure
         except Exception:
             if not direct:
                 raise
@@ -318,18 +324,18 @@ class TaguruRetriever(BaseRetriever):
 
         try:
             while storey:
-                # Cancel and drain the siblings before re-raising, as
-                # `_agraph_lane` does: `gather` alone would leave them running
-                # as orphaned tasks.
-                tasks = [asyncio.ensure_future(_fetch_one(group_id)) for group_id in storey]
-                try:
-                    entries = list(await asyncio.gather(*tasks))
-                except BaseException:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    raise
+                # `return_exceptions` waits for every sibling (none is left
+                # orphaned) and keeps the successes of a storey one fetch
+                # failed in; cancelling this task still cancels the gather.
+                results = await asyncio.gather(
+                    *(_fetch_one(group_id) for group_id in storey), return_exceptions=True
+                )
+                entries = [r for r in results if not isinstance(r, BaseException)]
                 storey = _next_storey(entries, seen, members)
+                failures = [r for r in results if isinstance(r, BaseException)]
+                if failures:
+                    # A sibling's cancellation outranks a plain failure.
+                    raise next((f for f in failures if not isinstance(f, Exception)), failures[0])
         except Exception:
             if not direct:
                 raise

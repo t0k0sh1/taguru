@@ -185,16 +185,18 @@ export class TaguruRetriever extends BaseRetriever {
     // search needs are read — never the whole directory, whose every row
     // costs the server a fingerprint — in as many round trips as the
     // nesting is deep (at most 3). A walk that fails partway keeps the
-    // members already reached beside the direct targets — and with no
-    // direct target, the failure is the caller's to hear, never an empty
-    // search that looks complete.
+    // members already reached beside the direct targets — every sibling of
+    // a failed `group` is still fetched and counted, so the outcome does
+    // not hang on which fetch settled first — and with no direct target,
+    // the failure is the caller's to hear, never an empty search that
+    // looks complete.
     const members = new Set<string>();
     if ((this.group_ids?.length ?? 0) > 0) {
       let storey = [...new Set(this.group_ids)];
       const seen = new Set(storey);
       try {
         while (storey.length > 0) {
-          const entries = await Promise.all(
+          const settled = await Promise.allSettled(
             storey.map(async (id) => {
               try {
                 return await this.client.groups.get(id);
@@ -206,7 +208,19 @@ export class TaguruRetriever extends BaseRetriever {
               }
             }),
           );
+          const entries: Array<GroupEntry | null> = [];
+          let failure: { reason: unknown } | undefined;
+          for (const outcome of settled) {
+            if (outcome.status === "fulfilled") {
+              entries.push(outcome.value);
+            } else {
+              failure ??= outcome;
+            }
+          }
           storey = nextStorey(entries, seen, members);
+          if (failure !== undefined) {
+            throw failure.reason;
+          }
         }
       } catch (error) {
         if (targets.length === 0) {

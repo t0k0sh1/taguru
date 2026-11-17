@@ -277,6 +277,29 @@ async def test_a_walk_failing_partway_keeps_the_members_reached_beside_direct_ta
     ]
 
 
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_a_failed_group_keeps_its_siblings_members_in_the_same_storey(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    # gid-brewery fails and is named first; its sibling gid-parent still
+    # reads, and its member (sake) stands beside the direct target.
+    fake_server.fail_groups = {"gid-brewery"}
+    retriever = TaguruRetriever(
+        context_ids=["id-tea"],
+        group_ids=["gid-brewery", "gid-parent"],
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        retriever.invoke("青嶺酒造")
+    else:
+        await retriever.ainvoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [
+        {"context_ids": ["id-tea", "id-sake"], "query": "青嶺酒造", "limit": 5}
+    ]
+
+
 # ``context_id`` combined with the cross fields: it leads the target list —
 # pinned identically in the TypeScript suite so the twins cannot drift again.
 @pytest.mark.parametrize("lane", ["sync", "async"])

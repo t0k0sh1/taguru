@@ -243,6 +243,23 @@ describe("TaguruRetriever cross-context", () => {
     expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
   });
 
+  it("keeps a failed group's siblings' members in the same storey", async () => {
+    // gid-brewery fails and is named first; its sibling gid-parent still
+    // reads, and its member (sake) stands beside the direct target.
+    const server = new FakeServer();
+    server.failGroups.add("gid-brewery");
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-tea"],
+      group_ids: ["gid-brewery", "gid-parent"],
+      client: server.client(),
+    });
+    await retriever.invoke("青嶺酒造");
+    const crossSearches = server.calls
+      .filter(([path]) => path === "/sources/search")
+      .map(([, body]) => body);
+    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+  });
+
   // context_id combined with the cross fields: it leads the target list —
   // pinned identically in the Python suite so the twins cannot drift again.
   it("searches context_id first when combined with context_ids", async () => {
