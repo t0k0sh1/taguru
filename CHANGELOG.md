@@ -17,6 +17,15 @@ Entries that change an on-disk format or a response shape say so.
   and that a failure stays inside its segment. `docs/modeling.html`'s
   granularity table links to it.
 
+### Fixed
+
+- **`TAGURU_EMBED_PARALLEL` is documented as the process-wide ceiling it
+  is** (review on #1065). `--help` and `docs/getting-started.html` said
+  it bounded one context's refresh and that concurrent refreshes across
+  contexts multiplied it. Every refresh's provider call holds one of the
+  same `TAGURU_EMBED_PARALLEL` permits, so contexts share the ceiling.
+  Behavior is unchanged; only the description was wrong.
+
 ### Changed
 
 - **Breaking (CLI output) — `taguru import --url` counts requests, not
