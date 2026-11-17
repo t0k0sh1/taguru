@@ -7,6 +7,15 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- **TypeScript SDK tests run on vitest 5** (#1018). Both SDK packages
+  move their test runner from vitest 4.1.12 to 5.1.0. ADR 0049 listed
+  vitest 5 as an upstream wait on `@stryker-mutator/vitest-runner`;
+  that blocker left with Stryker (ADR 0051). Both suites pass the same
+  tests as on vitest 4 (286 core, 1197 LangChain). Dev dependency only:
+  the published packages are unchanged.
+
 ## [0.10.0] - 2026-11-17
 
 An identifier release (#958). Contexts and groups get server-minted
