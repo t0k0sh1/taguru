@@ -21,7 +21,9 @@ pub(super) struct Scatter {
 /// speaks names, so each distinct direct id's owner is asked of the
 /// shards themselves ([`locate_owner`]; a single-shard map pays
 /// nothing); an id no shard holds is the single-instance first-missing
-/// refusal, in the same list order.
+/// refusal, in the same list order - unless a probe answers a scope
+/// refusal for any id, which outranks it as on a single instance
+/// ([`FirstRefusal`]).
 pub(super) async fn plan_scatter(
     state: &RouterState,
     map: &RouteMap,
@@ -59,17 +61,16 @@ pub(super) async fn plan_scatter(
         .cloned()
         .collect();
     let mut per_shard: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    let mut refusal = FirstRefusal::default();
     for id in &direct {
         match locate_owner(state, map, id, headers, deadline, started_at).await {
             Located::Shard(shard) => per_shard.entry(shard).or_default().push(id.clone()),
-            Located::Missing => {
-                return Err(Box::new(api::error(
-                    ErrorCode::NoContext,
-                    format!("context '{id}' not found"),
-                    started_at,
-                )));
-            }
-            Located::Answered(response) => return Err(Box::new(response)),
+            Located::Missing => refusal.note(api::error(
+                ErrorCode::NoContext,
+                format!("context '{id}' not found"),
+                started_at,
+            ))?,
+            Located::Answered(response) => refusal.note(response)?,
             // No reachable shard holds it, but some could not be asked:
             // send the id to them, where it surfaces as the labeled
             // `unreached` partial (the shard that can answer for it is
@@ -81,6 +82,7 @@ pub(super) async fn plan_scatter(
             }
         }
     }
+    refusal.finish()?;
     let shards: Vec<usize> = if group_ids.is_empty() {
         per_shard.keys().copied().collect()
     } else {

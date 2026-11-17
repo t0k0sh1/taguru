@@ -290,7 +290,7 @@ fn the_proxy_injects_its_own_span_and_forwards_tracestate() {
 
     let request = ureq::http::Request::builder()
         .method("GET")
-        .uri(format!("{}/contexts/sake", router.base))
+        .uri(format!("{}/contexts/{}", router.base, fixed_id("sake")))
         .header(
             "traceparent",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
@@ -358,7 +358,7 @@ fn the_proxy_omits_tracestate_when_the_caller_sent_none() {
 
     let request = ureq::http::Request::builder()
         .method("GET")
-        .uri(format!("{}/contexts/sake", router.base))
+        .uri(format!("{}/contexts/{}", router.base, fixed_id("sake")))
         .header(
             "traceparent",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",

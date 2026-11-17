@@ -1211,20 +1211,30 @@ where
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let AppPath(id) = AppPath::<String>::from_request_parts(parts, state).await?;
-        if crate::registry::is_context_id(&id) {
-            Ok(Self(id))
-        } else {
-            Err(coded(
-                axum::http::StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidArgument,
-                format!(
-                    "'{id}' is not a context id: paths take the id column of GET /contexts \
-                     (a lowercase hyphenated UUID), not the context's name"
-                ),
-                Instant::now(),
-            ))
+        match invalid_context_id_path(&id, Instant::now()) {
+            None => Ok(Self(id)),
+            Some(refusal) => Err(refusal),
         }
     }
+}
+
+/// The 400 for a `/contexts/{id}` path segment that is not a context
+/// id — [`ContextIdPath`]'s rejection, shared with `taguru router`,
+/// which checks the decoded id before probing any shard with it.
+/// `None` when it is one.
+pub(crate) fn invalid_context_id_path(id: &str, started_at: Instant) -> Option<Response> {
+    if crate::registry::is_context_id(id) {
+        return None;
+    }
+    Some(coded(
+        axum::http::StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidArgument,
+        format!(
+            "'{id}' is not a context id: paths take the id column of GET /contexts \
+             (a lowercase hyphenated UUID), not the context's name"
+        ),
+        started_at,
+    ))
 }
 
 /// The `{id}` segment of every `/groups/{id}/…` route (#995): a

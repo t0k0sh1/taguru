@@ -78,6 +78,14 @@ pub(super) async fn proxy_context_sub(
 /// the create body's display NAME against the route map, which still
 /// keys on names: the map keeps deciding where new `contexts` go,
 /// exactly as it decided the old name-addressed create.
+///
+/// A single instance refuses the caller (401, a context-scoped key's
+/// 403) before it reads the body, and the router holds no keyring, so
+/// it never answers a create refusal of its own ahead of the shards':
+/// a body without a usable name goes to a shard as it is (no shard can
+/// create from it, so the answer is the shard's own refusal), and a
+/// name no shard owns is first put to a shard as an empty-name create
+/// ([`create_refused_by_a_shard`]).
 pub(super) async fn route_create_context(
     State(state): State<RouterState>,
     axum::Extension(deadline): axum::Extension<Deadline>,
@@ -92,7 +100,23 @@ pub(super) async fn route_create_context(
                 .get("name")
                 .and_then(|name| name.as_str().map(str::to_string))
         });
+    let map = state.map();
     let Some(name) = name else {
+        if let Some(shard) = map.all().next()
+            && let Ok(answer) = state
+                .call_shard(
+                    &map,
+                    shard,
+                    Method::POST,
+                    "/contexts",
+                    &hop_headers(&headers),
+                    Some(body),
+                    deadline,
+                )
+                .await
+        {
+            return passthrough(answer);
+        }
         return api::error(
             ErrorCode::InvalidArgument,
             "the create body must be JSON carrying the context's name — the router routes \
@@ -100,8 +124,10 @@ pub(super) async fn route_create_context(
             started_at,
         );
     };
-    let map = state.map();
     let Some(shard) = map.shard_of(&name) else {
+        if let Some(refusal) = create_refused_by_a_shard(&state, &map, &headers, deadline).await {
+            return refusal;
+        }
         return api::error(
             ErrorCode::InvalidArgument,
             format!(
@@ -147,6 +173,38 @@ pub(super) async fn route_create_context(
     }
 }
 
+/// The shard's own refusal of the caller for a create, if it has one:
+/// a `POST /contexts {"name": ""}` - which no shard can apply, the
+/// empty name being refused after the auth and scope checks - whose
+/// 401 or 403 is the single instance's first answer. `None` when the
+/// shard would let the caller create (its 400 for the empty name) or
+/// could not be asked.
+async fn create_refused_by_a_shard(
+    state: &RouterState,
+    map: &RouteMap,
+    headers: &HeaderMap,
+    deadline: Deadline,
+) -> Option<Response> {
+    let shard = map.all().next()?;
+    let answer = state
+        .call_shard(
+            map,
+            shard,
+            Method::POST,
+            "/contexts",
+            &hop_headers(headers),
+            Some(Bytes::from_static(br#"{"name":""}"#)),
+            deadline,
+        )
+        .await
+        .ok()?;
+    matches!(
+        answer.status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    )
+    .then(|| passthrough(answer))
+}
+
 /// Which shard answers for a path id. The route map still keys on
 /// display names — a path that now carries the ID cannot consult it —
 /// so ownership is resolved by asking the shards themselves: one
@@ -179,6 +237,32 @@ pub(super) enum Located {
         shards: Vec<usize>,
         refusal: Response,
     },
+}
+
+/// The single-instance refusal order over several probed ids: a scope
+/// refusal (403) on any id outranks every other refusal, because a
+/// single instance checks the key's grant over the whole request
+/// before it checks existence; otherwise the first refusal in request
+/// order answers. The router holds no keyring, so it learns a scope
+/// refusal only from the shard a later id's probe reaches - which is
+/// why an earlier id's 404 is held instead of answered.
+#[derive(Default)]
+pub(super) struct FirstRefusal(Option<Response>);
+
+impl FirstRefusal {
+    /// Records one id's refusal; `Err` when it answers at once.
+    pub(super) fn note(&mut self, refusal: Response) -> Result<(), Box<Response>> {
+        if refusal.status() == StatusCode::FORBIDDEN {
+            return Err(Box::new(refusal));
+        }
+        self.0.get_or_insert(refusal);
+        Ok(())
+    }
+
+    /// The held refusal, once every id has been probed.
+    pub(super) fn finish(self) -> Result<(), Box<Response>> {
+        self.0.map_or(Ok(()), |refusal| Err(Box::new(refusal)))
+    }
 }
 
 /// [`resolve_owner`] for callers that treat "nowhere" as a state, not
@@ -342,6 +426,13 @@ async fn proxy_context(
     // path as received, encoded segments included.
     if has_dot_segment(request.uri().path()) {
         return dot_segment_refusal(request.uri().path(), started_at);
+    }
+    // The id as axum decoded it: a percent-encoded `/` survives the raw
+    // dot-segment test above, but `..%2F..%2Fhealth` decodes to a path
+    // the probe's URL would resolve onto another shard endpoint. Only a
+    // context id is probed - the single instance's own 400 otherwise.
+    if let Some(refusal) = api::invalid_context_id_path(&id, started_at) {
+        return refusal;
     }
     let map = state.map();
     let shard =

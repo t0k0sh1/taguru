@@ -555,6 +555,75 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
     );
 }
 
+/// A torn earlier run that REWROTE a summary: its batch for one
+/// positional id landed with another cluster's text and fingerprint
+/// tag, its manifest never did. The next run must not reuse that text
+/// under the old manifest's fingerprint for the id — it re-summarizes
+/// (ADR 0056: a hit's fingerprint describes the text it serves).
+#[test]
+fn a_summary_a_torn_run_rewrote_is_resummarized_not_reused() {
+    let server = Server::start("communities-torn-rewrite");
+    seed_two_cliques(&server, "corp");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
+
+    let derived = server.cx("corp::communities");
+    let listed = server.ok(
+        "GET",
+        &format!("/contexts/{derived}/sources?prefix=community:"),
+        None,
+    );
+    let entries = listed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{listed}");
+    let rewritten = entries[0]["id"].as_str().unwrap().to_string();
+    let other_tag = entries[1]["tags"][0].as_str().unwrap().to_string();
+    assert!(other_tag.starts_with("community-fingerprint:"), "{listed}");
+    // What the torn run left: the other community's text and tag under
+    // this id, the manifest untouched.
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived}/sources"),
+        Some(json!({
+            "passages": {rewritten.as_str(): "別の共同体の要約。"},
+            "tags": {rewritten.as_str(): [other_tag]},
+        })),
+    );
+
+    let (code, stdout, stderr) = run_communities(
+        &["--context", &server.cx("corp"), &server.base],
+        &extract_env,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 generated, 1 reused"), "{stdout}");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    let looked = server.ok(
+        "POST",
+        &format!("/contexts/{derived}/sources/lookup"),
+        Some(json!({"source_ids": [rewritten.as_str()]})),
+    );
+    let text = looked["passages"][rewritten.as_str()].as_str().unwrap();
+    assert!(!text.contains("別の共同体"), "{looked}");
+    let relisted = server.ok(
+        "GET",
+        &format!("/contexts/{derived}/sources?prefix=community:"),
+        None,
+    );
+    assert_eq!(
+        relisted["entries"][0]["tags"], entries[0]["tags"],
+        "the re-summarized record carries its own fingerprint again: {relisted}"
+    );
+}
+
 // --- community_hits: untested refusal/degradation branches -----------------
 
 /// The artifact's own manifest builder, `search_refuses_without_an_
