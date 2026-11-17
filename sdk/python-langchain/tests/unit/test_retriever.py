@@ -143,18 +143,27 @@ def test_cross_contexts_tag_documents_and_share_one_text_call(
     assert by_context == {"id-sake", "id-tea"}
 
 
-def test_groups_resolve_to_members_nested_children_included(
-    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_groups_resolve_to_members_nested_children_included(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    lane: str,
 ) -> None:
+    # gid-childg is named twice — as a root and as gid-parent's child.
     retriever = TaguruRetriever(
-        group_ids=["gid-parent"], client=sync_client, async_client=async_client
+        group_ids=["gid-parent", "gid-childg"], client=sync_client, async_client=async_client
     )
-    documents = retriever.invoke("青嶺酒造")
+    if lane == "sync":
+        documents = retriever.invoke("青嶺酒造")
+    else:
+        documents = await retriever.ainvoke("青嶺酒造")
 
     # parent reaches sake directly and tea through its child group — walked
-    # over one read of the directory, never a per-group fetch.
+    # one get per group reached (#1024), each group once, never the whole
+    # directory listing.
     fetched = [path for path, _ in fake_server.calls if path.startswith("/groups")]
-    assert fetched == ["/groups", "/groups"]
+    assert sorted(fetched) == ["/groups/gid-childg", "/groups/gid-parent"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
         {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
@@ -220,12 +229,12 @@ async def test_async_still_resolves_the_groups_it_can_when_one_group_fails_to_fe
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
 
-def test_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
+def test_a_group_that_fails_to_read_refuses_a_groups_only_retrieval(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    # Nothing but groups to search: an unreadable directory is the
+    # Nothing but groups to search: an unreadable group is the
     # caller's error, never an empty result that looks complete.
-    fake_server.fail_group_directory_after = 1
+    fake_server.fail_groups = {"gid-childg"}
     retriever = TaguruRetriever(
         group_ids=["gid-parent"], client=sync_client, async_client=async_client
     )
@@ -234,10 +243,10 @@ def test_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
     assert not [path for path, _ in fake_server.calls if path == "/sources/search"]
 
 
-async def test_async_a_group_directory_that_fails_to_read_refuses_a_groups_only_retrieval(
+async def test_async_a_group_that_fails_to_read_refuses_a_groups_only_retrieval(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    fake_server.fail_group_directory_after = 0
+    fake_server.fail_groups = {"gid-parent"}
     retriever = TaguruRetriever(
         group_ids=["gid-parent"], client=sync_client, async_client=async_client
     )
@@ -246,16 +255,15 @@ async def test_async_a_group_directory_that_fails_to_read_refuses_a_groups_only_
 
 
 @pytest.mark.parametrize("lane", ["sync", "async"])
-async def test_a_directory_failing_partway_keeps_the_rows_read_beside_direct_targets(
+async def test_a_walk_failing_partway_keeps_the_members_reached_beside_direct_targets(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
 ) -> None:
-    # The first page reads (every row fits on it); the closing page
-    # fails. The rows already read still resolve, beside the direct
-    # target.
-    fake_server.fail_group_directory_after = 1
+    # gid-parent reads; its child gid-childg fails. The members already
+    # reached (sake) still resolve, beside the direct target.
+    fake_server.fail_groups = {"gid-childg"}
     retriever = TaguruRetriever(
         context_ids=["id-tea"],
-        group_ids=["gid-brewery"],
+        group_ids=["gid-parent"],
         client=sync_client,
         async_client=async_client,
     )
@@ -316,10 +324,10 @@ async def test_context_id_is_searched_beside_a_groups_members(
 
 
 @pytest.mark.parametrize("lane", ["sync", "async"])
-async def test_context_id_is_the_fallback_when_the_group_directory_fails(
+async def test_context_id_is_the_fallback_when_the_group_fails_to_read(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
 ) -> None:
-    fake_server.fail_group_directory_after = 0
+    fake_server.fail_groups = {"gid-brewery"}
     retriever = TaguruRetriever(
         context_id="id-sake",
         group_ids=["gid-brewery"],
@@ -332,20 +340,6 @@ async def test_context_id_is_the_fallback_when_the_group_directory_fails(
         await retriever.ainvoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
-
-
-def test_the_group_walk_pages_through_rows_that_share_a_name(
-    sync_client: Taguru, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A page boundary between two rows named alike: the (name, id)
-    # cursor resumes after the first, never skipping the second.
-    monkeypatch.setitem(
-        GROUP_ROWS,
-        "gid-twin",
-        {"id": "gid-twin", "name": "childg", "description": "", "context_ids": [], "group_ids": []},
-    )
-    walked = [(row.name, row.id) for row in sync_client.groups.iter(limit=1)]
-    assert walked == sorted((row["name"], row["id"]) for row in GROUP_ROWS.values())
 
 
 def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(

@@ -53,27 +53,23 @@ def _rrf(rank: int) -> float:
     return 1.0 / (RRF_K + rank)
 
 
-def _group_members(rows: list[GroupEntry], roots: list[str]) -> set[str]:
-    """Every ``context`` id the ``group`` ids in ``roots`` reach, nested children
-    included, walked over one read of the directory (``rows``). A root id no row
-    carries (a deleted ``group``) contributes nothing, and the rest of the walk
-    still stands: one unresolvable ``group`` must not blank out every other
-    member. Children are ids too (#996), followed through the same read."""
-    by_id = {row.id: row for row in rows}
-    members: set[str] = set()
-    seen: set[str] = set()
-    stack = list(roots)
-    while stack:
-        group_id = stack.pop()
-        if group_id in seen:
-            continue
-        seen.add(group_id)
-        entry = by_id.get(group_id)
+def _next_storey(entries: list[GroupEntry | None], seen: set[str], members: set[str]) -> list[str]:
+    """Folds one storey of fetched ``group`` rows into ``members`` and answers
+    the child ``group`` ids to fetch next — each id once, however many parents
+    name it (``seen`` carries every id already asked for). A ``None`` entry is a
+    ``group`` that answered 404 (deleted): it contributes nothing, and the rest
+    of the walk still stands — one unresolvable ``group`` must not blank out
+    every other member."""
+    children: list[str] = []
+    for entry in entries:
         if entry is None:
             continue
         members.update(entry.context_ids)
-        stack.extend(entry.group_ids)
-    return members
+        for child in entry.group_ids:
+            if child not in seen:
+                seen.add(child)
+                children.append(child)
+    return children
 
 
 class TaguruRetriever(BaseRetriever):
@@ -165,20 +161,29 @@ class TaguruRetriever(BaseRetriever):
     def _resolve_targets(self, client: Taguru) -> list[str]:
         if not self.group_ids:
             return self._direct_targets()
-        # One directory read resolves every ``group`` id and its nested
-        # children, instead of a ``groups.get`` per storey. A directory that
-        # fails to read partway keeps the rows already read beside the direct
-        # targets — and with no direct target, the failure is the
-        # caller's to hear, never an empty search that looks complete.
+        # Walk down from the named ``groups``, one ``groups.get`` per ``group``
+        # reached (#1024): only the rows this search needs are read — never
+        # the whole directory, whose every row costs the server a
+        # fingerprint. A walk that fails partway keeps the members already
+        # reached beside the direct targets — and with no direct target, the
+        # failure is the caller's to hear, never an empty search that looks
+        # complete.
         direct = self._direct_targets()
-        rows: list[GroupEntry] = []
+        members: set[str] = set()
+        storey = list(dict.fromkeys(self.group_ids))
+        seen = set(storey)
         try:
-            for entry in client.groups.iter():
-                rows.append(entry)
+            while storey:
+                entries: list[GroupEntry | None] = []
+                for group_id in storey:
+                    try:
+                        entries.append(client.groups.get(group_id))
+                    except NotFoundError:
+                        entries.append(None)
+                storey = _next_storey(entries, seen, members)
         except Exception:
             if not direct:
                 raise
-        members = _group_members(rows, self.group_ids)
         return self._with_members(direct, members)
 
     def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
@@ -293,20 +298,41 @@ class TaguruRetriever(BaseRetriever):
     # -- async lane ----------------------------------------------------------
 
     async def _aresolve_targets(self, client: AsyncTaguru) -> list[str]:
-        """:meth:`_resolve_targets`' async twin. ``except Exception`` lets a
+        """:meth:`_resolve_targets`' async twin, fetching each storey's
+        ``groups`` concurrently, so the round trips follow the nesting depth
+        (at most 3), not the ``group`` count. ``except Exception`` lets a
         BaseException that is NOT an Exception — CancelledError above all —
-        propagate, never swallowed as an unreadable directory."""
+        propagate, never swallowed as an unreadable ``group``."""
         if not self.group_ids:
             return self._direct_targets()
         direct = self._direct_targets()
-        rows: list[GroupEntry] = []
+        members: set[str] = set()
+        storey = list(dict.fromkeys(self.group_ids))
+        seen = set(storey)
+
+        async def _fetch_one(group_id: str) -> GroupEntry | None:
+            try:
+                return await client.groups.get(group_id)
+            except NotFoundError:
+                return None
+
         try:
-            async for entry in client.groups.iter():
-                rows.append(entry)
+            while storey:
+                # Cancel and drain the siblings before re-raising, as
+                # `_agraph_lane` does: `gather` alone would leave them running
+                # as orphaned tasks.
+                tasks = [asyncio.ensure_future(_fetch_one(group_id)) for group_id in storey]
+                try:
+                    entries = list(await asyncio.gather(*tasks))
+                except BaseException:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
+                storey = _next_storey(entries, seen, members)
         except Exception:
             if not direct:
                 raise
-        members = _group_members(rows, self.group_ids)
         return self._with_members(direct, members)
 
     async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
