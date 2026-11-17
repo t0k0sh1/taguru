@@ -155,7 +155,7 @@ from ._types import (
     SectionSpec,
 )
 
-__version__ = "0.9.7"
+__version__ = "0.10.0"
 
 __all__ = [
     "__version__",
