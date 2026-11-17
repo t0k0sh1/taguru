@@ -88,7 +88,7 @@
 
   <section id="terms">
     <h2>Terms: document, segment, chunk, piece, paragraph</h2>
-    <p class="section-sub">The five units this page talks about, largest first. Each one contains the next.</p>
+    <p class="section-sub">The five units this page talks about, largest first. Each one contains the next — except a paragraph longer than the chunk cap, whose slices can land in different chunks and pieces (below).</p>
     <div class="tbl">
       <table>
         <thead><tr><th>Term</th><th>What it is</th><th>Who decides it</th><th>Where you see it</th></tr></thead>
@@ -130,7 +130,8 @@
       Chunks and pieces are cut at paragraph boundaries. The one exception is a paragraph longer
       than the cap: it is cut inside, and every slice repeats its <code>[N]</code> label, so a
       chunk or piece always names the paragraph its text came from. A split never crosses its
-      chunk: a sub-piece is still chunk K, which is why <code>--dry-run</code>'s chunk count is a
+      chunk: a sub-piece is still chunk K. A chunk reused from a <a href="#checkpoints">checkpoint</a>
+      makes no model call, so <code>--dry-run</code>'s chunk count less its reusable count is a
       lower bound on model calls.
     </p>
     <p>
@@ -1010,7 +1011,8 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       carries the full segment text as-is. Segments over 8 MiB are refused. Their passage could
       not fit in the source file. Split the segment. Under the escalation ladder
       (<a href="#structured-output">above</a>) a length-limited or timed-out chunk can split further at run
-      time, so <code>--dry-run</code>'s chunk count is a lower bound on model calls, not an
+      time, so <code>--dry-run</code>'s chunk count, less the chunks it reports as reusable from a
+      checkpoint, is a lower bound on model calls, not an
       exact one. The cap is a computation input: a segment extracted under a different
       <code>--chunk-bytes</code> re-extracts (the default cap matches manifests written before the
       flag existed). Lower it for a slow local provider or for output-dense segments — statutes,
