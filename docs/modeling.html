@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Modeling — Taguru</title>
-  <meta name="description" content="Mapping real documents onto Taguru: which boundaries become contexts, which become groups, how sources carry parts, and the failure modes of a context grown into a corpus.">
+  <meta name="description" content="Mapping real documents onto Taguru: which boundaries become contexts, which become groups, how a long section stays one context across several sources, and the failure modes of a context grown into a corpus.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -114,7 +114,7 @@
             <td>the sources API, at ingest</td>
           </tr>
           <tr>
-            <td>chunk / part</td>
+            <td>chunk</td>
             <td>a size-bounded slice a <em>pipeline</em> feeds to a model (<code>taguru extract</code>: 24 KiB)</td>
             <td>nothing on the server — it is transport, not meaning</td>
             <td>your extraction pipeline, never the server</td>
@@ -190,9 +190,10 @@
     </p>
     <p>
       A section too long for one ingest pass does <b>not</b> become two <code>contexts</code>. It stays one
-      <code>context</code> — the frame of meaning has not changed — and gains a second <b>source</b>:
-      <code>bert/2.2/part-1</code>, <code>bert/2.2/part-2</code>, both inside
-      <code>section/bert/2.2</code>. Each part retracts and re-imports on its own; the section's
+      <code>context</code> — the frame of meaning has not changed. Cut it into two segments instead.
+      Each one becomes its own <b>source</b>, <code>bert/2.2/segment-1</code> and
+      <code>bert/2.2/segment-2</code>, both inside <code>section/bert/2.2</code>. Each source
+      retracts and re-imports on its own; the section's
       vocabulary and aliases stay shared across both, which is the entire reason splitting by
       source rather than by <code>context</code> is the correct move here.
     </p>
@@ -202,12 +203,12 @@
       A run of <code>taguru import</code> (or one <code>POST /import</code> body) can carry
       several sources and any number of <code>group</code> records together — <code>group</code>
       records apply after every source in the run, so a <code>group</code> and the <code>contexts</code> it names can travel
-      in any order. One file for the two parts of §2.1, closing with the chapter and paper <code>groups</code>:
+      in any order. One file carrying both of §2.1's sources, closing with the chapter and paper <code>groups</code>:
     </p>
-    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/part-1"</span>, <span class="k">"context_id"</span>: <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>, <span class="k">"create"</span>: {<span class="k">"name"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
+    <pre><code>{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/segment-1"</span>, <span class="k">"context_id"</span>: <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>, <span class="k">"create"</span>: {<span class="k">"name"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"We pre-train BERT using two unsupervised tasks…"</span>}
 {<span class="k">"subject"</span>: <span class="s">"BERT"</span>, <span class="k">"label"</span>: <span class="s">"pre-training task"</span>, <span class="k">"object"</span>: <span class="s">"masked LM"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
-{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/part-2"</span>, <span class="k">"context_id"</span>: <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>}
+{<span class="k">"type"</span>: <span class="s">"source"</span>, <span class="k">"id"</span>: <span class="s">"bert/2.1/segment-2"</span>, <span class="k">"context_id"</span>: <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>}
 {<span class="k">"passage"</span>: <span class="s">"…the second task jointly pre-trains text-pair representations."</span>}
 {<span class="k">"subject"</span>: <span class="s">"BERT"</span>, <span class="k">"label"</span>: <span class="s">"pre-training task"</span>, <span class="k">"object"</span>: <span class="s">"next sentence prediction"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
 {<span class="k">"type"</span>: <span class="s">"group"</span>, <span class="k">"id"</span>: <span class="s">"5d2e8a41-9c63-4b17-a0f5-3e7b1c9d6f28"</span>, <span class="k">"name"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"context_ids"</span>: [<span class="s">"3c1d9a52-6e47-4f08-b2a1-0d8e5f7c4a19"</span>, <span class="s">"7b0a5c1e-3f24-4c8e-9a61-2d5e8f4b9c70"</span>, <span class="s">"a94e2f60-1b3d-4d75-8c0e-6f2a7b9d1e34"</span>]}
@@ -219,7 +220,7 @@
       the run, and a member still missing at that point refuses the record, naming the missing id.
       The second source's <code>create</code> block is left out on purpose — the <code>context</code> already
       exists from the first source, and importing into an absent <code>context</code> without a create block is
-      refused, so this is also how the parser confirms both parts land in the same <code>context</code> rather
+      refused, so this is also how the parser confirms both sources land in the same <code>context</code> rather
       than silently minting two. Full field-by-field contract: <a href="import.html">The
       source file contract</a>.
     </p>

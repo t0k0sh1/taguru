@@ -83,7 +83,7 @@ fn stub_chat_server(replies: Vec<String>) -> (String, std::thread::JoinHandle<Ve
 /// accepted connection is handled on its own thread — so simultaneous
 /// client connections are actually served simultaneously — and the
 /// reply is chosen by the chunk index embedded in the request body
-/// (the `"part K of N"` tag `extract.rs`'s `user_message` writes into
+/// (the `"chunk K of N"` tag `extract.rs`'s `user_message` writes into
 /// the user message, K one-based), not by arrival order, since
 /// concurrent workers connect in OS-scheduled, non-deterministic
 /// order. `respond` is called once per request with the zero-based
@@ -141,7 +141,7 @@ where
 }
 
 /// Pulls the zero-based chunk index out of the last user-role
-/// message's `"part K of N"` tag; a single-chunk document carries no
+/// message's `"chunk K of N"` tag; a single-chunk document carries no
 /// such tag, so it is index 0.
 fn chunk_index_of(body: &str) -> usize {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
@@ -153,9 +153,9 @@ fn chunk_index_of(body: &str) -> usize {
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default();
     content
-        .find("part ")
+        .find(", chunk ")
         .and_then(|start| {
-            let rest = &content[start + "part ".len()..];
+            let rest = &content[start + ", chunk ".len()..];
             let end = rest.find(" of ")?;
             rest[..end].parse::<usize>().ok()
         })
@@ -1934,11 +1934,11 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     let lines: Vec<&str> = preamble.lines().collect();
     assert_eq!(
         lines[0],
-        format!("Segment '{}', part 2 of 2:", doc.display())
+        format!("Segment '{}', chunk 2 of 2:", doc.display())
     );
     assert!(lines[1].starts_with("Chunk context ("), "{preamble}");
     assert!(
-        lines[1].contains("extract facts from part 2 of 2 only"),
+        lines[1].contains("extract facts from chunk 2 of 2 only"),
         "{preamble}"
     );
     assert_eq!(lines[2], "Position: Beta");
@@ -2033,7 +2033,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         "off sends today's prompt: {off}"
     );
     assert!(
-        off.starts_with(&format!("Segment '{}', part 1 of ", doc.display())),
+        off.starts_with(&format!("Segment '{}', chunk 1 of ", doc.display())),
         "{off}"
     );
     let (_, trace) = read_trace(&out);
@@ -2184,8 +2184,8 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     };
     // The first two requests are the overview pass, in chunk order,
     // each listing the units opening in its chunk.
-    assert!(system_of(&requests[0]).starts_with("You read one part of a segment"));
-    assert!(system_of(&requests[1]).starts_with("You read one part of a segment"));
+    assert!(system_of(&requests[0]).starts_with("You read one chunk of a segment"));
+    assert!(system_of(&requests[1]).starts_with("You read one chunk of a segment"));
     assert!(
         user_of(&requests[0]).contains("- unit 0: Alpha"),
         "{}",
@@ -2385,7 +2385,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
             json_body_of(r)["messages"][0]["content"]
                 .as_str()
                 .unwrap()
-                .starts_with("You read one part")
+                .starts_with("You read one chunk")
         })
         .count();
     assert_eq!(overview_calls_before, 3);
@@ -7729,9 +7729,9 @@ fn setup_one_checkpointed_chunk_and_one_failure(
     // exhausts its attempts and the document fails, but only after
     // chunk 0 already landed in the checkpoint file. `stub_chat_server`
     // (connection-order-keyed) is used deliberately instead of
-    // `stub_chat_server_concurrent` (content-parsed "part K of N"
+    // `stub_chat_server_concurrent` (content-parsed "chunk K of N"
     // index): a corrective retry's last user turn is the corrective ask
-    // text, not the original part tag, so the latter can't tell chunk
+    // text, not the original chunk tag, so the latter can't tell chunk
     // 1's retries apart from chunk 0.
     let chunk0_reply = json!({"associations": [
         {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
@@ -9054,7 +9054,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     // a diagnostic snapshot of this run's compute inputs.
     let settings = &records[1];
     assert_eq!(settings["model"], "stub-model");
-    assert_eq!(settings["prompt_version"], 6);
+    assert_eq!(settings["prompt_version"], 7);
     assert_eq!(settings["questions_n"], 0);
     assert_eq!(settings["fact_budget"], 0);
     assert_eq!(settings["structured_output"], "");

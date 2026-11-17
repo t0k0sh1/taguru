@@ -437,7 +437,7 @@ pub(super) fn extract_chunk_or_ladder(
 /// Everything one piece's ladder needs, bundled so the split
 /// recursion doesn't thread eight arguments through every level.
 /// `chunk_index`/`chunk_total` stay the ORIGINAL chunk's coordinates
-/// all the way down: a split sub-piece is still "part K of N" of the
+/// all the way down: a split sub-piece is still "chunk K of N" of the
 /// same segment as far as the model is told.
 pub(super) struct PieceContext<'a> {
     pub(super) completions: &'a Completions,
@@ -447,7 +447,7 @@ pub(super) struct PieceContext<'a> {
     pub(super) chunk_total: usize,
     /// ADR 0033: the ORIGINAL chunk's context block, carried down to
     /// every split sub-piece the same way `chunk_index` is — a
-    /// sub-piece is still part K, read in part K's context.
+    /// sub-piece is still chunk K, read in chunk K's context.
     pub(super) context_block: Option<&'a str>,
     pub(super) ladder: &'a LadderConfig,
     pub(super) policy: &'a CorrectionPolicy,

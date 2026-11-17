@@ -189,7 +189,7 @@ describe("checkpoint reuse", () => {
     const humanContents = llm2.seenPrompts[0]!.filter((m) => m.getType() === "human").map(
       (m) => m.content,
     );
-    expect(humanContents.some((c) => String(c).includes("part 2 of 2"))).toBe(true);
+    expect(humanContents.some((c) => String(c).includes("chunk 2 of 2"))).toBe(true);
     expect(server.imported.length).toBe(1);
     expect(unitCount(store, source)).toBe(0); // cleared once the batch landed
   });
@@ -583,7 +583,7 @@ it("a reused chunk still participates in cross-chunk correction", async () => {
   const stage2Messages = llm2.seenPrompts[0]!;
   const humanContents = stage2Messages.filter((m) => m.getType() === "human").map((m) => m.content);
   const aiContents = stage2Messages.filter((m) => m.getType() === "ai").map((m) => m.content);
-  expect(humanContents.some((c) => String(c).includes("part 2 of 2"))).toBe(true);
+  expect(humanContents.some((c) => String(c).includes("chunk 2 of 2"))).toBe(true);
   // The replayed prior-answer turn is the STORED (checkpointed) answer,
   // verbatim — proof the reused record's own conversation was rebuilt from
   // checkpoint data, not re-derived some other way.

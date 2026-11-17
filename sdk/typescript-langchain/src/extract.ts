@@ -29,11 +29,12 @@ import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
 // fact, never a heading-only paragraph. 6 (#851/#904): every "document"
 // the model is shown (the framing, the user turn's preamble, the
 // candidates/vocabulary/chunk-context blocks) is now "segment" (#851's
-// terminology split). A schema DOCUMENT's own content changing without a
+// terminology split). 7 (#851/#1057): the user turn's "part K of N" is
+// now "chunk K of N". A schema DOCUMENT's own content changing without a
 // prompt revision is instead covered by the checkpoint's schema digest
 // (checkpoints.ts) — the same division fact_budget (a computation input)
 // and PROMPT_VERSION (the prompt's wording) already draw.
-export const PROMPT_VERSION = 6;
+export const PROMPT_VERSION = 7;
 // The file-format revision every record this module writes is stamped
 // with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
 // record's `version` column beside its `type`.
@@ -613,7 +614,7 @@ function relationLine(label: string, domain: string[], range: string[]): string 
 
 export function userMessage(source: string, index: number, total: number, text: string): string {
   if (total > 1) {
-    return `Segment '${source}', part ${index + 1} of ${total}:\n\n${text}`;
+    return `Segment '${source}', chunk ${index + 1} of ${total}:\n\n${text}`;
   }
   return `Segment '${source}':\n\n${text}`;
 }

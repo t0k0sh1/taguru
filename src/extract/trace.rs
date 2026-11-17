@@ -252,7 +252,7 @@ pub(super) struct PieceOrigin {
 
 impl PieceOrigin {
     /// Read off a [`ChunkOutput`] before it is consumed: the piece text
-    /// is the user turn's segment part, byte for byte
+    /// is the user turn's segment text, byte for byte
     /// (`user_message_segment` is `user_message`'s inverse). `reused`
     /// is derived from the attempt's run: an output this run produced
     /// carries this run's id; a checkpointed one carries the producing
