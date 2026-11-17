@@ -239,27 +239,59 @@ jobs:
         run: npm install --no-fund --no-audit
         working-directory: sdk
       # `npm audit` exits 1 both for a real finding and for a registry
-      # outage (`audit endpoint returned an error` — 5xx or a network
-      # timeout at registry.npmjs.org, seen four runs in a row on
-      # 2026-09-04). Only the outage is retried; a finding fails on the
-      # first attempt as before.
+      # outage (`audit endpoint returned an error` on stderr — 5xx or a
+      # network timeout at registry.npmjs.org, seen four runs in a row on
+      # 2026-09-04). One `--json` audit per attempt decides all three
+      # cases, so an outage anywhere is retried. A finding passes only
+      # when every high/critical advisory is on sdk/npm-audit-allowlist.txt
+      # (each entry carries its reason and exit condition); one unlisted
+      # advisory fails the job on the first attempt as before. A clean
+      # audit with entries still listed warns that they can go.
       # No pipe: this workflow declares no `shell`, so `run` gets `bash -e`
       # without `pipefail`, and `npm audit | tee` would return tee's exit
       # status — the gate judges npm's own.
       - name: Audit dependencies
         shell: bash
         run: |
+          allowed=$(sed 's/#.*//' npm-audit-allowlist.txt | awk 'NF {print $1}' | LC_ALL=C sort -u)
           for attempt in 1 2 3 4 5; do
-            if npm audit --workspaces --audit-level=high > audit.log 2>&1; then
-              cat audit.log
+            status=0
+            npm audit --workspaces --audit-level=high --json > audit.json 2> audit.err || status=$?
+            cat audit.err
+            if grep -q "audit endpoint returned an error" audit.err audit.json; then
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              echo "::warning::npm audit endpoint error (attempt ${attempt}/5); retrying"
+              sleep $((attempt * 30))
+              continue
+            fi
+            # The report, one flagged package per line: severity, then the
+            # advisory URL or the dependency it comes through.
+            jq -r '.vulnerabilities // {} | to_entries[]
+              | "\(.key)  \(.value.severity)  via \([.value.via[]
+                  | if type == "object" then .url else . end] | join(", "))"' audit.json
+            if [ "$status" -eq 0 ]; then
+              if [ -n "$allowed" ]; then
+                echo "::warning::npm audit is clean; drop these from sdk/npm-audit-allowlist.txt: $(echo $allowed)"
+              fi
               exit 0
             fi
-            cat audit.log
-            if ! grep -q "audit endpoint returned an error" audit.log || [ "$attempt" -eq 5 ]; then
+            found=$(jq -r '[.vulnerabilities[]?.via[] | objects
+              | select(.severity == "high" or .severity == "critical")
+              | .url | sub(".*/"; "")] | unique[]' audit.json)
+            if [ -z "$found" ]; then
+              echo "::error::npm audit failed (exit ${status}) but its report names no high/critical advisory"
+              cat audit.json
               exit 1
             fi
-            echo "::warning::npm audit endpoint error (attempt ${attempt}/5); retrying"
-            sleep $((attempt * 30))
+            unlisted=$(comm -23 <(echo "$found" | LC_ALL=C sort) <(echo "$allowed"))
+            if [ -n "$unlisted" ]; then
+              echo "::error::advisories not on sdk/npm-audit-allowlist.txt: $(echo $unlisted)"
+              exit 1
+            fi
+            echo "::warning::accepted allowlisted advisories (see sdk/npm-audit-allowlist.txt): $(echo $found)"
+            exit 0
           done
           exit 1
         working-directory: sdk
