@@ -7,6 +7,16 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- **One place that defines extraction's units** (#1060, #851).
+  `docs/extract.html` opens with a Terms section: document, segment,
+  chunk, piece and paragraph, what each is, who decides it, where it
+  shows up, and how they nest — including that a piece is the text one
+  model call sees (an unsplit chunk is one piece with the chunk's id),
+  and that a failure stays inside its segment. `docs/modeling.html`'s
+  granularity table links to it.
+
 ### Changed
 
 - **Breaking (re-extraction) — the extraction prompt says "chunk" where
