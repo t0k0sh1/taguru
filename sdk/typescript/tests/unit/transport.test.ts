@@ -4,7 +4,7 @@ import { Taguru } from "../../src/client.js";
 import { citationKey } from "../../src/models.js";
 import { TaguruError } from "../../src/errors.js";
 import {
-  chunkAssociations,
+  batchAssociations,
   DEFAULT_BASE_URL,
   describeError,
   dropUndefined,
@@ -536,46 +536,46 @@ describe("pagination iterators", () => {
 describe("batching", () => {
   const op = (i: number) => ({ subject: `s${i}`, label: "l", object: "o", weight: 1.0 });
 
-  it("chunks by count", () => {
-    const chunks = [...chunkAssociations([op(0), op(1), op(2), op(3), op(4)], 2, 1e9)];
-    expect(chunks.map((c) => c.length)).toEqual([2, 2, 1]);
+  it("batches by count", () => {
+    const batches = [...batchAssociations([op(0), op(1), op(2), op(3), op(4)], 2, 1e9)];
+    expect(batches.map((b) => b.length)).toEqual([2, 2, 1]);
   });
 
-  it("yields nothing for an empty ops list (no trailing empty chunk)", () => {
-    expect([...chunkAssociations([], 10, 1e9)]).toEqual([]);
+  it("yields nothing for an empty ops list (no trailing empty batch)", () => {
+    expect([...batchAssociations([], 10, 1e9)]).toEqual([]);
   });
 
-  it("never flushes an empty leading chunk when the very first op alone exceeds the budget", () => {
-    // maxChunkBytes smaller than even one op's serialized size: the
-    // `chunk.length > 0` guard must still gate the flush on an empty
-    // chunk — the first op is pushed unconditionally, never preceded by
+  it("never flushes an empty leading batch when the very first op alone exceeds the budget", () => {
+    // maxBatchBytes smaller than even one op's serialized size: the
+    // `batch.length > 0` guard must still gate the flush on an empty
+    // batch — the first op is pushed unconditionally, never preceded by
     // a spurious empty yield.
-    const chunks = [...chunkAssociations([op(0)], 1e9, 1)];
-    expect(chunks).toEqual([[op(0)]]);
+    const batches = [...batchAssociations([op(0)], 1e9, 1)];
+    expect(batches).toEqual([[op(0)]]);
   });
 
   it("accounts for the separating comma exactly, one byte off the boundary", () => {
     // Budget is exactly ONE byte short of fitting two ops (2 + one + comma
     // + one); every op serializes to the same size here, so three ops
-    // must land one per chunk — a `+`/`-` swap on the comma byte, or an
-    // inverted `chunk.length > 0` ternary guarding it, would fit 2 into
-    // the first chunk instead.
+    // must land one per batch — a `+`/`-` swap on the comma byte, or an
+    // inverted `batch.length > 0` ternary guarding it, would fit 2 into
+    // the first batch instead.
     const one = Buffer.byteLength(JSON.stringify(op(0)), "utf-8");
-    const chunks = [...chunkAssociations([op(0), op(1), op(2)], 10_000, 2 * one + 2)];
-    expect(chunks.map((c) => c.length)).toEqual([1, 1, 1]);
+    const batches = [...batchAssociations([op(0), op(1), op(2)], 10_000, 2 * one + 2)];
+    expect(batches.map((b) => b.length)).toEqual([1, 1, 1]);
   });
 
-  it("chunks by serialized byte budget", () => {
+  it("batches by serialized byte budget", () => {
     const one = Buffer.byteLength(JSON.stringify(op(0)), "utf-8");
     const budget = 2 + one + 1 + one;
-    const chunks = [...chunkAssociations([op(0), op(1), op(2), op(3)], 10_000, budget)];
-    expect(chunks.map((c) => c.length)).toEqual([2, 2]);
-    for (const chunk of chunks) {
-      expect(Buffer.byteLength(JSON.stringify(chunk), "utf-8")).toBeLessThanOrEqual(budget);
+    const batches = [...batchAssociations([op(0), op(1), op(2), op(3)], 10_000, budget)];
+    expect(batches.map((b) => b.length)).toEqual([2, 2]);
+    for (const batch of batches) {
+      expect(Buffer.byteLength(JSON.stringify(batch), "utf-8")).toBeLessThanOrEqual(budget);
     }
   });
 
-  it("addAssociationsBatched sums applied counts across chunks", async () => {
+  it("addAssociationsBatched sums applied counts across batches", async () => {
     const batchSizes: number[] = [];
     const client = stubClient((req) => {
       const ops = JSON.parse(req.body ?? "[]") as unknown[];
@@ -584,8 +584,8 @@ describe("batching", () => {
     });
     const result = await client
       .context("sake")
-      .addAssociationsBatched([op(0), op(1), op(2), op(3), op(4)], { chunk_size: 2 });
-    expect(result).toEqual({ applied: 5, chunks: 3, issues: [], schema_violations: 0 });
+      .addAssociationsBatched([op(0), op(1), op(2), op(3), op(4)], { batch_size: 2 });
+    expect(result).toEqual({ applied: 5, batches: 3, issues: [], schema_violations: 0 });
     expect(batchSizes).toEqual([2, 2, 1]);
   });
 
@@ -611,10 +611,10 @@ describe("batching", () => {
     expect(result).toEqual({ applied: 1, issues: [issue], schema_violations: 3 });
   });
 
-  it("addAssociationsBatched aggregates the warn-mode carrier in chunk order", async () => {
-    // Each response is derived from the CHUNK THE REQUEST CARRIED, not
+  it("addAssociationsBatched aggregates the warn-mode carrier in batch order", async () => {
+    // Each response is derived from the BATCH THE REQUEST CARRIED, not
     // from handler call order — so a reordered transmission, a dropped
-    // chunk, or a double-count would all be visible.
+    // batch, or a double-count would all be visible.
     const issueFor = (subject: string) => ({
       path: `associations[0].${subject}`,
       kind: "range",
@@ -639,10 +639,10 @@ describe("batching", () => {
     });
     const result = await client
       .context("sake")
-      .addAssociationsBatched([op(0), op(1)], { chunk_size: 1 });
+      .addAssociationsBatched([op(0), op(1)], { batch_size: 1 });
     expect(result).toEqual({
       applied: 2,
-      chunks: 2,
+      batches: 2,
       issues: [issueFor("s0"), issueFor("s1")],
       schema_violations: 1 + 2,
     });

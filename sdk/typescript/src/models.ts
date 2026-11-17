@@ -1115,13 +1115,13 @@ export interface PromoteOutcome {
 }
 
 /**
- * Outcome of `addAssociationsBatched`: chunks are independent writes.
- * `issues`/`schema_violations` aggregate every chunk's warn-mode carrier
- * (ADR 0009 §8.3), in chunk order.
+ * Outcome of `addAssociationsBatched`: batches are independent writes.
+ * `issues`/`schema_violations` aggregate every batch's warn-mode carrier
+ * (ADR 0009 §8.3), in batch order.
  */
 export interface BatchApplyResult {
   applied: number;
-  chunks: number;
+  batches: number;
   issues: Issue[];
   schema_violations: number;
 }

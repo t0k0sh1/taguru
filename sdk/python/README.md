@@ -31,7 +31,7 @@ package = ctx.assemble_evidence("青嶺酒造", budget={"max_items": 10})  # ser
 ```
 
 Prefer one `add_associations` call per document. Above the 10,000-association
-request limit, `add_associations_batched` auto-chunks it; for corpus-scale
+request limit, `add_associations_batched` sends it in batches; for corpus-scale
 ingestion, use `POST /import` or `taguru import`. Each call pays for a full
 durable write.
 

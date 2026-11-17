@@ -1,4 +1,4 @@
-/** Transport-independent pieces: envelope handling, error mapping, chunking. */
+/** Transport-independent pieces: envelope handling, error mapping, batching. */
 
 import { TaguruError, errorForStatus } from "./errors.js";
 import type {
@@ -21,7 +21,7 @@ export const ENV_TOKEN = "TAGURU_API_TOKEN";
 export const DEFAULT_TIMEOUT_SECS = 30.0;
 /** Server-enforced caps mirrored client-side by addAssociationsBatched. */
 export const MAX_OPS_PER_REQUEST = 10_000;
-export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+export const MAX_BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
  * Lower-case every header key. HTTP header names are case-insensitive, but a
@@ -68,28 +68,28 @@ export function sortedEntries(mapping: Record<string, string>): Array<[string, s
   );
 }
 
-/** Split a batch by both element count and serialized body size. */
-export function* chunkAssociations(
+/** Split associations into batches by both element count and serialized body size. */
+export function* batchAssociations(
   ops: AssocOp[],
-  chunkSize: number,
-  maxChunkBytes: number,
+  batchSize: number,
+  maxBatchBytes: number,
 ): Generator<AssocOp[], void, undefined> {
-  let chunk: AssocOp[] = [];
-  let chunkBytes = 2; // "[" + "]"
+  let batch: AssocOp[] = [];
+  let batchBytes = 2; // "[" + "]"
   for (const op of ops) {
     const opBytes = Buffer.byteLength(JSON.stringify(op), "utf-8");
-    let added = opBytes + (chunk.length > 0 ? 1 : 0); // separating comma
-    if (chunk.length > 0 && (chunk.length >= chunkSize || chunkBytes + added > maxChunkBytes)) {
-      yield chunk;
-      chunk = [];
-      chunkBytes = 2;
+    let added = opBytes + (batch.length > 0 ? 1 : 0); // separating comma
+    if (batch.length > 0 && (batch.length >= batchSize || batchBytes + added > maxBatchBytes)) {
+      yield batch;
+      batch = [];
+      batchBytes = 2;
       added = opBytes;
     }
-    chunk.push(op);
-    chunkBytes += added;
+    batch.push(op);
+    batchBytes += added;
   }
-  if (chunk.length > 0) {
-    yield chunk;
+  if (batch.length > 0) {
+    yield batch;
   }
 }
 

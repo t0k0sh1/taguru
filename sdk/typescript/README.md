@@ -33,7 +33,7 @@ const pkg = await ctx.assembleEvidence("青嶺酒造", { budget: { max_items: 10
 ```
 
 Prefer one `addAssociations` call per document. Above the 10,000-association
-request limit, `addAssociationsBatched` auto-chunks it; for corpus-scale
+request limit, `addAssociationsBatched` sends it in batches; for corpus-scale
 ingestion, use `POST /import` or `taguru import`. Each call pays for a full
 durable write.
 

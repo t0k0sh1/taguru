@@ -30,7 +30,7 @@ ENV_TOKEN = "TAGURU_API_TOKEN"
 DEFAULT_TIMEOUT_SECS = 30.0
 # Server-enforced caps mirrored client-side by add_associations_batched.
 MAX_OPS_PER_REQUEST = 10_000
-MAX_CHUNK_BYTES = 8 * 1024 * 1024
+MAX_BATCH_BYTES = 8 * 1024 * 1024
 
 
 def encode_name(name: str) -> str:
@@ -53,30 +53,30 @@ def drop_none(mapping: Mapping[str, Any]) -> dict[str, Any]:
 def dumps_compact(obj: Any) -> bytes:
     """Serialize a JSON body compactly (UTF-8, no ASCII escaping).
 
-    Used for every JSON request so that ``chunk_associations``'s byte
+    Used for every JSON request so that ``batch_associations``'s byte
     accounting is exact for what actually goes on the wire.
     """
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def chunk_associations(
-    ops: list[AssocOp], chunk_size: int, max_chunk_bytes: int
+def batch_associations(
+    ops: list[AssocOp], batch_size: int, max_batch_bytes: int
 ) -> Iterator[list[AssocOp]]:
-    """Split a batch by both element count and serialized body size."""
-    chunk: list[AssocOp] = []
-    chunk_bytes = 2  # "[" + "]"
+    """Split associations into batches by both element count and serialized body size."""
+    batch: list[AssocOp] = []
+    batch_bytes = 2  # "[" + "]"
     for op in ops:
         op_bytes = len(dumps_compact(op))
-        added = op_bytes + (1 if chunk else 0)  # separating comma
-        if chunk and (len(chunk) >= chunk_size or chunk_bytes + added > max_chunk_bytes):
-            yield chunk
-            chunk = []
-            chunk_bytes = 2
+        added = op_bytes + (1 if batch else 0)  # separating comma
+        if batch and (len(batch) >= batch_size or batch_bytes + added > max_batch_bytes):
+            yield batch
+            batch = []
+            batch_bytes = 2
             added = op_bytes
-        chunk.append(op)
-        chunk_bytes += added
-    if chunk:
-        yield chunk
+        batch.append(op)
+        batch_bytes += added
+    if batch:
+        yield batch
 
 
 def raise_for_response(response: httpx.Response) -> NoReturn:

@@ -113,7 +113,7 @@ pub(super) fn never_sent_lines(queue: &VecDeque<Chunk>) -> Vec<String> {
         if let Some(first) = unsent.next() {
             let count = 1 + unsent.count();
             lines.push(format!(
-                "{count} {what} after this chunk were never sent, from {}",
+                "{count} {what} after this request were never sent, from {}",
                 first.label
             ));
         }
@@ -230,7 +230,7 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
 /// is ever touched, naming the two real fixes (ADR 0002 §9).
 pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
     format!(
-        "{label} alone is {size} byte(s), over the {budget}-byte chunk \
+        "{label} alone is {size} byte(s), over the {budget}-byte request \
          budget — splitting a source's own record set client-side would break the \
          retract-then-apply contract's atomicity boundary, so this cannot be packed \
          automatically; reduce what this source file carries (split the source \
@@ -658,12 +658,12 @@ pub(super) fn run_remote(
                     // rides after every batch unit (the append above), so
                     // the tail chunk(s) of a run can carry only group
                     // records and `outcomes` is empty for those. Skipping
-                    // the line there (as this used to do) made `chunk N/M`
+                    // the line there (as this used to do) made `request N/M`
                     // visibly jump a number, and an operator watching the
                     // log cannot tell that apart from a crash between
                     // prints.
                     println!(
-                        "chunk {landed_chunks}/{total}: {}",
+                        "request {landed_chunks}/{total}: {}",
                         if outcomes.is_empty() {
                             "schema/group record(s) only".to_string()
                         } else {
@@ -741,23 +741,23 @@ pub(super) fn run_remote(
                 eprintln!("taguru: import: {message}");
                 if dry_run {
                     eprintln!(
-                        "taguru: import: connection lost after chunk \
+                        "taguru: import: connection lost after request \
                          {landed_chunks}/{total} of the dry run — nothing was applied"
                     );
                 } else {
                     eprintln!(
-                        "taguru: import: connection lost after chunk {landed_chunks}/{total} \
+                        "taguru: import: connection lost after request {landed_chunks}/{total} \
                          — re-run `--dry-run` to confirm what would change, then resume"
                     );
                 }
                 // Where the confirmed prefix ends and what the unconfirmed
-                // chunk carried, by file and source (#863) — a chunk
+                // request carried, by file and source (#863) — a request
                 // number alone maps to nothing the operator holds.
                 if let Some(confirmed) = &last_confirmed {
                     eprintln!("taguru: import: last confirmed: {confirmed}");
                 }
                 eprintln!(
-                    "taguru: import: not confirmed — this chunk carried {}",
+                    "taguru: import: not confirmed — this request carried {}",
                     chunk.carried()
                 );
                 // The chunks still queued behind the dropped one were
@@ -783,7 +783,7 @@ pub(super) fn run_remote(
                 body,
             }) => {
                 eprintln!(
-                    "taguru: import: chunk {}/{total} refused: {message}",
+                    "taguru: import: request {}/{total} refused: {message}",
                     landed_chunks + 1
                 );
                 if matches!(status, 401 | 403) {
@@ -795,11 +795,11 @@ pub(super) fn run_remote(
                 if let Some(integrity) = body.get("integrity").and_then(Value::as_str) {
                     eprintln!("taguru: import: integrity: {integrity}");
                 }
-                // The refused chunk by file and source, then the server's
+                // The refused request by file and source, then the server's
                 // own `issues[]` re-addressed to those units (#863) — the
                 // server names `batches[3].associations[7].subject`; the
                 // operator holds files.
-                eprintln!("taguru: import: this chunk carried {}", chunk.carried());
+                eprintln!("taguru: import: this request carried {}", chunk.carried());
                 for line in refusal_issue_lines(&body, &chunk.units) {
                     eprintln!("taguru: import: {line}");
                 }
@@ -808,12 +808,12 @@ pub(super) fn run_remote(
                 }
                 if dry_run {
                     eprintln!(
-                        "taguru: import: {landed_chunks} chunk(s) of the dry run \
+                        "taguru: import: {landed_chunks} request(s) of the dry run \
                          previewed cleanly before this refusal; nothing was applied"
                     );
                 } else {
                     eprintln!(
-                        "taguru: import: {landed_chunks} chunk(s) already landed durably; \
+                        "taguru: import: {landed_chunks} request(s) already landed durably; \
                          re-running the corrected stream is exact (each source file replaces its \
                          predecessor)"
                     );
@@ -859,7 +859,7 @@ pub(super) fn run_remote(
     } else {
         println!(
             "import: {batches_landed} source(s) applied across {} context(s) in {total} \
-             chunk(s)",
+             request(s)",
             contexts.len()
         );
         if schema_count > 0 {

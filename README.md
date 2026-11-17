@@ -262,9 +262,9 @@ request = one source file or source stream, same validation, same
 replace-a-source semantics), so live systems bulk-load without a
 downtime window. `taguru import --url URL FILE|DIR...` is the
 shortcut ([ADR 0002](adr/0002-remote-cli-access.md) §9): the input is
-split into chunks of whole source files under the server's body cap
-automatically (never mid-source), a 413 halves the offending chunk
-and resends, and `--dry-run` previews every chunk first:
+split into requests of whole source files under the server's body cap
+automatically (never mid-source), a 413 halves the offending request
+and resends, and `--dry-run` previews every request first:
 
 ```sh
 taguru import --url "$TAGURU_URL" backups/
@@ -466,8 +466,8 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   shard verbatim). `groups` exist on every shard under one id, each
   copy holding the members that live on its shard; `/import` splits
   its source stream by `context_id` (the shard holding the id, else
-  the shard its `create` name routes to) and dry-run-preflights chunks
-  of whole source files and projected `group` records alike,
+  the shard its `create` name routes to) and dry-run-preflights each
+  shard's share of whole source files and projected `group` records alike,
   so a stream one instance would refuse with nothing applied is
   refused the same way here (a v0.9.7 stream is refused outright:
   import it into a single instance or into each shard directly — see

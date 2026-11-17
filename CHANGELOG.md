@@ -17,7 +17,33 @@ Entries that change an on-disk format or a response shape say so.
   and that a failure stays inside its segment. `docs/modeling.html`'s
   granularity table links to it.
 
+### Fixed
+
+- **`TAGURU_EMBED_PARALLEL` is documented as the process-wide ceiling it
+  is** (review on #1065). `--help` and `docs/getting-started.html` said
+  it bounded one context's refresh and that concurrent refreshes across
+  contexts multiplied it. Every refresh's provider call holds one of the
+  same `TAGURU_EMBED_PARALLEL` permits, so contexts share the ceiling.
+  Behavior is unchanged; only the description was wrong.
+
 ### Changed
+
+- **Breaking (CLI output) — `taguru import --url` counts requests, not
+  chunks** (#1059, #851). "Chunk" now means only the slice of a segment
+  `taguru extract` shows the model. The per-request progress line reads
+  `request N/M: …` (was `chunk N/M: …`), and the summary ends `in N
+  request(s)`. The refusal and lost-connection lines say `request N/M
+  refused`, `connection lost after request N/M`, `this request
+  carried …`, `… after this request were never sent` and `N request(s)
+  already landed durably`; the oversized-source error names the
+  `N-byte request budget`. A script matching the old wording on
+  stdout/stderr must be updated. `--help` and `docs/import.html` follow,
+  and `TAGURU_EMBED_PARALLEL` describes a "128-item batch dispatch".
+- **Breaking (SDK) — `add_associations_batched` / `addAssociationsBatched`
+  speak of batches** (#1059). The options `chunk_size` /
+  `max_chunk_bytes` are now `batch_size` / `max_batch_bytes`, and
+  `BatchApplyResult.chunks` is `BatchApplyResult.batches`, in both the
+  Python and TypeScript SDKs. No aliases: the old names are gone.
 
 - **Breaking (re-extraction) — the extraction prompt says "chunk" where
   it said "part"** (#1057, #851). The user turn's `part K of N`, the
