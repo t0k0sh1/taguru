@@ -997,11 +997,6 @@ fn community_fingerprint_tags(
         let Some(last) = entries.last().and_then(|entry| entry["id"].as_str()) else {
             return Ok(tags);
         };
-        if after.as_deref().is_some_and(|cursor| last <= cursor) {
-            return Err(format!(
-                "{context}: the server's sources page did not advance past '{last}'"
-            ));
-        }
         after = Some(last.to_string());
         for entry in entries {
             let Some(id) = entry["id"].as_str() else {
