@@ -353,10 +353,15 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       What is <b>not</b> judged, on purpose: names, addresses, dates, IP addresses,
       high-entropy strings without a known shape, and anything only context can tell apart.
       Those need a model or a dictionary, and a gate that sends the segment to a model to
-      decide what not to send is no gate. The rule set is versioned (<code>redact2</code>)
+      decide what not to send is no gate. The rule set is versioned (<code>redact3</code>)
       and is a computation input: turning the flag on, off, or to another group re-extracts
       the segment; the manifest's <code>sha256</code> stays the file's own, so "did the
-      file change" is unaffected.
+      file change" is unaffected. <code>redact3</code> changed two judgments over
+      <code>redact2</code>: a secret overlapping a credential assignment's or header's owned
+      span is shadowed only when that span holds it whole (a key block running past
+      <code>SECRET_KEY=</code> is masked, not left in plain text), and a private-key block a
+      blank line splits — an encrypted PEM's headers end in one — is masked in every
+      paragraph it touches, one placeholder per paragraph, so paragraph numbering is unchanged.
     </p>
     <p>
       Accounting is by rule and paragraph, never by content: one stderr line per segment
@@ -380,9 +385,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       placeholder, <code>«redacted emp_id 3f9a»</code> — and may not repeat a built-in's or an
       earlier line's; the pattern is a <a href="https://docs.rs/regex/latest/regex/#syntax">Rust
       <code>regex</code></a> (no look-around; bound with <code>\b</code>), matched within one
-      paragraph like every built-in. A bad line is a usage error naming it, never a skipped
+      paragraph like every built-in (a private-key block alone is judged across paragraphs).
+      A bad line is a usage error naming it, never a skipped
       rule. The file's SHA-256 joins the redaction version
-      (<code>redact2+&lt;64 hex&gt;</code>, <code>redact2:pii+…</code>), so editing the file
+      (<code>redact3+&lt;64 hex&gt;</code>, <code>redact3:pii+…</code>), so editing the file
       re-extracts every segment exactly as a changed built-in would. The file needs
       <code>--redact</code> on: a rules file with redaction off would run nothing.
     </p>

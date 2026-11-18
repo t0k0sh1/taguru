@@ -33,7 +33,7 @@
 //! digit, IP addresses, and hostnames.
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use regex::Regex;
 
@@ -44,12 +44,20 @@ use regex::Regex;
 /// History: `redact1` (#881) — the initial set; `redact2` —
 /// `credential_assignment` also takes the keyword as the tail of a
 /// longer identifier (`DB_PASSWORD=`) and `secret`'s `_key` family,
-/// and `url_userinfo` matches the scheme case-insensitively.
-pub(crate) const RULESET_VERSION: &str = "redact2";
+/// and `url_userinfo` matches the scheme case-insensitively;
+/// `redact3` — a secret candidate is shadowed only when an owned span
+/// holds it whole, and `private_key` also masks a key block a blank
+/// line splits (an encrypted legacy PEM's headers end in one), one
+/// fragment per paragraph.
+pub(crate) const RULESET_VERSION: &str = "redact3";
 
 /// The rule name the scanner gives a placeholder the input already
 /// carries (§3.2) — never a built-in's or a user rule's name.
 pub(crate) const PREEXISTING_RULE: &str = "preexisting";
+
+/// The built-in whose key blocks [`scan`] also matches across
+/// paragraph breaks ([`PEM_BLOCK`]).
+const PRIVATE_KEY_RULE: &str = "private_key";
 
 /// The shortest digest prefix a placeholder carries (§3.2).
 const MIN_DIGEST_HEX: usize = 4;
@@ -427,6 +435,23 @@ fn placeholder_regex() -> &'static Regex {
     })
 }
 
+/// A private-key block judged over the whole text rather than one
+/// paragraph: BEGIN, then only lines a PEM body can hold — an
+/// RFC 1421 header (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: …`), a
+/// base64 run, or a blank line — then END. An encrypted legacy PEM
+/// MUST put a blank line between its headers and its body, so the
+/// per-paragraph `private_key` pattern never sees its BEGIN and END
+/// together. The interior is held to PEM's line shapes (not `.*?`)
+/// so prose that merely names a BEGIN line and, paragraphs later, an
+/// END line is not swallowed whole. Leading indentation is allowed on
+/// every line (an indented Markdown code block).
+static PEM_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[ \t\r]*\n(?:[ \t]*(?:[A-Za-z0-9-]+:[^\n]*|[A-Za-z0-9+/=]+)?[ \t\r]*\n)*?[ \t]*-----END [A-Z ]*PRIVATE KEY-----",
+    )
+    .expect("valid PEM block pattern")
+});
+
 /// Every accepted match in `text` (ADR 0038 §3.1's "per paragraph, in
 /// a fixed order, and non-overlapping"): the scanner runs every rule
 /// over one paragraph at a time, lets each value-only rule shadow the
@@ -434,13 +459,45 @@ fn placeholder_regex() -> &'static Regex {
 /// left by start offset ascending, then length descending, then rule
 /// order (the pre-existing placeholder form first, so what is already
 /// masked is never re-masked), and accepts greedily. Offsets are into
-/// `text`.
+/// `text`. The one judgment made over the whole text is a private-key
+/// block a blank line splits ([`PEM_BLOCK`]): it enters each
+/// paragraph it touches as that paragraph's fragment of the block, so
+/// every match still lies inside one paragraph and names it.
 pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
+    let key_blocks: Vec<(usize, usize, usize)> = rules
+        .rules
+        .iter()
+        .position(|rule| rule.name == PRIVATE_KEY_RULE)
+        .map(|order| {
+            PEM_BLOCK
+                .find_iter(text)
+                .map(|found| (order, found.start(), found.end()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut accepted = Vec::new();
     for span in crate::paragraph::split(text) {
         let (start, end) = (span.start as usize, span.end as usize);
         let paragraph = &text[start..end];
         let mut candidates: Vec<Candidate> = Vec::new();
+        // This paragraph's fragment of each whole-text key block. A
+        // block inside one paragraph duplicates the per-paragraph
+        // `private_key` candidate span for span (same start, end and
+        // order), and the greedy accept below drops the twin.
+        for &(order, from, to) in &key_blocks {
+            let (from, to) = (from.max(start), to.min(end));
+            if from < to {
+                candidates.push(Candidate {
+                    start: from - start,
+                    end: to - start,
+                    order,
+                    rule: PRIVATE_KEY_RULE.to_string(),
+                    preexisting: false,
+                    secret: true,
+                    owns: None,
+                });
+            }
+        }
         for found in placeholder_regex().find_iter(paragraph) {
             candidates.push(Candidate {
                 start: found.start(),
@@ -740,7 +797,7 @@ mod tests {
             ":secrets"
         );
         assert_eq!(Groups::parse(Some("pii")).unwrap().version_suffix(), ":pii");
-        assert_eq!(RULESET_VERSION, "redact2");
+        assert_eq!(RULESET_VERSION, "redact3");
     }
 
     #[test]
@@ -934,13 +991,16 @@ mod tests {
         assert_eq!(names_of(&found), vec!["authorization_header"]);
         assert_eq!(matched(text, &found[0]), "a@b.co");
         // A key block a blank line has split is two matches, one per
-        // paragraph, and neither crosses the separator.
+        // paragraph, and neither crosses the separator (redact3).
         let text = "-----BEGIN PRIVATE KEY-----\nAAAA\n\n-----END PRIVATE KEY-----";
         let found = scan(text, &rules);
-        assert!(
-            found.is_empty(),
-            "the split block has no BEGIN…END within one paragraph: {found:?}"
+        assert_eq!(names_of(&found), vec!["private_key", "private_key"]);
+        assert_eq!(
+            matched(text, &found[0]),
+            "-----BEGIN PRIVATE KEY-----\nAAAA"
         );
+        assert_eq!((found[0].paragraph, found[1].paragraph), (0, 1));
+        assert_eq!(matched(text, &found[1]), "-----END PRIVATE KEY-----");
         let text = "x\n\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n\ny";
         let found = scan(text, &rules);
         assert_eq!(found.len(), 1);
@@ -1091,6 +1151,55 @@ mod tests {
         assert_eq!(names_of(&found), vec!["private_key"]);
         let (masked, _) = mask(text, "d", &rules);
         assert!(!masked.contains("MIIEbody"), "{masked}");
+    }
+
+    /// An encrypted legacy PEM must put a blank line between its RFC 1421
+    /// headers and its base64 body, so its BEGIN and END never share a
+    /// paragraph: the per-paragraph pattern alone let the whole key
+    /// through `--redact` and `import --refuse-sensitive`. Each paragraph
+    /// it touches gets its own fragment match — offsets into the text,
+    /// that paragraph's index — and the mask keeps paragraph numbering
+    /// (the separator stays, every fragment's placeholder is one line).
+    #[test]
+    fn an_encrypted_pem_split_by_its_header_blank_line_is_masked_per_paragraph() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        let key = "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\
+                   DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\n\
+                   MIIEowIBAAKCAQEAsecretbody+/=\nQUJDREVGR0g=\n-----END RSA PRIVATE KEY-----";
+        let text = format!("intro\n\n{key}\n\noutro");
+        let found = scan(&text, &rules);
+        assert_eq!(names_of(&found), vec!["private_key", "private_key"]);
+        assert_eq!((found[0].paragraph, found[1].paragraph), (1, 2));
+        assert!(matched(&text, &found[0]).starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(matched(&text, &found[0]).ends_with("0123456789ABCDEF"));
+        assert!(matched(&text, &found[1]).starts_with("MIIEowIBAAKCAQEAsecretbody"));
+        assert!(matched(&text, &found[1]).ends_with("-----END RSA PRIVATE KEY-----"));
+
+        let (masked, redactions) = mask(&text, "d", &rules);
+        assert!(!masked.contains("secretbody"), "{masked}");
+        assert!(!masked.contains("DEK-Info"), "{masked}");
+        assert_eq!(redactions.len(), 2);
+        assert_eq!(
+            crate::paragraph::split(&masked).len(),
+            crate::paragraph::split(&text).len(),
+            "masking must not renumber paragraphs: {masked}"
+        );
+        assert!(
+            masked.starts_with("intro\n\n«redacted private_key "),
+            "{masked}"
+        );
+        assert!(masked.ends_with("»\n\noutro"), "{masked}");
+
+        // Prose that names a BEGIN line and, paragraphs later, an END
+        // line is not a key block: the interior is not PEM-shaped.
+        let prose = "The file starts with -----BEGIN PRIVATE KEY-----\n\n\
+                     and a long explanation follows here.\n\n\
+                     -----END PRIVATE KEY----- closes it.";
+        assert!(scan(prose, &rules).is_empty(), "{:?}", scan(prose, &rules));
+        // Without the secrets group there is no private_key rule, and
+        // no whole-text judgment either.
+        let pii = RuleSet::builtin(Groups::parse(Some("pii")).unwrap());
+        assert!(scan(&text, &pii).is_empty());
     }
 
     #[test]
@@ -1263,14 +1372,14 @@ mod tests {
         assert_eq!(redactions[0].rule, "emp_id");
         // The version carries the file's whole digest after the group.
         let digest = crate::sha256::sha256_hex(file.as_bytes());
-        assert_eq!(rules.version(Groups::BOTH), format!("redact2+{digest}"));
+        assert_eq!(rules.version(Groups::BOTH), format!("redact3+{digest}"));
         assert_eq!(
             rules.version(Groups::parse(Some("pii")).unwrap()),
-            format!("redact2:pii+{digest}")
+            format!("redact3:pii+{digest}")
         );
         assert_eq!(
             RuleSet::builtin(Groups::BOTH).version(Groups::BOTH),
-            "redact2"
+            "redact3"
         );
         // A user rule cannot outrank a built-in on the same span: the
         // built-in comes first in rule order.

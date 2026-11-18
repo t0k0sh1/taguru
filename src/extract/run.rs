@@ -470,7 +470,7 @@ impl Run {
 
     /// The manifest/checkpoint value of the redaction control (ADR
     /// 0038 §3.5): `""` when off, so pre-ADR entries keep matching a
-    /// default run; `redact2`, `redact2:secrets`, or `redact2:pii`
+    /// default run; `redact3`, `redact3:secrets`, or `redact3:pii`
     /// when on, `+<sha256 of the rules file>` appended under
     /// `--redact-rules` (#884).
     pub(super) fn redaction_manifest_value(&self) -> String {
@@ -546,6 +546,7 @@ impl Run {
         // The manifest's hash is the FILE's (did it change); the
         // redaction version below is the reading's (ADR 0038 §3.3).
         let hash = sha256_hex(text.as_bytes());
+        let read_bytes = text.len();
         // ADR 0038 §3.3: with `--redact` on, the redacted text IS the
         // segment from here on — prompt, chunks, candidates, passage,
         // checkpoint, trace, attempts log, coverage all read it.
@@ -562,6 +563,14 @@ impl Run {
         if let Some(line) = redaction_stderr_line(&redactions) {
             eprintln!("taguru: extract: {source}: {line}");
         }
+        // `read_segment` capped the UNMASKED text; a placeholder is
+        // often longer than what it replaced (`«redacted phone abcd»`
+        // is 23 bytes for the 13-byte `090-1234-5678`), so a near-cap
+        // segment dense with matches can outgrow the passage cap only
+        // here. Refused now, before any completion is paid for —
+        // otherwise the written batch's passage line fails
+        // self-validation after every model call, blamed on taguru.
+        masked_within_passage_cap(read_bytes, &text)?;
         // The fingerprint's source-id value is the EFFECTIVE written
         // source, but only under the flag — "" when off, so pre-S1
         // manifest entries (no field) keep matching default runs.
@@ -2217,6 +2226,24 @@ pub(super) enum OverviewOutcome {
     Answered(OverviewAnswer),
     LengthLimited,
     Failed(String),
+}
+
+/// `Err` when the masked segment no longer fits the passage cap
+/// [`read_segment`] held the file to: placeholders can be longer than
+/// what they replaced, so `--redact` alone can push a near-cap segment
+/// over. Without `--redact` the text is unchanged and always fits.
+/// `read_bytes` is the segment as read, for a message that says the
+/// growth came from redaction (the segment is not wrong as written,
+/// only too dense to mask under the cap).
+pub(super) fn masked_within_passage_cap(read_bytes: usize, masked: &str) -> Result<(), String> {
+    if masked.len() > MAX_PASSAGE_BYTES {
+        return Err(format!(
+            "redaction grew the segment from {read_bytes} to {} bytes, over the \
+             {MAX_PASSAGE_BYTES}-byte passage cap — split the segment",
+            masked.len()
+        ));
+    }
+    Ok(())
 }
 
 /// The dry run's note: `, N redaction(s)` when the read masked

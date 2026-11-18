@@ -4613,6 +4613,48 @@ fn read_segment_rejects_an_oversized_file_by_metadata_before_buffering_it() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `read_segment` caps the file as read, but `--redact` can grow it:
+/// a placeholder outweighs a phone number nearly two to one, so a
+/// near-cap segment dense with matches exceeds the passage cap only
+/// once masked. The run re-checks the masked text before any model
+/// call instead of letting the written batch fail self-validation
+/// afterwards with "a bug in taguru". (A real 8 MiB mask is too slow
+/// for an unoptimized test build; the growth is measured on a sample
+/// and the cap check driven at its exact boundary.)
+#[test]
+fn a_segment_that_redaction_grows_past_the_passage_cap_is_refused_up_front() {
+    use super::run::masked_within_passage_cap;
+
+    let rules = crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH);
+    let sample = "090-1234-5678\n".repeat(64);
+    let (masked, redactions) = crate::sensitive::mask(&sample, "h", &rules);
+    assert_eq!(redactions.len(), 64);
+    assert!(
+        masked.len() > sample.len(),
+        "placeholders must outweigh the phones they replace: {} vs {}",
+        masked.len(),
+        sample.len()
+    );
+
+    // At the cap is fine — the read's own `>` boundary, unchanged.
+    let at_cap = "a".repeat(MAX_PASSAGE_BYTES);
+    assert!(masked_within_passage_cap(MAX_PASSAGE_BYTES, &at_cap).is_ok());
+    // A segment read under the cap and masked one byte over it is
+    // refused, naming redaction as the cause and both sizes.
+    let grown = "a".repeat(MAX_PASSAGE_BYTES + 1);
+    let error = masked_within_passage_cap(MAX_PASSAGE_BYTES - 100, &grown).unwrap_err();
+    assert!(error.contains("redaction grew the segment"), "{error}");
+    assert!(
+        error.contains(&(MAX_PASSAGE_BYTES - 100).to_string()),
+        "{error}"
+    );
+    assert!(
+        error.contains(&(MAX_PASSAGE_BYTES + 1).to_string()),
+        "{error}"
+    );
+    assert!(!error.contains("a bug in taguru"), "{error}");
+}
+
 /// A BOM is invisible in an editor but would otherwise become the
 /// first character of paragraph 0 — silently breaking any exact
 /// match against the segment's true opening text. Windows editors
@@ -5172,36 +5214,51 @@ fn drive_ladder_on(
     let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    let checkpoints = CheckpointStore::empty(dir.join("unit.json"), ladder_fingerprint(ladder));
+    let outcome = drive_ladder_against(chat, piece, ladder, &checkpoints);
+    let _ = fs::remove_dir_all(&dir);
+    outcome
+}
+
+/// The checkpoint fingerprint every ladder test runs under.
+fn ladder_fingerprint(ladder: &LadderConfig) -> CheckpointFingerprint {
+    CheckpointFingerprint {
+        sha256: "h".to_string(),
+        model: "scripted".to_string(),
+        prompt_version: PROMPT_VERSION,
+        context: "sake".to_string(),
+        questions_n: 0,
+        no_passage: false,
+        description: String::new(),
+        fact_budget: 0,
+        structured_output: String::new(),
+        max_output_tokens: ladder.max_output_tokens.unwrap_or(0),
+        escalation_factor: String::new(),
+        runaway_ratio: String::new(),
+        chunk_bytes: String::new(),
+        chunk_briefing: String::new(),
+        lossy: true,
+        schema_digest: String::new(),
+        candidates: String::new(),
+        redaction: String::new(),
+        vocabulary_digest: String::new(),
+    }
+}
+
+/// [`extract_piece`] on one piece against a caller-held checkpoint
+/// store — the resume tests run it twice over the same file.
+fn drive_ladder_against(
+    chat: &ScriptedChat,
+    piece: &str,
+    ladder: &LadderConfig,
+    checkpoints: &CheckpointStore,
+) -> Result<Vec<ChunkOutput>, String> {
     let completions = Completions::new(Some(chat.client()));
     let policy = CorrectionPolicy {
         max_attempts: 3,
         corrective_replay_cap: None,
     };
     let vocabulary = HashSet::new();
-    let checkpoints = CheckpointStore::empty(
-        dir.join("unit.json"),
-        CheckpointFingerprint {
-            sha256: "h".to_string(),
-            model: "scripted".to_string(),
-            prompt_version: PROMPT_VERSION,
-            context: "sake".to_string(),
-            questions_n: 0,
-            no_passage: false,
-            description: String::new(),
-            fact_budget: 0,
-            structured_output: String::new(),
-            max_output_tokens: ladder.max_output_tokens.unwrap_or(0),
-            escalation_factor: String::new(),
-            runaway_ratio: String::new(),
-            chunk_bytes: String::new(),
-            chunk_briefing: String::new(),
-            lossy: true,
-            schema_digest: String::new(),
-            candidates: String::new(),
-            redaction: String::new(),
-            vocabulary_digest: String::new(),
-        },
-    );
     let context = PieceContext {
         completions: &completions,
         system: "You extract associations.",
@@ -5218,11 +5275,84 @@ fn drive_ladder_on(
             sink: None,
             log: None,
         },
-        checkpoints: &checkpoints,
+        checkpoints,
     };
-    let outcome = extract_piece(&context, piece);
+    extract_piece(&context, piece)
+}
+
+/// A split piece has no checkpoint unit of its own — only its
+/// children do — so the split itself is checkpointed: a resume after
+/// the first child landed and the second failed goes straight to the
+/// second child, never re-paying the parent's `length` round and
+/// escalated resend. Without the record, the resume's first request
+/// re-asks the whole parent.
+#[test]
+fn ladder_a_resume_replays_a_checkpointed_split_without_re_asking_the_parent() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-ladder-split-resume-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    outcome
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("unit.json");
+    let ladder = LadderConfig::new(Rung::Prompted, false, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+
+    // First attempt: length, escalated length, split; the first child
+    // lands, the second is refused (terminal) and fails the piece.
+    let first = ScriptedChat::start(vec![
+        chat_answer("truncated…", "length"),
+        chat_answer("truncated again…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer("", "content_filter"),
+    ]);
+    let checkpoints = CheckpointStore::empty(path.clone(), ladder_fingerprint(&ladder));
+    drive_ladder_against(&first, &piece, &ladder, &checkpoints).unwrap_err();
+    assert_eq!(first.requests().len(), 4);
+
+    // The resume loads the file: one request, the second child's.
+    let resumed = ScriptedChat::start(vec![chat_answer(VALID_ANSWER, "stop")]);
+    let checkpoints = CheckpointStore::load(path.clone(), &ladder_fingerprint(&ladder));
+    let outputs = drive_ladder_against(&resumed, &piece, &ladder, &checkpoints).unwrap();
+    assert_eq!(
+        outputs.len(),
+        2,
+        "the cached first child and the fresh second"
+    );
+    let requests = resumed.requests();
+    assert_eq!(requests.len(), 1, "only the unanswered child: {requests:?}");
+    let user = requests[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        user.contains(&block_b) && !user.contains(&block_a),
+        "{user}"
+    );
+    assert_eq!(requests[0]["max_tokens"], serde_json::json!(64));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A checkpoint written before splits were recorded (no `splits` key)
+/// still loads — its pieces are reused, it simply records no split.
+#[test]
+fn checkpoint_without_a_splits_field_still_loads_its_pieces() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-checkpoint-nosplits-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("unit.json");
+    let ladder = LadderConfig::new(Rung::Prompted, false, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
+    let chat = ScriptedChat::start(vec![chat_answer(VALID_ANSWER, "stop")]);
+    let checkpoints = CheckpointStore::empty(path.clone(), ladder_fingerprint(&ladder));
+    drive_ladder_against(&chat, "本文。", &ladder, &checkpoints).unwrap();
+
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("splits").unwrap();
+    fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let loaded = CheckpointStore::load(path.clone(), &ladder_fingerprint(&ladder));
+    assert_eq!(loaded.piece_count(), 1);
+    assert_eq!(loaded.split_cap("anything"), None);
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 const VALID_ANSWER: &str =

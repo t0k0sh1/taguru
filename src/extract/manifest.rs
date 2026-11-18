@@ -123,8 +123,8 @@ pub(super) struct ManifestEntry {
     /// the control (or revising the segmentation algorithm) re-extracts.
     #[serde(default)]
     pub(super) candidates: String,
-    /// `--redact`'s version (`""` = off; `redact2`, `redact2:secrets`,
-    /// `redact2:pii`) — ADR 0038 §3.5. Entries written before the
+    /// `--redact`'s version (`""` = off; `redact3`, `redact3:secrets`,
+    /// `redact3:pii`) — ADR 0038 §3.5. Entries written before the
     /// control existed default to `""` and keep matching default runs;
     /// the first `--redact` run over the segment re-extracts.
     #[serde(default)]
