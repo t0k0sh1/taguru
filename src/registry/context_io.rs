@@ -233,29 +233,39 @@ impl AppState {
     /// Rebuilds one `context`'s image without its dead weight — the
     /// append-only storage's accumulated retracted edges, unlinked
     /// attributions, and arena slack (see [`Context::compacted`]) —
-    /// then persists the fresh image immediately. Runs under the
-    /// `context`'s exclusive lock for the rebuild: requests to THIS
-    /// `context` wait; every other `context` is untouched. Crash-safe by
-    /// construction: the fresh `context` carries the old WAL watermark,
-    /// so a crash before the flush lands simply boots the old image
-    /// and replays the same log — compaction lost, nothing corrupted.
+    /// and publishes the fresh image before anything can see it. Runs
+    /// under the `context`'s exclusive lock for the rebuild AND the
+    /// publish: requests to THIS `context` wait; every other `context`
+    /// is untouched.
+    ///
+    /// The publish must land before the lock drops. A write admitted
+    /// after the swap is validated against the compacted graph (an
+    /// alias the rebuild dropped no longer resolves), but a crash
+    /// before the compacted image is durable recovers the OLD image
+    /// plus the whole log — and replays that write against a graph it
+    /// was never checked against, to a different result or a replay
+    /// refusal. Publishing first makes the swap and its durability one
+    /// step: if the image cannot be written, the `context` keeps its
+    /// previous image and nothing changes (`image_persisted: false`,
+    /// the numbers describe the rebuild that was not applied).
     pub fn compact_context(
         &self,
         id: &str,
         deadline: Deadline,
     ) -> Result<CompactOutcome, AccessError> {
         let entry = self.resolved_id(id)?;
-        let (bytes_before, bytes_after, stats) = offload(|| {
-            let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+        let (bytes_before, bytes_after, stats, image_persisted) = offload(|| {
+            let mut guard = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
+            let inner = &mut *guard;
             ensure_hot(
                 &self.0.data_dir,
                 &entry.id,
-                &mut inner,
+                inner,
                 &self.0.metrics,
                 self.0.hydrator.as_deref(),
             )
             .map_err(AccessError::Load)?;
-            let context = hot_context(&inner);
+            let context = hot_context(inner);
             let bytes_before = context.footprint();
             let (mut fresh, stats) =
                 context
@@ -267,11 +277,35 @@ impl AppState {
                         CompactionError::DeadlineExceeded => AccessError::DeadlineExceeded,
                     })?;
             // Config the image never carries, re-applied exactly as a
-            // load would; the watermark keeps WAL replay monotonic.
-            fresh.set_applied_seq(context.applied_seq());
+            // load would. The watermark is everything logged so far —
+            // what memory holds under this lock, and what the image
+            // about to publish reflects — the same one a flush bakes in.
+            let watermark = inner.wal_seq.saturating_sub(1);
+            fresh.set_applied_seq(watermark);
             fresh.set_dice_floor(inner.meta.dice_floor);
             let bytes_after = fresh.footprint();
+            let fresh_stats = ContextStats::of(&fresh);
+            if let Err(error) = save_files(
+                &self.0.data_dir,
+                &entry.id,
+                &inner.name,
+                &inner.meta,
+                &fresh_stats,
+                &entry.usage.snapshot(),
+                entry.revision_snapshot(inner),
+                inner.schema_digest.as_deref(),
+                &fresh,
+            ) {
+                tracing::warn!(
+                    context = %id, save_error = %error,
+                    "{}",
+                    unpersisted_compact_warning(false).unwrap_or_default()
+                );
+                return Ok((bytes_before, bytes_after, stats, false));
+            }
             inner.slot = Slot::Hot(Box::new(fresh));
+            // A flush that staged the pre-compaction image while this
+            // rebuilt must back off rather than publish over it.
             inner.image_generation += 1;
             // Compaction physically drops what `graph_revision` alone
             // cannot express: retracted edges and orphaned aliases stop
@@ -283,26 +317,15 @@ impl AppState {
             // an unmoved revision" shape a replica refresh guards against
             // (see `replication.rs`'s `cache_identity` bump).
             inner.invalidate_cache_identity();
-            inner.stats = ContextStats::of(hot_context(&inner));
-            entry.dirty.store(true, Ordering::Relaxed);
-            self.recount_entry(&mut inner);
-            Ok((bytes_before, bytes_after, stats))
+            inner.stats = fresh_stats;
+            // The published image covers everything logged: clean, and
+            // the log is replay-inert behind its watermark.
+            entry.dirty.store(false, Ordering::Relaxed);
+            let name = inner.name.clone();
+            self.truncate_wal(&name, &entry.id, inner);
+            self.recount_entry(inner);
+            Ok((bytes_before, bytes_after, stats, true))
         })?;
-        // Persist the shrunken image now (flush_entry takes its own
-        // locks); a failure leaves the entry dirty for the next tick,
-        // which is the flusher's ordinary retry story — but unlike a
-        // routine flush, THIS caller asked specifically for a smaller
-        // durable image and must be told when what it got back is only
-        // a smaller in-memory one. `flush_entry` reports `false` both
-        // for a genuine stage/commit failure and for a benign back-off
-        // (a racing eviction or compaction already published something
-        // newer) — either way `entry.dirty` stays set, so the honest
-        // answer is the same: not durably reflected by THIS call, the
-        // next flush tick will pick it up.
-        let image_persisted = self.flush_entry(id, &entry);
-        if let Some(message) = unpersisted_compact_warning(image_persisted) {
-            tracing::warn!(context = %id, "{message}");
-        }
         // The passage log's own dead weight (#437): a retracted
         // source's text lives on in the log as bytes behind a
         // tombstone until the log's size-triggered compaction happens
@@ -534,8 +557,10 @@ impl AppState {
 /// this crate for that, and the log line is the ONLY observable effect
 /// of the branch it lives in).
 fn unpersisted_compact_warning(image_persisted: bool) -> Option<&'static str> {
-    (!image_persisted)
-        .then_some("compacted image not yet persisted to disk; the next flush tick will retry")
+    (!image_persisted).then_some(
+        "compacted image could not be persisted to disk; the context keeps its previous \
+         image — compact again once the disk recovers",
+    )
 }
 
 #[cfg(test)]
@@ -1113,16 +1138,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// #586: the graph rebuild inside `compact_context` runs entirely
-    /// in memory — only the trailing `flush_entry` call actually
-    /// touches disk. When that publish cannot land (a full disk being
-    /// the realistic cause), the call must still answer 200 with the
-    /// real shed-bytes numbers (the compaction itself is not a lie),
-    /// but `image_persisted: false` must say the smaller image is not
-    /// durable yet, and the entry must stay `dirty` so the next flush
-    /// tick retries the exact same publish.
+    /// #586, as compaction publishes under its lock: when the rebuilt
+    /// image cannot be written (a full disk being the realistic cause),
+    /// the call still answers with the rebuild's numbers but
+    /// `image_persisted: false`, and the `context` keeps its previous
+    /// image — in memory too, so no write is ever validated against a
+    /// graph the disk does not hold. Compacting again once the disk
+    /// recovers applies it.
     #[test]
-    fn compact_context_reports_image_persisted_false_when_the_flush_cannot_publish() {
+    fn compact_context_keeps_the_previous_image_when_the_rebuild_cannot_publish() {
         let dir = scratch_dir("compact-unpersisted");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state
@@ -1143,32 +1167,112 @@ mod tests {
         state
             .retract_source(&state.id_of("sake"), "gone.md")
             .unwrap();
+        let footprint = |state: &AppState| {
+            state
+                .read_context(&state.id_of("sake"), |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+        let before = footprint(&state);
 
-        // The rebuild itself does no persistence I/O — only the
-        // trailing `flush_entry` does, staging the image as its very
-        // first op. Failing op #0 lands squarely on that stage.
+        // The rebuild itself does no persistence I/O; the publish's
+        // sidecar write is the first op. Failing op #0 lands on it.
         fail_persistence_ops_after(0);
         let outcome = state
             .compact_context(&state.id_of("sake"), Deadline::unbounded())
-            .expect("the rebuild succeeds even though its publish will fail");
-        let past_end = clear_persistence_fault();
-        assert!(!past_end, "the flush's own stage must be what failed");
-
+            .expect("the call answers even though its publish failed");
+        assert!(
+            !clear_persistence_fault(),
+            "the publish must be what failed"
+        );
         assert!(
             outcome.bytes_after < outcome.bytes_before,
-            "the in-memory rebuild is real even though publishing it failed: {outcome:?}"
+            "the numbers describe the rebuild: {outcome:?}"
         );
-        assert!(
-            !outcome.image_persisted,
-            "the rebuilt image never reached disk: {outcome:?}"
-        );
+        assert!(!outcome.image_persisted, "{outcome:?}");
+        assert_eq!(footprint(&state), before, "the previous image stays");
 
-        let entry = state.lookup_named("sake").expect("still registered");
-        assert!(
-            entry.dirty.load(Ordering::Relaxed),
-            "a failed publish must leave the entry dirty for the next flush tick to retry"
-        );
+        let retried = state
+            .compact_context(&state.id_of("sake"), Deadline::unbounded())
+            .unwrap();
+        assert!(retried.image_persisted, "{retried:?}");
+        assert_eq!(retried.dead_edges, 1, "{retried:?}");
+        assert!(footprint(&state) < before);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A write admitted right after a compaction whose publish failed
+    /// must replay, after a crash, to what the live write did. Here
+    /// the rebuild would drop the alias `X → C` (its canonical has no
+    /// live edge): had the unpublished compacted graph stayed live,
+    /// the write would make `X` a concept of its own while the replay
+    /// over the old image resolves `X` to `C`.
+    #[test]
+    fn a_write_after_an_unpublished_compaction_replays_as_it_applied() {
+        let dir = scratch_dir("compact-replay");
+        let subjects = |state: &AppState| -> Vec<String> {
+            let mut subjects: Vec<String> = state
+                .read_context(&state.id_of("sake"), |context| {
+                    context
+                        .query_any(&[], &[], &[])
+                        .into_iter()
+                        .filter(|association| association.count > 0)
+                        .map(|association| association.subject)
+                        .collect()
+                })
+                .map_err(|_| "read")
+                .unwrap();
+            subjects.sort();
+            subjects
+        };
+        let live;
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let id = state.id_of("sake");
+            state
+                .add_associations(
+                    &id,
+                    vec![assoc_op("C", "旧", "Y", 1.0, Some("gone.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    &id,
+                    &BTreeMap::from([("X".to_string(), "C".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state.retract_source(&id, "gone.md").unwrap();
+            fail_persistence_ops_after(0);
+            let outcome = state.compact_context(&id, Deadline::unbounded()).unwrap();
+            assert!(!clear_persistence_fault(), "the publish must have failed");
+            assert!(!outcome.image_persisted, "{outcome:?}");
+            state
+                .add_associations(
+                    &id,
+                    vec![assoc_op("X", "新", "Z", 1.0, Some("new.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            live = subjects(&state);
+            // Drop WITHOUT flushing: the crash.
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            subjects(&state),
+            live,
+            "the replay must match the live write"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1177,8 +1281,7 @@ mod tests {
     #[test]
     fn unpersisted_compact_warning_only_fires_when_the_image_did_not_land() {
         assert_eq!(unpersisted_compact_warning(true), None);
-        let message = unpersisted_compact_warning(false).expect("must warn on a failed publish");
-        assert!(message.contains("not yet persisted"), "{message}");
+        assert!(unpersisted_compact_warning(false).is_some());
     }
 
     fn apply_generated_context(

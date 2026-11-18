@@ -257,7 +257,7 @@ impl AppState {
     /// whole-image upload instead of a few log records. Bounded by the
     /// shipper's own deferral budget, so a dead bucket can never walk
     /// this log into its cap.
-    fn truncate_wal(&self, name: &str, stem: &str, inner: &mut EntryInner) {
+    pub(super) fn truncate_wal(&self, name: &str, stem: &str, inner: &mut EntryInner) {
         let path = wal_path(&self.0.data_dir, stem);
         if let Some(progress) = &self.0.ship_progress
             && !progress.allows_reset(&path, inner.wal_seq.saturating_sub(1), inner.wal_bytes)
