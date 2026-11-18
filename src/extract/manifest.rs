@@ -82,13 +82,13 @@ pub(super) struct ManifestEntry {
     /// written before the field existed matching an all-defaults run.
     #[serde(default)]
     pub(super) runaway_ratio: String,
-    /// --chunk-context of the run that wrote this batch, as
-    /// [`ChunkContextMode::manifest_value`] encodes it (`""` = off —
+    /// --chunk-briefing of the run that wrote this batch, as
+    /// [`ChunkBriefingMode::manifest_value`] encodes it (`""` = off —
     /// ADR 0033): the mode decides what every chunk is prefixed with,
     /// so any other value re-extracts; the empty default keeps entries
     /// written before the field existed matching an all-defaults run.
     #[serde(default)]
-    pub(super) chunk_context: String,
+    pub(super) chunk_briefing: String,
     /// --chunk-bytes of the run that wrote this batch, as
     /// [`chunk_bytes_manifest_value`] encodes it (`""` = the default
     /// cap — ADR 0020): the cap decides what every chunk the model is
@@ -195,7 +195,7 @@ impl Manifest {
                 && entry.escalation_factor == inputs.escalation_factor
                 && entry.runaway_ratio == inputs.runaway_ratio
                 && entry.chunk_bytes == inputs.chunk_bytes
-                && entry.chunk_context == inputs.chunk_context
+                && entry.chunk_briefing == inputs.chunk_briefing
                 && entry.lossy == inputs.lossy
                 && entry.schema_digest == inputs.schema_digest
                 && entry.candidates == inputs.candidates
@@ -235,7 +235,7 @@ impl Manifest {
                 escalation_factor: inputs.escalation_factor.to_string(),
                 runaway_ratio: inputs.runaway_ratio.to_string(),
                 chunk_bytes: inputs.chunk_bytes.to_string(),
-                chunk_context: inputs.chunk_context.to_string(),
+                chunk_briefing: inputs.chunk_briefing.to_string(),
                 lossy: inputs.lossy,
                 schema_digest: inputs.schema_digest.to_string(),
                 candidates: inputs.candidates.to_string(),
@@ -275,7 +275,7 @@ pub(super) struct ComputationInputs<'a> {
     pub(super) escalation_factor: &'a str,
     pub(super) runaway_ratio: &'a str,
     pub(super) chunk_bytes: &'a str,
-    pub(super) chunk_context: &'a str,
+    pub(super) chunk_briefing: &'a str,
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,

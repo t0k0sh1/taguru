@@ -40,7 +40,7 @@ pub(super) struct ContextVocabulary {
     /// computation-input fingerprint like `schema_digest`: same names,
     /// same digest, whatever file layout or op order produced them.
     pub(super) digest: String,
-    /// ADR 0033 §3.2 (`--chunk-context ingested`): what the export
+    /// ADR 0033 §3.2 (`--chunk-briefing ingested`): what the export
     /// holds about each concept — its associations, at most
     /// [`KNOWN_RELATIONS_PER_NAME`] by weight, in export order among
     /// equals — keyed by the concept's spelling. Harvested always
@@ -48,7 +48,7 @@ pub(super) struct ContextVocabulary {
     pub(super) known: BTreeMap<String, Vec<KnownRelation>>,
     /// sha256 over the canonical serialization of `known` — the
     /// computation-input fingerprint of what `ingested` offers, folded
-    /// into the manifest's `chunk_context` value under that mode.
+    /// into the manifest's `chunk_briefing` value under that mode.
     pub(super) known_digest: String,
 }
 

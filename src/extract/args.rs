@@ -39,9 +39,9 @@ pub(super) struct Args {
     /// [`CHUNK_BYTES`] — resolved in [`run`]. ADR 0020 (#762): the
     /// caller-selectable unit policy ADR 0001 §7 D anticipated.
     pub(super) chunk_bytes: Option<usize>,
-    /// `None` defers to TAGURU_EXTRACT_CHUNK_CONTEXT, and then to
-    /// [`ChunkContextMode::Off`] — resolved in [`run`]. ADR 0033 (#782).
-    pub(super) chunk_context: Option<ChunkContextMode>,
+    /// `None` defers to TAGURU_EXTRACT_CHUNK_BRIEFING, and then to
+    /// [`ChunkBriefingMode::Off`] — resolved in [`run`]. ADR 0033 (#782).
+    pub(super) chunk_briefing: Option<ChunkBriefingMode>,
     /// `None` defers to TAGURU_EXTRACT_LOSSY, and then to `false`
     /// (issue #199's default: an invalid item earns a corrective turn,
     /// never a silent drop) — resolved in [`run`], same pattern as
@@ -128,7 +128,7 @@ impl Args {
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut chunk_bytes: Option<usize> = None;
-        let mut chunk_context: Option<ChunkContextMode> = None;
+        let mut chunk_briefing: Option<ChunkBriefingMode> = None;
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
         let mut redact: Option<crate::sensitive::Groups> = None;
@@ -335,26 +335,26 @@ impl Args {
                         ));
                     }
                 },
-                "--chunk-context" => match rest.next() {
-                    Some(_) if chunk_context.is_some() => {
+                "--chunk-briefing" => match rest.next() {
+                    Some(_) if chunk_briefing.is_some() => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
-                            "--chunk-context given twice",
+                            "--chunk-briefing given twice",
                         ));
                     }
-                    Some(value) => match ChunkContextMode::parse(value) {
-                        Some(mode) => chunk_context = Some(mode),
+                    Some(value) => match ChunkBriefingMode::parse(value) {
+                        Some(mode) => chunk_briefing = Some(mode),
                         None => {
                             return Err(crate::config::subcommand_usage_error(
                                 "extract",
-                                &format!("--chunk-context takes one of: {CHUNK_CONTEXT_MODES}"),
+                                &format!("--chunk-briefing takes one of: {CHUNK_BRIEFING_MODES}"),
                             ));
                         }
                     },
                     None => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
-                            "--chunk-context needs a mode",
+                            "--chunk-briefing needs a mode",
                         ));
                     }
                 },
@@ -712,7 +712,7 @@ impl Args {
             structured_output,
             max_output_tokens,
             chunk_bytes,
-            chunk_context,
+            chunk_briefing,
             lossy,
             candidates,
             redact,
@@ -802,7 +802,7 @@ pub(super) enum Outcome {
 
 /// How [`extract_chunk`] handles a model answer that isn't the JSON
 /// object it asked for. Resolved once per run from
-/// TAGURU_EXTRACT_MAX_ATTEMPTS/TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES
+/// TAGURU_EXTRACT_MAX_ATTEMPTS/TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES
 /// (docs/extract.html). The all-defaults value (`DEFAULT_MAX_ATTEMPTS`,
 /// `None`) reproduces today's fixed "one corrective turn, full replay"
 /// behavior byte for byte.
@@ -814,7 +814,7 @@ pub(super) struct CorrectionPolicy {
     /// to it in the next attempt's corrective turn: `None` replays it
     /// in full (today's behavior), `Some(0)` omits it behind a
     /// placeholder, `Some(n)` truncates it to `n` bytes.
-    pub(super) corrective_context_cap: Option<usize>,
+    pub(super) corrective_replay_cap: Option<usize>,
 }
 
 /// `--structured-output`'s closed vocabulary: which rung of ADR 0001

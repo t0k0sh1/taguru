@@ -25,8 +25,35 @@ Entries that change an on-disk format or a response shape say so.
   contexts multiplied it. Every refresh's provider call holds one of the
   same `TAGURU_EMBED_PARALLEL` permits, so contexts share the ceiling.
   Behavior is unchanged; only the description was wrong.
+- **`taguru extract --help` and `taguru inspect` say "segment" where
+  #904 left "document"** (#851). The help still described the input as
+  documents and named a diagnostics `"document"` record the sidecar has
+  written as `"segment"` since 0.10.0; `inspect` said `no document
+  record` for an attempts log without its `segment` record. Wording only.
 
 ### Changed
+
+- **Breaking (CLI, configuration, on-disk keys, re-extraction) —
+  "chunk context" is "chunk briefing"** (#851). `context` now names
+  only the Taguru `context`. `--chunk-context` is `--chunk-briefing`,
+  `TAGURU_EXTRACT_CHUNK_CONTEXT` is `TAGURU_EXTRACT_CHUNK_BRIEFING`, the
+  trace's `chunk_context` record is `chunk_briefing`, and the
+  `chunk_context` key in the extract manifest, checkpoint and attempts
+  log `settings` record (and in a benchmark `manifest.json`) is
+  `chunk_briefing`. The block the model reads opens `Chunk briefing (`
+  instead of `Chunk context (`, so `PROMPT_VERSION` 7 → 8. No aliases:
+  `--chunk-context` is an unknown flag, `extract` refuses to start while
+  `TAGURU_EXTRACT_CHUNK_CONTEXT` is set (naming the new variable — it
+  would otherwise run with the briefing silently off), and an `--out`
+  written with the old keys re-extracts (it would anyway, under the new
+  `PROMPT_VERSION`).
+- **Breaking (configuration, SDK) — the corrective turn's replay cap
+  says "replay"** (#851). `TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES` is
+  `TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES`, and the LangChain SDKs'
+  `TaguruIngester` option `corrective_context_bytes` is
+  `corrective_replay_bytes` (Python and TypeScript). No aliases:
+  `extract` refuses to start while the old variable is set, naming the
+  new one.
 
 - **LangChain `TaguruRetriever(group_ids=…)` reads only the groups it
   searches** (#1024). It used to read the whole group directory

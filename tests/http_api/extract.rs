@@ -337,11 +337,14 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_PARALLEL")
         .env_remove("TAGURU_EXTRACT_FACT_BUDGET")
         .env_remove("TAGURU_EXTRACT_MAX_ATTEMPTS")
-        .env_remove("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES")
+        .env_remove("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES")
         .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
         .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
         .env_remove("TAGURU_EXTRACT_ESCALATION_FACTOR")
         .env_remove("TAGURU_EXTRACT_CHUNK_BYTES")
+        .env_remove("TAGURU_EXTRACT_CHUNK_BRIEFING")
+        .env_remove("TAGURU_EXTRACT_CHUNK_CONTEXT")
+        .env_remove("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES")
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_CANDIDATES")
         .env_remove("TAGURU_EXTRACT_REDACT")
@@ -1867,15 +1870,15 @@ fn extract_vocabulary_accepts_a_previous_extract_out_directory() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// ADR 0033 (#782): `--chunk-context structure` prefixes every chunk
+/// ADR 0033 (#782): `--chunk-briefing structure` prefixes every chunk
 /// with its block — position, references, preceding text — in the
 /// user turn's preamble, label-free; prefers a chunk boundary at the
-/// outermost heading; records `structure` and `chunk_context` in the
+/// outermost heading; records `structure` and `chunk_briefing` in the
 /// trace; and is a computation input (same mode skips, another mode
 /// re-extracts). `off` sends today's prompt byte for byte.
 #[test]
-fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
-    let docs = batch_dir("extract-chunk-context-docs");
+fn chunk_briefing_structure_prefixes_chunks_and_is_a_computation_input() {
+    let docs = batch_dir("extract-chunk-briefing-docs");
     let doc = docs.join("guide.md");
     let filler = "x".repeat(600);
     std::fs::write(
@@ -1885,7 +1888,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         ),
     )
     .unwrap();
-    let out = batch_dir("extract-chunk-context-out");
+    let out = batch_dir("extract-chunk-briefing-out");
     let reply = |index: usize| {
         chat_ok(
             &json!({"associations": [
@@ -1907,7 +1910,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "structure",
             doc.to_str().unwrap(),
         ],
@@ -1936,7 +1939,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         lines[0],
         format!("Segment '{}', chunk 2 of 2:", doc.display())
     );
-    assert!(lines[1].starts_with("Chunk context ("), "{preamble}");
+    assert!(lines[1].starts_with("Chunk briefing ("), "{preamble}");
     assert!(
         lines[1].contains("extract facts from chunk 2 of 2 only"),
         "{preamble}"
@@ -1960,7 +1963,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert!(stdout.contains("2 association(s)"), "{stdout}");
     assert!(!stdout.contains("removed"), "{stdout}");
 
-    // The trace: one `structure` record per unit, one `chunk_context`
+    // The trace: one `structure` record per unit, one `chunk_briefing`
     // per chunk right after its `chunk`, citing units by index.
     let (_, trace) = read_trace(&out);
     let structure: Vec<&Value> = trace.iter().filter(|r| r["type"] == "structure").collect();
@@ -1975,12 +1978,12 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert_eq!(structure[1]["paragraph_last"], 3);
     let kinds: Vec<&str> = trace.iter().map(|r| r["type"].as_str().unwrap()).collect();
     let chunk_at = kinds.iter().position(|k| *k == "chunk").unwrap();
-    assert_eq!(kinds[chunk_at + 1], "chunk_context");
+    assert_eq!(kinds[chunk_at + 1], "chunk_briefing");
     assert_eq!(kinds[chunk_at + 2], "chunk");
-    assert_eq!(kinds[chunk_at + 3], "chunk_context");
+    assert_eq!(kinds[chunk_at + 3], "chunk_briefing");
     let contexts: Vec<&Value> = trace
         .iter()
-        .filter(|r| r["type"] == "chunk_context")
+        .filter(|r| r["type"] == "chunk_briefing")
         .collect();
     assert_eq!(contexts[0]["chunk_index"], 0);
     assert_eq!(contexts[0]["position"], json!([0]));
@@ -2002,7 +2005,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "structure",
             doc.to_str().unwrap(),
         ],
@@ -2018,7 +2021,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "off",
             doc.to_str().unwrap(),
         ],
@@ -2029,7 +2032,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert!(requests.len() > before, "the mode change re-extracted");
     let off = user_of(&requests[before]);
     assert!(
-        !off.contains("Chunk context"),
+        !off.contains("Chunk briefing"),
         "off sends today's prompt: {off}"
     );
     assert!(
@@ -2040,7 +2043,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert!(
         !trace
             .iter()
-            .any(|r| r["type"] == "structure" || r["type"] == "chunk_context")
+            .any(|r| r["type"] == "structure" || r["type"] == "chunk_briefing")
     );
 
     // The env default, and a mode outside the list.
@@ -2049,7 +2052,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &[
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
-            ("TAGURU_EXTRACT_CHUNK_CONTEXT", "structure"),
+            ("TAGURU_EXTRACT_CHUNK_BRIEFING", "structure"),
         ],
         &[
             "--context",
@@ -2068,14 +2071,14 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &[
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
-            "--chunk-context",
+            "--chunk-briefing",
             "live",
             doc.to_str().unwrap(),
         ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("--chunk-context takes one of: off, structure, overview, ingested"),
+        stderr.contains("--chunk-briefing takes one of: off, structure, overview, ingested"),
         "{stderr}"
     );
     let (code, _, stderr) = run_extract(
@@ -2083,7 +2086,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         &[
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
-            ("TAGURU_EXTRACT_CHUNK_CONTEXT", "bogus"),
+            ("TAGURU_EXTRACT_CHUNK_BRIEFING", "bogus"),
         ],
         &[
             "--context",
@@ -2094,7 +2097,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains(
-            "TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure, overview, ingested"
+            "TAGURU_EXTRACT_CHUNK_BRIEFING takes one of: off, structure, overview, ingested"
         ),
         "{stderr}"
     );
@@ -2103,7 +2106,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// ADR 0033 §3.5: `--chunk-context overview` runs one overview call
+/// ADR 0033 §3.5: `--chunk-briefing overview` runs one overview call
 /// per chunk before any extraction (`stage: "overview"` attempts,
 /// its own system prompt), and every extraction chunk's block then
 /// carries `Cast:` and — for units wholly before it — `Before:`; the
@@ -2111,8 +2114,8 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
 /// for the occurrence check; and the cached answers are reused on a
 /// resume, extraction units discarded only when the overview changed.
 #[test]
-fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
-    let docs = batch_dir("extract-chunk-context-overview-docs");
+fn chunk_briefing_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
+    let docs = batch_dir("extract-chunk-briefing-overview-docs");
     let doc = docs.join("guide.md");
     let filler = "x".repeat(600);
     std::fs::write(
@@ -2122,7 +2125,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         ),
     )
     .unwrap();
-    let out = batch_dir("extract-chunk-context-overview-out");
+    let out = batch_dir("extract-chunk-briefing-overview-out");
     // Overview asks are told apart by their system prompt; the stub
     // answers them by chunk index, then answers extraction.
     let (url, captured) = stub_chat_server_concurrent(move |index, attempt| {
@@ -2158,7 +2161,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "overview",
             doc.to_str().unwrap(),
         ],
@@ -2261,7 +2264,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     assert_eq!(overview[0]["cast"][0]["name"], "Tool");
     let contexts: Vec<&Value> = trace
         .iter()
-        .filter(|r| r["type"] == "chunk_context")
+        .filter(|r| r["type"] == "chunk_briefing")
         .collect();
     assert_eq!(contexts[1]["cast"], json!(["Tool", "Ghost"]));
     assert_eq!(contexts[1]["synopsis"], json!([0]));
@@ -2276,7 +2279,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "overview",
             doc.to_str().unwrap(),
         ],
@@ -2291,7 +2294,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "structure",
             doc.to_str().unwrap(),
         ],
@@ -2309,8 +2312,8 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
 /// overview answer the pass cannot land (cut off even at the
 /// escalated budget) is reported and skipped, never a failed document.
 #[test]
-fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
-    let docs = batch_dir("extract-chunk-context-overview-resume-docs");
+fn chunk_briefing_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
+    let docs = batch_dir("extract-chunk-briefing-overview-resume-docs");
     let doc = docs.join("guide.md");
     let filler = "x".repeat(600);
     std::fs::write(
@@ -2320,7 +2323,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
         ),
     )
     .unwrap();
-    let out = batch_dir("extract-chunk-context-overview-resume-out");
+    let out = batch_dir("extract-chunk-briefing-overview-resume-out");
     // Run 1: chunk 0's overview is cut off twice (escalated too);
     // chunk 1's lands; extraction of chunk 1 is refused (terminal, no
     // corrective turn), so the document fails with chunk 0's unit
@@ -2352,7 +2355,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
         "700",
         "--max-output-tokens",
         "512",
-        "--chunk-context",
+        "--chunk-briefing",
         "overview",
         doc.to_str().unwrap(),
     ];
@@ -2421,13 +2424,13 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// ADR 0033 §3.2: `--chunk-context ingested` offers, for each cast
+/// ADR 0033 §3.2: `--chunk-briefing ingested` offers, for each cast
 /// name the `--vocabulary` export knows, that name's strongest
 /// relations as a `Known:` line after the cast — from the export, no
 /// further call — and needs `--vocabulary` to exist at all.
 #[test]
-fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
-    let docs = batch_dir("extract-chunk-context-ingested-docs");
+fn chunk_briefing_ingested_offers_the_exports_relations_for_the_cast() {
+    let docs = batch_dir("extract-chunk-briefing-ingested-docs");
     let doc = docs.join("minutes.md");
     std::fs::write(
         &doc,
@@ -2447,7 +2450,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         ),
     )
     .unwrap();
-    let out = batch_dir("extract-chunk-context-ingested-out");
+    let out = batch_dir("extract-chunk-briefing-ingested-out");
     let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
         if attempt == 0 {
             chat_ok(
@@ -2474,7 +2477,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &[
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
-            "--chunk-context",
+            "--chunk-briefing",
             "ingested",
             "--vocabulary",
             export.to_str().unwrap(),
@@ -2507,7 +2510,10 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     assert!(stdout.contains("1 association(s)"), "{stdout}");
     assert!(!stdout.contains("removed"), "{stdout}");
     let (_, trace) = read_trace(&out);
-    let context = trace.iter().find(|r| r["type"] == "chunk_context").unwrap();
+    let context = trace
+        .iter()
+        .find(|r| r["type"] == "chunk_briefing")
+        .unwrap();
     assert_eq!(context["known"], json!(["委員会"]));
 
     // The manifest value carries the relations' digest: the same
@@ -2518,7 +2524,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &[
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
-            "--chunk-context",
+            "--chunk-briefing",
             "ingested",
             "--vocabulary",
             export.to_str().unwrap(),
@@ -2568,7 +2574,7 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &[
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
-            "--chunk-context",
+            "--chunk-briefing",
             "ingested",
             "--vocabulary",
             export.to_str().unwrap(),
@@ -2595,14 +2601,14 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
         &[
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
-            "--chunk-context",
+            "--chunk-briefing",
             "ingested",
             doc.to_str().unwrap(),
         ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("--chunk-context ingested needs --vocabulary"),
+        stderr.contains("--chunk-briefing ingested needs --vocabulary"),
         "{stderr}"
     );
 
@@ -2615,8 +2621,8 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
 /// act's name on the heading path is kept, where the chunk alone
 /// would have had it removed as a fabrication.
 #[test]
-fn chunk_context_names_pass_the_occurrence_check() {
-    let docs = batch_dir("extract-chunk-context-occurrence-docs");
+fn chunk_briefing_names_pass_the_occurrence_check() {
+    let docs = batch_dir("extract-chunk-briefing-occurrence-docs");
     let doc = docs.join("law.md");
     let filler = "x".repeat(600);
     std::fs::write(
@@ -2624,7 +2630,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
         format!("# 電子署名法\n\nfiller value- {filler}\n\n## 第三条\n\n同法の規定により value- が定まる。"),
     )
     .unwrap();
-    let out = batch_dir("extract-chunk-context-occurrence-out");
+    let out = batch_dir("extract-chunk-briefing-occurrence-out");
     let reply = |index: usize| {
         chat_ok(
             &json!({"associations": [
@@ -2647,7 +2653,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "structure",
             doc.to_str().unwrap(),
         ],
@@ -3892,7 +3898,7 @@ fn extract_rejects_a_max_attempts_env_var_outside_its_range() {
 /// A byte cap truncates the corrective turn's replay of the model's own
 /// prior bad answer instead of resending it in full.
 #[test]
-fn extract_corrective_context_bytes_caps_the_replayed_bad_answer() {
+fn extract_corrective_replay_bytes_caps_the_replayed_bad_answer() {
     let docs = batch_dir("extract-correctivecap-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "small document").unwrap();
@@ -3908,7 +3914,7 @@ fn extract_corrective_context_bytes_caps_the_replayed_bad_answer() {
         &[
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
-            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "10"),
+            ("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES", "10"),
         ],
         &[
             "--context",
@@ -3938,7 +3944,7 @@ fn extract_corrective_context_bytes_caps_the_replayed_bad_answer() {
 /// A zero byte cap omits the replay entirely, behind a placeholder —
 /// distinct from an unset cap (full replay, the default).
 #[test]
-fn extract_corrective_context_bytes_of_zero_omits_the_bad_answer() {
+fn extract_corrective_replay_bytes_of_zero_omits_the_bad_answer() {
     let docs = batch_dir("extract-correctivezero-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "small document").unwrap();
@@ -3954,7 +3960,7 @@ fn extract_corrective_context_bytes_of_zero_omits_the_bad_answer() {
         &[
             ("TAGURU_EXTRACT_URL", url.as_str()),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
-            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "0"),
+            ("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES", "0"),
         ],
         &[
             "--context",
@@ -3978,7 +3984,7 @@ fn extract_corrective_context_bytes_of_zero_omits_the_bad_answer() {
 }
 
 #[test]
-fn extract_rejects_a_corrective_context_bytes_env_var_that_is_not_a_number() {
+fn extract_rejects_a_corrective_replay_bytes_env_var_that_is_not_a_number() {
     let docs = batch_dir("extract-correctivebad-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "content").unwrap();
@@ -3988,7 +3994,7 @@ fn extract_rejects_a_corrective_context_bytes_env_var_that_is_not_a_number() {
         let provider = [
             ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
             ("TAGURU_EXTRACT_MODEL", "stub-model"),
-            ("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", bad),
+            ("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES", bad),
         ];
         let (code, _, stderr) = run_extract(
             &out,
@@ -4001,8 +4007,57 @@ fn extract_rejects_a_corrective_context_bytes_env_var_that_is_not_a_number() {
         );
         assert_eq!(code, 2, "{bad}: {stderr}");
         assert!(
-            stderr.contains("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES needs an integer"),
+            stderr.contains("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES needs an integer"),
             "{bad}: {stderr}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// #851: the names `--chunk-briefing`/`corrective_replay_bytes` retired
+/// are refused, never silently ignored — a run configured for the old
+/// name would otherwise fall back to the default (no briefing, a full
+/// replay). Presence alone, an empty value included.
+#[test]
+fn extract_refuses_the_retired_context_named_variables() {
+    let docs = batch_dir("extract-retired-vars-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "content").unwrap();
+    let out = batch_dir("extract-retired-vars-out");
+
+    for (retired, current, value) in [
+        (
+            "TAGURU_EXTRACT_CHUNK_CONTEXT",
+            "TAGURU_EXTRACT_CHUNK_BRIEFING",
+            "structure",
+        ),
+        (
+            "TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES",
+            "TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES",
+            "",
+        ),
+    ] {
+        let (code, _, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+                (retired, value),
+            ],
+            &[
+                "--context",
+                "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 2, "{retired}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "{retired} is set, but extract now reads {current}"
+            )),
+            "{retired}: {stderr}"
         );
     }
 
@@ -7050,7 +7105,7 @@ fn diagnostics_reports_provider_token_usage_when_present() {
 }
 
 /// TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts into a byte-capped raw
-/// answer, truncated at capture exactly like `corrective_context_bytes`.
+/// answer, truncated at capture exactly like `corrective_replay_bytes`.
 #[test]
 fn diagnostics_raw_bytes_attaches_a_capped_response_text() {
     let docs = batch_dir("extract-diag-raw-docs");
@@ -9054,7 +9109,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     // a diagnostic snapshot of this run's compute inputs.
     let settings = &records[1];
     assert_eq!(settings["model"], "stub-model");
-    assert_eq!(settings["prompt_version"], 7);
+    assert_eq!(settings["prompt_version"], 8);
     assert_eq!(settings["questions_n"], 0);
     assert_eq!(settings["fact_budget"], 0);
     assert_eq!(settings["structured_output"], "");
@@ -10822,7 +10877,7 @@ fn a_failed_overview_is_recorded_once_and_never_re_asked_on_resume() {
         "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--chunk-bytes",
         "700",
-        "--chunk-context",
+        "--chunk-briefing",
         "overview",
         doc.to_str().unwrap(),
     ];
@@ -10935,7 +10990,7 @@ fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "overview",
             doc.to_str().unwrap(),
         ],
@@ -10959,7 +11014,7 @@ fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
 /// `--parallel N` is documented as "chunk completions to run
 /// concurrently within one document", and an overview ask is a chunk
 /// completion. The pass used to ignore the flag entirely, so under
-/// `--chunk-context overview` it became the phase's floor: the
+/// `--chunk-briefing overview` it became the phase's floor: the
 /// extraction fanned out four ways while the overview ahead of it
 /// still cost one round trip per chunk, end to end. The stub counts
 /// how many overview asks are in flight at once — serial can never
@@ -10986,7 +11041,7 @@ fn the_overview_pass_fans_out_under_parallel_and_matches_the_sequential_run() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--chunk-bytes",
             "700",
-            "--chunk-context",
+            "--chunk-briefing",
             "overview",
         ];
         all.extend(extra);
@@ -11157,7 +11212,7 @@ fn a_sigint_during_the_overview_pass_stops_it_between_chunks() {
             "--context",
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         ])
-        .args(["--chunk-context", "overview"])
+        .args(["--chunk-briefing", "overview"])
         // One paragraph per chunk, so the pass has eight more chunks
         // ahead of it when the interrupt lands — the gap between
         // stopping there and running the pass out is unmistakable.

@@ -20,7 +20,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         escalation_factor: "",
         runaway_ratio: "",
         chunk_bytes: "",
-        chunk_context: "",
+        chunk_briefing: "",
         lossy: false,
         schema_digest: "",
         candidates: "",
@@ -1988,7 +1988,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         escalation_factor: String::new(),
         runaway_ratio: String::new(),
         chunk_bytes: String::new(),
-        chunk_context: String::new(),
+        chunk_briefing: String::new(),
         lossy: false,
         schema_digest: String::new(),
         candidates: String::new(),
@@ -5145,7 +5145,7 @@ fn drive_ladder_on(
     let completions = Completions::new(Some(chat.client()));
     let policy = CorrectionPolicy {
         max_attempts: 3,
-        corrective_context_cap: None,
+        corrective_replay_cap: None,
     };
     let vocabulary = HashSet::new();
     let checkpoints = CheckpointStore::empty(
@@ -5164,7 +5164,7 @@ fn drive_ladder_on(
             escalation_factor: String::new(),
             runaway_ratio: String::new(),
             chunk_bytes: String::new(),
-            chunk_context: String::new(),
+            chunk_briefing: String::new(),
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
@@ -5178,7 +5178,7 @@ fn drive_ladder_on(
         source: "doc.md",
         chunk_index: 0,
         chunk_total: 1,
-        context_block: None,
+        briefing_block: None,
         ladder,
         policy: &policy,
         fact_budget: 0,
@@ -7054,7 +7054,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
     assert_eq!(kinds.last(), Some(&"uncovered"));
 }
 
-// ================ #782 / ADR 0033: chunk context (structure) ================
+// ================ #782 / ADR 0033: chunk briefing (structure) ================
 
 fn spans_of(text: &str) -> Vec<crate::paragraph::ParagraphSpan> {
     crate::paragraph::split(text)
@@ -7075,35 +7075,38 @@ fn unit_view(units: &[Unit]) -> Vec<(u8, &str, u32, u32)> {
 }
 
 #[test]
-fn chunk_context_mode_parses_and_records_off_as_empty() {
-    assert_eq!(ChunkContextMode::parse("off"), Some(ChunkContextMode::Off));
+fn chunk_briefing_mode_parses_and_records_off_as_empty() {
     assert_eq!(
-        ChunkContextMode::parse(" Structure "),
-        Some(ChunkContextMode::Structure)
+        ChunkBriefingMode::parse("off"),
+        Some(ChunkBriefingMode::Off)
     );
     assert_eq!(
-        ChunkContextMode::parse("overview"),
-        Some(ChunkContextMode::Overview)
+        ChunkBriefingMode::parse(" Structure "),
+        Some(ChunkBriefingMode::Structure)
     );
     assert_eq!(
-        ChunkContextMode::parse("ingested"),
-        Some(ChunkContextMode::Ingested)
+        ChunkBriefingMode::parse("overview"),
+        Some(ChunkBriefingMode::Overview)
     );
-    assert_eq!(ChunkContextMode::parse("live"), None);
-    assert_eq!(ChunkContextMode::parse(""), None);
-    assert_eq!(ChunkContextMode::Ingested.manifest_value(), "ingested");
-    assert!(ChunkContextMode::Ingested.overview(), "cumulative");
-    assert!(ChunkContextMode::Ingested.ingested());
-    assert!(!ChunkContextMode::Overview.ingested());
-    assert_eq!(ChunkContextMode::Off.manifest_value(), "");
-    assert_eq!(ChunkContextMode::Structure.manifest_value(), "structure");
-    assert_eq!(ChunkContextMode::Overview.manifest_value(), "overview");
-    assert!(!ChunkContextMode::Off.is_on());
-    assert!(ChunkContextMode::Structure.is_on());
-    assert!(ChunkContextMode::Overview.is_on());
-    assert!(!ChunkContextMode::Structure.overview());
-    assert!(ChunkContextMode::Overview.overview());
-    assert_eq!(ChunkContextMode::default(), ChunkContextMode::Off);
+    assert_eq!(
+        ChunkBriefingMode::parse("ingested"),
+        Some(ChunkBriefingMode::Ingested)
+    );
+    assert_eq!(ChunkBriefingMode::parse("live"), None);
+    assert_eq!(ChunkBriefingMode::parse(""), None);
+    assert_eq!(ChunkBriefingMode::Ingested.manifest_value(), "ingested");
+    assert!(ChunkBriefingMode::Ingested.overview(), "cumulative");
+    assert!(ChunkBriefingMode::Ingested.ingested());
+    assert!(!ChunkBriefingMode::Overview.ingested());
+    assert_eq!(ChunkBriefingMode::Off.manifest_value(), "");
+    assert_eq!(ChunkBriefingMode::Structure.manifest_value(), "structure");
+    assert_eq!(ChunkBriefingMode::Overview.manifest_value(), "overview");
+    assert!(!ChunkBriefingMode::Off.is_on());
+    assert!(ChunkBriefingMode::Structure.is_on());
+    assert!(ChunkBriefingMode::Overview.is_on());
+    assert!(!ChunkBriefingMode::Structure.overview());
+    assert!(ChunkBriefingMode::Overview.overview());
+    assert_eq!(ChunkBriefingMode::default(), ChunkBriefingMode::Off);
 }
 
 #[test]
@@ -7440,7 +7443,7 @@ fn name_flag_parses_once_and_is_bounded() {
 }
 
 #[test]
-fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
+fn chunk_briefing_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
     fn parse(words: &[&str]) -> Result<Args, i32> {
         Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
@@ -7449,12 +7452,12 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
         "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
-        "--chunk-context",
+        "--chunk-briefing",
         "structure",
         "d.md",
     ])
     .unwrap();
-    assert_eq!(parsed.chunk_context, Some(ChunkContextMode::Structure));
+    assert_eq!(parsed.chunk_briefing, Some(ChunkBriefingMode::Structure));
     assert_eq!(
         parse(&[
             "--context",
@@ -7464,7 +7467,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
             "d.md"
         ])
         .unwrap()
-        .chunk_context,
+        .chunk_briefing,
         None
     );
     let twice = parse(&[
@@ -7472,9 +7475,9 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
         "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
         "--out",
         "o",
-        "--chunk-context",
+        "--chunk-briefing",
         "off",
-        "--chunk-context",
+        "--chunk-briefing",
         "structure",
         "d.md",
     ]);
@@ -7485,7 +7488,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
-            "--chunk-context",
+            "--chunk-briefing",
             "live",
             "d.md"
         ]),
@@ -7497,7 +7500,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
             "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
             "--out",
             "o",
-            "--chunk-context"
+            "--chunk-briefing"
         ]),
         Err(2)
     ));
@@ -8555,13 +8558,13 @@ fn user_message_carries_the_block_in_the_preamble_and_the_inverses_split_it_righ
 }
 
 #[test]
-fn chunk_context_is_a_manifest_and_checkpoint_input() {
+fn chunk_briefing_is_a_manifest_and_checkpoint_input() {
     let inputs = base_inputs("h", "m");
     let mut manifest = Manifest::default();
     manifest.record("doc.md", &inputs, "doc.jsonl");
     assert!(manifest.matches("doc.md", &inputs));
     let structured = ComputationInputs {
-        chunk_context: "structure",
+        chunk_briefing: "structure",
         ..base_inputs("h", "m")
     };
     assert!(!manifest.matches("doc.md", &structured));
@@ -8575,12 +8578,12 @@ fn chunk_context_is_a_manifest_and_checkpoint_input() {
         "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""
     });
     let recorded = parse_settings_record(&value).unwrap();
-    assert_eq!(recorded.chunk_context, "");
+    assert_eq!(recorded.chunk_briefing, "");
     let mut current = parse_settings_record(&value).unwrap();
-    current.chunk_context = "structure".to_string();
+    current.chunk_briefing = "structure".to_string();
     assert_eq!(
         settings_differences(&recorded, &current),
-        vec!["chunk_context \"\" \u{2192} \"structure\""]
+        vec!["chunk_briefing \"\" \u{2192} \"structure\""]
     );
 }
 

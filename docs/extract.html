@@ -162,7 +162,7 @@ TAGURU_EXTRACT_TIMEOUT_SECS  time budget per completion; 0 = unlimited (default 
 TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per segment (default 1)
 TAGURU_EXTRACT_FACT_BUDGET  default for --fact-budget (default 0, off)
 TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10 (default 2)
-TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES  cap a corrective turn's replay of
                     the model's own prior bad answer to this many bytes;
                     0 omits it entirely (default: unset, replay in full)
 TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
@@ -176,7 +176,7 @@ TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
                     an auto-resolved rung (a pinned rung never demotes);
                     0 = no runaway judgment (default 8)
 TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
-TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (default off)
+TAGURU_EXTRACT_CHUNK_BRIEFING  default for --chunk-briefing (default off)
 TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-segment attempts log (on by default; see Trace)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
@@ -210,7 +210,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     512); chunks split at paragraph boundaries — lower it for
                     a slow provider or output-dense segments (statutes,
                     minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
---chunk-context MODE  what each chunk is told about its place in the
+--chunk-briefing MODE  what each chunk is told about its place in the
                     segment (ADR 0033): off (default) sends the chunk
                     alone; structure prefixes every chunk with its
                     heading path, the openings of the units it refers
@@ -414,7 +414,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       <li><b>Give the server a real context window.</b> A 24 KiB chunk is roughly 6k tokens. A serving default of 4k truncates the request <b>silently</b> — no error, just quietly degraded output. On Ollama, bake the window into a derived model: <code>FROM &lt;base&gt;</code> + <code>PARAMETER num_ctx 16384</code> → <code>ollama create</code>.</li>
       <li><b>Match the timeout to the hardware.</b> <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> bounds each chat completion (default 300; <code>0</code> = unlimited). Every attempt gets the full budget, and a transient failure is retried up to 4 attempts total, so a provider that stalls instead of erroring can cost several multiples of the timeout per chunk before the retries exhaust — worth remembering before dropping the timeout to something tight. Under the escalation ladder (<code>--max-output-tokens</code> or <code>--structured-output</code>) a timeout is not retried at the same size at all: the chunk splits instead (ADR 0020), so the cost is one timeout per split level, and <code>--chunk-bytes</code> lets you start smaller.</li>
       <li><b>The manifest trusts the model's name.</b> Re-point a serving alias at a different base (overwrite <code>ollama create my-extractor</code> with another base) and nothing the manifest can see changes — segments stay "unchanged" under what is actually a new model. Name models honestly, or <code>--force</code> after re-pointing. The same caveat as the embedding vector cache (also keyed by model name).</li>
-      <li><b>A wall of a malformed answer near the output cap can stall a chunk for minutes.</b> A small local model that runs its output budget out mid-answer produces one huge invalid response; replaying that whole response back verbatim and then asking for the same length again just reproduces the same cutoff — one chunk of a few hundred bytes measured at 4-5 minutes this way. The first-class fix is <code>--max-output-tokens</code>: with an explicit budget, a cut-off answer takes the deterministic escalation ladder (<a href="#structured-output">below</a>) instead of a shorter-please retry. Without one, <code>--fact-budget N</code> asks for fewer associations per chunk up front, the truncation-aware correction (see <a href="#prompt">below</a>) asks for a shorter answer once the provider's <code>finish_reason</code> says the prior one was cut off, and <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES=0</code> is the blunter fallback: never replay the bad answer at all.</li>
+      <li><b>A wall of a malformed answer near the output cap can stall a chunk for minutes.</b> A small local model that runs its output budget out mid-answer produces one huge invalid response; replaying that whole response back verbatim and then asking for the same length again just reproduces the same cutoff — one chunk of a few hundred bytes measured at 4-5 minutes this way. The first-class fix is <code>--max-output-tokens</code>: with an explicit budget, a cut-off answer takes the deterministic escalation ladder (<a href="#structured-output">below</a>) instead of a shorter-please retry. Without one, <code>--fact-budget N</code> asks for fewer associations per chunk up front, the truncation-aware correction (see <a href="#prompt">below</a>) asks for a shorter answer once the provider's <code>finish_reason</code> says the prior one was cut off, and <code>TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES=0</code> is the blunter fallback: never replay the bad answer at all.</li>
     </ul>
     <p>
       These five are the extraction side of the same serving layer. The same knobs — thinking
@@ -453,8 +453,8 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
         <tr>
           <td><code>structure</code></td><td>per segment</td><td>—</td>
           <td>the segment's structural units — headings, statute articles, speakers — each
-            with a level and a paragraph range (empty under <code>--chunk-context off</code>)</td>
-          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
+            with a level and a paragraph range (empty under <code>--chunk-briefing off</code>)</td>
+          <td><a href="#chunk-briefing">Chunk briefing</a>, <a href="#trace">Trace</a>
             (<code>structure</code>)</td>
         </tr>
         <tr>
@@ -464,18 +464,18 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
         </tr>
         <tr>
           <td><code>overview</code></td><td>per segment</td><td>yes</td>
-          <td>under <code>--chunk-context overview</code>: one call per chunk, before any
+          <td>under <code>--chunk-briefing overview</code>: one call per chunk, before any
             extraction — a synopsis of each unit opening in it and the cast it introduces,
             cached in the checkpoint (none under other modes)</td>
-          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
+          <td><a href="#chunk-briefing">Chunk briefing</a>, <a href="#trace">Trace</a>
             (<code>overview</code>)</td>
         </tr>
         <tr>
           <td><code>annotate</code></td><td>per chunk</td><td>—</td>
-          <td>the chunk's context block — heading path, referenced units' openings, preceding
+          <td>the chunk's briefing block — heading path, referenced units' openings, preceding
             paragraphs — as prefixed to its user turn (none under <code>off</code>)</td>
-          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
-            (<code>chunk_context</code>)</td>
+          <td><a href="#chunk-briefing">Chunk briefing</a>, <a href="#trace">Trace</a>
+            (<code>chunk_briefing</code>)</td>
         </tr>
         <tr>
           <td><code>steer</code></td><td>per segment</td><td>—</td>
@@ -729,7 +729,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code> raises the ceiling to anywhere from 1 (no
       corrective turn at all) to 10. Every corrective turn rebuilds the conversation from the
       system/user base plus only the single most recent bad answer, never the accumulated
-      history, so <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> bounds the replay the same
+      history, so <code>TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES</code> bounds the replay the same
       way on attempt 5 as on attempt 2: left unset the bad answer is replayed back in full
       (today's behavior), a byte count truncates the replay to that size, and <code>0</code> omits
       it behind a placeholder entirely. When the provider's own <code>finish_reason</code> says
@@ -753,7 +753,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       across five attempts without fixing anything, while removal is instant, deterministic, and
       loses nothing a corrected answer would have kept. The corrective treatment itself is
       bounded by the same <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>/
-      <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> controls — never a second, unbounded
+      <code>TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES</code> controls — never a second, unbounded
       mechanism. The turn names every violation by its exact JSON path (for example
       <code>associations[1].weight: expected finite non-zero number, got string "strong"</code>)
       and asks for the complete corrected object: keep every item, correct the named fields
@@ -898,22 +898,22 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
     </p>
   </section>
 
-  <section id="chunk-context">
-    <h2>Chunk context: what a chunk is told about its place in the segment</h2>
+  <section id="chunk-briefing">
+    <h2>Chunk briefing: what a chunk is told about its place in the segment</h2>
     <p>
       These are the <a href="#pipeline"><code>structure</code></a> and
       <a href="#pipeline"><code>annotate</code></a> steps (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>,
-      #782). "Context" here is what a reader needs in mind to read a chunk — never the
-      <code>context</code> that <code>--context ID</code> targets. By default (<code>--chunk-context
-      off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: chunk K of
+      #782, which called it "chunk context"). The briefing is what a reader needs in mind to
+      read a chunk. By default (<code>--chunk-briefing
+      off</code>, or <code>TAGURU_EXTRACT_CHUNK_BRIEFING</code>) a chunk is sent alone: chunk K of
       N, and the labeled text. It does not know the chapter it sits in, the definitions an
       earlier article gave, or which act <code>同法</code> names three chunks back — the gap the
       v0.9.5 baseline measured as near-zero cross-unit recall on statutes, minutes, and
       technical segments.
     </p>
     <p>
-      <code>--chunk-context structure</code> closes the mechanical half of that gap with no model
+      <code>--chunk-briefing structure</code> closes the mechanical half of that gap with no model
       call. The <code>structure</code> step reads the segment's own lines for headings:
       Markdown <code>#</code> levels; statute <code>第N章</code>/<code>第N節</code>/<code>第N条</code>
       (a parenthesized <code>（見出し）</code> line names its article, <code>第三条の二</code>
@@ -921,7 +921,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       dotted or <code>§</code> numbering (<code>1.2 Setup</code>, <code>§ 3</code> — never a bare
       <code>1. item</code>, which is a list). Each heading opens a <i>unit</i> with a level and
       the paragraph range up to the next heading. The <code>annotate</code> step then prefixes
-      every chunk's user turn with a <b>chunk context block</b>, in this order and only while a
+      every chunk's user turn with a <b>chunk briefing block</b>, in this order and only while a
       cap (a quarter of <code>--chunk-bytes</code>, never under 512 bytes) holds:
       <code>Position:</code> the heading path in force at the chunk's first paragraph, outermost
       first (<code>第二章 › 第三条</code>); <code>References:</code> the heading and opening of
@@ -939,16 +939,16 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       answered for a chunk that only says <code>同法</code> is kept when the act's name is on the
       heading path, where the chunk alone would have had it removed as unattested. And it is
       <b>recorded</b>: the <a href="#trace">trace</a> carries one <code>structure</code> record
-      per unit and one <code>chunk_context</code> record per chunk (its <code>sha256</code> and
+      per unit and one <code>chunk_briefing</code> record per chunk (its <code>sha256</code> and
       <code>bytes</code>, the unit indices on the <code>position</code> path and among the
       <code>references</code>, and the <code>overlap_paragraphs</code> range), so a gained fact
-      can be credited to the kind of context that carried it. The mode is a computation input:
+      can be credited to the kind of briefing that carried it. The mode is a computation input:
       switching it re-extracts, and a manifest or checkpoint from before the flag matches
       <code>off</code>. Split sub-pieces (the ladder's split rung) keep their chunk's block — a
       sub-piece is still chunk K, read with chunk K's block.
     </p>
     <p>
-      <code>--chunk-context overview</code> adds the model's half. Before any extraction, the
+      <code>--chunk-briefing overview</code> adds the model's half. Before any extraction, the
       <code>overview</code> step asks the model once per chunk — with the units opening in that
       chunk listed by number and heading, and the chunk exactly as extraction will see it — for
       a one-to-two-sentence synopsis of each such unit (what it establishes: definitions made,
@@ -977,7 +977,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       schema is the wrong shape for this answer.
     </p>
     <p>
-      <code>--chunk-context ingested</code> adds the second source ADR 0033 §3.2 names: what the
+      <code>--chunk-briefing ingested</code> adds the second source ADR 0033 §3.2 names: what the
       target <code>context</code> <i>already holds</i>. It needs <a href="#prompt"><code>--vocabulary</code></a>
       — the same export of the target <code>context</code> — and reads, beside the names, every association
       the export carries, keeping for each concept its strongest few (at most five by
@@ -993,7 +993,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       leaves it out too (its names already pass through the export's allowlist). The manifest
       records the mode as <code>ingested:&lt;digest&gt;</code>, the digest being that of the
       relations the export offers — a changed export re-extracts, as a changed vocabulary
-      already did. The trace's <code>chunk_context</code> record lists the <code>known</code>
+      already did. The trace's <code>chunk_briefing</code> record lists the <code>known</code>
       names carried.
     </p>
   </section>
@@ -1017,7 +1017,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       <code>--chunk-bytes</code> re-extracts (the default cap matches manifests written before the
       flag existed). Lower it for a slow local provider or for output-dense segments — statutes,
       minutes — whose answers outrun the time or token budget at the default cap (ADR 0020).
-      Under <a href="#chunk-context"><code>--chunk-context structure</code></a> the packing gains
+      Under <a href="#chunk-briefing"><code>--chunk-briefing structure</code></a> the packing gains
       one preference: a paragraph that opens a unit at the segment's outermost level (a
       chapter, a top-level heading, a speaker block) ends the current chunk once that chunk is
       past half the cap — so boundaries fall on chapters when they can, no chunk exceeds the cap,
@@ -1260,7 +1260,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       opts into the model's final answer text on each <code>attempt</code> record (the only kind
       that carries one at all) — the full text of every prompt and answer lives in the
       <a href="#attempts">attempts log</a> beside the source file instead, byte-capped <b>at
-      capture</b> (the same treatment <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code>
+      capture</b> (the same treatment <code>TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES</code>
       gives a replayed bad answer above). A raw response can embed the segment's own text,
       so an uncapped default would leak it into a file meant for troubleshooting model
       behavior.
@@ -1303,7 +1303,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       one <code>redaction</code> per match (<code>rule</code>, <code>paragraph</code>,
       <code>placeholder</code>, <code>bytes</code>, and <code>preexisting</code> when the input
       already carried it — never the matched text); under <a
-      href="#chunk-context"><code>--chunk-context structure</code></a>, one <code>structure</code>
+      href="#chunk-briefing"><code>--chunk-briefing structure</code></a>, one <code>structure</code>
       per unit (<code>unit</code>, <code>level</code>, <code>heading</code>,
       <code>paragraph_first</code>/<code>paragraph_last</code>); one <code>chunk</code> per chunk of
       the plan (the same <code>chunk_index</code>/<code>chunk_sha256</code>/
@@ -1312,7 +1312,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       <code>overview</code> — its <code>overview</code> record (<code>chunk_index</code>,
       <code>units</code> as <code>[{unit, summary}]</code>, <code>cast</code> as
       <code>[{name, gloss}]</code>) and by its
-      <code>chunk_context</code> (<code>chunk_index</code>, the block's <code>sha256</code>/
+      <code>chunk_briefing</code> (<code>chunk_index</code>, the block's <code>sha256</code>/
       <code>bytes</code>, <code>position</code> and <code>references</code> as unit indices,
       <code>cast</code> names, <code>known</code> names, and <code>synopsis</code> unit indices
       when carried, <code>overlap_paragraphs</code>); one <code>piece</code> per answer the chunk
@@ -1341,7 +1341,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       recomputed alike), and <code>pinned_from</code> (the run_id the system prompt was pinned
       from under <a href="#replay"><code>--replay</code></a>; absent from the record whenever
       this run computed its own); <code>chunk_index</code> is <code>null</code> — segment scope, every chunk
-      sees the same lists today; per-chunk context (a future control) adds records with the
+      sees the same lists today; per-chunk briefing (a future control) adds records with the
       index set. Then one <code>loss</code> per item the model's accepted answer held that the source file does
       not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
       0024</a>): <code>item</code> (<code>association</code> | <code>alias</code> |
@@ -1465,7 +1465,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       0031</a>) — a diagnostic snapshot of this run's compute inputs (<code>model</code>,
       <code>prompt_version</code>, <code>questions_n</code>, <code>fact_budget</code>,
       <code>structured_output</code>, <code>max_output_tokens</code>, <code>chunk_bytes</code>,
-      <code>chunk_context</code>, <code>lossy</code>, <code>schema_digest</code>,
+      <code>chunk_briefing</code>, <code>lossy</code>, <code>schema_digest</code>,
       <code>candidates</code>, <code>vocabulary_digest</code>, and the current
       <code>rung</code>), the same field set the
       manifest and checkpoint fingerprint check, minus what only names the segment or never
@@ -1723,7 +1723,7 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             the manifest entry's <code>sha256</code>. Paragraph numbering only shows up
             indirectly, through <code>paragraph</code> records (also <code>verify</code>'s).</td></tr>
         <tr><td><code>structure</code></td>
-          <td>trace <code>structure</code>, one per unit (none under <code>--chunk-context
+          <td>trace <code>structure</code>, one per unit (none under <code>--chunk-briefing
             off</code>).</td></tr>
         <tr><td><code>plan</code></td>
           <td>trace <code>chunk</code>, one per chunk; the diagnostics sidecar's own
@@ -1734,7 +1734,7 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             <code>overview</code>, one per chunk the pass answered for; the checkpoint file's
             <code>overview</code> map and <code>overview_digest</code>.</td></tr>
         <tr><td><code>annotate</code></td>
-          <td>trace <code>chunk_context</code>, one per chunk that got a block, right after its
+          <td>trace <code>chunk_briefing</code>, one per chunk that got a block, right after its
             <code>chunk</code>; the block text itself is in each <code>attempt</code>'s
             <code>messages</code> (the user turn's preamble section).</td></tr>
         <tr><td><code>steer</code></td>
@@ -1914,7 +1914,7 @@ jq -c 'select(.type=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
           <td>Corrections don't take: correction success low, <code>removed_instead</code>
             high</td>
           <td>Raise <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>; read the corrective ask beside its
-            answer (walkthrough step 4). <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code>
+            answer (walkthrough step 4). <code>TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES</code>
             changes how much of the bad answer is replayed. An ask the model consistently
             misreads is a product bug — file it with those two records attached; the wording
             is taguru's, not yours.</td>
@@ -1932,7 +1932,7 @@ jq -c 'select(.type=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
         <tr>
           <td>Referent in another chunk: items citing a paragraph outside their piece's
             range, or a subject that only occurs in some other chunk's range</td>
-          <td><a href="#chunk-context"><code>--chunk-context structure</code></a>: the chunk is
+          <td><a href="#chunk-briefing"><code>--chunk-briefing structure</code></a>: the chunk is
             told its heading path, the referenced units' openings, and the preceding
             paragraphs, and a name the block states passes the occurrence check (ADR 0033).
             Otherwise raise <code>--chunk-bytes</code> so mention and referent share a

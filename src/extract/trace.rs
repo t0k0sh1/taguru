@@ -152,7 +152,7 @@ pub(super) struct TraceLoss<'a> {
 /// segment today, `chunk_index: null`: every chunk of a segment sees
 /// the same steering (ADR 0014: candidates come from the whole
 /// segment, once; the vocabulary grows only between segments). When
-/// #782 adds per-chunk context, its records set `chunk_index` — a
+/// #782 adds per-chunk briefing, its records set `chunk_index` — a
 /// chunk's steering is the segment-wide record plus its own.
 #[derive(serde::Serialize)]
 pub(super) struct TraceSteering<'a> {
@@ -301,7 +301,7 @@ pub(super) fn render_trace(
     uncovered: &[CoverageGap],
     steering: &TraceSteering,
     units: &[Unit],
-    blocks: &[Option<ContextBlock>],
+    blocks: &[Option<BriefingBlock>],
     overview: &[Option<OverviewAnswer>],
 ) -> String {
     let mut lines = Vec::new();
@@ -367,8 +367,8 @@ pub(super) fn render_trace(
             });
         }
         if let Some(block) = blocks.get(chunk_index).and_then(Option::as_ref) {
-            push(&TraceChunkContext {
-                record_type: "chunk_context",
+            push(&TraceChunkBriefing {
+                record_type: "chunk_briefing",
                 chunk_index,
                 block,
             });

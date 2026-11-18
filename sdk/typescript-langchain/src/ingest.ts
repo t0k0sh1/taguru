@@ -226,7 +226,7 @@ export interface TaguruIngesterFields {
   questions?: number;
   fact_budget?: number;
   max_attempts?: number;
-  corrective_context_bytes?: number;
+  corrective_replay_bytes?: number;
   include_passage?: boolean;
   chunk_bytes?: number;
   vocabulary_cap?: number;
@@ -526,7 +526,7 @@ export class TaguruIngester {
   readonly questions: number;
   readonly fact_budget: number;
   readonly max_attempts: number;
-  readonly corrective_context_bytes: number | undefined;
+  readonly corrective_replay_bytes: number | undefined;
   readonly include_passage: boolean;
   readonly chunk_bytes: number;
   readonly vocabulary_cap: number;
@@ -566,9 +566,9 @@ export class TaguruIngester {
     if (maxAttempts < 1 || maxAttempts > MAX_ATTEMPTS_CEILING) {
       throw new Error(`max_attempts must be between 1 and ${MAX_ATTEMPTS_CEILING}`);
     }
-    if (fields.corrective_context_bytes !== undefined && fields.corrective_context_bytes < 0) {
+    if (fields.corrective_replay_bytes !== undefined && fields.corrective_replay_bytes < 0) {
       throw new Error(
-        "corrective_context_bytes must be a non-negative integer, or undefined to replay " +
+        "corrective_replay_bytes must be a non-negative integer, or undefined to replay " +
           "the prior bad answer in full",
       );
     }
@@ -585,7 +585,7 @@ export class TaguruIngester {
     // Passed through as-is: undefined (replay the prior bad answer in
     // full) and 0 (omit it behind a placeholder) are distinct policies —
     // a `?? 0` here would silently collapse the default into omission.
-    this.corrective_context_bytes = fields.corrective_context_bytes;
+    this.corrective_replay_bytes = fields.corrective_replay_bytes;
     this.include_passage = fields.include_passage ?? true;
     this.chunk_bytes = fields.chunk_bytes ?? CHUNK_BYTES;
     this.vocabulary_cap = fields.vocabulary_cap ?? VOCABULARY_CAP;
@@ -704,7 +704,7 @@ export class TaguruIngester {
         new SystemMessage(system),
         new HumanMessage(chunkRecord.user),
         new AIMessage(
-          correctiveAssistantTurnContent(chunkRecord.answer, this.corrective_context_bytes),
+          correctiveAssistantTurnContent(chunkRecord.answer, this.corrective_replay_bytes),
         ),
         new HumanMessage(correctiveValidationMessage(issues)),
       ];
@@ -852,7 +852,7 @@ export class TaguruIngester {
       let chunkRecord: ChunkRecord | null = null;
       // Each retry rebuilds the conversation from the system/user base and
       // appends only the most recent bad turn — never the whole history —
-      // so corrective_context_bytes bounds every retry alike, not just the
+      // so corrective_replay_bytes bounds every retry alike, not just the
       // first. At the all-defaults policy this reproduces the previous
       // fixed implementation's request bodies exactly.
       let pendingAsk: string | null = null;
@@ -867,7 +867,7 @@ export class TaguruIngester {
             : [
                 ...base,
                 new AIMessage(
-                  correctiveAssistantTurnContent(priorBadAnswer, this.corrective_context_bytes),
+                  correctiveAssistantTurnContent(priorBadAnswer, this.corrective_replay_bytes),
                 ),
                 new HumanMessage(pendingAsk ?? ""),
               ];

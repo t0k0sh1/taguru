@@ -155,7 +155,7 @@ pub(super) fn inspect_attempts_log(path: &Path, filter: &Filter, as_json: bool) 
     let report = build_report(&path.display().to_string(), &text, filter);
     if report.segment.is_none() && report.attempts.is_empty() && report.moves.is_empty() {
         eprintln!(
-            "{}: not an extract attempts log — no document or attempt record in it",
+            "{}: not an extract attempts log — no segment or attempt record in it",
             path.display()
         );
         return 1;
@@ -538,25 +538,25 @@ fn move_line(m: &MoveRow) -> String {
 pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
     let mut out = String::new();
     match &report.segment {
-        Some(document) => {
+        Some(segment) => {
             let runs = if report.runs.len() > 1 {
                 format!(
                     ", {} run(s) — latest run {}",
                     report.runs.len(),
-                    document.run_id
+                    segment.run_id
                 )
             } else {
-                format!(", run {}", document.run_id)
+                format!(", run {}", segment.run_id)
             };
             out.push_str(&format!(
                 "{}: attempts log for '{}'{runs}{}\n",
                 report.target,
-                document.source,
-                if document.resumed { " (resumed)" } else { "" }
+                segment.source,
+                if segment.resumed { " (resumed)" } else { "" }
             ));
         }
         None => out.push_str(&format!(
-            "{}: attempts log (no document record)\n",
+            "{}: attempts log (no segment record)\n",
             report.target
         )),
     }
@@ -567,7 +567,7 @@ pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
             "structured_output",
             "max_output_tokens",
             "chunk_bytes",
-            "chunk_context",
+            "chunk_briefing",
             "rung",
         ]
         .iter()
@@ -753,7 +753,7 @@ mod tests {
     fn sample_log() -> String {
         [
             json!({"type": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
-            json!({"type": "settings", "prompt_version": 4, "model": "stub", "questions_n": 0, "fact_budget": 0, "structured_output": "off", "max_output_tokens": 4000, "chunk_bytes": "", "chunk_context": "off", "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""}).to_string(),
+            json!({"type": "settings", "prompt_version": 4, "model": "stub", "questions_n": 0, "fact_budget": 0, "structured_output": "off", "max_output_tokens": 4000, "chunk_bytes": "", "chunk_briefing": "off", "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""}).to_string(),
             json!({"type": "system", "sha256": "s", "bytes": 3, "content": "sys"}).to_string(),
             attempt(1, "aaaa1111bbbb2222cccc", 0, "length_limited", "[0] alpha\n\n[1] beta\n\n[2] gamma", Some("{\"associations\": [")),
             json!({"type": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa1111bbbb2222cccc", "chunk_index": 0, "reason": "the answer still ended at the output cap", "piece_bytes": 27, "split_cap": 14, "sub_pieces": 2}).to_string(),
@@ -803,7 +803,7 @@ mod tests {
             text.starts_with("log: attempts log for 'a.md', run r1\n"),
             "{text}"
         );
-        assert!(text.contains("  settings: model stub, prompt_version 4, structured_output off, max_output_tokens 4000, chunk_context off\n"), "{text}");
+        assert!(text.contains("  settings: model stub, prompt_version 4, structured_output off, max_output_tokens 4000, chunk_briefing off\n"), "{text}");
         assert!(text.contains("  #1  chunk 1/2  piece aaaa1111bbbb  paragraphs 0–2 (30 B)  attempt 1/2  length_limited (finish length)  cap 4000 tok  1.5 s  10→20 tok\n"), "{text}");
         assert!(text.contains("      ↳ split  2 sub-piece(s), cap 14 B — the answer still ended at the output cap\n"), "{text}");
         assert!(text.contains("  #3  chunk 1/2  piece 999988887777  paragraph 2 (9 B)  attempt 1/2  stop_malformed  cap 4000 tok  1.5 s  10→20 tok\n        not a JSON object: invalid escape at line 1 column 7\n"), "{text}");
@@ -1058,7 +1058,7 @@ mod tests {
         let report = build_report("log", &log, &filter);
         let text = render_text(&report, &filter);
         assert!(
-            text.starts_with("log: attempts log (no document record)\n"),
+            text.starts_with("log: attempts log (no segment record)\n"),
             "{text}"
         );
         assert!(text.contains("  #2  chunk 1/1  piece abcdef012345  paragraph 0 (9 B)  attempt 2/2  stop_valid  0.5 s  corrects #1  replayed from #3 (run r0)\n        associations[0].weight: expected a number\n        1 item(s) removed (mechanical validation)\n        (piece text as sent: same as #1)\n--- corrective ask (#2, 48 B) ---\nYour previous answer was not JSON. Answer again.\n--- answer (#2, 20 B) ---"), "{text}");
