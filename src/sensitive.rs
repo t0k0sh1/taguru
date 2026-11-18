@@ -605,10 +605,11 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
             // the assignment's value starts at the backtick, the key
             // block one byte later) keeps its remainder: trimmed to
             // start where that match ends, the two spans stay disjoint
-            // and together cover the whole secret. Anything else that
-            // overlaps is dropped.
-            if candidate.secret && candidate.start < taken_until && candidate.end > taken_until {
-                candidate.start = taken_until;
+            // and together cover the whole secret. A secret wholly
+            // inside the accepted match trims to nothing and is dropped
+            // below; anything else that overlaps is dropped too.
+            if candidate.secret {
+                candidate.start = candidate.start.max(taken_until);
             }
             if candidate.start < taken_until {
                 continue;

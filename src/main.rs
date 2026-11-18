@@ -1202,9 +1202,7 @@ fn spawn_keyring_reload_tasks(
                         (keyring.clone(), Arc::clone(&source), state.clone());
                     let reload = move || {
                         let outcome = auth::reload_keyring(&keyring, &source, "sighup");
-                        state
-                            .metrics()
-                            .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+                        state.metrics().record_keyring_reload(outcome.succeeded());
                         Some(())
                     };
                     let _ = read_off_worker_queued(&in_flight, reload, || {
@@ -1240,9 +1238,7 @@ fn spawn_keyring_reload_tasks(
             // a reload that finishes past the deadline still counts.
             let _ = read_off_worker(&in_flight, move || {
                 let outcome = auth::reload_keyring_if_changed(&keyring, &source)?;
-                state
-                    .metrics()
-                    .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+                state.metrics().record_keyring_reload(outcome.succeeded());
                 Some(())
             })
             .await;

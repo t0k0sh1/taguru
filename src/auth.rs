@@ -665,6 +665,15 @@ pub enum ReloadOutcome {
     Refused,
 }
 
+impl ReloadOutcome {
+    /// Whether the reload counts as a success for the reload counter:
+    /// a refusal is the one failure — an unchanged table is a clean
+    /// read that simply had nothing to arm.
+    pub fn succeeded(self) -> bool {
+        self != Self::Refused
+    }
+}
+
 /// Rebuilds the keyring from its current sources and swaps it in,
 /// fail closed on every path: an unreadable or malformed source, and
 /// the one transition that must be impossible — "tokens configured" →
@@ -1105,6 +1114,14 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use axum::routing::get;
     use tower::util::ServiceExt;
+
+    /// The reload counter's success split: only a refusal fails.
+    #[test]
+    fn only_a_refused_reload_counts_as_a_failure() {
+        assert!(ReloadOutcome::Applied.succeeded());
+        assert!(ReloadOutcome::Unchanged.succeeded());
+        assert!(!ReloadOutcome::Refused.succeeded());
+    }
 
     fn ring(single: Option<&str>, named: Option<&str>) -> SharedKeyring {
         SharedKeyring::new(
