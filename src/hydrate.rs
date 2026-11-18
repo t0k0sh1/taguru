@@ -506,9 +506,38 @@ pub(crate) async fn head_modified(
     store: &Arc<dyn ObjectStore>,
     key: &StorePath,
 ) -> io::Result<Option<SystemTime>> {
+    Ok(head_stamp(store, key).await?.map(|stamp| stamp.modified))
+}
+
+/// What identifies one write of an object, for "did it change?" checks.
+///
+/// `last_modified` alone is not enough: cloud stores report it at
+/// one-second granularity, so two PUTs inside the same second (the
+/// shipper re-PUTs `complete` every cycle, possibly every 100ms) carry
+/// identical timestamps. The ETag (and version, where the store keeps
+/// one) differ per write, so comparing the whole stamp catches them.
+/// A spurious difference only costs an idempotent re-apply; a missed
+/// one leaves a replica stale, so every available field participates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectStamp {
+    /// `last_modified` by the store's clock.
+    pub(crate) modified: SystemTime,
+    pub(crate) e_tag: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+/// The object's [`ObjectStamp`], or `None` when it does not exist.
+pub(crate) async fn head_stamp(
+    store: &Arc<dyn ObjectStore>,
+    key: &StorePath,
+) -> io::Result<Option<ObjectStamp>> {
     use object_store::ObjectStoreExt;
     match store.head(key).await {
-        Ok(meta) => Ok(Some(SystemTime::from(meta.last_modified))),
+        Ok(meta) => Ok(Some(ObjectStamp {
+            modified: SystemTime::from(meta.last_modified),
+            e_tag: meta.e_tag,
+            version: meta.version,
+        })),
         Err(object_store::Error::NotFound { .. }) => Ok(None),
         Err(error) => Err(io::Error::other(format!("checking {key}: {error}"))),
     }
@@ -1384,6 +1413,39 @@ mod tests {
     use crate::registry::AppState;
     use crate::ship::{ShipProgress, Shipper};
     use crate::wal::{self, WalOp};
+
+    /// Two writes inside one store-clock second share `last_modified`;
+    /// the stamp must still tell them apart by ETag (the replica
+    /// tailer's short-circuit compares these stamps).
+    #[tokio::test]
+    async fn head_stamp_distinguishes_same_second_rewrites_by_e_tag() {
+        use object_store::{ObjectStoreExt, PutPayload};
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let key = StorePath::from("gen-1/complete");
+        store
+            .put(&key, PutPayload::from_static(b"a"))
+            .await
+            .unwrap();
+        let first = head_stamp(&store, &key).await.unwrap().unwrap();
+        store
+            .put(&key, PutPayload::from_static(b"b"))
+            .await
+            .unwrap();
+        let second = head_stamp(&store, &key).await.unwrap().unwrap();
+        assert!(first.e_tag.is_some(), "the fake must report an ETag");
+        // Pin the timestamps equal, as a 1s-granular cloud store would.
+        let second = ObjectStamp {
+            modified: first.modified,
+            ..second
+        };
+        assert_ne!(first, second);
+        assert!(
+            head_stamp(&store, &StorePath::from("absent"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     /// The hand-laid fixture families' ids: canonical context ids, the
     /// only stem shape a boot registers (ADR 0045). Their sidecars keep
