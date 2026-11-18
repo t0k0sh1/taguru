@@ -48,8 +48,10 @@ use regex::Regex;
 /// `redact3` — a secret candidate is shadowed only when an owned span
 /// holds it whole, and `private_key` also masks a key block a blank
 /// line splits (an encrypted legacy PEM's headers end in one), one
-/// fragment per paragraph.
-pub(crate) const RULESET_VERSION: &str = "redact3";
+/// fragment per paragraph; `redact4` — a secret that starts inside
+/// an earlier accepted match and runs past it is masked from that
+/// match's end on, instead of being dropped whole.
+pub(crate) const RULESET_VERSION: &str = "redact4";
 
 /// The rule name the scanner gives a placeholder the input already
 /// carries (§3.2) — never a built-in's or a user rule's name.
@@ -475,6 +477,11 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                 .collect()
         })
         .unwrap_or_default();
+    // `find_iter` yields the blocks in start order and disjoint, so a
+    // cursor walks them once over all paragraphs: blocks ending before
+    // a paragraph are passed for good, and one crossing its end stays
+    // at the cursor for the next paragraph.
+    let mut next_block = 0usize;
     let mut accepted = Vec::new();
     for span in crate::paragraph::split(text) {
         let (start, end) = (span.start as usize, span.end as usize);
@@ -484,7 +491,16 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
         // block inside one paragraph duplicates the per-paragraph
         // `private_key` candidate span for span (same start, end and
         // order), and the greedy accept below drops the twin.
-        for &(order, from, to) in &key_blocks {
+        while key_blocks
+            .get(next_block)
+            .is_some_and(|&(_, _, to)| to <= start)
+        {
+            next_block += 1;
+        }
+        for &(order, from, to) in &key_blocks[next_block..] {
+            if from >= end {
+                break;
+            }
             let (from, to) = (from.max(start), to.min(end));
             if from < to {
                 candidates.push(Candidate {
@@ -559,8 +575,8 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
         // owned span (`SECRET_KEY=-----BEGIN PRIVATE KEY-----…` — the
         // assignment's value is `-----BEGIN`, the key block runs on
         // past it) would otherwise leave everything beyond the span in
-        // plain text. Kept, the ordering below lets it compete with the
-        // owner's value like any other overlap.
+        // plain text. Kept, it competes with the owner's value in the
+        // accept below, which trims rather than drops a losing secret.
         candidates.retain(|candidate| {
             candidate.preexisting
                 || candidate.owns.is_some()
@@ -583,7 +599,17 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                 .then(a.order.cmp(&b.order))
         });
         let mut taken_until = 0usize;
-        for candidate in candidates {
+        for mut candidate in candidates {
+            // A secret that starts inside an earlier-starting accepted
+            // match but runs past it (`` SECRET_KEY=`-----BEGIN … `` —
+            // the assignment's value starts at the backtick, the key
+            // block one byte later) keeps its remainder: trimmed to
+            // start where that match ends, the two spans stay disjoint
+            // and together cover the whole secret. Anything else that
+            // overlaps is dropped.
+            if candidate.secret && candidate.start < taken_until && candidate.end > taken_until {
+                candidate.start = taken_until;
+            }
             if candidate.start < taken_until {
                 continue;
             }
@@ -797,7 +823,7 @@ mod tests {
             ":secrets"
         );
         assert_eq!(Groups::parse(Some("pii")).unwrap().version_suffix(), ":pii");
-        assert_eq!(RULESET_VERSION, "redact3");
+        assert_eq!(RULESET_VERSION, "redact4");
     }
 
     #[test]
@@ -1153,6 +1179,23 @@ mod tests {
         assert!(!masked.contains("MIIEbody"), "{masked}");
     }
 
+    /// A key block starting one byte inside an assignment's value (the
+    /// value opens with a backtick) loses the accept to the earlier
+    /// value but keeps its remainder, so the key body is still masked.
+    #[test]
+    fn a_key_block_starting_inside_an_assignment_value_keeps_its_remainder() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        let text = "SECRET_KEY=`-----BEGIN PRIVATE KEY-----\nMIIEbody\n-----END PRIVATE KEY-----`";
+        let found = scan(text, &rules);
+        assert_eq!(
+            names_of(&found),
+            vec!["credential_assignment", "private_key"]
+        );
+        assert_eq!(found[0].end, found[1].start);
+        let (masked, _) = mask(text, "d", &rules);
+        assert!(!masked.contains("MIIEbody"), "{masked}");
+    }
+
     /// An encrypted legacy PEM must put a blank line between its RFC 1421
     /// headers and its base64 body, so its BEGIN and END never share a
     /// paragraph: the per-paragraph pattern alone let the whole key
@@ -1372,14 +1415,14 @@ mod tests {
         assert_eq!(redactions[0].rule, "emp_id");
         // The version carries the file's whole digest after the group.
         let digest = crate::sha256::sha256_hex(file.as_bytes());
-        assert_eq!(rules.version(Groups::BOTH), format!("redact3+{digest}"));
+        assert_eq!(rules.version(Groups::BOTH), format!("redact4+{digest}"));
         assert_eq!(
             rules.version(Groups::parse(Some("pii")).unwrap()),
-            format!("redact3:pii+{digest}")
+            format!("redact4:pii+{digest}")
         );
         assert_eq!(
             RuleSet::builtin(Groups::BOTH).version(Groups::BOTH),
-            "redact3"
+            "redact4"
         );
         // A user rule cannot outrank a built-in on the same span: the
         // built-in comes first in rule order.

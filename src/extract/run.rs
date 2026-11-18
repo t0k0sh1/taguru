@@ -470,7 +470,7 @@ impl Run {
 
     /// The manifest/checkpoint value of the redaction control (ADR
     /// 0038 §3.5): `""` when off, so pre-ADR entries keep matching a
-    /// default run; `redact3`, `redact3:secrets`, or `redact3:pii`
+    /// default run; `redact4`, `redact4:secrets`, or `redact4:pii`
     /// when on, `+<sha256 of the rules file>` appended under
     /// `--redact-rules` (#884).
     pub(super) fn redaction_manifest_value(&self) -> String {
