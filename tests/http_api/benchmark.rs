@@ -504,3 +504,34 @@ fn redact_is_forwarded_to_every_cell_and_never_inherited_from_the_shell() {
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["extraction_settings"]["redact"], "0");
 }
+
+/// #851: a retired extract variable in benchmark's own environment is
+/// refused before any cell runs — every cell would inherit it, and each
+/// would refuse it on its own.
+#[test]
+fn a_retired_extract_variable_is_refused_before_any_cell_runs() {
+    let (url, captured) = stub_provider(vec![]);
+    let corpus = corpus_dir("retired-var", &[("brewery.md", "青嶺酒造は1907年創業。")]);
+    let out = results_dir("retired-var");
+    let models = write_models_json(&out, &[("stub-a", &url)]);
+    let mut full = vec!["benchmark", "extract"];
+    full.extend_from_slice(&[
+        "--models",
+        models.to_str().unwrap(),
+        "--context",
+        "1b32c28c-b38c-4548-8ecc-c1bd60ff9702",
+        "--out",
+        out.to_str().unwrap(),
+        corpus.to_str().unwrap(),
+    ]);
+    let (code, stdout, stderr) = run_cli(&full, &[("TAGURU_EXTRACT_CHUNK_CONTEXT", "structure")]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains(
+            "TAGURU_EXTRACT_CHUNK_CONTEXT is set, but extract now reads TAGURU_EXTRACT_CHUNK_BRIEFING"
+        ),
+        "{stderr}"
+    );
+    assert!(!out.join("cells").exists(), "no cell may start");
+    assert!(captured.lock().unwrap().is_empty(), "no model call");
+}

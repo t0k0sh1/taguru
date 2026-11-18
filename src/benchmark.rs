@@ -3627,6 +3627,11 @@ fn run_extract(args: &[String]) -> i32 {
         Ok(args) => args,
         Err(code) => return code,
     };
+    // #851: a retired extract variable in this environment would reach
+    // every cell, and each would refuse it — refuse once, up front.
+    if let Some(refusal) = crate::extract::retired_extract_var() {
+        return subcommand_usage_error("benchmark", &refusal);
+    }
 
     let (models_bytes, models, warnings) = match load_models_file(&args.models) {
         Ok(v) => v,

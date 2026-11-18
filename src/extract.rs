@@ -562,6 +562,25 @@ const RETIRED_EXTRACT_VARS: [(&str, &str); 2] = [
     ),
 ];
 
+/// The refusal for the first [`RETIRED_EXTRACT_VARS`] entry set in this
+/// process's environment, or `None`. Refused, never ignored: a run
+/// configured for the old name would otherwise fall back to the default
+/// without a word (no briefing, a full replay). Presence alone, an
+/// empty value included, as with TAGURU_KEY_SCOPES. `pub(crate)` so
+/// `benchmark extract` refuses up front instead of spawning cells that
+/// each inherit the variable and refuse one by one.
+pub(crate) fn retired_extract_var() -> Option<String> {
+    RETIRED_EXTRACT_VARS
+        .iter()
+        .find(|(retired, _)| std::env::var_os(retired).is_some())
+        .map(|(retired, current)| {
+            format!(
+                "{retired} is set, but extract now reads {current} instead (#851): rename it, \
+                 or unset it"
+            )
+        })
+}
+
 /// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
 /// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,
 /// `on`, `both`, a group for `secrets`/`pii`; `None` for anything
@@ -788,20 +807,8 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => 0,
         },
     };
-    // #851: the retired names are refused, never ignored — a run
-    // configured for the old name would otherwise fall back to the
-    // default without a word (no briefing, a full replay). Presence
-    // alone, an empty value included, as with TAGURU_KEY_SCOPES.
-    for (retired, current) in RETIRED_EXTRACT_VARS {
-        if std::env::var_os(retired).is_some() {
-            return crate::config::subcommand_usage_error(
-                "extract",
-                &format!(
-                    "{retired} is set, but extract now reads {current} instead (#851): rename \
-                     it, or unset it"
-                ),
-            );
-        }
+    if let Some(refusal) = retired_extract_var() {
+        return crate::config::subcommand_usage_error("extract", &refusal);
     }
     // Same "hard usage error, not a silent warning" reasoning as
     // --parallel/--fact-budget above.
