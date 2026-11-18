@@ -1187,7 +1187,10 @@ pub enum RestoreGroupsError {
     Nesting(groups::NestingViolation),
     /// A record would not persist; the `applied` records before it did
     /// (children-first order, so what landed never dangles on what did
-    /// not).
+    /// not). `applied` counts `group` itself too when its rename landed
+    /// and only the directory fsync after it failed
+    /// ([`crate::storage::is_published_unsynced`]): its file is there,
+    /// the next boot registers it, and memory already holds it.
     Io {
         group: String,
         applied: usize,
@@ -1217,9 +1220,10 @@ impl RestoreGroupsError {
         }
     }
 
-    /// How many records durably landed despite the refusal — zero for
-    /// every validation arm, the write count for [`Self::Io`] and
-    /// [`Self::Timeout`].
+    /// How many records landed despite the refusal — zero for every
+    /// validation arm, the write count for [`Self::Io`] (the failing
+    /// record included when it was published before its fsync failed)
+    /// and [`Self::Timeout`].
     pub fn applied(&self) -> usize {
         match self {
             Self::Io { applied, .. } | Self::Timeout { applied } => *applied,
@@ -1327,13 +1331,17 @@ pub struct CompactOutcome {
     /// --url` still reads an older server's response.
     #[serde(default)]
     pub passages_compacted: bool,
-    /// Whether the rebuilt image this response describes actually
-    /// reached disk (#586). `bytes_after` is computed from the
-    /// in-memory rebuild alone — a `flush_entry` that cannot publish
-    /// it (a full disk, most plausibly, on the very endpoint whose job
-    /// is reclaiming space) still leaves the graph compacted in
-    /// memory, so the call is not a failure, but the response must not
-    /// silently claim the smaller footprint is durable when it is not.
+    /// Whether the rebuilt image this response describes was durably
+    /// published (#586). `bytes_after` is computed from the in-memory
+    /// rebuild alone, so the call is not a failure when the publish
+    /// falls short, but the response must not silently claim the
+    /// smaller footprint is durable when it is not. `false` has two
+    /// shapes: the image never landed (a full disk, most plausibly, on
+    /// the very endpoint whose job is reclaiming space) — the `context`
+    /// keeps its previous image and the numbers describe the rebuild
+    /// that was not applied; compact again — or it landed but its
+    /// directory fsync failed — the `context` now runs on the compacted
+    /// image and the next flush re-publishes it durably.
     /// `#[serde(default = "default_image_persisted")]` reads an older
     /// server's response (which never lied about this — it simply
     /// never said) as the historically true case, not a false alarm.

@@ -394,8 +394,9 @@ fn success_line(name: &str, outcome: &CompactOutcome) -> String {
         if outcome.image_persisted {
             String::new()
         } else {
-            " [not persisted to disk; the context keeps its previous image — compact again once \
-             the disk recovers]"
+            " [not durably persisted: either the image never landed and the context keeps its \
+             previous image — compact again once the disk recovers — or it landed but its \
+             directory fsync failed and the next flush re-publishes it durably]"
                 .to_string()
         },
     )

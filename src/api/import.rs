@@ -406,8 +406,11 @@ pub(super) fn import_refusal(
 /// [`schema_import_refusal`]'s does: the `batches_landed` batches, the
 /// `schemas_landed` schema records (installed before the group phase
 /// began — a stream may carry no batch at all), and the group records
-/// the restore itself already fsynced before an `Io` fault or a spent
-/// budget stopped it ([`crate::registry::RestoreGroupsError::applied`]).
+/// the restore itself already published before an `Io` fault or a
+/// spent budget stopped it ([`crate::registry::RestoreGroupsError::applied`]
+/// — the `Io` record itself included when its rename landed and only
+/// the directory fsync failed: its `.group` file is there, and the
+/// next boot registers it).
 /// `durable_batches` still names only the batch count — a schema or
 /// group record is not a batch, and a resuming client keys on it to
 /// know how many batches to skip.
@@ -1628,6 +1631,37 @@ mod tests {
         ))
         .await;
         assert_eq!(body["integrity"], "nothing_written", "{body}");
+    }
+
+    /// End to end: the stream's only group record publishes (its rename
+    /// lands) but its directory fsync fails. The `.group` file is
+    /// there and the next boot registers it, so the response must not
+    /// claim `nothing_written` — before the fix the record went
+    /// uncounted and the refusal denied a file the disk held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_group_record_published_before_its_fsync_failed_reports_a_durable_prefix() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let state = scratch_state("group-published-unsynced");
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
+        let group = "00000000-0000-4000-9000-000000000001";
+        let body = format!(
+            "{{\"type\": \"group\", \"id\": \"{group}\", \"name\": \"g\", \
+             \"context_ids\": [\"{sake}\"]}}\n"
+        );
+        // `block_in_place` off a worker thread runs inline, so the
+        // thread-local fault reaches the restore's write.
+        fail_publish_syncs_after(0);
+        let body = json_body(call_import(&state, &body).await).await;
+        assert!(
+            !clear_publish_sync_fault(),
+            "the group's publish sync must fail"
+        );
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert!(
+            state.group(group).is_some(),
+            "memory must hold the record its file holds"
+        );
     }
 
     /// End to end: a schema record installs, then the stream's group

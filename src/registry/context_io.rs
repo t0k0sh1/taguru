@@ -248,6 +248,17 @@ impl AppState {
     /// step: if the image cannot be written, the `context` keeps its
     /// previous image and nothing changes (`image_persisted: false`,
     /// the numbers describe the rebuild that was not applied).
+    ///
+    /// The one failure that is NOT "nothing changed": the image rename
+    /// landed and only its directory fsync failed
+    /// ([`crate::storage::is_published_unsynced`]). The compacted image
+    /// is then the file every later load boots, so memory follows it —
+    /// swapped exactly as on success, keeping live writes and their
+    /// replay on one graph — but the call still answers
+    /// `image_persisted: false`, the entry stays dirty so the next
+    /// flush re-publishes the image durably, and the log is kept (it
+    /// is replay-inert behind the image's watermark, and the only
+    /// recovery if power loss drops the undurable rename).
     pub fn compact_context(
         &self,
         id: &str,
@@ -285,7 +296,7 @@ impl AppState {
             fresh.set_dice_floor(inner.meta.dice_floor);
             let bytes_after = fresh.footprint();
             let fresh_stats = ContextStats::of(&fresh);
-            if let Err(error) = save_files(
+            let saved = save_files(
                 &self.0.data_dir,
                 &entry.id,
                 &inner.name,
@@ -295,37 +306,56 @@ impl AppState {
                 entry.revision_snapshot(inner),
                 inner.schema_digest.as_deref(),
                 &fresh,
-            ) {
-                tracing::warn!(
-                    context = %id, save_error = %error,
-                    "{}",
-                    unpersisted_compact_warning(false).unwrap_or_default()
-                );
-                // `save_files` lands the sidecar first: an image that
-                // failed after it (a full disk refuses the big write,
-                // not the small one) leaves the sidecar describing the
-                // compacted graph — near-zero dead weight a cold read
-                // would trust, dropping this context from every
-                // compaction sweep. Put the previous context's account
-                // back; best effort, the next flush rewrites it anyway.
-                let previous_stats = ContextStats::of(hot_context(inner));
-                if let Err(restore_error) = write_meta(
-                    &self.0.data_dir,
-                    &entry.id,
-                    &inner.name,
-                    &inner.meta,
-                    &previous_stats,
-                    &entry.usage.snapshot(),
-                    entry.sidecar_revision(inner, self.0.wal_enabled),
-                    inner.schema_digest.as_deref(),
-                ) {
+            );
+            let durable = match saved {
+                Ok(()) => true,
+                // The image rename landed; only its directory fsync
+                // failed. The compacted image is what every later load
+                // boots, so it is the published one: keeping the old
+                // graph live would validate the next write (through an
+                // alias the rebuild dropped, say) against a graph its
+                // replay never sees again. Swap below as on success.
+                Err(error) if crate::storage::is_published_unsynced(&error) => {
                     tracing::warn!(
-                        context = %id, restore_error = %restore_error,
-                        "sidecar not restored after the failed compaction publish"
+                        context = %id, save_error = %error,
+                        "compacted image published but its directory fsync failed; the context \
+                         runs on the compacted image and the next flush re-publishes it durably"
                     );
+                    false
                 }
-                return Ok((bytes_before, bytes_after, stats, false));
-            }
+                Err(error) => {
+                    tracing::warn!(
+                        context = %id, save_error = %error,
+                        "{}",
+                        unpersisted_compact_warning(false).unwrap_or_default()
+                    );
+                    // `save_files` lands the sidecar first: an image
+                    // that failed after it (a full disk refuses the big
+                    // write, not the small one) leaves the sidecar
+                    // describing the compacted graph — near-zero dead
+                    // weight a cold read would trust, dropping this
+                    // context from every compaction sweep. Put the
+                    // previous context's account back; best effort, the
+                    // next flush rewrites it anyway.
+                    let previous_stats = ContextStats::of(hot_context(inner));
+                    if let Err(restore_error) = write_meta(
+                        &self.0.data_dir,
+                        &entry.id,
+                        &inner.name,
+                        &inner.meta,
+                        &previous_stats,
+                        &entry.usage.snapshot(),
+                        entry.sidecar_revision(inner, self.0.wal_enabled),
+                        inner.schema_digest.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            context = %id, restore_error = %restore_error,
+                            "sidecar not restored after the failed compaction publish"
+                        );
+                    }
+                    return Ok((bytes_before, bytes_after, stats, false));
+                }
+            };
             inner.slot = Slot::Hot(Box::new(fresh));
             // A flush that staged the pre-compaction image while this
             // rebuilt must back off rather than publish over it.
@@ -342,13 +372,22 @@ impl AppState {
             inner.invalidate_cache_identity();
             inner.stats = fresh_stats;
             inner.published_graph_revision = inner.graph_revision;
-            // The published image covers everything logged: clean, and
-            // the log is replay-inert behind its watermark.
-            entry.dirty.store(false, Ordering::Relaxed);
-            let name = inner.name.clone();
-            self.truncate_wal(&name, &entry.id, inner);
+            if durable {
+                // The published image covers everything logged: clean,
+                // and the log is replay-inert behind its watermark.
+                entry.dirty.store(false, Ordering::Relaxed);
+                let name = inner.name.clone();
+                self.truncate_wal(&name, &entry.id, inner);
+            } else {
+                // Durability unconfirmed: dirty makes the next flush
+                // re-publish (and fsync) this image. The log stays —
+                // replay-inert behind the image's watermark if the
+                // rename survives, the whole history if power loss
+                // drops it.
+                entry.dirty.store(true, Ordering::Relaxed);
+            }
             self.recount_entry(inner);
-            Ok((bytes_before, bytes_after, stats, true))
+            Ok((bytes_before, bytes_after, stats, durable))
         })?;
         // The passage log's own dead weight (#437): a retracted
         // source's text lives on in the log as bytes behind a
@@ -1342,6 +1381,102 @@ mod tests {
             subjects(&state),
             live,
             "the replay must match the live write"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other publish failure: the compacted image's rename LANDED
+    /// and only its directory fsync failed, so the disk now holds the
+    /// compacted image. Memory must swap to it too — the same alias
+    /// `X → C` the rebuild drops would otherwise resolve live (the old
+    /// graph applies the write to `C`) but not on replay (the
+    /// compacted image plus the log applies it to `X`). The call still
+    /// reports `image_persisted: false`, and the entry stays dirty so
+    /// the next flush re-publishes the image durably.
+    #[test]
+    fn a_write_after_a_published_but_unsynced_compaction_replays_as_it_applied() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let dir = scratch_dir("compact-replay-unsynced");
+        let subjects = |state: &AppState| -> Vec<String> {
+            let mut subjects: Vec<String> = state
+                .read_context(&state.id_of("sake"), |context| {
+                    context
+                        .query_any(&[], &[], &[])
+                        .into_iter()
+                        .filter(|association| association.count > 0)
+                        .map(|association| association.subject)
+                        .collect()
+                })
+                .map_err(|_| "read")
+                .unwrap();
+            subjects.sort();
+            subjects
+        };
+        let live;
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let id = state.id_of("sake");
+            state
+                .add_associations(
+                    &id,
+                    vec![assoc_op("C", "旧", "Y", 1.0, Some("gone.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    &id,
+                    &BTreeMap::from([("X".to_string(), "C".to_string())]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state.retract_source(&id, "gone.md").unwrap();
+            // Publishes: sidecar (0), image (1) — the image's rename
+            // lands and its directory fsync fails.
+            fail_publish_syncs_after(1);
+            let outcome = state.compact_context(&id, Deadline::unbounded()).unwrap();
+            assert!(
+                !clear_publish_sync_fault(),
+                "the image's publish sync must be what failed"
+            );
+            assert!(!outcome.image_persisted, "{outcome:?}");
+            assert_eq!(outcome.aliases_dropped, 1, "{outcome:?}");
+            assert!(
+                state
+                    .lookup_named("sake")
+                    .unwrap()
+                    .dirty
+                    .load(Ordering::Relaxed),
+                "an undurable publish must leave the next flush to re-publish it"
+            );
+            state
+                .add_associations(
+                    &id,
+                    vec![assoc_op("X", "新", "Z", 1.0, Some("new.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            live = subjects(&state);
+            assert_eq!(
+                live,
+                vec!["X".to_string()],
+                "the write must apply against the published (alias-free) graph"
+            );
+            // Drop WITHOUT flushing: the crash.
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            subjects(&state),
+            live,
+            "the replay over the published image must match the live write"
         );
         let _ = fs::remove_dir_all(&dir);
     }

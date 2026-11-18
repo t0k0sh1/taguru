@@ -107,7 +107,15 @@ pub(super) fn save_files(
     // same-name create — never a durable image with a defaulted sidecar,
     // which would resurrect a context `create` told the client had failed.
     // (Image-then-meta would do exactly that; see `create`'s doc.)
-    write_meta(dir, stem, name, meta, stats, usage, revision, schema_digest)?;
+    //
+    // An error marked `storage::is_published_unsynced` means the IMAGE
+    // landed under its final name and only its directory fsync failed.
+    // The sidecar's own published-unsynced failure stops the save
+    // before the image (its durability is what the order above relies
+    // on), so it is stripped to a plain error: the image a caller keys
+    // on was not published.
+    write_meta(dir, stem, name, meta, stats, usage, revision, schema_digest)
+        .map_err(crate::storage::unpublished)?;
     write_atomic(&image_path(dir, stem), &context.to_bytes())
 }
 
@@ -356,6 +364,66 @@ mod tests {
         let meta = read_meta_file(&dir, "sake");
         assert_eq!(meta.revision, ContextRevision::default());
         assert_eq!(meta.schema_digest, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `save_files`' published-unsynced marker speaks for the IMAGE
+    /// alone: the sidecar's own post-rename fsync failing stops the
+    /// save before any image is written, and must read as "nothing a
+    /// caller keys on was published" — `compact_context` would
+    /// otherwise swap memory to an image the disk never got. The
+    /// image's fsync failing, by contrast, keeps the marker: that image
+    /// IS the file now.
+    #[test]
+    fn save_files_marks_published_only_when_the_image_itself_landed() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let dir = scratch_dir("meta-io-save-unsynced");
+        fs::create_dir_all(&dir).unwrap();
+        let save = || {
+            save_files(
+                &dir,
+                "sake",
+                "sake",
+                &ContextMeta::default(),
+                &ContextStats::default(),
+                &ContextUsage::default(),
+                ContextRevision::default(),
+                None,
+                &Context::default(),
+            )
+        };
+
+        // Publishes: sidecar (0), image (1) — the sidecar's sync fails.
+        fail_publish_syncs_after(0);
+        let sidecar_error = save().expect_err("the sidecar's failed sync fails the save");
+        assert!(
+            !clear_publish_sync_fault(),
+            "the sidecar sync must be what failed"
+        );
+        assert!(
+            !crate::storage::is_published_unsynced(&sidecar_error),
+            "{sidecar_error}"
+        );
+        assert!(
+            meta_path(&dir, "sake").exists(),
+            "the sidecar rename landed"
+        );
+        assert!(
+            !image_path(&dir, "sake").exists(),
+            "the save stops before the image"
+        );
+
+        fail_publish_syncs_after(1);
+        let image_error = save().expect_err("the image's failed sync fails the save");
+        assert!(
+            !clear_publish_sync_fault(),
+            "the image sync must be what failed"
+        );
+        assert!(
+            crate::storage::is_published_unsynced(&image_error),
+            "{image_error}"
+        );
+        assert!(image_path(&dir, "sake").exists(), "the image rename landed");
         let _ = fs::remove_dir_all(&dir);
     }
 

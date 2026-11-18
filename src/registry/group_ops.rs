@@ -103,7 +103,9 @@ impl AppState {
     /// the description — validates the nesting that results, and
     /// persists. Nothing applies unless everything does: a refused
     /// nesting or a failed persist restores the previous record, the
-    /// update twin of [`rollback_meta`].
+    /// update twin of [`rollback_meta`] — except a write whose rename
+    /// landed before its fsync failed, which keeps the record the file
+    /// now holds (see `commit_group_mutation`).
     ///
     /// A child to ADD must be a standing `group`; a child to REMOVE that
     /// this `group` does not bundle is an idempotent no-op — the
@@ -214,7 +216,11 @@ impl AppState {
     /// Writes land children-first (depth order over the prospective
     /// map), so a persist failure partway strands no record dangling
     /// on an absent child; memory tracks exactly what persisted. A
-    /// record equal to the standing row skips its write, so
+    /// record whose rename landed but whose directory fsync failed
+    /// ([`crate::storage::is_published_unsynced`]) persisted as far as
+    /// every later boot can tell: it stands in memory and counts in
+    /// `Io`'s `applied`, even though the call still refuses with `Io`.
+    /// A record equal to the standing row skips its write, so
     /// re-importing a stream converges to a no-op instead of a
     /// directory-wide fsync storm.
     pub fn restore_groups(
@@ -398,6 +404,16 @@ impl AppState {
             }
             let record = &stored[index];
             if let Err(error) = groups::write_group(&self.0.data_dir, record) {
+                // A rename that landed before its directory fsync
+                // failed has published the record: its `.group` file
+                // re-registers at the next boot whatever this call
+                // answers, so memory and the count follow the disk — a
+                // response saying "nothing written" over a file that is
+                // there would be wrong.
+                if crate::storage::is_published_unsynced(&error) {
+                    groups.insert(record.clone());
+                    applied += 1;
+                }
                 return Err(RestoreGroupsError::Io {
                     group: record.id.clone(),
                     applied,
@@ -461,7 +477,9 @@ impl AppState {
     /// nothing else moves (ADR 0045 §2.6) — the file is stemmed by id and
     /// every parent bundles it by id, so there is no file move, no parent
     /// rewrite, and no marker to resume. One staged write, so a crash
-    /// leaves either the old name or the new one.
+    /// leaves either the old name or the new one. A write whose rename
+    /// landed but whose directory fsync failed still answers `Io`, but
+    /// memory takes the new name the file now holds.
     ///
     /// The destination may be another `group`'s name — names are labels
     /// (ADR 0050). Answers the name the `group` had, for the audit line.
@@ -482,7 +500,14 @@ impl AppState {
         }
         let mut record = standing.clone();
         record.name = to.to_string();
-        groups::write_group(&self.0.data_dir, &record).map_err(RenameGroupError::Io)?;
+        if let Err(error) = groups::write_group(&self.0.data_dir, &record) {
+            // Published but undurable: the file holds the new name, and
+            // so must memory.
+            if crate::storage::is_published_unsynced(&error) {
+                groups.insert(record);
+            }
+            return Err(RenameGroupError::Io(error));
+        }
         groups.insert(record);
         Ok(from)
     }
@@ -648,6 +673,14 @@ fn check_member_caps(
 /// restores the cloned record) and in their error enums.
 /// `restore_groups` does not share this shape: it validates its whole
 /// prospective SET before the first write.
+///
+/// The one persist failure that does NOT unwind: a rename that landed
+/// before its directory fsync failed
+/// ([`crate::storage::is_published_unsynced`]). The file already
+/// holds the mutated record and re-registers it at the next boot, so
+/// memory keeps it too — the caller still answers `Io`, and a retried
+/// create under the same id converges on the standing record instead
+/// of racing a resurrected one.
 fn commit_group_mutation<E>(
     data_dir: &Path,
     groups: &mut GroupTable,
@@ -665,7 +698,9 @@ fn commit_group_mutation<E>(
         .get(id)
         .expect("the caller just inserted or edited it");
     if let Err(error) = groups::write_group(data_dir, record) {
-        rollback(groups);
+        if !crate::storage::is_published_unsynced(&error) {
+            rollback(groups);
+        }
         return Err(on_io(error));
     }
     Ok(())
@@ -1286,6 +1321,41 @@ mod tests {
             "\"a\"'s successful write must not be rolled back"
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A record whose rename landed but whose directory fsync failed
+    /// is published — its `.group` file re-registers at every later
+    /// boot — so the `Io` refusal must count it in `applied` (the
+    /// import response's `integrity` keys on that count) and memory
+    /// must hold it, matching what the next boot loads.
+    #[test]
+    fn restore_groups_counts_a_published_but_unsynced_record_as_applied() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let dir = scratch_dir("groups-restore-unsynced");
+        let record = |name: &str| StoredGroup::empty(&fixed_id(name), name);
+        {
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            // "a" and "b" tie on depth, so list order holds: "a" syncs,
+            // "b"'s rename lands and its directory fsync fails.
+            fail_publish_syncs_after(1);
+            let error = state
+                .restore_groups(&[record("a"), record("b")], Deadline::unbounded())
+                .unwrap_err();
+            assert!(!clear_publish_sync_fault(), "\"b\"'s sync must fail");
+            assert!(matches!(
+                &error,
+                RestoreGroupsError::Io { group, .. } if *group == fixed_id("b")
+            ));
+            assert_eq!(error.applied(), 2, "\"b\" is published too");
+            assert!(
+                state.group(&fixed_id("b")).is_some(),
+                "memory must hold the record the disk holds"
+            );
+        }
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        assert!(state.group(&fixed_id("a")).is_some());
+        assert!(state.group(&fixed_id("b")).is_some());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1943,6 +2013,59 @@ mod tests {
             BTreeSet::from([state.id_of("sake")])
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The create/update/rename twin of the restore case above: a
+    /// write whose rename landed before its directory fsync failed
+    /// still answers `Io`, but memory keeps the record the file now
+    /// holds — unwinding it would leave the next boot resurrecting a
+    /// state the live server had dropped.
+    #[test]
+    fn a_published_but_unsynced_group_write_keeps_memory_on_the_file() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let dir = scratch_dir("groups-unsynced");
+        let id = fixed_id("drinks");
+        {
+            let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+            fail_publish_syncs_after(0);
+            let created = state.create_group(
+                Some(id.as_str()),
+                "drinks",
+                "first".into(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            );
+            assert!(!clear_publish_sync_fault(), "the create's sync must fail");
+            assert!(matches!(created, Err(CreateGroupError::Io(_))));
+            assert!(
+                state.group(&id).is_some(),
+                "the create's file is there; memory must not drop it"
+            );
+
+            fail_publish_syncs_after(0);
+            let updated = state.update_group(
+                &id,
+                Some("second".into()),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            );
+            assert!(!clear_publish_sync_fault(), "the update's sync must fail");
+            assert!(matches!(updated, Err(UpdateGroupError::Io(_))));
+            assert_eq!(state.group(&id).unwrap().record.description, "second");
+
+            fail_publish_syncs_after(0);
+            let renamed = state.rename_group(&id, "sake");
+            assert!(!clear_publish_sync_fault(), "the rename's sync must fail");
+            assert!(matches!(renamed, Err(RenameGroupError::Io(_))));
+            assert_eq!(state.group(&id).unwrap().name, "sake");
+        }
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+        let rebooted = state.group(&id).expect("the published file re-registers");
+        assert_eq!(rebooted.name, "sake");
+        assert_eq!(rebooted.record.description, "second");
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -264,12 +264,15 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       on exactly how the rewrite lays out the surviving content, which only running the rewrite
       produces. Whether that rebuilt image actually reached disk is a separate question from
       whether the numbers above are real: a real compaction's response also carries
-      <code>image_persisted</code> — <code>false</code> means the rebuilt image could not be
-      written (most plausibly a full disk at the moment compaction tried to reclaim space), so
-      the <code>context</code> keeps its previous image, in memory and on disk, and the numbers
-      describe the rebuild that was not applied. Nothing retries it on its own: fix the
-      underlying cause (check disk space first), then re-run <code>compact</code> and confirm
-      <code>image_persisted: true</code> in its response. A row with <code>"stats_are_snapshot":
+      <code>image_persisted</code> — <code>false</code> means the rebuilt image was not durably
+      published, in one of two shapes. Usually it never landed (most plausibly a full disk at
+      the moment compaction tried to reclaim space): the <code>context</code> keeps its previous
+      image, in memory and on disk, the numbers describe the rebuild that was not applied, and
+      nothing retries it on its own — fix the underlying cause (check disk space first), then
+      re-run <code>compact</code>. Rarely the image landed but the directory fsync after it
+      failed: the <code>context</code> now runs on the compacted image and the next flush
+      re-publishes it durably. Either way, confirm <code>image_persisted: true</code> on a
+      re-run. A row with <code>"stats_are_snapshot":
       true</code> means the <code>context</code> is cold (not
       currently loaded) or came from a remote listing, so its numbers are the last-saved snapshot
       rather than a live recomputation — still accurate as of the last flush, just not
@@ -317,9 +320,10 @@ curl -X POST localhost:8248/contexts/$CTX/compact</code></pre>
       ones — the withdrawn content is unreachable through every API but still present on disk.
       For an actual deletion-request obligation, also check <code>image_persisted</code> in the
       same response: the compaction endpoint answers 200 as soon as the rebuild is done in
-      memory, but if the rebuilt image could not be written back to disk (a full disk being the
-      likely cause, which is also exactly when a deletion is hardest to complete), the OLD image
-      — with the shed bytes still in it — is what a crash right after would boot from. A deletion
+      memory, but if the rebuilt image was not durably published (it could not be written — a
+      full disk being the likely cause, which is also exactly when a deletion is hardest to
+      complete — or it landed but its directory fsync failed), the OLD image — with the shed
+      bytes still in it — is what a crash right after can boot from. A deletion
       request is <b>not complete</b> until the response confirms <code>image_persisted: true</code>;
       <code>image_persisted: false</code> means resolve whatever kept it off disk (disk space,
       most plausibly) first, then re-run <code>POST .../compact</code> (safe to repeat) and check
