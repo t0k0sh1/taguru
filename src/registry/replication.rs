@@ -165,17 +165,9 @@ impl AppState {
         // increments, and `ensure_hot`'s own re-stat runs only for
         // pinned entries below (or on the next local read) — without
         // this, a cold unpinned context the tailer keeps growing
-        // understates `taguru_wal_bytes` indefinitely. `NotFound` is
-        // the one honest zero (no WAL shipped for this lane yet); any
-        // other stat failure keeps the last-known value rather than
-        // walking a live gauge down to nothing on a transient error.
-        let restat = |path: &std::path::Path, last: u64| match std::fs::metadata(path) {
-            Ok(meta) => meta.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(_) => last,
-        };
-        inner.wal_bytes = restat(&wal_path(&self.0.data_dir, stem), inner.wal_bytes);
-        inner.passages_wal_bytes = restat(
+        // understates `taguru_wal_bytes` indefinitely.
+        inner.wal_bytes = wal::restat_len(&wal_path(&self.0.data_dir, stem), inner.wal_bytes);
+        inner.passages_wal_bytes = wal::restat_len(
             &passages_wal_path(&self.0.data_dir, stem),
             inner.passages_wal_bytes,
         );

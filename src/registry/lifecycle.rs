@@ -3,17 +3,38 @@ use super::*;
 /// One id held in a reservation set (`pending_creates` or
 /// `pending_deletes`) for as long as this lives — released by `Drop` on
 /// every exit path (a normal return, an early `?`, a panic unwind), so
-/// no failed operation can leave its id reserved until restart.
+/// no failed operation can leave its id reserved until restart. A
+/// reservation claimed with `settled` wakes every waiter on it once
+/// released.
 struct IdReservation<'set> {
     set: &'set Mutex<HashSet<String>>,
+    settled: Option<&'set parking_lot::Condvar>,
     id: String,
 }
 
 impl<'set> IdReservation<'set> {
     /// Reserves `id` in `set`, or `None` when someone already holds it.
     fn claim(set: &'set Mutex<HashSet<String>>, id: &str) -> Option<Self> {
+        Self::claim_with(set, None, id)
+    }
+
+    /// [`Self::claim`], notifying `settled` on release.
+    fn claim_notifying(
+        set: &'set Mutex<HashSet<String>>,
+        settled: &'set parking_lot::Condvar,
+        id: &str,
+    ) -> Option<Self> {
+        Self::claim_with(set, Some(settled), id)
+    }
+
+    fn claim_with(
+        set: &'set Mutex<HashSet<String>>,
+        settled: Option<&'set parking_lot::Condvar>,
+        id: &str,
+    ) -> Option<Self> {
         set.lock().insert(id.to_string()).then(|| Self {
             set,
+            settled,
             id: id.to_string(),
         })
     }
@@ -22,6 +43,9 @@ impl<'set> IdReservation<'set> {
 impl Drop for IdReservation<'_> {
     fn drop(&mut self) {
         self.set.lock().remove(&self.id);
+        if let Some(settled) = self.settled {
+            settled.notify_all();
+        }
     }
 }
 
@@ -140,9 +164,9 @@ impl AppState {
     /// HEADER'S id, so an export restored here keeps the id every
     /// other record points at. The id is reserved in `pending_creates`
     /// for the disk work's duration, so a concurrent batch of the same
-    /// stream sees "taken" instead of writing the same family twice;
-    /// it reports `Ok(false)` exactly as if the winner had already
-    /// registered.
+    /// stream never writes the same family twice: it waits for the
+    /// winner to settle, then answers `Ok(false)` once the winner has
+    /// registered — or, if the winner failed, tries the create itself.
     ///
     /// Unlike [`Self::create`], the stem here is NOT freshly minted —
     /// import headers and derived ids (`derived_context_id`'s analysis
@@ -166,25 +190,39 @@ impl AppState {
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
-        let _reservation = {
-            let registry = self.0.registry.read();
-            if registry.get_id(id).is_some() {
-                return Ok(false);
+        let _reservation = loop {
+            {
+                let registry = self.0.registry.read();
+                if registry.get_id(id).is_some() {
+                    return Ok(false);
+                }
+                // Both sets are consulted under the registry read guard:
+                // `delete` enters `pending_deletes` under the WRITE guard,
+                // in the same section that unregisters the id, so "not
+                // registered and not being deleted" is one observation;
+                // and two create_if_absent calls of one id cannot both
+                // claim `pending_creates`.
+                if self.0.pending_deletes.lock().contains(id) {
+                    return Err(CreateError::Io(io::Error::other(format!(
+                        "context id {id} is still being deleted; retry once the delete has completed"
+                    ))));
+                }
+                if let Some(reservation) = IdReservation::claim_notifying(
+                    &self.0.pending_creates,
+                    &self.0.creates_settled,
+                    id,
+                ) {
+                    break reservation;
+                }
             }
-            // Both sets are consulted under the registry read guard:
-            // `delete` enters `pending_deletes` under the WRITE guard,
-            // in the same section that unregisters the id, so "not
-            // registered and not being deleted" is one observation;
-            // and two create_if_absent calls of one id cannot both
-            // claim `pending_creates`.
-            if self.0.pending_deletes.lock().contains(id) {
-                return Err(CreateError::Io(io::Error::other(format!(
-                    "context id {id} is still being deleted; retry once the delete has completed"
-                ))));
-            }
-            match IdReservation::claim(&self.0.pending_creates, id) {
-                Some(reservation) => reservation,
-                None => return Ok(false),
+            // Another create holds the id and is still writing its
+            // family. Answering `false` now would send the caller on to
+            // a context that is not registered yet; wait (with the
+            // registry guard released — the winner needs it to
+            // register) until the reservation is gone, then look again.
+            let mut pending = self.0.pending_creates.lock();
+            while pending.contains(id) {
+                self.0.creates_settled.wait(&mut pending);
             }
         };
         if image_path(&self.0.data_dir, id).exists() {
@@ -194,9 +232,9 @@ impl AppState {
             ))));
         }
         self.clear_stale_family(id).map_err(CreateError::Io)?;
-        // Registered before the reservation drops, so a concurrent
-        // batch of the same id goes from "reserved" straight to
-        // "registered" — never to a gap that would create twice.
+        // Registered before the reservation drops, so a waiting batch
+        // of the same id wakes to "registered" — never to a gap that
+        // would create twice.
         self.create_registered(id, name, meta)?;
         Ok(true)
     }
@@ -1152,6 +1190,56 @@ mod tests {
             ),
             "the failed attempt's reservation may not linger"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A `create_if_absent` that loses the id's claim to a create still
+    /// writing its family waits for it: it answers `false` only once
+    /// the winner has registered (the import batch behind it then finds
+    /// the context), and creates itself if the winner failed.
+    #[test]
+    fn a_create_that_loses_the_claim_waits_for_the_winner_to_settle() {
+        let dir = scratch_dir("create-claim-wait");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let spawn_loser = |id: &str| {
+            let state = state.clone();
+            let id = id.to_string();
+            std::thread::spawn(move || {
+                state
+                    .create_if_absent(&id, "restored", ContextMeta::default())
+                    .map_err(|_| "create")
+            })
+        };
+
+        // The winner registers: the loser hears `false`, and the
+        // context is there when it does.
+        let id = test_id("won");
+        let winner =
+            IdReservation::claim_notifying(&state.0.pending_creates, &state.0.creates_settled, &id)
+                .unwrap();
+        let loser = spawn_loser(&id);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!loser.is_finished(), "the loser must wait for the winner");
+        state
+            .create_registered(&id, "restored", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        drop(winner);
+        assert_eq!(loser.join().unwrap(), Ok(false));
+        assert!(state.context_id_exists(&id));
+
+        // The winner fails: the loser creates the context itself.
+        let id = test_id("lost");
+        let winner =
+            IdReservation::claim_notifying(&state.0.pending_creates, &state.0.creates_settled, &id)
+                .unwrap();
+        let loser = spawn_loser(&id);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!loser.is_finished(), "the loser must wait for the winner");
+        drop(winner);
+        assert_eq!(loser.join().unwrap(), Ok(true));
+        assert!(state.context_id_exists(&id));
 
         let _ = fs::remove_dir_all(dir);
     }

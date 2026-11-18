@@ -180,6 +180,7 @@ impl AppState {
             hydrator: options.hydrator,
             replica: options.replica,
             pending_creates: Mutex::new(HashSet::new()),
+            creates_settled: parking_lot::Condvar::new(),
             pending_deletes: Mutex::new(HashSet::new()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),

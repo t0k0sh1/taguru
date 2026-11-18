@@ -946,6 +946,21 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
     Ok(records)
 }
 
+/// The log's length on disk, for bookkeeping that must not drift from
+/// it: after a `reset`/`truncate_to`/append rollback that failed, the
+/// file may or may not have shrunk, and a byte count that runs ahead of
+/// the file sends the next partial-apply `truncate_to` to a length
+/// inside a fresh record. `NotFound` is the one honest zero; any other
+/// stat failure keeps `last` rather than walk the count to nothing on a
+/// transient error.
+pub(crate) fn restat_len(path: &Path, last: u64) -> u64 {
+    match fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(_) => last,
+    }
+}
+
 /// Rewinds the log to `len` bytes — never grows it, see the refusal
 /// below — same in-place, no-rename shape as `reset`, but to an
 /// arbitrary prior length rather than zero. The caller for this is a

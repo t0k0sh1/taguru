@@ -2697,6 +2697,11 @@ struct StateInner {
     /// [`AppState::create`] needs no entry here: its id is minted on
     /// the spot, so nothing else can be working under it.
     pending_creates: Mutex<HashSet<String>>,
+    /// Signalled whenever a `pending_creates` reservation is released:
+    /// a create that lost the claim waits here for the winner to
+    /// register (or fail) instead of answering before the context
+    /// exists.
+    creates_settled: parking_lot::Condvar,
     /// Ids an [`AppState::delete`] has unregistered but is still
     /// unlinking the files of. Inserted in the same registry write
     /// section that unregisters the id and released after the unlink
