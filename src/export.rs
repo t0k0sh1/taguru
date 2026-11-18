@@ -402,10 +402,11 @@ struct Bucket<'a> {
 /// only refusal is a real source colliding with a reserved id, or
 /// `deadline` running out partway through — checked once per
 /// association, passage, and alias, once per output batch, and (via
-/// [`DEADLINE_CHECK_STRIDE`]) periodically inside the two loops a
+/// [`DEADLINE_CHECK_STRIDE`]) periodically inside the three loops a
 /// single association's uncapped `count` can otherwise blow past all
-/// of those: [`push_assertions`]'s line expansion and this function's
-/// per-bucket line serialization. So a `context` large enough to make
+/// of those: [`push_assertions`]'s line expansion,
+/// [`strip_orphan_locators`]'s walk, and this function's per-bucket
+/// line serialization. So a `context` large enough to make
 /// rendering itself slow cannot run past its budget, whether that size
 /// comes from many associations or one association corroborated many
 /// times over. `snapshot` is already fully materialized by the time
@@ -502,19 +503,7 @@ pub(crate) fn render(
         }
         buckets.entry(source).or_default().passage = Some(record);
     }
-    // A paragraph locator names a spot in its source's passage, and
-    // import refuses one in a batch with no passage line. A source the
-    // graph attributes with a locator but that never stored a passage
-    // (a bare `POST associations` naming a paragraph) would otherwise
-    // render a stream its own import refuses — a backup that does not
-    // restore. The locator points at nothing, so it is dropped.
-    for bucket in buckets.values_mut() {
-        if bucket.passage.is_none() {
-            for line in &mut bucket.lines {
-                line.paragraph = None;
-            }
-        }
-    }
+    strip_orphan_locators(&mut buckets, deadline)?;
 
     let mut aliases: Vec<AliasLine> = Vec::new();
     let mut aliases_dropped = 0usize;
@@ -667,6 +656,32 @@ pub(crate) fn render(
 /// otherwise the only unit of work between the association-level
 /// checks around these loops' callers.
 const DEADLINE_CHECK_STRIDE: u64 = 4096;
+
+/// A paragraph locator names a spot in its source's passage, and
+/// import refuses one in a batch with no passage line. A source the
+/// graph attributes with a locator but that never stored a passage
+/// (a bare `POST associations` naming a paragraph) would otherwise
+/// render a stream its own import refuses — a backup that does not
+/// restore. The locator points at nothing, so it is dropped. A
+/// passage-less bucket's line count is as unbounded as the `count`s
+/// that filled it, so this walk checks `deadline` every
+/// [`DEADLINE_CHECK_STRIDE`] lines like the other per-line loops.
+fn strip_orphan_locators(
+    buckets: &mut BTreeMap<&str, Bucket<'_>>,
+    deadline: Deadline,
+) -> Result<(), String> {
+    for bucket in buckets.values_mut() {
+        if bucket.passage.is_none() {
+            for (line_index, line) in bucket.lines.iter_mut().enumerate() {
+                if (line_index as u64).is_multiple_of(DEADLINE_CHECK_STRIDE) && deadline.expired() {
+                    return Err(DeadlineExceeded.to_string());
+                }
+                line.paragraph = None;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Re-renders one attribution as `count` assertion lines of its
 /// average weight; the paragraph locator rides the first line only
@@ -2482,5 +2497,34 @@ mod tests {
                 "{reaches}: {refusal}"
             );
         }
+    }
+
+    /// Through `render` an already-expired deadline is always caught
+    /// first by the association loop (or `push_assertions`) that
+    /// filled the bucket, so the locator-stripping walk is exercised
+    /// directly: a passage-less bucket with lines must refuse too.
+    #[test]
+    fn strip_orphan_locators_refuses_an_expired_deadline() {
+        let line = AssociationLine {
+            subject: "青嶺",
+            label: "所在地",
+            object: "長野",
+            weight: 1.0,
+            paragraph: Some(0),
+        };
+        let mut buckets: BTreeMap<&str, Bucket> = BTreeMap::new();
+        buckets.insert(
+            "a.md",
+            Bucket {
+                lines: vec![line],
+                passage: None,
+            },
+        );
+        assert_eq!(
+            strip_orphan_locators(&mut buckets, Deadline::after(std::time::Duration::ZERO)),
+            Err(DeadlineExceeded.to_string())
+        );
+        strip_orphan_locators(&mut buckets, Deadline::unbounded()).unwrap();
+        assert_eq!(buckets["a.md"].lines[0].paragraph, None);
     }
 }

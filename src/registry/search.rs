@@ -534,7 +534,11 @@ impl AppState {
             Err(idle) => idle.into(),
         };
 
-        let is_target = |hit: &RankedPassage| hit.source == source && hit.index == chosen;
+        // Generation-safe like `chosen` itself: a newer generation's
+        // hit at the same (source, index) is evidence about other
+        // bytes, so it neither supplies the rank/lane evidence nor
+        // counts as served / reached.
+        let is_target = |hit: &RankedPassage| is_hit_of_record(hit, source, chosen, &record);
         let rank = full.iter().position(is_target);
         let target = rank.map(|at| &full[at]);
         let served = served_hits.iter().any(is_target);
@@ -965,6 +969,20 @@ fn ranked_paragraph_of(
         .iter()
         .find(|hit| hit.source == source && Arc::ptr_eq(&hit.record, record))
         .map(|hit| hit.index)
+}
+
+/// Whether `hit` is paragraph `index` of `source` validated against
+/// the SAME record generation as `record` — the identity
+/// [`ranked_paragraph_of`] selects by, applied to locating the chosen
+/// paragraph's rank/lane evidence so a racing newer generation's hit
+/// at the same index is never mistaken for it.
+fn is_hit_of_record(
+    hit: &RankedPassage,
+    source: &str,
+    index: u32,
+    record: &Arc<crate::passages::PassageRecord>,
+) -> bool {
+    hit.source == source && hit.index == index && Arc::ptr_eq(&hit.record, record)
 }
 
 /// One ranked candidate, staleness-validated against the store's
@@ -3736,5 +3754,29 @@ mod tests {
         let same = vec![hit(0, &held)];
         assert_eq!(ranked_paragraph_of(&same, "b.md", &held), None);
         assert_eq!(ranked_paragraph_of(&same, "a.md", &held), Some(0));
+    }
+
+    #[test]
+    fn explain_target_match_skips_a_newer_generations_hit_at_the_same_index() {
+        let held = crate::passages::PassageRecord::for_tests("one");
+        let newer = crate::passages::PassageRecord::for_tests("uno");
+        let hit = |index: u32, record: &Arc<crate::passages::PassageRecord>| RankedPassage {
+            source: "a.md".to_string(),
+            index,
+            score: 1.0,
+            bm25: None,
+            vector: None,
+            record: Arc::clone(record),
+        };
+        let ranking = vec![hit(0, &newer), hit(0, &held)];
+        assert_eq!(
+            ranking
+                .iter()
+                .position(|h| is_hit_of_record(h, "a.md", 0, &held)),
+            Some(1),
+            "the newer generation's same-index hit must not be the target"
+        );
+        assert!(!is_hit_of_record(&hit(0, &held), "b.md", 0, &held));
+        assert!(!is_hit_of_record(&hit(1, &held), "a.md", 0, &held));
     }
 }
