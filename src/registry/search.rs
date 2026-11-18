@@ -3768,7 +3768,7 @@ mod tests {
             vector: None,
             record: Arc::clone(record),
         };
-        let ranking = vec![hit(0, &newer), hit(0, &held)];
+        let ranking = [hit(0, &newer), hit(0, &held)];
         assert_eq!(
             ranking
                 .iter()
