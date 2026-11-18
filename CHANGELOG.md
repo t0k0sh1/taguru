@@ -28,7 +28,9 @@ Entries that change an on-disk format or a response shape say so.
   `SECRET_KEY=-----BEGIN PRIVATE KEY-----…` the assignment's value
   (`-----BEGIN`) shadowed the whole key match, so the key body reached
   the model, passages, and `import --refuse-sensitive` unmasked. A
-  secret is now shadowed only when the owning match holds it whole. The
+  secret is now shadowed only when the owning match holds it whole, and
+  one that starts inside an earlier match and runs past it (a key block
+  one byte into a credential's value) has its remainder masked too. The
   output scan read the JSON-encoded batch line, so the `\"` of a masked
   `DB_PASSWORD="…"` read as a new credential and failed the segment,
   discarding its checkpoint, on every run; it now scans the decoded
@@ -40,7 +42,8 @@ Entries that change an on-disk format or a response shape say so.
   bucket boot no longer registers stems the sweep vetoed.
 - **Export drops paragraph locators whose source stored no passage.**
   Import refuses a paragraph in a passage-less batch, so such a context
-  exported a stream its own import refused.
+  exported a stream its own import refused. The pass honors the export
+  deadline like the rest of the render.
 - **Concurrent imports creating the same context id no longer fail at
   random.** A batch that lost the create race was refused with
   `no_context` while the winner was still writing; it now waits for the
@@ -53,10 +56,19 @@ Entries that change an on-disk format or a response shape say so.
   Writes admitted between the in-memory swap and the publish were
   validated against the compacted graph but, after a crash, replayed
   against the old image — to a different result or a refusal.
-  `image_persisted: false` now means the rebuilt image could not be
-  written and the context keeps its previous image; nothing retries it,
-  compact again once the disk recovers (it used to mean the compacted
-  graph stood in memory until a later flush landed).
+  `image_persisted: false` now means the rebuilt image was not durably
+  published, in one of two shapes: it could not be written, and the
+  context keeps its previous image (nothing retries it; compact again
+  once the disk recovers), or it landed but its directory fsync failed,
+  and the context runs on the compacted image — matching the disk — while
+  the next flush re-publishes it durably. It used to mean the compacted
+  graph stood in memory until a later flush landed.
+- **A file published before its fsync failed is treated as written.**
+  `write_atomic` reported a post-rename directory-fsync failure like a
+  failed write; a group create, update, rename, or restore then rolled
+  memory back while the file stayed on disk and re-registered at the
+  next boot. Memory now follows the published file, and a restore counts
+  that record toward `durable_prefix`.
 - **A context-scoped key's grant stays opaque.** A v0.9.7 import from a
   scoped key resolved names against every context before checking the
   grant, so the answer (403 with the real id, 404, or 409) told an
@@ -75,11 +87,19 @@ Entries that change an on-disk format or a response shape say so.
 - **Replica: a manifest re-PUT within the same second is applied.**
   Change detection compared second-granular Last-Modified only; it now
   includes ETag and version.
-- **Explain no longer answers 500** when the source is re-registered
-  with more paragraphs during the call.
-- **Keyring reloads are serialized from the read on.** A SIGHUP reload
-  read the file before taking the reload lock, so an older table could
-  overwrite a newer one. The failed-auth throttle's docs now say what it
+- **Explain no longer answers 500, or reports another generation's
+  rank,** when the source is re-registered with more paragraphs during
+  the call.
+- **Keyring and route-map reloads never re-arm an older version.** A
+  SIGHUP reload read the file before taking the reload lock, and the
+  config watch (the router's map watch alike) read and applied outside
+  any serialization — an older keyring could overwrite a newer one and
+  re-enable revoked tokens, an older map could replace a newer one, and
+  a file reverted after a SIGHUP read as unchanged to the watch. Every
+  reload now reads, judges, and swaps under one lock, off the async
+  workers, and SIGHUP and the watch share the digest of the last content
+  judged. A SIGHUP that arrives mid-tick is no longer dropped. The
+  failed-auth throttle's docs now say what it
   does: it slows wrong guesses and never blocks a correct token (so a
   shared IP cannot lock the real client out); token entropy is the
   brute-force defense.
@@ -95,16 +115,19 @@ Entries that change an on-disk format or a response shape say so.
   resume goes straight to its children (on-disk: an optional `splits`
   map; older checkpoints load). Encrypted PEM private keys, whose header
   is followed by a blank line, are now masked; the ruleset version is
-  `redact3`, so documents extracted with `--redact` re-extract once.
+  `redact4`, so documents extracted with `--redact` re-extract once.
 - **Code map (`taguru-code`).** A synced file that turns into a
-  symlink, non-UTF-8, or unreadable file retracts its facts; a full
+  symlink, non-UTF-8, or unreadable file retracts its facts — judged by
+  what the map holds, so a sync interrupted before saving its state does
+  not leave them behind; a full
   re-sync (missing anchor or state) retracts files deleted meanwhile;
   the state file is written atomically; one refused file no longer stops
   the sync. Same-named definitions in one file each keep their location:
   trait-impl methods are named `<X as Trait>::fn` and remaining
   duplicates `name#2`, … — `find fmt` and `find X::fmt` still match
   (FACTS_VERSION 2: existing maps rebuild on the next sync). The data
-  directory's self-exclusion survives `..` and symlinks, and the watch
+  directory's self-exclusion survives `..` and symlinks (including an
+  existing directory reached past a missing one), and the watch
   polls git with `--no-optional-locks`.
 - **CLI and config.** `taguru communities` chunks its passage lookups
   under the 1,000-item cap; a config line with a NUL is a usage error,
