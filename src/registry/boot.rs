@@ -252,7 +252,7 @@ impl AppState {
 /// `true` when the file is gone afterwards (removed now, or never
 /// there); `false` when it is still held — the sweep keeps the
 /// deletion marker for that family.
-fn remove_persisted_file_quietly(path: &Path, what: &str) -> bool {
+pub(super) fn remove_persisted_file_quietly(path: &Path, what: &str) -> bool {
     match remove_persisted_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             // Never a bare `error` field — see the same note on

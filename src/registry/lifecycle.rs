@@ -335,14 +335,12 @@ impl AppState {
     fn discard_created_files(&self, id: &str) {
         let dir = &self.0.data_dir;
         for path in [image_path(dir, id), meta_path(dir, id)] {
-            if let Err(cleanup_error) = remove_persisted_file(&path)
-                && cleanup_error.kind() != io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    context = %id, cleanup_error = %cleanup_error,
-                    "failed create left {} behind", path.display()
-                );
-            }
+            // The boot sweeps' helper: `NotFound` is the goal reached,
+            // anything else is warned about and left for the operator.
+            super::boot::remove_persisted_file_quietly(
+                &path,
+                "failed create left this file behind",
+            );
         }
         // Make the unlinks durable too: a crash that forgot them would
         // resurrect exactly the family this cleanup exists to remove.

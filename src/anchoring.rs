@@ -214,13 +214,8 @@ pub(crate) fn run(args: &[String]) -> i32 {
         // directory, with a warning, exactly as
         // scripts/extract_metrics.py does for its trace aggregation.
         let key = listing_key(&batch.source, file, |key| segments.contains_key(key));
-        if key != batch.source {
-            eprintln!(
-                "taguru: anchoring: {}: source '{}' already judged — listed again as \
-                 '{key}'",
-                file.display(),
-                batch.source
-            );
+        if let Some(warning) = relisted_warning(file, &batch.source, &key) {
+            eprintln!("{warning}");
         }
         segments.insert(
             key,
@@ -272,6 +267,18 @@ pub(crate) fn run(args: &[String]) -> i32 {
 /// `evaluate`'s "first three, then a count" precedent; `--json` is
 /// never capped.
 const DEFAULT_LIST: usize = 3;
+
+/// The stderr line for a source listed under a disambiguated key, or
+/// `None` when it kept its own name — pure, so which inputs warn is
+/// testable without capturing stderr.
+fn relisted_warning(file: &Path, source: &str, key: &str) -> Option<String> {
+    (key != source).then(|| {
+        format!(
+            "taguru: anchoring: {}: source '{source}' already judged — listed again as '{key}'",
+            file.display()
+        )
+    })
+}
 
 /// The table key for `source` judged from batch `file`, unique among
 /// the keys `taken` already holds — a collision would overwrite one
@@ -765,6 +772,16 @@ fn print_table(segments: &BTreeMap<String, SegmentReport>, totals: &Counts, skip
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a source moved to a disambiguated key warns; one listed
+    /// under its own name is the ordinary case and stays silent.
+    #[test]
+    fn only_a_relisted_source_warns() {
+        let file = Path::new("run2/out/c.jsonl");
+        assert_eq!(relisted_warning(file, "c.md", "c.md"), None);
+        let warning = relisted_warning(file, "c.md", "c.md (run2/out)").unwrap();
+        assert!(warning.contains("'c.md (run2/out)'"), "{warning}");
+    }
 
     fn assoc(subject: &str, object: &str, paragraph: Option<u32>) -> crate::registry::AssocOp {
         crate::registry::AssocOp {

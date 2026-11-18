@@ -2440,6 +2440,16 @@ fn redaction_accounting_names_rules_and_positions_never_content() {
         batch_sensitive_hit(&leaked, &rules),
         Some((2, "credential_assignment".to_string()))
     );
+    // Strings inside arrays are content too: a passage line's `tags`
+    // carrying a secret is a hit on that line.
+    let tagged = format!(
+        "{}\n",
+        serde_json::json!({ "passage": "clean text", "tags": ["ok", "AKIAIOSFODNN7EXAMPLE"] })
+    );
+    assert_eq!(
+        batch_sensitive_hit(&tagged, &rules),
+        Some((1, "aws_access_key".to_string()))
+    );
 }
 
 #[test]
