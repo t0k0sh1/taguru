@@ -502,6 +502,19 @@ pub(crate) fn render(
         }
         buckets.entry(source).or_default().passage = Some(record);
     }
+    // A paragraph locator names a spot in its source's passage, and
+    // import refuses one in a batch with no passage line. A source the
+    // graph attributes with a locator but that never stored a passage
+    // (a bare `POST associations` naming a paragraph) would otherwise
+    // render a stream its own import refuses — a backup that does not
+    // restore. The locator points at nothing, so it is dropped.
+    for bucket in buckets.values_mut() {
+        if bucket.passage.is_none() {
+            for line in &mut bucket.lines {
+                line.paragraph = None;
+            }
+        }
+    }
 
     let mut aliases: Vec<AliasLine> = Vec::new();
     let mut aliases_dropped = 0usize;
@@ -1867,28 +1880,53 @@ mod tests {
 
     #[test]
     fn corroboration_re_renders_as_count_lines() {
+        let mut snapshot = snapshot(vec![association(
+            3,
+            vec![Attribution {
+                source: "a.md".to_string(),
+                weight: 6.0,
+                count: 3,
+                paragraph: Some(0),
+            }],
+        )]);
+        snapshot.passages = vec![("a.md".to_string(), PassageRecord::for_tests("甲"))];
+        let rendered = render("sake", &snapshot, Deadline::unbounded()).unwrap();
+        assert_eq!(rendered.batches, 1);
+        assert_eq!(rendered.association_lines, 3);
+        let lines: Vec<&str> = rendered.stream.lines().collect();
+        assert_eq!(lines.len(), 5, "header + passage + three assertions");
+        // The locator rides the first assertion only.
+        assert!(lines[2].contains("\"paragraph\":0"));
+        assert!(!lines[3].contains("paragraph"));
+        assert!(lines[2].contains("\"weight\":2.0"));
+    }
+
+    /// A locator whose source never stored a passage points at nothing,
+    /// and import refuses a paragraph in a passage-less batch: export
+    /// drops it, so the stream restores.
+    #[test]
+    fn a_locator_without_a_stored_passage_is_dropped_so_the_stream_restores() {
         let rendered = render(
-            "sake",
+            "017a80b6-80ac-4531-b4ca-a82c4659f007",
             &snapshot(vec![association(
-                3,
+                1,
                 vec![Attribution {
                     source: "a.md".to_string(),
-                    weight: 6.0,
-                    count: 3,
+                    weight: 1.0,
+                    count: 1,
                     paragraph: Some(2),
                 }],
             )]),
             Deadline::unbounded(),
         )
         .unwrap();
-        assert_eq!(rendered.batches, 1);
-        assert_eq!(rendered.association_lines, 3);
-        let lines: Vec<&str> = rendered.stream.lines().collect();
-        assert_eq!(lines.len(), 4, "header + three assertions");
-        // The locator rides the first assertion only.
-        assert!(lines[1].contains("\"paragraph\":2"));
-        assert!(!lines[2].contains("paragraph"));
-        assert!(lines[1].contains("\"weight\":2.0"));
+        assert!(
+            !rendered.stream.contains("paragraph"),
+            "{}",
+            rendered.stream
+        );
+        crate::ingest::parse_batch(std::io::Cursor::new(rendered.stream.as_bytes()))
+            .unwrap_or_else(|error| panic!("{error}\n{}", rendered.stream));
     }
 
     #[test]
