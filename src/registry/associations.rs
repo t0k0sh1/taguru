@@ -145,8 +145,24 @@ impl AppState {
         // whose passage-side removal, below, hasn't happened yet and
         // could still fail (#676 review). The passage side instead
         // reports its own real outcome directly to the feed, below.
+        //
+        // `Some(0)` folds into the no-op too: `Context::retract_source`
+        // answers it for a source still interned (it was seen once, and
+        // retraction deliberately keeps the name) whose edges an earlier
+        // retract already withdrew — nothing changes, so it must not
+        // count as applied. Counted, it advanced `graph_revision` and
+        // pushed a `SourceRetracted` event for a change that never
+        // happened, and a passage coming off right after pushed the same
+        // event again via the `touched == 0` branch below. Filtered here
+        // rather than in `retract_single_op`: `retract_association`'s
+        // `Some(0)` (an edge with only unsourced weight, zeroed with no
+        // attribution to unlink) IS a real change.
         let touched = self
-            .retract_single_op(id, op, |context| context.retract_source(source))?
+            .retract_single_op(id, op, |context| {
+                context
+                    .retract_source(source)
+                    .filter(|&touched| touched > 0)
+            })?
             .unwrap_or(0);
 
         let Some(entry) = self.lookup_id(id) else {
@@ -409,9 +425,11 @@ impl AppState {
     /// [`Self::retract_source_unmarked`]: a single WAL op whose
     /// `operate` closure reports whether it actually touched a live
     /// edge/source via `Option<usize>` — `None` names no live target,
-    /// nothing changed. Unlike `logged_write`'s other callers (whole
-    /// batches, where a fixed `applied_count` of the op count is
-    /// correct because a batch write either lands wholesale or fails),
+    /// nothing changed (`retract_source_unmarked` maps its own
+    /// `Some(0)` no-op onto `None` before it gets here). Unlike
+    /// `logged_write`'s other callers (whole batches, where a fixed
+    /// `applied_count` of the op count is correct because a batch
+    /// write either lands wholesale or fails),
     /// a single retract op can itself be a genuine no-op, so `applied`
     /// here honestly reflects that instead of the `|_| 1` every
     /// earlier version of these two callers hardcoded — the bug this
@@ -809,6 +827,126 @@ mod tests {
                     "a no-op retract_source must not emit a change-feed event"
                 );
                 assert!(!more);
+            }
+            ChangesOutcome::Stale => panic!("the cursor must still be live"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The `Some(0)` half of the no-op contract above: a source the
+    /// graph DID see once stays interned after its first retract, so a
+    /// repeat retract hit `Context::retract_source`'s `Some(0)`, which
+    /// `retract_single_op` counted as applied — advancing
+    /// `graph_revision` and pushing a `SourceRetracted` event for a
+    /// retraction that changed nothing.
+    #[test]
+    fn a_repeated_retract_source_does_not_advance_the_graph_revision_or_change_feed() {
+        let dir = scratch_dir("retract-source-repeat-no-op-revision");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                &state.id_of("sake"),
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let (touched, _) = state.retract_source(&state.id_of("sake"), "doc").unwrap();
+        assert_eq!(touched, 1, "the first retract withdraws the one edge");
+
+        let before = state.directory_entry("sake").unwrap().revision.graph;
+        let cursor = match state
+            .context_changes(&state.id_of("sake"), None, 100)
+            .unwrap()
+        {
+            ChangesOutcome::Page { next, .. } => next,
+            ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
+        };
+
+        let (touched, passage_removed) = state.retract_source(&state.id_of("sake"), "doc").unwrap();
+        assert_eq!(touched, 0);
+        assert!(!passage_removed);
+
+        let after = state.directory_entry("sake").unwrap().revision.graph;
+        assert_eq!(
+            before, after,
+            "a repeated retract_source must not advance graph_revision"
+        );
+        match state
+            .context_changes(&state.id_of("sake"), Some(&cursor), 100)
+            .unwrap()
+        {
+            ChangesOutcome::Page { events, more, .. } => {
+                assert!(
+                    events.is_empty(),
+                    "a repeated retract_source must not emit a change-feed event"
+                );
+                assert!(!more);
+            }
+            ChangesOutcome::Stale => panic!("the cursor must still be live"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A source whose graph edges were already withdrawn but whose
+    /// passage comes off now is one real change — exactly one
+    /// `SourceRetracted`. Before, the graph side's `Some(0)` counted as
+    /// applied (one event from the write) AND left `touched == 0`, so
+    /// the passage branch pushed a second.
+    #[test]
+    fn retracting_a_passage_after_its_graph_edges_emits_exactly_one_event() {
+        let dir = scratch_dir("retract-source-passage-after-graph");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                &state.id_of("sake"),
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        // Withdraw the graph side alone, leaving "doc" interned.
+        let (touched, _) = state.retract_source(&state.id_of("sake"), "doc").unwrap();
+        assert_eq!(touched, 1);
+        let mut passages = BTreeMap::new();
+        passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
+        state
+            .store_passages(&state.id_of("sake"), plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let before = state.directory_entry("sake").unwrap().revision.graph;
+        let cursor = match state
+            .context_changes(&state.id_of("sake"), None, 100)
+            .unwrap()
+        {
+            ChangesOutcome::Page { next, .. } => next,
+            ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
+        };
+
+        let (touched, passage_removed) = state.retract_source(&state.id_of("sake"), "doc").unwrap();
+        assert_eq!(touched, 0);
+        assert!(passage_removed);
+
+        assert_eq!(
+            state.directory_entry("sake").unwrap().revision.graph,
+            before,
+            "only the passage moved; the graph revision must not"
+        );
+        match state
+            .context_changes(&state.id_of("sake"), Some(&cursor), 100)
+            .unwrap()
+        {
+            ChangesOutcome::Page { events, .. } => {
+                let retracted = events
+                    .iter()
+                    .filter(|event| matches!(event.kind, ChangeKind::SourceRetracted { .. }))
+                    .count();
+                assert_eq!(retracted, 1, "one real change, one event: {events:?}");
             }
             ChangesOutcome::Stale => panic!("the cursor must still be live"),
         }

@@ -318,6 +318,7 @@ impl AppState {
             // (see `replication.rs`'s `cache_identity` bump).
             inner.invalidate_cache_identity();
             inner.stats = fresh_stats;
+            inner.published_graph_revision = inner.graph_revision;
             // The published image covers everything logged: clean, and
             // the log is replay-inert behind its watermark.
             entry.dirty.store(false, Ordering::Relaxed);

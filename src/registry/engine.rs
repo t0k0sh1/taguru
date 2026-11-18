@@ -220,6 +220,9 @@ impl AppState {
         let published = match outcome {
             Ok(()) => {
                 inner.stats = stats;
+                // The staged capture, not the live value: these are
+                // the bytes that just became the image.
+                inner.published_graph_revision = staged_graph_revision;
                 self.0.metrics.record_flush(name, true);
                 // `dirty` stays as claimed: clear (nothing raced) means the
                 // image is current; a racing write re-set it and will
@@ -842,6 +845,7 @@ impl AppState {
                     return false;
                 }
                 inner.stats = stats;
+                inner.published_graph_revision = inner.graph_revision;
                 entry.dirty.store(false, Ordering::Relaxed);
                 self.truncate_wal(name, &entry.id, inner);
             } else {
