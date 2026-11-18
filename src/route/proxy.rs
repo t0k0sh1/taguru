@@ -38,8 +38,11 @@ fn hop_headers(headers: &HeaderMap) -> HeaderMap {
 /// and onto any endpoint or unmapped context the shard hosts. A dot
 /// segment has no legitimate reading here (no context-scoped verb's
 /// path contains one), so it is refused whole rather than resolved.
+/// A `\` delimits segments too: the outbound URL parser reads it as `/`
+/// in an http(s) URL (WHATWG special-scheme parsing), so
+/// `/contexts/sake/..\..\import` resolves exactly like the `/` form.
 fn has_dot_segment(path: &str) -> bool {
-    path.split('/').any(|segment| {
+    path.split(['/', '\\']).any(|segment| {
         let decoded = segment.replace("%2E", ".").replace("%2e", ".");
         decoded == "." || decoded == ".."
     })
@@ -632,6 +635,9 @@ mod tests {
             "/contexts/sake/.%2e/flush",
             "/contexts/%2e/x",
             "/contexts/sake/associations/..",
+            "/contexts/sake/..\\..\\import",
+            "/contexts/sake/..\\flush",
+            "/contexts/sake/x\\%2e%2e\\%2e%2e\\import",
         ] {
             assert!(has_dot_segment(path), "{path}");
         }
