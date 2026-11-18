@@ -216,6 +216,11 @@ describe("OcrAdapter call-out (PdfConnector)", () => {
     expect(document.diagnostics[0]!.message).toBe("adapter skipped a region");
   });
 
+  it("OcrResult refuses the retired `units` key instead of returning nothing", () => {
+    const legacy = { units: [new OcrRecoveredText({ locator: { kind: "page", value: "1" }, text: "x" })] };
+    expect(() => new OcrResult(legacy as never)).toThrow(/`texts`, not `units`/);
+  });
+
   it("configuring an adapter changes the digest but not the raw hash", async () => {
     const data = textPdf(["Some ordinary page text."]);
     const path = write("doc.pdf", data);

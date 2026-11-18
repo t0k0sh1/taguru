@@ -101,6 +101,12 @@ export class OcrResult {
   readonly diagnostics: readonly Diagnostic[];
 
   constructor(fields?: { texts?: readonly OcrRecoveredText[]; diagnostics?: readonly Diagnostic[] }) {
+    // #1069 renamed `units` to `texts`. Refused, never ignored: a JavaScript
+    // (or `any`-typed) caller still passing `units` would otherwise get an
+    // empty result and every page it recovered would stay ocr_required.
+    if (fields !== undefined && Object.prototype.hasOwnProperty.call(fields, "units")) {
+      throw new TypeError("OcrResult takes `texts`, not `units` (renamed in #1069)");
+    }
     this.texts = Object.freeze([...(fields?.texts ?? [])]);
     this.diagnostics = Object.freeze([...(fields?.diagnostics ?? [])]);
   }

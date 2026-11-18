@@ -43,9 +43,13 @@ Entries that change an on-disk format or a response shape say so.
   keyed `piece` (was `unit`), the TypeScript file's map is `pieces`, and
   the pre-JSONL Python format is no longer read. No checkpoint written by
   a released version could resume under `PROMPT_VERSION` 8 anyway — the
-  fingerprint holds it — so no run loses work it would otherwise keep.
+  fingerprint holds it — so no run loses work it would otherwise keep;
+  only a checkpoint written by an unreleased build since `PROMPT_VERSION`
+  8 (still keyed `units`) is ignored, and its segment re-extracts.
   `OcrRecoveredUnit` is `OcrRecoveredText` and `OcrResult.units` is
-  `OcrResult.texts` (Python and TypeScript). No aliases.
+  `OcrResult.texts` (Python and TypeScript). No aliases: Python's
+  `OcrResult(units=…)` is a `TypeError`, and TypeScript's constructor
+  throws on a `units` key rather than returning an empty result.
 - **Wording — one meaning each for "section" and "unit"** (#1069,
   #851). `section` keeps its one meaning, the heading a source file's
   `{"paragraph", "section"}` line attaches to the paragraphs after it —
