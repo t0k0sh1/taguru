@@ -482,10 +482,15 @@ pub struct SharedKeyring {
     /// and the config watch), and without this their read-compute-
     /// write cycles can interleave: the loser stores a table parsed
     /// from a file state the winner already superseded, and — because
-    /// the config watch has by then recorded the newest (mtime, len)
+    /// the config watch has by then recorded the newest content digest
     /// as seen — nothing re-triggers until the file changes again.
-    /// The stale table would sit armed indefinitely. Held inside
-    /// [`reload_keyring`] so every trigger, future ones included, is
+    /// The stale table would sit armed indefinitely. The SIGHUP path
+    /// ([`reload_keyring`]) takes this lock BEFORE it reads the file,
+    /// so its read is ordered with every other reload's swap; the
+    /// config watch necessarily reads first (that read is its change
+    /// detector — see [`reload_keyring_with_bytes`] for why a stale
+    /// watch apply heals itself on the next tick). Held inside the
+    /// reload functions so every trigger, future ones included, is
     /// serialized by construction rather than by caller discipline.
     reload_serial: Arc<parking_lot::Mutex<()>>,
 }
@@ -654,16 +659,21 @@ pub enum ReloadOutcome {
 /// since armed → empty is the only transition that could break it.)
 ///
 /// Concurrent triggers (a SIGHUP racing the config watch) are
-/// serialized end-to-end on [`SharedKeyring::reload_serial`]: without
-/// that, two reloads straddling a file rewrite could finish in the
-/// wrong order and leave the SUPERSEDED table armed — permanently,
-/// since the watch has by then already recorded the newest file state
-/// as seen. Request loads never touch this lock.
+/// serialized end-to-end on [`SharedKeyring::reload_serial`], and the
+/// source read happens UNDER that lock, not before it: a read taken
+/// before the lock could see file state v1, lose the lock to a watch
+/// tick that reads and applies the rewritten v2 (recording v2's
+/// digest as seen), and then swap v1 back in — leaving the SUPERSEDED
+/// table armed permanently, since the watch has nothing left to
+/// re-trigger on. Reading under the lock makes this reload's view of
+/// the file at least as new as every swap ordered before it. Request
+/// loads never touch this lock.
 pub fn reload_keyring(
     shared: &SharedKeyring,
     source: &AuthSource,
     trigger: &'static str,
 ) -> ReloadOutcome {
+    let _serialized = shared.reload_serial.lock();
     apply_reload(shared, source.read_current(), trigger)
 }
 
@@ -671,26 +681,47 @@ pub fn reload_keyring(
 /// config file's current bytes in hand — see `AuthSource::table_from`
 /// for why reusing them here (instead of reading the file again)
 /// matters.
+///
+/// Those bytes were read BEFORE this lock is taken — the config
+/// watch's read is its change detector, and it runs off the async
+/// worker where this lock cannot be held across the await. A SIGHUP
+/// reload can therefore slip in between and arm a NEWER file state,
+/// which this call then overwrites with the older bytes. That window
+/// is bounded, not permanent: the watch recorded the digest of the
+/// bytes it applied here, the file on disk now hashes differently,
+/// and the very next tick re-applies the newest state. (The
+/// permanent variant — the watch recording the NEWEST digest while
+/// an older table wins — needs a reload whose read precedes its
+/// lock with no later re-trigger, which is exactly what
+/// [`reload_keyring`] reading under the lock rules out.)
 pub fn reload_keyring_with_bytes(
     shared: &SharedKeyring,
     source: &AuthSource,
     trigger: &'static str,
     bytes: &[u8],
 ) -> ReloadOutcome {
+    let _serialized = shared.reload_serial.lock();
     let values = std::str::from_utf8(bytes)
         .map_err(|error| format!("config is not valid UTF-8: {error}"))
         .and_then(|text| source.table_from(Some(text)));
     apply_reload(shared, values, trigger)
 }
 
+/// Parse → judge → swap. Callers MUST hold
+/// [`SharedKeyring::reload_serial`] — and must have taken it before
+/// reading any source they still can read under it (see
+/// [`reload_keyring`]).
 fn apply_reload(
     shared: &SharedKeyring,
     values: Result<[Option<String>; AUTH_VARS.len()], String>,
     trigger: &'static str,
 ) -> ReloadOutcome {
-    let _serialized = shared.reload_serial.lock();
     let refused = |error: String| {
-        tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
+        tracing::error!(
+            reload_error = %error,
+            trigger,
+            "keyring reload refused; the previous table stays armed"
+        );
         ReloadOutcome::Refused
     };
     let [single, named, grants, retired_grants] = match values {
@@ -742,9 +773,17 @@ fn apply_reload(
 
 /// Everything the bearer gate consults: the static keyring, the OAuth
 /// subsystem when the operator enabled it, and a per-source-IP throttle
-/// on FAILED attempts (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`) so the gate
-/// cannot be brute-forced — or used to burn CPU on the constant-time
-/// scan — for free.
+/// on FAILED attempts (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`).
+///
+/// What that throttle does NOT do: it is consulted only AFTER the
+/// constant-time scan has judged the token, so it neither saves the
+/// scan's CPU nor stops a guess from being graded — over budget, a
+/// wrong token gets 429 + Retry-After instead of 401, but a correct
+/// one still passes from the same IP. That ordering is deliberate:
+/// checking the budget first would let anyone sharing the client's
+/// source IP (a NAT, a proxy) lock the legitimate caller out just by
+/// spending it. Brute-force resistance rests on token entropy; the
+/// throttle only tells a misconfigured or hostile client to back off.
 pub struct Gate {
     pub keyring: SharedKeyring,
     pub oauth: Option<Arc<crate::oauth::Oauth>>,
@@ -821,8 +860,11 @@ pub async fn require_bearer(
     // No credential matched. Throttle repeated failures per source IP:
     // successful auth returned above without touching this limiter, so a
     // legitimate caller presenting the right token is never throttled —
-    // only a brute-forcer (or a client burning the constant-time scan)
-    // spends here, and once over budget gets a 429 instead of a 401.
+    // not even after a neighbor on the same IP spent the budget. The
+    // flip side (see `Gate`): the scan above already ran and already
+    // graded this guess, so over budget a wrong token gets a 429 instead
+    // of a 401, but the throttle neither saves that CPU nor stops a
+    // correct guess from passing. Token entropy is the brute-force bar.
     if !gate.fail_limiter.is_disabled() {
         let peer = crate::limits::peer_ip(&request).unwrap_or_else(|| Arc::from("peer:unknown"));
         if let Err(retry_after) = gate.fail_limiter.admit(&peer, started_at) {
@@ -1497,6 +1539,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The SIGHUP reload reads its source UNDER `reload_serial`, not
+    /// before taking it. A read taken first could see file state v1,
+    /// lose the race to a config-watch tick that applies the rewritten
+    /// v2 (and records v2's digest as seen), then swap v1 back in —
+    /// a superseded table armed with nothing left to re-trigger.
+    ///
+    /// Deterministic via a FIFO as the config file: the reader's
+    /// `open` blocks until this test opens the write end, so the
+    /// moment our `open` returns the reload thread is provably INSIDE
+    /// its read — and at that moment the lock must already be held.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_reads_its_source_while_holding_the_reload_lock() {
+        use std::io::Write;
+
+        let dir = crate::registry::test_support::scratch_dir("auth-reload-read-under-lock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed");
+        let source = AuthSource {
+            config: Some(config.clone()),
+            from_shell: [false; AUTH_VARS.len()],
+        };
+        let keyring = ring(None, Some("ci:tok-old"));
+
+        let (locked_during_read, outcome) = std::thread::scope(|scope| {
+            let reload = scope.spawn(|| reload_keyring(&keyring, &source, "test"));
+            // Returns only once the reload thread has opened the read
+            // end, i.e. is mid-`read_current`.
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&config)
+                .unwrap();
+            let locked = keyring.reload_serial.is_locked();
+            // Finish the read either way, so a failing assertion below
+            // reports instead of hanging the reload thread.
+            writer.write_all(b"TAGURU_API_TOKENS=ci:tok-new\n").unwrap();
+            drop(writer);
+            (locked, reload.join().unwrap())
+        });
+
+        assert!(
+            locked_during_read,
+            "the source read ran outside reload_serial, so it can race another reload's swap"
+        );
+        assert_eq!(outcome, ReloadOutcome::Applied);
+        assert!(keyring.load().authenticate("tok-new").is_some());
+        assert!(keyring.load().authenticate("tok-old").is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// One reload against a LIVE gate: the same `SharedKeyring` flips
     /// to the new table for the next request — the rotated name
     /// authenticates with its new bytes, the removed key dies, and so
@@ -1749,8 +1847,8 @@ mod tests {
 
     /// Repeated failures from one source IP trip a 429 with a
     /// Retry-After, but a valid token from that very IP still passes:
-    /// the throttle bites brute force, never a caller who finally
-    /// presents the right credential.
+    /// a neighbor spending the shared IP's budget can never lock the
+    /// legitimate caller out (the trade `Gate`'s doc spells out).
     #[tokio::test]
     async fn failed_auth_is_throttled_per_source_ip() {
         use axum::extract::connect_info::MockConnectInfo;

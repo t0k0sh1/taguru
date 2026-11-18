@@ -27,10 +27,13 @@ pub struct OauthState {
     pub keyring: SharedKeyring,
     /// Shared with the bearer gate. The consent POST runs the same
     /// constant-time keyring scan (`authenticate`) as the gate but
-    /// unauthenticated, so a wrong key here has to spend the same
-    /// per-source-IP failure budget — otherwise the page is a free
-    /// brute-force (and CPU-burn) oracle against the keyring whenever the
-    /// optional per-key rate limit is off, which is its default.
+    /// unauthenticated, so a wrong key here spends the same
+    /// per-source-IP failure budget, with the same limits `auth::Gate`
+    /// documents: the budget is consulted only after the scan has
+    /// graded the key, so it saves no CPU and a correct key still
+    /// passes over budget — deliberately, so a neighbor on a shared IP
+    /// cannot lock the operator out. Brute-force resistance rests on
+    /// key entropy; over budget, wrong keys get 429 + Retry-After.
     pub fail_limiter: Arc<crate::limits::RateLimiter>,
 }
 
@@ -273,9 +276,11 @@ async fn approve(
         // Same throttle the bearer gate applies to a wrong token: this
         // path runs the identical constant-time keyring scan, so a wrong
         // key spends the per-source-IP failure budget and, once over it,
-        // gets a 429 instead of another guess. A correct key returns
-        // below without ever touching the limiter, so a delegating
-        // operator is never throttled — only a brute-forcer is.
+        // gets a 429 instead of the re-asking form. The scan above has
+        // already graded the key either way — the throttle saves no CPU
+        // and does not stop a correct guess. A correct key returns below
+        // without ever touching the limiter, so a delegating operator is
+        // never locked out by someone else spending a shared IP's budget.
         if !state.fail_limiter.is_disabled() {
             let peer = peer_addr
                 .map(|addr| Arc::<str>::from(addr.ip().to_string().as_str()))
@@ -578,12 +583,11 @@ mod tests {
     /// The consent POST runs the keyring's constant-time scan
     /// unauthenticated, so a wrong key spends the same per-source-IP
     /// failure budget the bearer gate uses: the first miss re-asks (200),
-    /// but once the budget is gone the page answers 429 + Retry-After
-    /// instead of grading another guess. A correct key never touches the
-    /// limiter, so a delegating operator is not locked out even after the
-    /// budget is spent. Without this the form is a free brute-force /
-    /// CPU-burn oracle against the keyring whenever the optional per-key
-    /// rate limit is off (its default).
+    /// but once the budget is gone a wrong key gets 429 + Retry-After
+    /// instead of the form. A correct key never touches the limiter, so
+    /// a delegating operator is not locked out even after the budget is
+    /// spent (the same trade `auth::Gate` documents: the throttle never
+    /// stops a correct guess; key entropy does).
     #[tokio::test]
     async fn a_wrong_consent_key_spends_the_failed_auth_budget() {
         let dir = std::env::temp_dir().join(format!(
