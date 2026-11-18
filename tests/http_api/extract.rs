@@ -8142,7 +8142,9 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
 /// succeeded must be reused on resume even though the ORIGINAL
 /// (pre-split) piece never itself succeeds and so is never itself
 /// cacheable — only a per-unit content hash, never `chunk_index` alone,
-/// can tell the two apart correctly.
+/// can tell the two apart correctly. The split itself is checkpointed
+/// too, so the resume never re-asks the pre-split piece: its budgeted
+/// ask and escalation are not paid twice.
 #[test]
 fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
     let docs = batch_dir("extract-checkpoint-split-docs");
@@ -8213,13 +8215,11 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
         "only the completed sub-piece, never the pre-split piece, should be checkpointed"
     );
 
-    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
-        if attempt <= 1 {
-            chat_ok_with_finish_reason("truncated garbage", "length")
-        } else {
-            chat_ok(&json!({"associations": []}).to_string())
-        }
-    });
+    // Every reply succeeds: were the pre-split piece re-asked, it would
+    // now answer whole — one request either way — so the request's
+    // TEXT, not just the count, is what proves which piece was asked.
+    let (url, captured) =
+        stub_chat_server_concurrent(|_, _| chat_ok(&json!({"associations": []}).to_string()));
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
@@ -8235,12 +8235,18 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
         ],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests = captured.lock().unwrap();
     assert_eq!(
-        captured.lock().unwrap().len(),
-        3,
-        "budgeted ask, escalation, and only the not-yet-completed sub-piece — never the \
-         already-checkpointed one"
+        requests.len(),
+        1,
+        "only the not-yet-completed sub-piece — never the already-checkpointed one, \
+         and never the pre-split piece whose split the checkpoint recorded"
     );
+    assert!(
+        requests[0].contains(&"b".repeat(600)) && !requests[0].contains(&"a".repeat(600)),
+        "the one request must carry the second sub-piece alone"
+    );
+    drop(requests);
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

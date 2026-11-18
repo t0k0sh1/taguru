@@ -17,6 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// the parent directory's own data, so the parent is fsynced too;
 /// without that a crash can forget the rename even though the file
 /// contents reached disk.
+///
+/// An `Err` comes in two shapes, told apart by
+/// [`is_published_unsynced`] (see [`commit_staged`]): nothing was
+/// published (the previous version, if any, is still the file), or
+/// the rename landed and only the parent fsync failed — the new bytes
+/// ARE the file under `path` now, but the rename may not survive
+/// power loss.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_with(path, bytes, false)
 }
@@ -43,10 +50,17 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
 /// avoids a flag for each call site. Two things are deliberately
 /// outside this net: [`fsync_dir`] (durability, not mutation — a
 /// dropped fsync loses nothing a crash-consistency test can observe
-/// without also modeling real fsync failures, which this harness does
-/// not attempt) and any plain read (`fs::read` — a read has no
-/// write-ordering story to get wrong, so injecting into it would only
-/// test the reader's own error handling, not persistence ordering).
+/// without also modeling real fsync failures) and any plain read
+/// (`fs::read` — a read has no write-ordering story to get wrong, so
+/// injecting into it would only test the reader's own error handling,
+/// not persistence ordering).
+///
+/// The ONE fsync failure a caller must react to has its own,
+/// separate counter: [`fail_publish_syncs_after`] fails
+/// [`commit_staged`]'s post-rename parent fsync — the "published, but
+/// durability unconfirmed" shape. Kept apart from this counter so
+/// arming it never shifts the op numbering every existing sweep and
+/// fault test counts by.
 #[cfg(test)]
 pub(crate) fn fail_persistence_ops_after(successes: u32) {
     PERSISTENCE_FAULT.with(|cell| cell.set(Some(successes)));
@@ -64,6 +78,52 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn clear_persistence_fault() -> bool {
     PERSISTENCE_FAULT.with(|cell| cell.take().is_some())
+}
+
+#[cfg(test)]
+thread_local! {
+    static PUBLISH_SYNC_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: the calling thread's [`commit_staged`] fails its
+/// post-rename parent-directory fsync once, after `successes`
+/// publishes have synced normally — the rename itself still lands,
+/// exactly as a real fsync failure leaves it. Only `commit_staged`'s
+/// fsync counts (every [`write_atomic`] goes through it); the other
+/// [`fsync_dir`] callers stay outside, see
+/// [`fail_persistence_ops_after`].
+#[cfg(test)]
+pub(crate) fn fail_publish_syncs_after(successes: u32) {
+    PUBLISH_SYNC_FAULT.with(|cell| cell.set(Some(successes)));
+}
+
+/// [`clear_persistence_fault`]'s twin for [`fail_publish_syncs_after`]:
+/// `false` means the armed publish sync was reached and failed.
+#[cfg(test)]
+pub(crate) fn clear_publish_sync_fault() -> bool {
+    PUBLISH_SYNC_FAULT.with(|cell| cell.take().is_some())
+}
+
+#[cfg(test)]
+fn injected_publish_sync_failure() -> Option<io::Error> {
+    PUBLISH_SYNC_FAULT.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other(
+                "injected parent-directory fsync failure after a publish rename",
+            ))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
+#[cfg(not(test))]
+fn injected_publish_sync_failure() -> Option<io::Error> {
+    None
 }
 
 #[cfg(test)]
@@ -297,9 +357,71 @@ pub(crate) fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Resul
 /// rename-marker resume both use it that way. [`move_context_files`]
 /// moves ten files under one parent and fsyncs once itself instead of
 /// calling this per file — see there.
+///
+/// A failed rename publishes nothing and returns the plain error. A
+/// failed fsync AFTER the rename returns an error
+/// [`is_published_unsynced`] recognizes: `path` already holds the new
+/// file — every later read and the next boot see it — and only its
+/// survival across power loss is unconfirmed. A caller that keeps
+/// memory in step with disk must treat that shape as published; one
+/// that only reports or retries may treat both alike.
 pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
     rename_persisted_file(staged, path)?;
-    fsync_parent_dir(path)
+    let synced = match injected_publish_sync_failure() {
+        Some(error) => Err(error),
+        None => fsync_parent_dir(path),
+    };
+    synced.map_err(|error| io::Error::new(error.kind(), PublishedUnsynced(error)))
+}
+
+/// The marker [`commit_staged`] wraps a post-rename fsync failure in.
+/// Carried inside the `io::Error` (same kind, the fsync error as its
+/// source) rather than as a new return type so the many callers that
+/// treat every failure alike — reporting, retrying on the next flush —
+/// keep their `io::Result<()>` unchanged.
+#[derive(Debug)]
+struct PublishedUnsynced(io::Error);
+
+impl std::fmt::Display for PublishedUnsynced {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (the file is already published under its final name; its directory entry \
+             may not survive power loss)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for PublishedUnsynced {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// True when `error` is [`commit_staged`]'s "published, durability
+/// unconfirmed" shape: the rename landed, only the parent fsync failed.
+pub(crate) fn is_published_unsynced(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<PublishedUnsynced>())
+}
+
+/// Strips the [`is_published_unsynced`] marker, leaving its fsync
+/// error: for a multi-file write whose published-unsynced step was NOT
+/// the file its caller keys on (`save_files`' sidecar, written before
+/// the image), so the composite reads as "the file that matters was
+/// not published". Any other error passes through untouched.
+pub(crate) fn unpublished(error: io::Error) -> io::Error {
+    if !is_published_unsynced(&error) {
+        return error;
+    }
+    let marker = error
+        .into_inner()
+        .and_then(|inner| inner.downcast::<PublishedUnsynced>().ok())
+        .expect("is_published_unsynced just found the marker");
+    let PublishedUnsynced(source) = *marker;
+    source
 }
 
 /// Takes the advisory exclusive lock (`.taguru.lock`) that admits one
@@ -492,6 +614,90 @@ mod tests {
         let error = fsync_parent_dir(&path)
             .expect_err("fsyncing a nonexistent parent directory must fail, not silently succeed");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// The two failure shapes of a publish must stay apart: a failed
+    /// RENAME publishes nothing (plain error, `path` untouched), while
+    /// a failed fsync AFTER the rename leaves the new bytes under
+    /// `path` — callers that keep memory in step with disk key on the
+    /// marker to tell which happened.
+    #[test]
+    fn write_atomic_marks_only_a_post_rename_sync_failure_as_published() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-published-unsynced-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        // Ops: stage (0), commit (1) — the rename fails.
+        fail_persistence_ops_after(1);
+        let unpublished_error =
+            write_atomic(&path, b"never").expect_err("a failed rename must fail the write");
+        assert!(!clear_persistence_fault(), "the rename must be what failed");
+        assert!(
+            !is_published_unsynced(&unpublished_error),
+            "{unpublished_error}"
+        );
+        assert!(!path.exists(), "a failed rename publishes nothing");
+
+        fail_publish_syncs_after(0);
+        let published_error = write_atomic(&path, b"published")
+            .expect_err("a failed post-rename fsync must still fail the write");
+        assert!(
+            !clear_publish_sync_fault(),
+            "the publish sync must be what failed"
+        );
+        assert!(is_published_unsynced(&published_error), "{published_error}");
+        assert_eq!(published_error.kind(), io::ErrorKind::Other);
+        // The operator-facing text says the file landed, and the fsync
+        // error stays reachable as the source.
+        assert!(
+            published_error
+                .to_string()
+                .contains("already published under its final name"),
+            "{published_error}"
+        );
+        assert_eq!(
+            std::error::Error::source(&published_error).map(ToString::to_string),
+            Some("injected parent-directory fsync failure after a publish rename".to_string())
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"published",
+            "the rename landed: the new bytes are the file"
+        );
+
+        // `successes` counts publishes that synced normally first.
+        fail_publish_syncs_after(1);
+        write_atomic(&path, b"first").expect("the first publish syncs normally");
+        assert!(clear_publish_sync_fault(), "only one publish has run");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `unpublished` drops exactly the marker — keeping the fsync
+    /// error it wrapped — and passes any other error through as is.
+    #[test]
+    fn unpublished_strips_the_marker_and_passes_other_errors_through() {
+        let marked = io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            PublishedUnsynced(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fsync refused",
+            )),
+        );
+        assert!(is_published_unsynced(&marked));
+        let stripped = unpublished(marked);
+        assert!(!is_published_unsynced(&stripped));
+        assert_eq!(stripped.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(stripped.to_string(), "fsync refused");
+
+        let plain = unpublished(io::Error::other("plain failure"));
+        assert_eq!(plain.to_string(), "plain failure");
+        assert!(!is_published_unsynced(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
     }
 
     /// `NotFound` (the routine "never written yet" cold-start case

@@ -213,20 +213,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
         // table must list both — disambiguate by the batch file's
         // directory, with a warning, exactly as
         // scripts/extract_metrics.py does for its trace aggregation.
-        let mut key = batch.source.clone();
-        if segments.contains_key(&key) {
-            let parent = file
-                .parent()
-                .and_then(Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| file.display().to_string());
-            key = format!("{} ({parent})", batch.source);
-            eprintln!(
-                "taguru: anchoring: {}: source '{}' already judged — listed again as \
-                 '{key}'",
-                file.display(),
-                batch.source
-            );
+        let key = listing_key(&batch.source, file, |key| segments.contains_key(key));
+        if let Some(warning) = relisted_warning(file, &batch.source, &key) {
+            eprintln!("{warning}");
         }
         segments.insert(
             key,
@@ -278,6 +267,50 @@ pub(crate) fn run(args: &[String]) -> i32 {
 /// `evaluate`'s "first three, then a count" precedent; `--json` is
 /// never capped.
 const DEFAULT_LIST: usize = 3;
+
+/// The stderr line for a source listed under a disambiguated key, or
+/// `None` when it kept its own name — pure, so which inputs warn is
+/// testable without capturing stderr.
+fn relisted_warning(file: &Path, source: &str, key: &str) -> Option<String> {
+    (key != source).then(|| {
+        format!(
+            "taguru: anchoring: {}: source '{source}' already judged — listed again as '{key}'",
+            file.display()
+        )
+    })
+}
+
+/// The table key for `source` judged from batch `file`, unique among
+/// the keys `taken` already holds — a collision would overwrite one
+/// segment's report while the totals still counted both. The bare
+/// source when free; else `"{source} ({dir})"`, widening `dir` one
+/// parent at a time (`out`, `run2/out`, ...) since `run1/out/c.jsonl`
+/// and `run2/out/c.jsonl` share their nearest directory; else (the
+/// same file named twice) the full file path with an ordinal.
+fn listing_key(source: &str, file: &Path, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(source) {
+        return source.to_string();
+    }
+    let directories: Vec<_> = file
+        .parent()
+        .map(|parent| parent.components().collect())
+        .unwrap_or_default();
+    for start in (0..directories.len()).rev() {
+        let tail: PathBuf = directories[start..].iter().collect();
+        let key = format!("{source} ({})", tail.display());
+        if !taken(&key) {
+            return key;
+        }
+    }
+    let base = format!("{source} ({})", file.display());
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|ordinal| format!("{base} #{ordinal}"))
+        .find(|key| !taken(key))
+        .expect("an unbounded ordinal range always reaches a free key")
+}
 
 /// The 1-based line of every association line in a batch file, in
 /// order — a line is an association exactly when it is a JSON object
@@ -740,6 +773,16 @@ fn print_table(segments: &BTreeMap<String, SegmentReport>, totals: &Counts, skip
 mod tests {
     use super::*;
 
+    /// Only a source moved to a disambiguated key warns; one listed
+    /// under its own name is the ordinary case and stays silent.
+    #[test]
+    fn only_a_relisted_source_warns() {
+        let file = Path::new("run2/out/c.jsonl");
+        assert_eq!(relisted_warning(file, "c.md", "c.md"), None);
+        let warning = relisted_warning(file, "c.md", "c.md (run2/out)").unwrap();
+        assert!(warning.contains("'c.md (run2/out)'"), "{warning}");
+    }
+
     fn assoc(subject: &str, object: &str, paragraph: Option<u32>) -> crate::registry::AssocOp {
         crate::registry::AssocOp {
             subject: subject.to_string(),
@@ -1073,5 +1116,37 @@ mod tests {
         assert_eq!(run(&["--list".to_string()]), 2);
         assert_eq!(run(&["--list".to_string(), "many".to_string()]), 2);
         assert_eq!(run(&["--list".to_string(), "-1".to_string()]), 2);
+    }
+
+    /// Three out-dirs named alike (`run{1,2,3}/out/c.jsonl`) all hold
+    /// source `c.md`: the old "{source} ({parent})" key gave the second
+    /// and third the same "c.md (out)" and the third overwrote the
+    /// second. Every one keeps its own row, so the table matches the
+    /// totals; the same file named again gets its full path, then an
+    /// ordinal.
+    #[test]
+    fn listing_keys_stay_unique_for_same_named_directories() {
+        let mut keys = std::collections::BTreeSet::new();
+        let files = [
+            "run1/out/c.jsonl",
+            "run2/out/c.jsonl",
+            "run3/out/c.jsonl",
+            "run3/out/c.jsonl",
+            "run3/out/c.jsonl",
+        ];
+        for file in files {
+            let key = listing_key("c.md", Path::new(file), |key| keys.contains(key));
+            assert!(keys.insert(key.clone()), "{key} collided");
+        }
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            [
+                "c.md",
+                "c.md (out)",
+                "c.md (run3/out)",
+                "c.md (run3/out/c.jsonl)",
+                "c.md (run3/out/c.jsonl) #2",
+            ]
+        );
     }
 }

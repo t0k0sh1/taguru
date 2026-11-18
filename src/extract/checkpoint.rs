@@ -139,6 +139,18 @@ pub(super) struct SegmentCheckpoints {
     /// (`CheckpointStore::bind_overview`). `""` below `overview`.
     #[serde(default)]
     pub(super) overview_digest: String,
+    /// Pieces the ladder SPLIT (by content hash) → the split cap it
+    /// used. A split piece never gets a `pieces` entry of its own —
+    /// only its children do — so without this a resume re-paid the
+    /// parent's whole failed ladder (the `length` round, the escalated
+    /// resend, the timeout wait, an `auto` demotion) before reaching
+    /// the children's cache. With it, `extract_piece` goes straight to
+    /// the children: what was answered — "too big, split" included —
+    /// is never asked again. `default` so a checkpoint written before
+    /// the field loads with no splits recorded (those resumes simply
+    /// re-pay, as before).
+    #[serde(default)]
+    pub(super) splits: BTreeMap<String, usize>,
 }
 
 /// ADR 0037 §3.4: the line for a checkpoint whose fingerprint is not
@@ -206,6 +218,7 @@ impl SegmentCheckpoints {
             pieces: BTreeMap::new(),
             overview: BTreeMap::new(),
             overview_digest: String::new(),
+            splits: BTreeMap::new(),
         }
     }
 
@@ -250,6 +263,7 @@ impl CheckpointStore {
                 pieces: BTreeMap::new(),
                 overview: BTreeMap::new(),
                 overview_digest: String::new(),
+                splits: BTreeMap::new(),
             }),
         }
     }
@@ -283,6 +297,33 @@ impl CheckpointStore {
             eprintln!(
                 "taguru: extract: {source}: saving checkpoint {}: {error} — the piece still \
                  counts this run; a resume may repeat it",
+                self.path.display()
+            );
+        }
+    }
+
+    /// The split cap a prior attempt split `piece_id` at, if it did.
+    pub(super) fn split_cap(&self, piece_id: &str) -> Option<usize> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.splits.get(piece_id).copied()
+    }
+
+    /// Records that `piece_id` split at `cap`, durably — the same
+    /// posture as [`CheckpointStore::record`]: a save failure only
+    /// warns, and a resume then re-pays the parent's ladder.
+    pub(super) fn record_split(&self, source: &str, piece_id: String, cap: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.splits.insert(piece_id, cap);
+        if let Err(error) = state.save(&self.path) {
+            eprintln!(
+                "taguru: extract: {source}: saving checkpoint {}: {error} — the split \
+                 still counts this run; a resume may repeat the piece's ladder",
                 self.path.display()
             );
         }
@@ -322,7 +363,9 @@ impl CheckpointStore {
     /// Binds the cached extraction pieces to the overview in force:
     /// pieces extracted under a different overview digest saw
     /// different blocks and are discarded (never reused against a
-    /// prompt they did not answer). Returns how many were discarded.
+    /// prompt they did not answer) — and so are recorded splits, a
+    /// judgment made on a prompt that is no longer the one sent.
+    /// Returns how many pieces were discarded.
     pub(super) fn bind_overview(&self, source: &str, digest: &str) -> usize {
         let mut state = self
             .state
@@ -333,6 +376,7 @@ impl CheckpointStore {
         }
         let discarded = state.pieces.len();
         state.pieces.clear();
+        state.splits.clear();
         state.overview_digest = digest.to_string();
         if let Err(error) = state.save(&self.path) {
             eprintln!(

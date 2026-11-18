@@ -236,8 +236,16 @@ impl RepoWalk {
     }
 }
 
+/// Every git invocation this tool makes. `--no-optional-locks` (a
+/// global option, so before `-C` and the subcommand): `git status`
+/// otherwise opportunistically refreshes the index and takes
+/// `index.lock` to write it back — and `watch` runs it every poll,
+/// so the user's own `git commit`/`git add` would intermittently die
+/// on "index.lock: File exists". Everything here only reads; none of
+/// it needs the refresh persisted.
 fn git_in(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -350,6 +358,35 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         assert!(RepoWalk::discover(&outside).is_err());
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// `watch` polls `dirty_files` every tick; plain `git status`
+    /// refreshes stale stat info in the index and writes it back under
+    /// `index.lock`, racing the user's own git. The poll must leave
+    /// the index byte-for-byte alone.
+    #[test]
+    fn polling_the_dirty_set_never_rewrites_the_index() {
+        let repo = TestRepo::new("optional-locks");
+        repo.write("src/lib.rs", "fn a() {}\n");
+        repo.commit("init");
+        // Content unchanged, stat info stale: exactly what makes a
+        // plain `git status` refresh and rewrite the index. An mtime
+        // far in the past keeps the entry out of racy-git territory.
+        fs::File::options()
+            .write(true)
+            .open(repo.dir.join("src/lib.rs"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(978_307_200))
+            .unwrap();
+        let index = repo.dir.join(".git/index");
+        let before = fs::read(&index).unwrap();
+        let walk = RepoWalk::discover(&repo.dir).unwrap();
+        assert!(walk.dirty_files().unwrap().is_empty());
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            before,
+            "the dirty-set poll must not write the index"
+        );
     }
 
     #[test]

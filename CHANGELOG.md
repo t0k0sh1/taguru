@@ -19,6 +19,122 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Fixed
 
+- **The router refuses `..` segments delimited by `\`.** The proxy's
+  dot-segment check split paths on `/` only, while the outbound URL
+  parser reads `\` as `/`: `POST /contexts/<id>/..\..\import` reached a
+  shard as `POST /import`, past the router's own per-batch routing.
+- **`--redact` masks a private key that follows a credential
+  assignment, and stops failing quoted credentials.** In
+  `SECRET_KEY=-----BEGIN PRIVATE KEY-----…` the assignment's value
+  (`-----BEGIN`) shadowed the whole key match, so the key body reached
+  the model, passages, and `import --refuse-sensitive` unmasked. A
+  secret is now shadowed only when the owning match holds it whole, and
+  one that starts inside an earlier match and runs past it (a key block
+  one byte into a credential's value) has its remainder masked too. The
+  output scan read the JSON-encoded batch line, so the `\"` of a masked
+  `DB_PASSWORD="…"` read as a new credential and failed the segment,
+  discarding its checkpoint, on every run; it now scans the decoded
+  string values.
+- **A deletion that boot cannot finish stays deleted.** The boot sweep
+  removed the `.deleted` marker even when an unlink failed, and the
+  same boot registered the surviving `.ctx` — the deleted context came
+  back. The marker now stays until the family is gone, and a lazy
+  bucket boot no longer registers stems the sweep vetoed.
+- **Export drops paragraph locators whose source stored no passage.**
+  Import refuses a paragraph in a passage-less batch, so such a context
+  exported a stream its own import refused. The pass honors the export
+  deadline like the rest of the render.
+- **Concurrent imports creating the same context id no longer fail at
+  random.** A batch that lost the create race was refused with
+  `no_context` while the winner was still writing; it now waits for the
+  winner (and creates the context itself if the winner failed).
+- **A failed WAL rewind no longer leaves the byte count ahead of the
+  file.** A reset or truncate whose shrink landed but whose sync failed
+  left `wal_bytes` at the old length; the next partial-apply rollback
+  then cut inside a fresh record and the log was quarantined as corrupt.
+- **Compaction publishes its image before releasing the context.**
+  Writes admitted between the in-memory swap and the publish were
+  validated against the compacted graph but, after a crash, replayed
+  against the old image — to a different result or a refusal.
+  `image_persisted: false` now means the rebuilt image was not durably
+  published, in one of two shapes: it could not be written, and the
+  context keeps its previous image (nothing retries it; compact again
+  once the disk recovers), or it landed but its directory fsync failed,
+  and the context runs on the compacted image — matching the disk — while
+  the next flush re-publishes it durably. It used to mean the compacted
+  graph stood in memory until a later flush landed.
+- **A file published before its fsync failed is treated as written.**
+  `write_atomic` reported a post-rename directory-fsync failure like a
+  failed write; a group create, update, rename, or restore then rolled
+  memory back while the file stayed on disk and re-registered at the
+  next boot. Memory now follows the published file, and a restore counts
+  that record toward `durable_prefix`.
+- **A context-scoped key's grant stays opaque.** A v0.9.7 import from a
+  scoped key resolved names against every context before checking the
+  grant, so the answer (403 with the real id, 404, or 409) told an
+  out-of-grant context apart from an absent one; names now resolve
+  within the grant only. A group write refused through an existing
+  group's members no longer names the out-of-grant member ids.
+- **Restore and write validation.** A group restore refused after some
+  groups (or a schema record) landed reported `nothing_written`; it now
+  reports `durable_prefix`, and an I/O failure is no longer marked
+  `retryable_after_correction`. `POST /contexts/{id}/sources` refuses
+  passages over import's 8 MiB passage cap and the ids export reserves
+  (`export:empty`, `export:unsourced`); `explain` validates `source_id`
+  like every other source endpoint.
+- **Router: a single-shard router checks import `create` blocks against
+  the route map** instead of creating contexts the map does not route.
+- **Replica: a manifest re-PUT within the same second is applied.**
+  Change detection compared second-granular Last-Modified only; it now
+  includes ETag and version.
+- **Explain no longer answers 500, or reports another generation's
+  rank,** when the source is re-registered with more paragraphs during
+  the call.
+- **Keyring and route-map reloads never re-arm an older version.** A
+  SIGHUP reload read the file before taking the reload lock, and the
+  config watch (the router's map watch alike) read and applied outside
+  any serialization — an older keyring could overwrite a newer one and
+  re-enable revoked tokens, an older map could replace a newer one, and
+  a file reverted after a SIGHUP read as unchanged to the watch. Every
+  reload now reads, judges, and swaps under one lock, off the async
+  workers, and SIGHUP and the watch share the digest of the last content
+  judged. A SIGHUP that arrives mid-tick is no longer dropped. The
+  failed-auth throttle's docs now say what it
+  does: it slows wrong guesses and never blocks a correct token (so a
+  shared IP cannot lock the real client out); token entropy is the
+  brute-force defense.
+- **Registry durability edges.** With `TAGURU_WAL=0`, sidecar-only
+  writes (rename, meta update, schema install, config bump, usage)
+  published a graph revision the on-disk image did not reflect. A
+  repeated `retract_source` advanced the revision and emitted
+  `SourceRetracted` (twice, when the passage went next). A create that
+  failed after publishing files now removes them.
+- **Extract.** A segment that redaction grew past the 8 MiB passage cap
+  is refused before any model call, not after every one. A piece split
+  for length or timeout records the split in the checkpoint, so a
+  resume goes straight to its children (on-disk: an optional `splits`
+  map; older checkpoints load). Encrypted PEM private keys, whose header
+  is followed by a blank line, are now masked; the ruleset version is
+  `redact4`, so documents extracted with `--redact` re-extract once.
+- **Code map (`taguru-code`).** A synced file that turns into a
+  symlink, non-UTF-8, or unreadable file retracts its facts — judged by
+  what the map holds, so a sync interrupted before saving its state does
+  not leave them behind; a full
+  re-sync (missing anchor or state) retracts files deleted meanwhile;
+  the state file is written atomically; one refused file no longer stops
+  the sync. Same-named definitions in one file each keep their location:
+  trait-impl methods are named `<X as Trait>::fn` and remaining
+  duplicates `name#2`, … — `find fmt` and `find X::fmt` still match
+  (FACTS_VERSION 2: existing maps rebuild on the next sync). The data
+  directory's self-exclusion survives `..` and symlinks (including an
+  existing directory reached past a missing one), and the watch
+  polls git with `--no-optional-locks`.
+- **CLI and config.** `taguru communities` chunks its passage lookups
+  under the 1,000-item cap; a config line with a NUL is a usage error,
+  not a panic; `taguru anchoring` keeps same-named sources apart;
+  consolidation cuts an overlong headline to the 1,024-byte name cap;
+  `TAGURU_EMBED_URL` without a model, an inapplicable `--take-over`, and
+  an unparseable `RUST_LOG` now warn.
 - **`TAGURU_EMBED_PARALLEL` is documented as the process-wide ceiling it
   is** (review on #1065). `--help` and `docs/getting-started.html` said
   it bounded one context's refresh and that concurrent refreshes across

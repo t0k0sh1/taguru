@@ -282,6 +282,18 @@ pub(crate) fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> 
         // to the value's content, not to accidental padding around
         // the separator.
         let value = value.trim();
+        // `std::env::set_var` panics on a NUL in either half, which
+        // turned a mis-encoded file (UTF-16 without a BOM puts a NUL
+        // after every ASCII byte) into exit 101 instead of this usage
+        // error. '=' cannot reach the key: the first one split it off.
+        // Neither half is echoed — the value may be a token, and the
+        // key is the garbled thing.
+        if key.contains('\0') || value.contains('\0') {
+            return Err(format!(
+                "line {}: contains a NUL byte (is the file UTF-16? save it as UTF-8)",
+                index + 1
+            ));
+        }
         pairs.push((key.to_string(), value.to_string()));
     }
     Ok(pairs)
@@ -358,6 +370,22 @@ mod tests {
     fn config_keys_with_spaces_are_refused() {
         let error = parse_config("TAGURU WAL=1\n").unwrap_err();
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    /// A NUL would reach `std::env::set_var`, which panics — a
+    /// BOM-less UTF-16LE file is the realistic source. Refused as a
+    /// usage error naming the line, in the key or the value.
+    #[test]
+    fn config_lines_carrying_a_nul_are_refused() {
+        let utf16: String = "TAGURU_WAL=1\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .map(char::from)
+            .collect();
+        let error = parse_config(&utf16).unwrap_err();
+        assert!(error.contains("line 1") && error.contains("NUL"), "{error}");
+        let error = parse_config("TAGURU_ADDR=x\nTAGURU_WAL=1\0\n").unwrap_err();
+        assert!(error.contains("line 2") && error.contains("NUL"), "{error}");
     }
 
     /// A key repeated in the file must not see its own earlier

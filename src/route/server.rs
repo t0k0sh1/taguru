@@ -230,7 +230,9 @@ pub(crate) async fn run(config: Option<PathBuf>) {
 /// success, refuse on failure — the old map keeps serving, exactly as
 /// a boot-time refusal keeps the process from serving a broken one.
 /// The keyring's reload semantics (issue #134), applied to the route
-/// map (issue #515). Returns whether the swap happened.
+/// map (issue #515). Returns whether the swap happened. Both runtime
+/// triggers reach this through [`MapReloads`], which reads `bytes`
+/// under its lock.
 pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str) -> bool {
     let parsed = std::str::from_utf8(bytes)
         .map_err(|error| format!("not UTF-8: {error}"))
@@ -260,6 +262,67 @@ pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str)
     }
 }
 
+/// The route map's reload ledger, shared by both triggers (SIGHUP and
+/// the map-file watch). Every reload reads the file UNDER `judged`'s
+/// lock and swaps before releasing it, so reloads are serialized end
+/// to end — read → parse → swap — and none can swap in bytes another
+/// reload already superseded. Read outside the lock, a SIGHUP's v1
+/// could land after a watch tick armed the newer v2; with v2 already
+/// recorded as judged, the stale map would keep serving with nothing
+/// left to re-trigger. The keyring's `SharedKeyring::reload_serial`
+/// discipline, applied to the map.
+struct MapReloads {
+    path: PathBuf,
+    /// The digest of the newest map content any reload judged —
+    /// applied or refused — seeded with the bytes boot applied, not a
+    /// fresh read (#942), so an edit racing the watch's startup still
+    /// registers as a change. The watch's change detector, shared with
+    /// SIGHUP on purpose: a watch-private digest goes stale once a
+    /// SIGHUP arms other content, and a file then reverted to what the
+    /// watch last judged would read as unchanged. Refusals count: one
+    /// loud line per change, not one per tick.
+    judged: parking_lot::Mutex<String>,
+}
+
+impl MapReloads {
+    fn new(path: PathBuf, boot_digest: String) -> Self {
+        Self {
+            path,
+            judged: parking_lot::Mutex::new(boot_digest),
+        }
+    }
+
+    /// SIGHUP's reload: an operator asked, so whatever the file says is
+    /// judged, already-judged content included. `None`: the file is
+    /// unreadable, and the map already serving stays in effect.
+    fn reload(&self, state: &RouterState) -> Option<bool> {
+        self.judge(state, "sighup", false)
+    }
+
+    /// A watch tick's reload, for content no reload has judged yet — a
+    /// digest, not `(mtime, len)`, for the same reasons the keyring
+    /// watch hashes (issue #309). `None` when nothing was judged: an
+    /// unreadable file (transient volume states must neither trigger a
+    /// reload nor poison the digest), or content already judged.
+    fn reload_if_changed(&self, state: &RouterState) -> Option<bool> {
+        self.judge(state, "map-watch", true)
+    }
+
+    /// Blocking: the read happens under the lock, so the reload tasks
+    /// run this on an off-worker thread (`read_off_worker` for a tick,
+    /// `read_off_worker_queued` for a SIGHUP), never on a worker.
+    fn judge(&self, state: &RouterState, trigger: &str, skip_judged: bool) -> Option<bool> {
+        let mut judged = self.judged.lock();
+        let bytes = std::fs::read(&self.path).ok()?;
+        let digest = crate::sha256::sha256_hex(&bytes);
+        if skip_judged && *judged == digest {
+            return None;
+        }
+        *judged = digest;
+        Some(reload_route_map(state, &bytes, trigger))
+    }
+}
+
 /// Arms the route-map hot-reload triggers (issue #515) — the same two
 /// triggers, same swap discipline, as the keyring's
 /// `spawn_keyring_reload_tasks`:
@@ -277,8 +340,7 @@ pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str)
 /// Requests already in flight keep the snapshot they took at entry
 /// ([`RouterState::map`]); only new requests see a swapped map.
 /// `boot_digest` is the sha256 of the bytes boot applied — the
-/// watch's baseline, so an edit racing the task's startup still
-/// registers as a change.
+/// reloads' judged baseline (see [`MapReloads`]).
 fn spawn_route_map_reload_tasks(
     state: RouterState,
     path: PathBuf,
@@ -288,16 +350,21 @@ fn spawn_route_map_reload_tasks(
     // Shared with the keyring watch — see `crate::read_off_worker`
     // (issue #900): off a plain thread, not tokio's blocking pool, so
     // a stalled read on a network mount can neither wedge this loop
-    // nor outlive graceful shutdown. SIGHUP and the periodic tick both
-    // read this same path, so they share one `in_flight` flag too —
-    // without it, a SIGHUP landing mid-stall would pile a second
-    // blocked thread behind the tick's.
+    // nor outlive graceful shutdown — and the whole reload with it,
+    // since each one reads under `MapReloads`' lock. SIGHUP and the
+    // periodic tick both read this same path, so they share one
+    // `in_flight` flag too: a SIGHUP landing mid-stall never piles a
+    // second blocked thread behind the tick's, and — unlike a tick —
+    // it is never skipped either, but queues until the path is free.
     use crate::{ReadInFlight, read_off_worker};
-    let in_flight: ReadInFlight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let in_flight = Arc::new(ReadInFlight::default());
+    let reloads = Arc::new(MapReloads::new(path, boot_digest));
     #[cfg(unix)]
     {
+        use crate::read_off_worker_queued;
+
         let state = state.clone();
-        let path = path.clone();
+        let reloads = Arc::clone(&reloads);
         let in_flight = Arc::clone(&in_flight);
         // Registered before the task is spawned (#892, the same window
         // `shutdown_signal` closes): a SIGHUP before the task's first
@@ -312,43 +379,34 @@ fn spawn_route_map_reload_tasks(
         if let Some(mut hangup) = hangup {
             tasks.push(tokio::spawn(async move {
                 while hangup.recv().await.is_some() {
-                    match read_off_worker(path.clone(), &in_flight).await {
-                        Some(bytes) => {
-                            reload_route_map(&state, &bytes, "sighup");
-                        }
-                        None => warn!(
-                            path = %path.display(),
+                    let (state, reload) = (state.clone(), Arc::clone(&reloads));
+                    let judged =
+                        read_off_worker_queued(&in_flight, move || reload.reload(&state), || {
+                            warn!(
+                                path = %reloads.path.display(),
+                                "route map SIGHUP reload is waiting on a read of the map that \
+                                 has not returned yet — it runs once that read does; the map \
+                                 already serving stays in effect meanwhile"
+                            );
+                        })
+                        .await;
+                    if judged.is_none() {
+                        warn!(
+                            path = %reloads.path.display(),
                             "route map unreadable on SIGHUP — the map already serving stays in effect"
-                        ),
+                        );
                     }
                 }
             }));
         }
     }
     tasks.push(tokio::spawn(async move {
-        // Each tick's read is THE read the reload uses — its bytes go
-        // straight into `reload_route_map`, so change detection and
-        // the reload can never disagree about what the file said
-        // (the same single-read discipline as the keyring watch).
-        let mut last: Option<String> = Some(boot_digest);
         let mut ticker = tokio::time::interval(crate::CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {
             ticker.tick().await;
-            // An unreadable file is NOT a change: transient volume
-            // states must neither trigger a reload nor poison `last`.
-            let Some(bytes) = read_off_worker(path.clone(), &in_flight).await else {
-                continue;
-            };
-            let current = crate::sha256::sha256_hex(&bytes);
-            if last.as_ref() != Some(&current) {
-                // Remember the state we ATTEMPTED, refusal included:
-                // one loud line per change, not one per tick. A
-                // reverted file hashes differently again and
-                // re-triggers.
-                last = Some(current);
-                reload_route_map(&state, &bytes, "map-watch");
-            }
+            let (state, reload) = (state.clone(), Arc::clone(&reloads));
+            let _ = read_off_worker(&in_flight, move || reload.reload_if_changed(&state)).await;
         }
     }));
     tasks
@@ -555,5 +613,141 @@ mod tests {
                 .copied(),
             Some(3)
         );
+    }
+
+    /// Where the serving map sends `sake` — the one context every map
+    /// in these tests names.
+    fn sake_url(state: &RouterState) -> String {
+        let map = state.map();
+        map.url(map.shard_of("sake").unwrap()).to_string()
+    }
+
+    /// A map file under a fresh scratch dir holding `boot`, and the
+    /// ledger boot would hand the reload tasks for it.
+    fn booted_map(tag: &str, boot: &str) -> (PathBuf, PathBuf, MapReloads) {
+        let dir = crate::registry::test_support::scratch_dir(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("route-map");
+        std::fs::write(&path, boot).unwrap();
+        let reloads = MapReloads::new(path.clone(), crate::sha256::sha256_hex(boot.as_bytes()));
+        (dir, path, reloads)
+    }
+
+    /// Every map reload — SIGHUP's and the watch's alike — reads the
+    /// file UNDER `MapReloads`' lock, not before taking it. Read first,
+    /// a SIGHUP's v1 could be swapped in after a watch tick armed the
+    /// newer v2 (recording v2 as judged): a stale map serving with
+    /// nothing left to re-trigger.
+    ///
+    /// Deterministic via a FIFO as the map file: the reader's `open`
+    /// blocks until this test opens the write end, so the moment our
+    /// `open` returns the reload thread is provably INSIDE its read —
+    /// and at that moment the lock must already be held.
+    #[cfg(unix)]
+    #[test]
+    fn every_map_reload_reads_the_file_while_holding_the_reload_lock() {
+        use std::io::Write;
+
+        let (dir, path, reloads) =
+            booted_map("route-reload-read-under-lock", "sake = http://a:1\n");
+        std::fs::remove_file(&path).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed");
+        let state = state();
+
+        let sighup = || reloads.reload(&state);
+        let watch = || reloads.reload_if_changed(&state);
+        let triggers: [(&str, &(dyn Fn() -> Option<bool> + Sync)); 2] =
+            [("sighup", &sighup), ("map-watch", &watch)];
+        for (port, (trigger, reload)) in (2..).zip(triggers) {
+            let (locked_during_read, swapped) = std::thread::scope(|scope| {
+                let reload = scope.spawn(reload);
+                // Returns only once the reload thread has opened the
+                // read end, i.e. is mid-read.
+                let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                let locked = reloads.judged.is_locked();
+                // Finish the read either way, so a failing assertion
+                // below reports instead of hanging the reload thread.
+                writer
+                    .write_all(format!("sake = http://a:{port}\n").as_bytes())
+                    .unwrap();
+                drop(writer);
+                (locked, reload.join().unwrap())
+            });
+
+            assert!(
+                locked_during_read,
+                "{trigger}: the map read ran outside the reload lock, so it can race another \
+                 reload's swap"
+            );
+            assert_eq!(swapped, Some(true), "{trigger}");
+            assert_eq!(sake_url(&state), format!("http://a:{port}"), "{trigger}");
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The watch's change detector is shared with SIGHUP: content a
+    /// SIGHUP judged counts as judged, and — what a watch-private
+    /// digest gets wrong — content the watch judged EARLIER is a
+    /// change again once a SIGHUP has armed something else. A rewrite
+    /// picked up by SIGHUP and reverted before the next tick must not
+    /// leave the rewrite serving against a file that no longer says it.
+    #[test]
+    fn a_map_reverted_after_a_sighup_reload_still_reads_as_a_change() {
+        let boot = "sake = http://a:1\n";
+        let (dir, path, reloads) = booted_map("route-reload-revert", boot);
+        let state = state();
+
+        std::fs::write(&path, "sake = http://b:2\n").unwrap();
+        assert_eq!(reloads.reload(&state), Some(true));
+        // The SIGHUP's judgment is the watch's too: no second reload.
+        assert_eq!(reloads.reload_if_changed(&state), None);
+
+        std::fs::write(&path, boot).unwrap();
+        assert_eq!(
+            reloads.reload_if_changed(&state),
+            Some(true),
+            "the reverted map must still read as a change"
+        );
+        assert_eq!(sake_url(&state), "http://a:1");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The watch's change detector: boot's own bytes (#942) and content
+    /// already judged are no reload, an unreadable file neither reloads
+    /// nor moves the baseline, and each content change is judged
+    /// exactly once — a refusal included, one loud line per change
+    /// rather than per tick — while a SIGHUP judges whatever the file
+    /// says, and the serving map survives every refusal.
+    #[test]
+    fn the_map_watch_judges_each_content_change_once() {
+        let boot = "sake = http://a:1\n";
+        let (dir, path, reloads) = booted_map("route-reload-change-detection", boot);
+        let state = state();
+        assert_eq!(reloads.reload_if_changed(&state), None);
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(reloads.reload_if_changed(&state), None);
+        assert_eq!(reloads.reload(&state), None);
+        std::fs::write(&path, boot).unwrap();
+        assert_eq!(reloads.reload_if_changed(&state), None);
+
+        std::fs::write(&path, "sake = http://b:2\n").unwrap();
+        assert_eq!(reloads.reload_if_changed(&state), Some(true));
+        assert_eq!(sake_url(&state), "http://b:2");
+        assert_eq!(reloads.reload_if_changed(&state), None);
+
+        std::fs::write(&path, "sake http://no-equals\n").unwrap();
+        assert_eq!(reloads.reload_if_changed(&state), Some(false));
+        assert_eq!(reloads.reload_if_changed(&state), None);
+        assert_eq!(reloads.reload(&state), Some(false));
+        assert_eq!(sake_url(&state), "http://b:2");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

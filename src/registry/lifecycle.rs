@@ -3,17 +3,38 @@ use super::*;
 /// One id held in a reservation set (`pending_creates` or
 /// `pending_deletes`) for as long as this lives — released by `Drop` on
 /// every exit path (a normal return, an early `?`, a panic unwind), so
-/// no failed operation can leave its id reserved until restart.
+/// no failed operation can leave its id reserved until restart. A
+/// reservation claimed with `settled` wakes every waiter on it once
+/// released.
 struct IdReservation<'set> {
     set: &'set Mutex<HashSet<String>>,
+    settled: Option<&'set parking_lot::Condvar>,
     id: String,
 }
 
 impl<'set> IdReservation<'set> {
     /// Reserves `id` in `set`, or `None` when someone already holds it.
     fn claim(set: &'set Mutex<HashSet<String>>, id: &str) -> Option<Self> {
+        Self::claim_with(set, None, id)
+    }
+
+    /// [`Self::claim`], notifying `settled` on release.
+    fn claim_notifying(
+        set: &'set Mutex<HashSet<String>>,
+        settled: &'set parking_lot::Condvar,
+        id: &str,
+    ) -> Option<Self> {
+        Self::claim_with(set, Some(settled), id)
+    }
+
+    fn claim_with(
+        set: &'set Mutex<HashSet<String>>,
+        settled: Option<&'set parking_lot::Condvar>,
+        id: &str,
+    ) -> Option<Self> {
         set.lock().insert(id.to_string()).then(|| Self {
             set,
+            settled,
             id: id.to_string(),
         })
     }
@@ -22,6 +43,9 @@ impl<'set> IdReservation<'set> {
 impl Drop for IdReservation<'_> {
     fn drop(&mut self) {
         self.set.lock().remove(&self.id);
+        if let Some(settled) = self.settled {
+            settled.notify_all();
+        }
     }
 }
 
@@ -140,9 +164,9 @@ impl AppState {
     /// HEADER'S id, so an export restored here keeps the id every
     /// other record points at. The id is reserved in `pending_creates`
     /// for the disk work's duration, so a concurrent batch of the same
-    /// stream sees "taken" instead of writing the same family twice;
-    /// it reports `Ok(false)` exactly as if the winner had already
-    /// registered.
+    /// stream never writes the same family twice: it waits for the
+    /// winner to settle, then answers `Ok(false)` once the winner has
+    /// registered — or, if the winner failed, tries the create itself.
     ///
     /// Unlike [`Self::create`], the stem here is NOT freshly minted —
     /// import headers and derived ids (`derived_context_id`'s analysis
@@ -166,25 +190,39 @@ impl AppState {
         if name.is_empty() {
             return Err(CreateError::InvalidName);
         }
-        let _reservation = {
-            let registry = self.0.registry.read();
-            if registry.get_id(id).is_some() {
-                return Ok(false);
+        let _reservation = loop {
+            {
+                let registry = self.0.registry.read();
+                if registry.get_id(id).is_some() {
+                    return Ok(false);
+                }
+                // Both sets are consulted under the registry read guard:
+                // `delete` enters `pending_deletes` under the WRITE guard,
+                // in the same section that unregisters the id, so "not
+                // registered and not being deleted" is one observation;
+                // and two create_if_absent calls of one id cannot both
+                // claim `pending_creates`.
+                if self.0.pending_deletes.lock().contains(id) {
+                    return Err(CreateError::Io(io::Error::other(format!(
+                        "context id {id} is still being deleted; retry once the delete has completed"
+                    ))));
+                }
+                if let Some(reservation) = IdReservation::claim_notifying(
+                    &self.0.pending_creates,
+                    &self.0.creates_settled,
+                    id,
+                ) {
+                    break reservation;
+                }
             }
-            // Both sets are consulted under the registry read guard:
-            // `delete` enters `pending_deletes` under the WRITE guard,
-            // in the same section that unregisters the id, so "not
-            // registered and not being deleted" is one observation;
-            // and two create_if_absent calls of one id cannot both
-            // claim `pending_creates`.
-            if self.0.pending_deletes.lock().contains(id) {
-                return Err(CreateError::Io(io::Error::other(format!(
-                    "context id {id} is still being deleted; retry once the delete has completed"
-                ))));
-            }
-            match IdReservation::claim(&self.0.pending_creates, id) {
-                Some(reservation) => reservation,
-                None => return Ok(false),
+            // Another create holds the id and is still writing its
+            // family. Answering `false` now would send the caller on to
+            // a context that is not registered yet; wait (with the
+            // registry guard released — the winner needs it to
+            // register) until the reservation is gone, then look again.
+            let mut pending = self.0.pending_creates.lock();
+            while pending.contains(id) {
+                self.0.creates_settled.wait(&mut pending);
             }
         };
         if image_path(&self.0.data_dir, id).exists() {
@@ -194,9 +232,9 @@ impl AppState {
             ))));
         }
         self.clear_stale_family(id).map_err(CreateError::Io)?;
-        // Registered before the reservation drops, so a concurrent
-        // batch of the same id goes from "reserved" straight to
-        // "registered" — never to a gap that would create twice.
+        // Registered before the reservation drops, so a waiting batch
+        // of the same id wakes to "registered" — never to a gap that
+        // would create twice.
         self.create_registered(id, name, meta)?;
         Ok(true)
     }
@@ -245,6 +283,16 @@ impl AppState {
     /// `pending_creates`). `save_files` lands the image last, so a
     /// crash anywhere before it commits leaves no image and nothing
     /// registers (the scan keys on `.ctx`).
+    ///
+    /// A reported failure, unlike a crash, can leave the image fully
+    /// in place: `write_atomic` answers `Err` when the parent-directory
+    /// fsync fails AFTER its rename already published the file. Left
+    /// there, the family would boot next time although `create` told
+    /// its caller it failed — and until then every `create_if_absent`
+    /// retry of the id would refuse on "files already exist but no
+    /// context is registered". So a failure unlinks whatever of the
+    /// two files this call may have published, best-effort; nothing
+    /// else can own them (the same exclusivity argument as above).
     fn create_files(
         &self,
         id: &str,
@@ -270,8 +318,38 @@ impl AppState {
             None,
             &context,
         )
-        .map_err(CreateError::Io)?;
+        .map_err(|error| {
+            self.discard_created_files(id);
+            CreateError::Io(error)
+        })?;
         Ok((stats, usage, context))
+    }
+
+    /// [`Self::create_files`]' failure cleanup. Image first — the
+    /// reverse of `save_files`' publish order — so a crash midway
+    /// leaves at worst the inert orphan sidecar a crashed create
+    /// always could, never an image whose sidecar is gone. A file that
+    /// is already absent is the ordinary case (the failure struck
+    /// before it landed); any other unlink or fsync error is only
+    /// logged, since the create's own error is what the caller needs.
+    fn discard_created_files(&self, id: &str) {
+        let dir = &self.0.data_dir;
+        for path in [image_path(dir, id), meta_path(dir, id)] {
+            // The boot sweeps' helper: `NotFound` is the goal reached,
+            // anything else is warned about and left for the operator.
+            super::boot::remove_persisted_file_quietly(
+                &path,
+                "failed create left this file behind",
+            );
+        }
+        // Make the unlinks durable too: a crash that forgot them would
+        // resurrect exactly the family this cleanup exists to remove.
+        if let Err(cleanup_error) = crate::storage::fsync_dir(dir) {
+            tracing::warn!(
+                context = %id, cleanup_error = %cleanup_error,
+                "failed create's cleanup not made durable"
+            );
+        }
     }
 
     /// Removes a `context` from the registry and deletes its files. The
@@ -449,7 +527,7 @@ impl AppState {
             &inner.meta,
             &inner.stats,
             &entry.usage.snapshot(),
-            entry.revision_snapshot(inner),
+            entry.sidecar_revision(inner, self.0.wal_enabled),
             inner.schema_digest.as_deref(),
         ) {
             inner.name = previous;
@@ -533,7 +611,7 @@ impl AppState {
                 &inner.meta,
                 &inner.stats,
                 &entry.usage.snapshot(),
-                entry.revision_snapshot(inner),
+                entry.sidecar_revision(inner, self.0.wal_enabled),
                 inner.schema_digest.as_deref(),
             )
             .map(|()| inner.meta.clone());
@@ -767,7 +845,7 @@ impl AppState {
                     &inner.meta,
                     &inner.stats,
                     &entry.usage.snapshot(),
-                    entry.revision_snapshot(inner),
+                    entry.sidecar_revision(inner, self.0.wal_enabled),
                     inner.schema_digest.as_deref(),
                 );
                 match meta_result {
@@ -810,7 +888,7 @@ impl AppState {
                                 &inner.meta,
                                 &inner.stats,
                                 &entry.usage.snapshot(),
-                                entry.revision_snapshot(inner),
+                                entry.sidecar_revision(inner, self.0.wal_enabled),
                                 previous_digest.as_deref(),
                             );
                             Err(PutSchemaError::Io(error))
@@ -1152,6 +1230,281 @@ mod tests {
             ),
             "the failed attempt's reservation may not linger"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A create that reports failure must leave nothing for the next
+    /// boot (or a `create_if_absent` retry) to trip over. The motivating
+    /// case — the image's post-rename directory fsync failing, file
+    /// already in place — sits outside the fault net (`fsync_dir`), so
+    /// this sweeps every stage/commit the net DOES reach: a failure
+    /// after the sidecar committed used to leave that sidecar behind,
+    /// the same "published, then reported failed" shape the cleanup
+    /// exists for.
+    #[test]
+    fn a_failed_create_leaves_no_family_files_behind() {
+        let family_files = |dir: &Path| -> Vec<String> {
+            fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".meta.json") || name.ends_with(".ctx"))
+                .collect()
+        };
+        let mut failed_after_the_sidecar_landed = false;
+        let mut exhausted = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("create-cleanup-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.create("sake", ContextMeta::default());
+            let past_end = clear_persistence_fault();
+            if past_end {
+                assert!(outcome.is_ok());
+                exhausted = true;
+                drop(state);
+                let _ = fs::remove_dir_all(&dir);
+                break;
+            }
+            assert!(
+                matches!(outcome, Err(CreateError::Io(_))),
+                "failure {failure} must refuse the create"
+            );
+            // Stage + commit of the sidecar are the first two ops.
+            failed_after_the_sidecar_landed |= failure >= 2;
+            assert_eq!(
+                family_files(&dir),
+                Vec::<String>::new(),
+                "failure {failure}: a create reported as failed left family files behind"
+            );
+            drop(state);
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert!(state.directory_entry("sake").is_none());
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+        }
+        assert!(exhausted, "create exceeded the sweep bound");
+        assert!(
+            failed_after_the_sidecar_landed,
+            "the sweep never failed a create after its sidecar committed"
+        );
+    }
+
+    /// With the WAL off, a sidecar-only write (rename, `update_meta`,
+    /// ...) between image publishes must persist the graph revision
+    /// the published image reflects — not the live one, which counts
+    /// writes only memory holds and that a crash right after would
+    /// lose with nothing ever flooring the claim back down. With the
+    /// WAL on the live value is right (the log replays those writes),
+    /// and stays what is persisted.
+    #[test]
+    fn a_sidecar_only_write_persists_the_published_graph_revision_with_the_wal_off() {
+        // By id: the test renames the context partway through.
+        let write = |state: &AppState, id: &str, subject: &str| {
+            state
+                .add_associations(
+                    id,
+                    vec![assoc_op(subject, "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+        };
+        for wal_enabled in [false, true] {
+            let dir = scratch_dir(&format!("sidecar-published-revision-{wal_enabled}"));
+            let boot = || {
+                AppState::boot_with(
+                    dir.clone(),
+                    usize::MAX,
+                    None,
+                    BootOptions {
+                        wal_enabled,
+                        ..BootOptions::default()
+                    },
+                )
+                .unwrap()
+            };
+            let state = boot();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let id = state.id_of("sake");
+            let persisted = || read_meta_file(&dir, &id).revision.graph;
+            // What each step must persist: the live value with the WAL
+            // on, the published image's with it off.
+            let expect = |live: u64, published: u64| if wal_enabled { live } else { published };
+
+            // Unflushed since create: the image holds nothing.
+            write(&state, &id, "蔵");
+            state
+                .update_meta(&id, Some("酒蔵".to_string()), None, None, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted(), expect(1, 0), "update_meta (wal {wal_enabled})");
+
+            // A flush publishes the write; a later one stays unflushed.
+            state.flush_dirty();
+            assert_eq!(
+                persisted(),
+                1,
+                "the flush publishes its own image's revision"
+            );
+            write(&state, &id, "酒");
+            state.rename_context(&id, "shochu").unwrap();
+            assert_eq!(persisted(), expect(2, 1), "rename (wal {wal_enabled})");
+
+            // Across a reboot: the reloaded image is the published one,
+            // and a write after it stays unpublished until the next flush.
+            state.flush_dirty();
+            drop(state);
+            let state = boot();
+            write(&state, &id, "米");
+            state
+                .update_meta(&id, None, None, Some(0.5), None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted(), expect(3, 2), "update_meta after a reboot");
+
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The other image publishers each re-set the published revision
+    /// too — compaction (slot stays Hot), the eviction's lock-held
+    /// fallback save (forced via the same `flushing` trick as
+    /// `evict_entry_stays_resident_when_the_lock_held_fallback_save_fails`,
+    /// slot goes Cold so the next sidecar write sees no reload), and a
+    /// load that replays a log an earlier WAL-on run left behind (the
+    /// replay raises the live revision past the sidecar's seed, and
+    /// that log is still on disk to back it). WAL off throughout the
+    /// checks, so each sidecar-only write below persists exactly the
+    /// published value.
+    #[test]
+    fn every_image_publish_advances_the_wal_off_sidecar_revision() {
+        let boot = |dir: &Path, wal_enabled: bool| {
+            AppState::boot_with(
+                dir.to_path_buf(),
+                usize::MAX,
+                None,
+                BootOptions {
+                    wal_enabled,
+                    ..BootOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let write = |state: &AppState, id: &str, subject: &str| {
+            state
+                .add_associations(
+                    id,
+                    vec![assoc_op(subject, "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+        };
+        let touch_meta = |state: &AppState, id: &str, description: &str| {
+            state
+                .update_meta(id, Some(description.to_string()), None, None, None)
+                .unwrap()
+                .unwrap();
+        };
+        let dir = scratch_dir("every-publish-sidecar-revision");
+
+        // Load path: a WAL-on run logs one write and stops unflushed —
+        // the sidecar still says 0, the log holds the write.
+        let state = boot(&dir, true);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let id = state.id_of("sake");
+        write(&state, &id, "蔵");
+        drop(state);
+        let persisted = || read_meta_file(&dir, &id).revision.graph;
+        assert_eq!(persisted(), 0, "sanity: nothing flushed the write");
+        let state = boot(&dir, false);
+        // Pinning loads the image (replaying the log) under the same
+        // lock as the sidecar write.
+        state
+            .update_meta(&id, None, Some(true), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted(), 1, "the replayed load is what is published");
+        state
+            .update_meta(&id, None, Some(false), None, None)
+            .unwrap()
+            .unwrap();
+
+        // Compaction publishes the write before it.
+        write(&state, &id, "酒");
+        state.compact_context(&id, Deadline::unbounded()).unwrap();
+        touch_meta(&state, &id, "compacted");
+        assert_eq!(persisted(), 2, "compaction published the image");
+
+        // The eviction's fallback save publishes the write before it.
+        write(&state, &id, "米");
+        let entry = state.lookup_named("sake").unwrap();
+        entry.flushing.store(true, Ordering::Relaxed);
+        let freed = state.evict_entry("sake", &entry);
+        entry.flushing.store(false, Ordering::Relaxed);
+        assert!(freed, "sanity: the fallback save must succeed");
+        touch_meta(&state, &id, "evicted");
+        assert_eq!(persisted(), 3, "the eviction save published the image");
+
+        drop(state);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `create_if_absent` that loses the id's claim to a create still
+    /// writing its family waits for it: it answers `false` only once
+    /// the winner has registered (the import batch behind it then finds
+    /// the context), and creates itself if the winner failed.
+    #[test]
+    fn a_create_that_loses_the_claim_waits_for_the_winner_to_settle() {
+        let dir = scratch_dir("create-claim-wait");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let spawn_loser = |id: &str| {
+            let state = state.clone();
+            let id = id.to_string();
+            std::thread::spawn(move || {
+                state
+                    .create_if_absent(&id, "restored", ContextMeta::default())
+                    .map_err(|_| "create")
+            })
+        };
+
+        // The winner registers: the loser hears `false`, and the
+        // context is there when it does.
+        let id = test_id("won");
+        let winner =
+            IdReservation::claim_notifying(&state.0.pending_creates, &state.0.creates_settled, &id)
+                .unwrap();
+        let loser = spawn_loser(&id);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!loser.is_finished(), "the loser must wait for the winner");
+        state
+            .create_registered(&id, "restored", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        drop(winner);
+        assert_eq!(loser.join().unwrap(), Ok(false));
+        assert!(state.context_id_exists(&id));
+
+        // The winner fails: the loser creates the context itself.
+        let id = test_id("lost");
+        let winner =
+            IdReservation::claim_notifying(&state.0.pending_creates, &state.0.creates_settled, &id)
+                .unwrap();
+        let loser = spawn_loser(&id);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!loser.is_finished(), "the loser must wait for the winner");
+        drop(winner);
+        assert_eq!(loser.join().unwrap(), Ok(true));
+        assert!(state.context_id_exists(&id));
 
         let _ = fs::remove_dir_all(dir);
     }

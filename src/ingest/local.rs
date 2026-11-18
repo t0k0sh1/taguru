@@ -305,7 +305,7 @@ pub(super) fn run_local(
     // independent, and schemas and groups apply after all of them.
     if !legacy.is_empty() {
         let (paths, streams): (Vec<&PathBuf>, Vec<LegacyStream>) = legacy.into_iter().unzip();
-        let refusal = match resolve_legacy(&state, streams) {
+        let refusal = match resolve_legacy(&state, streams, None) {
             Ok(streams) => {
                 let mut conflicting = 0;
                 for (path, stream) in paths.into_iter().zip(streams) {

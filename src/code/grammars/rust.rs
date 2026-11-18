@@ -1,14 +1,27 @@
 //! Rust grammar: tree-sitter-rust node types → [`SymbolNode`]s. The
 //! naming rule is the language-agnostic one — qualified names are
-//! `<file path>::<name path>` — with two Rust-specific calls:
+//! `<file path>::<name path>` — with three Rust-specific calls:
 //!
 //! - An `impl` block is a naming scope, not a symbol: methods inside
 //!   `impl Context` become `<file>::Context::method` (the plan's
 //!   worked example), and the block itself emits nothing. `impl Trait
-//!   for Type` scopes by `Type`. The scope name may denote a type
-//!   defined in another file — the `contains` edge then points at a
-//!   concept the other file's `defined_in` completes, which is
-//!   exactly how a shared graph is supposed to compose.
+//!   for Type` scopes as Rust's own fully-qualified form,
+//!   `<Type as Trait>`: `impl Display for X` and `impl Debug for X`
+//!   each define a `fmt`, and a shared `X::fmt` would collapse them
+//!   into one name — the map keeps one location per (name, file), so
+//!   the later definition would become unfindable. Lookups still
+//!   answer `X::fmt` for both (`query.rs` reads `<X as Display>` as
+//!   `X`), and both hang under `X` in `tree` (their `contains` parent
+//!   is the type). The scope name may denote a type defined in another file
+//!   — the `contains` edge then points at a concept the other file's
+//!   `defined_in` completes, which is exactly how a shared graph is
+//!   supposed to compose.
+//! - A name path that still repeats within the file — `#[cfg]`-split
+//!   twins, `impl X<u32>` beside `impl X<u64>`, two `impl From<_> for
+//!   X` — gets an ordinal on its last segment in source order
+//!   (`f`, `f#2`, `f#3`), for the same one-location-per-name reason.
+//!   `#` can never occur in a Rust identifier, so an ordinal never
+//!   collides with a real name, and lookups strip it.
 //! - `mod foo;` declarations emit nothing (the definition is the
 //!   other file, which states its own truth); only inline
 //!   `mod foo { ... }` is a symbol and a scope.
@@ -42,6 +55,7 @@ impl Grammar for RustGrammar {
             source,
             path: repo_relative_path,
             symbols: Vec::new(),
+            emitted: std::collections::HashSet::new(),
         };
         walker.walk(tree.root_node(), &mut Vec::new(), false);
         walker.symbols
@@ -52,6 +66,9 @@ struct Walker<'a> {
     source: &'a str,
     path: &'a str,
     symbols: Vec<SymbolNode>,
+    /// Every qualified name emitted so far — what a repeat checks
+    /// against before it takes an ordinal.
+    emitted: std::collections::HashSet<String>,
 }
 
 impl Walker<'_> {
@@ -137,15 +154,26 @@ impl Walker<'_> {
                     }
                 }
                 "impl_item" => {
-                    // A scope, not a symbol: `impl Context` and
-                    // `impl Display for Context` both scope by the
-                    // implemented type's last path segment.
-                    if let Some(scope_name) = child
+                    // A scope, not a symbol: `impl Context` scopes by
+                    // the implemented type's last path segment, `impl
+                    // Display for Context` as `<Context as Display>`
+                    // (module doc: one name per trait impl, or two
+                    // traits' same-name methods would share one).
+                    if let Some(type_name) = child
                         .child_by_field_name("type")
                         .and_then(|type_node| self.text(type_node))
                         .map(type_scope_name)
                         .filter(|name| !name.is_empty())
                     {
+                        let scope_name = match child
+                            .child_by_field_name("trait")
+                            .and_then(|trait_node| self.text(trait_node))
+                            .map(type_scope_name)
+                            .filter(|name| !name.is_empty())
+                        {
+                            Some(trait_name) => format!("<{type_name} as {trait_name}>"),
+                            None => type_name,
+                        };
                         scope.push(scope_name);
                         self.walk_field(child, "body", scope, true);
                         scope.pop();
@@ -172,8 +200,9 @@ impl Walker<'_> {
         }
     }
 
-    /// Emits one symbol if the node has a name; returns that name so
-    /// callers can extend the scope with it.
+    /// Emits one symbol if the node has a name; returns the name path
+    /// segment it took (the name, or `name#N` for a repeat) so callers
+    /// extend the scope with exactly what the children's parent is.
     fn emit(
         &mut self,
         node: tree_sitter::Node,
@@ -185,33 +214,48 @@ impl Walker<'_> {
             .child_by_field_name("name")
             .and_then(|name_node| self.text(name_node))?
             .to_string();
-        let mut qualified = String::from(self.path);
+        let mut prefix = String::from(self.path);
+        // The `contains` parent reads a trait-impl scope as its type:
+        // `<X as Display>::fmt` is named apart from `<X as Debug>::fmt`,
+        // but both hang under `X` in the tree, exactly as an inherent
+        // `impl X` method does — the scope segment is a naming device,
+        // not a node anything else defines.
+        let mut parent_path = String::from(self.path);
         for segment in scope {
-            qualified.push_str("::");
-            qualified.push_str(segment);
+            prefix.push_str("::");
+            prefix.push_str(segment);
+            parent_path.push_str("::");
+            parent_path.push_str(
+                segment
+                    .strip_prefix('<')
+                    .and_then(|inner| inner.strip_suffix('>'))
+                    .and_then(|inner| inner.split_once(" as "))
+                    .map_or(segment.as_str(), |(type_name, _)| type_name),
+            );
         }
-        qualified.push_str("::");
-        qualified.push_str(&name);
-        let parent = if scope.is_empty() {
-            None
-        } else {
-            let mut parent = String::from(self.path);
-            for segment in scope {
-                parent.push_str("::");
-                parent.push_str(segment);
-            }
-            Some(parent)
-        };
+        let parent = (!scope.is_empty()).then_some(parent_path);
+        // A repeat takes the first free ordinal (module doc): the
+        // first definition keeps the plain name, so a file with no
+        // repeats names everything exactly as before.
+        let mut segment = name.clone();
+        let mut qualified = format!("{prefix}::{segment}");
+        let mut ordinal = 1u32;
+        while self.emitted.contains(&qualified) {
+            ordinal += 1;
+            segment = format!("{name}#{ordinal}");
+            qualified = format!("{prefix}::{segment}");
+        }
+        self.emitted.insert(qualified.clone());
         self.symbols.push(SymbolNode {
             kind,
-            name: name.clone(),
+            signature: signature.unwrap_or_else(|| format!("{} {name}", kind.keyword())),
+            name,
             qualified_name: qualified,
             parent,
-            signature: signature.unwrap_or_else(|| format!("{} {name}", kind.keyword())),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
         });
-        Some(name)
+        Some(segment)
     }
 
     /// The declaration head: node text up to (not including) `field`,
@@ -234,9 +278,11 @@ impl Walker<'_> {
     }
 }
 
-/// `impl` scope name from the implemented type's text: generics cut,
+/// `impl` scope name from a type's (or trait's) text: generics cut,
 /// last path segment kept — `crate::ingest::Batch<'a>` scopes as
-/// `Batch`, matching what a reader (and a lookup cue) calls it.
+/// `Batch`, `std::fmt::Display` as `Display`, matching what a reader
+/// (and a lookup cue) calls it. The result never contains `::`, so a
+/// `<Type as Trait>` segment splits as one segment everywhere.
 fn type_scope_name(type_text: &str) -> String {
     let base = type_text.split('<').next().unwrap_or("").trim();
     base.rsplit("::").next().unwrap_or("").trim().to_string()
@@ -294,7 +340,8 @@ mod tests {
     /// The plan's worked shape: methods inside `impl` nest under the
     /// type's name, and the impl block itself emits nothing — even
     /// packed tight with no blank lines between methods (the case
-    /// that killed the raw-source passage design).
+    /// that killed the raw-source passage design). A trait impl
+    /// scopes as `<Type as Trait>`, path and generics cut.
     #[test]
     fn impl_blocks_scope_methods_without_emitting_themselves() {
         let symbols = parse(
@@ -313,13 +360,62 @@ mod tests {
                 "src/x.rs::Context",
                 "src/x.rs::Context::resolve",
                 "src/x.rs::Context::recall",
-                "src/x.rs::Context::fmt",
+                "src/x.rs::<Context as Display>::fmt",
             ]
         );
         let resolve = &symbols[1];
         assert_eq!(resolve.kind, SymbolKind::Method);
         assert_eq!(resolve.parent.as_deref(), Some("src/x.rs::Context"));
         assert_eq!(resolve.signature, "pub fn resolve(&self)");
+        // A trait impl's method hangs under its type, like an inherent
+        // method — `tree src/x.rs::Context` lists `fmt` too.
+        assert_eq!(symbols[3].parent.as_deref(), Some("src/x.rs::Context"));
+    }
+
+    /// Two traits' same-name methods on one type used to share
+    /// `X::fmt`, and the map keeps one location per (name, file) — the
+    /// second definition was unfindable. Every definition must now
+    /// carry its own name, whatever still repeats taking an ordinal.
+    #[test]
+    fn repeated_name_paths_stay_distinct_per_definition() {
+        let symbols = parse(
+            "struct X;\n\
+             impl std::fmt::Display for X { fn fmt(&self) {} }\n\
+             impl std::fmt::Debug for X { fn fmt(&self) {} }\n\
+             impl From<u32> for X { fn from(v: u32) -> X { X } }\n\
+             impl From<u64> for X { fn from(v: u64) -> X { X } }\n\
+             #[cfg(unix)]\n\
+             fn platform() {}\n\
+             #[cfg(not(unix))]\n\
+             fn platform() {}\n\
+             #[cfg(unix)]\n\
+             mod imp { pub fn open() {} }\n\
+             #[cfg(not(unix))]\n\
+             mod imp { pub fn open() {} }\n",
+        );
+        assert_eq!(
+            names(&symbols),
+            vec![
+                "src/x.rs::X",
+                "src/x.rs::<X as Display>::fmt",
+                "src/x.rs::<X as Debug>::fmt",
+                "src/x.rs::<X as From>::from",
+                "src/x.rs::<X as From>::from#2",
+                "src/x.rs::platform",
+                "src/x.rs::platform#2",
+                "src/x.rs::imp",
+                "src/x.rs::imp::open",
+                "src/x.rs::imp#2",
+                "src/x.rs::imp#2::open",
+            ]
+        );
+        // The display name never carries the ordinal — section
+        // headings and tail cues stay what the source says.
+        assert_eq!(symbols[6].name, "platform");
+        assert_eq!(symbols[6].start_line, 9);
+        // Children of a repeated container nest under ITS name, not
+        // the first twin's.
+        assert_eq!(symbols[10].parent.as_deref(), Some("src/x.rs::imp#2"));
     }
 
     #[test]

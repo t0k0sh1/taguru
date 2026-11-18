@@ -63,8 +63,21 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // A set-but-unparseable RUST_LOG falls back to the default, but
+    // loudly: silence left an operator chasing debug lines that were
+    // never going to appear. (The server's own helper,
+    // `env::log_filter`, lives in the `taguru` binary, not the library
+    // this bridge links.)
+    let (filter, unparseable_log_filter) = match std::env::var("RUST_LOG") {
+        Err(_) => (tracing_subscriber::EnvFilter::new("warn"), None),
+        Ok(value) => match tracing_subscriber::EnvFilter::try_new(&value) {
+            Ok(filter) => (filter, None),
+            Err(parse) => (
+                tracing_subscriber::EnvFilter::new("warn"),
+                Some((value, parse)),
+            ),
+        },
+    };
     let (provider, exporter_error) = trace::provider();
     let otel_layer = provider.as_ref().map(trace::otel_layer);
     tracing_subscriber::registry()
@@ -75,6 +88,9 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
                 .with_filter(filter),
         )
         .init();
+    if let Some((value, parse)) = unparseable_log_filter {
+        eprintln!("taguru-mcp: ignoring RUST_LOG={value}: {parse}; using warn");
+    }
     if let Some(error) = exporter_error {
         eprintln!("taguru-mcp: span export disabled: the OTLP exporter failed to build: {error}");
     }

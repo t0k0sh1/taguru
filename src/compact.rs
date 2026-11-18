@@ -378,10 +378,9 @@ fn report_outcome(
 /// One `context`'s report line — shared by the sequential path, the
 /// `--parallel` path, and both `--url` paths (per-`context` and the
 /// maintenance sweep), so the four can never drift apart. `#[586]`:
-/// when the rebuilt image did not actually make it to disk (the
-/// caller already succeeded — the graph itself is compacted, only the
-/// durable copy is still the old, larger one), the line says so rather
-/// than letting `bytes_after` imply a shrink that has not landed yet.
+/// when the rebuilt image could not be written, the `context` keeps
+/// its previous image, and the line says so rather than letting
+/// `bytes_after` imply a shrink that did not happen.
 fn success_line(name: &str, outcome: &CompactOutcome) -> String {
     format!(
         "context '{name}': {} → {} ({} dead edge(s) shed{}){}",
@@ -395,7 +394,10 @@ fn success_line(name: &str, outcome: &CompactOutcome) -> String {
         if outcome.image_persisted {
             String::new()
         } else {
-            " [not yet persisted to disk; the next flush will retry]".to_string()
+            " [not durably persisted: either the image never landed and the context keeps its \
+             previous image — compact again once the disk recovers — or it landed but its \
+             directory fsync failed and the next flush re-publishes it durably]"
+                .to_string()
         },
     )
 }

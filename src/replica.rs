@@ -54,7 +54,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
@@ -334,11 +334,13 @@ struct Tailer {
     info: Arc<ReplicaInfo>,
     stop: Arc<AtomicBool>,
     /// The followed manifest as last applied in full: its generation
-    /// and the `complete` object's store-clock `last_modified`.
+    /// and the `complete` object's [`hydrate::ObjectStamp`] (store-clock
+    /// `last_modified` plus ETag/version — the timestamp alone is
+    /// 1s-granular on cloud stores and would hide same-second re-PUTs).
     /// Advanced only after a whole diff lands, so a partial failure
     /// re-reads and re-diffs — retarget is idempotent and settled
     /// families skip in O(1).
-    manifest_stamp: Option<(u64, SystemTime)>,
+    manifest_stamp: Option<(u64, hydrate::ObjectStamp)>,
     /// The newest fence generation whose body was fetched (one GET
     /// per new claimant, for the refusal's holder string).
     fence_seen: Option<u64>,
@@ -389,15 +391,18 @@ impl Tailer {
                 Err(error) => return Err(error),
             };
         let generation_root = ship::gen_root(&self.root, generation);
-        let stamp = hydrate::head_modified(&self.store, &ship::complete_key(&generation_root))
+        let stamp = hydrate::head_stamp(&self.store, &ship::complete_key(&generation_root))
             .await?
             .ok_or_else(|| {
                 std::io::Error::other(format!(
                     "generation {generation}: complete marker vanished between listing and head"
                 ))
             })?;
-        self.state.metrics().note_replica_manifest(stamp);
-        if self.manifest_stamp == Some((generation, stamp)) {
+        self.state.metrics().note_replica_manifest(stamp.modified);
+        if let Some((applied_generation, applied_stamp)) = &self.manifest_stamp
+            && *applied_generation == generation
+            && *applied_stamp == stamp
+        {
             return Ok(());
         }
 
@@ -420,7 +425,10 @@ impl Tailer {
         // finish that switch. `manifest_stamp`'s generation only advances
         // once a poll fully succeeds, so it stays a reliable "last fully
         // reconciled generation" across any number of failed retries.
-        let previous_generation = self.manifest_stamp.map(|(generation, _)| generation);
+        let previous_generation = self
+            .manifest_stamp
+            .as_ref()
+            .map(|(generation, _)| *generation);
         let switched = previous_generation != Some(generation);
         if switched {
             tracing::info!(

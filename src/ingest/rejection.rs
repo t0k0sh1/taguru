@@ -605,9 +605,9 @@ pub(crate) fn apply_batch(
         };
         // At-most-one-per-id, however many batches of however many
         // concurrent streams race this header: `create_if_absent`
-        // serializes on the id and hands `false` to every loser — the
-        // context exists (or is about to), which is all the batch
-        // needed.
+        // serializes on the id, and every loser waits for the winner
+        // to register before it hears `false` — the context exists,
+        // which is all the batch needed.
         match state.create_if_absent(&batch.context_id, &spec.name, spec.meta.clone()) {
             Ok(minted) => created = minted,
             // Unreachable in practice — `parse_header` already refused an

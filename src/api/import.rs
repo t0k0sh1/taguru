@@ -397,13 +397,28 @@ pub(super) fn import_refusal(
 }
 
 /// Maps a refused `group` restore onto the response — the `group` half of
-/// [`import_refusal`]. `groups` apply after every batch, so the note
-/// says what already landed; re-POSTing the corrected stream is exact
-/// (batches replace their sources, records their `groups`).
+/// [`import_refusal`]. `groups` apply after every batch and schema
+/// record, so the note says what already landed; re-POSTing the
+/// stream is exact (batches replace their sources, records their
+/// `groups`).
+///
+/// `integrity` speaks for EVERYTHING durable by then, the way
+/// [`schema_import_refusal`]'s does: the `batches_landed` batches, the
+/// `schemas_landed` schema records (installed before the group phase
+/// began — a stream may carry no batch at all), and the group records
+/// the restore itself already published before an `Io` fault or a
+/// spent budget stopped it ([`crate::registry::RestoreGroupsError::applied`]
+/// — the `Io` record itself included when its rename landed and only
+/// the directory fsync failed: its `.group` file is there, and the
+/// next boot registers it).
+/// `durable_batches` still names only the batch count — a schema or
+/// group record is not a batch, and a resuming client keys on it to
+/// know how many batches to skip.
 pub(super) fn restore_refusal(
     state: &AppState,
     refusal: crate::registry::RestoreGroupsError,
     batches_landed: usize,
+    schemas_landed: usize,
     started_at: Instant,
 ) -> Response {
     use crate::registry::RestoreGroupsError;
@@ -423,53 +438,63 @@ pub(super) fn restore_refusal(
         // records no error either, and the client resumes by re-POSTing.
         RestoreGroupsError::Timeout { .. } => ErrorCode::Timeout,
     };
-    // A budget that ran out mid-restore is a resumable prefix, not a
-    // rejected set: some records may have landed, and the batches
-    // before them did. The validation arms, by contrast, wrote nothing
-    // in the group phase — every batch landed, so the group phase's
-    // own refusal is provably a durable prefix (issue #182), never a
-    // partial group write of its own (`restore_groups` validates the
-    // whole set before applying any of it).
+    let integrity = if batches_landed + schemas_landed + refusal.applied() == 0 {
+        "nothing_written"
+    } else {
+        "durable_prefix"
+    };
+    let durable_batches = (batches_landed > 0).then_some(batches_landed);
+    // A budget that ran out mid-restore, or a record that would not
+    // persist, leaves a resumable prefix — some group records may have
+    // landed, and the batches before them did — and neither is a
+    // refusal a corrected stream resolves, so neither claims
+    // `retryable_after_correction`. The validation arms, by contrast,
+    // wrote nothing in the group phase (`restore_groups` validates the
+    // whole set before applying any of it), so whatever is durable is
+    // the batches and schema records before it (issue #182).
     match &refusal {
-        RestoreGroupsError::Timeout { .. } => {
-            // Same machine-readable claim `import_budget_refusal` makes
-            // for the batch loop: the fields speak for the BATCHES (all
-            // durable), which is what a resuming importer keys on — the
-            // group phase itself stays a re-POST, as the note says.
-            let (integrity, durable_batches) = stream_integrity(batches_landed, false);
-            validation_error(
-                code,
-                format!(
-                    "group restore exceeded its budget with {batches_landed} source file(s) durable \
-                     (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
-                    refusal.text()
-                ),
-                RefusalDetail {
-                    integrity: Some(integrity),
-                    durable_batches,
-                    ..Default::default()
-                },
-                started_at,
-            )
-        }
-        _ => {
-            let (integrity, durable_batches) = stream_integrity(batches_landed, false);
-            validation_error(
-                code,
-                format!(
-                    "group records refused with every source file landed ({batches_landed} durable); \
-                     fixing the stream and re-POSTing it whole is exact: {}",
-                    refusal.text()
-                ),
-                RefusalDetail {
-                    integrity: Some(integrity),
-                    durable_batches,
-                    retryable_after_correction: Some(true),
-                    ..Default::default()
-                },
-                started_at,
-            )
-        }
+        RestoreGroupsError::Timeout { .. } => validation_error(
+            code,
+            format!(
+                "group restore exceeded its budget with {batches_landed} source file(s) durable \
+                 (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
+                refusal.text()
+            ),
+            RefusalDetail {
+                integrity: Some(integrity),
+                durable_batches,
+                ..Default::default()
+            },
+            started_at,
+        ),
+        RestoreGroupsError::Io { .. } => validation_error(
+            code,
+            format!(
+                "group restore failed to persist with {batches_landed} source file(s) durable; {}",
+                refusal.text()
+            ),
+            RefusalDetail {
+                integrity: Some(integrity),
+                durable_batches,
+                ..Default::default()
+            },
+            started_at,
+        ),
+        _ => validation_error(
+            code,
+            format!(
+                "group records refused with every source file landed ({batches_landed} durable); \
+                 fixing the stream and re-POSTing it whole is exact: {}",
+                refusal.text()
+            ),
+            RefusalDetail {
+                integrity: Some(integrity),
+                durable_batches,
+                retryable_after_correction: Some(true),
+                ..Default::default()
+            },
+            started_at,
+        ),
     }
 }
 
@@ -833,7 +858,10 @@ static LEGACY_IMPORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 /// settle on ids against this instance's registry first — a name one
 /// standing `context`/`group` carries reuses its id, an absent one is
 /// minted, a name several carry refuses 409 `conflict` — and the body
-/// then runs as the current-format stream that makes. Under
+/// then runs as the current-format stream that makes. A context-scoped
+/// key's names settle only on the contexts its grant covers, and a name
+/// none of them carries refuses 403 `forbidden` naming just that name
+/// — the same answer whether or not it exists beyond the grant. Under
 /// `?dry_run=true` the ids an absent name would get are minted for the
 /// preview only; the real import mints its own.
 ///
@@ -879,26 +907,48 @@ pub async fn import_batch(
         Ok(crate::ingest::ParsedStream::Current(stream)) => stream,
         // ADR 0057: a v0.9.7 export stream names its contexts and
         // groups; they settle on ids against this instance's registry
-        // here, before any grant check or write, so everything below
-        // judges and applies an ordinary current-format stream. A
-        // refusal (an ambiguous name, a name nothing creates) leaves
-        // the instance untouched.
+        // here, before any write, so everything below judges and
+        // applies an ordinary current-format stream. A refusal (an
+        // ambiguous name, a name nothing creates) leaves the instance
+        // untouched. A context-scoped key's names settle only on the
+        // contexts its grant covers (`resolve_legacy`'s doc): resolving
+        // against the whole registry first and judging the grant after
+        // would answer a name beyond the grant 403-with-its-id, an
+        // absent one 404, and a beyond-the-grant namesake 409 — an
+        // existence oracle the grant checks below exist to deny.
         Ok(crate::ingest::ParsedStream::Legacy(legacy)) => {
-            match crate::ingest::resolve_legacy(&state, vec![legacy]) {
+            let scope = grant.as_ref().map(|axum::Extension(grant)| grant);
+            match crate::ingest::resolve_legacy(&state, vec![legacy], scope) {
                 Ok(mut streams) => streams.pop().expect("one stream in, one stream out"),
                 Err(refusal) => {
-                    let code = match &refusal {
-                        crate::ingest::LegacyRefusal::Ambiguous { .. }
-                        | crate::ingest::LegacyRefusal::DuplicateGroup(_) => ErrorCode::Conflict,
-                        crate::ingest::LegacyRefusal::NoContext { .. } => ErrorCode::NoContext,
-                        crate::ingest::LegacyRefusal::NoGroup { .. } => ErrorCode::NoGroup,
+                    use crate::ingest::LegacyRefusal;
+                    // An out-of-grant name takes the grant refusal's
+                    // shape (the checks below): the key named, only
+                    // what the caller sent echoed, and no correction
+                    // implied — the stream is not wrong, the key is
+                    // short of a grant.
+                    let (code, retryable_after_correction, message) = match &refusal {
+                        LegacyRefusal::OutOfGrant { .. } => (
+                            ErrorCode::Forbidden,
+                            None,
+                            format!("key '{}': {}", key_name(&key), refusal.text()),
+                        ),
+                        LegacyRefusal::Ambiguous { .. } | LegacyRefusal::DuplicateGroup(_) => {
+                            (ErrorCode::Conflict, Some(true), refusal.text())
+                        }
+                        LegacyRefusal::NoContext { .. } => {
+                            (ErrorCode::NoContext, Some(true), refusal.text())
+                        }
+                        LegacyRefusal::NoGroup { .. } => {
+                            (ErrorCode::NoGroup, Some(true), refusal.text())
+                        }
                     };
                     return validation_error(
                         code,
-                        refusal.text(),
+                        message,
                         RefusalDetail {
                             integrity: Some("nothing_written"),
-                            retryable_after_correction: Some(true),
+                            retryable_after_correction,
                             ..Default::default()
                         },
                         started_at,
@@ -973,14 +1023,19 @@ pub async fn import_batch(
     }
     // Group records are judged the way every group write is: by the
     // context closure — the standing record's and the prospective
-    // one's both — before anything applies. Gated on the grant first,
-    // [`scoped_group_refusal`]'s discipline: a key with no grant never
-    // pays for the closure read.
+    // one's both — before anything applies. The records' own member
+    // ids are what the caller sent, so a refusal may name them; the
+    // rest of the closure (standing members, children's members) is
+    // what `GET /groups` hides from a scoped key, so a refusal reached
+    // only through it names no id ([`scope_refusal`]). Gated on the
+    // grant first, [`scoped_group_refusal`]'s discipline: a key with no
+    // grant never pays for the closure read.
     if grant.is_some()
         && !stream.groups.is_empty()
         && let Some(refusal) = scope_refusal(
             &grant,
             &key,
+            stream.groups.iter().flat_map(|record| &record.context_ids),
             &state.group_restore_involves(&stream.groups),
             started_at,
         )
@@ -1226,7 +1281,11 @@ pub async fn import_batch(
                 }
                 Err(refusal) => {
                     return Err(Box::new(restore_refusal(
-                        &state, refusal, total, started_at,
+                        &state,
+                        refusal,
+                        total,
+                        schema_outcomes.len(),
+                        started_at,
                     )));
                 }
             }
@@ -1437,15 +1496,190 @@ mod tests {
     }
 
     async fn call_import(state: &AppState, body: &str) -> Response {
+        call_import_as(state, body, None).await
+    }
+
+    /// [`call_import`] under `grant` — the extension the auth layer
+    /// attaches for a key `TAGURU_KEY_GRANTS` names.
+    async fn call_import_as(
+        state: &AppState,
+        body: &str,
+        grant: Option<crate::auth::KeyGrant>,
+    ) -> Response {
         import_batch(
             State(state.clone()),
             None,
-            None,
+            grant.map(axum::Extension),
             axum::Extension(Deadline::unbounded()),
             AppQuery(ImportQuery::default()),
             AppBytes(axum::body::Bytes::from(body.to_string())),
         )
         .await
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A context-scoped admin key POSTing a v0.9.7 stream gets ONE
+    /// answer for a context name beyond its grant and for a name
+    /// nothing carries (create block or not) — the same 403, never the
+    /// standing context's id, never a 404/409 — while a name its grant
+    /// covers still imports. A group record's member names are judged
+    /// the same way.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scoped_keys_v097_import_cannot_tell_a_context_beyond_its_grant_from_an_absent_one() {
+        let state = scratch_state("legacy-scoped-oracle");
+        let kura = state.create("kura", ContextMeta::default()).unwrap();
+        let wine = state.create("wine", ContextMeta::default()).unwrap();
+        let grant = crate::auth::KeyGrant {
+            role: crate::auth::Role::Admin,
+            contexts: Some(std::sync::Arc::new(std::collections::HashSet::from([
+                kura.clone()
+            ]))),
+        };
+        let batch = |name: &str| {
+            format!(
+                "{{\"taguru_batch\":1,\"context\":\"{name}\",\"source\":\"a.md\",\
+                 \"create\":{{\"description\":\"\"}}}}\n\
+                 {{\"subject\":\"a\",\"label\":\"b\",\"object\":\"c\",\"weight\":1.0}}\n"
+            )
+        };
+        let member = |name: &str| {
+            format!("{{\"taguru_group\":1,\"name\":\"g\",\"contexts\":[\"{name}\"]}}\n")
+        };
+        for body in [batch as fn(&str) -> String, member as fn(&str) -> String] {
+            let beyond = call_import_as(&state, &body("wine"), Some(grant.clone())).await;
+            assert_eq!(beyond.status(), StatusCode::FORBIDDEN);
+            let beyond = json_body(beyond).await;
+            let absent = call_import_as(&state, &body("ghost"), Some(grant.clone())).await;
+            assert_eq!(absent.status(), StatusCode::FORBIDDEN);
+            let absent = json_body(absent).await;
+            assert_eq!(beyond["code"], ErrorCode::Forbidden.as_str(), "{beyond}");
+            let text = beyond["error"].as_str().unwrap();
+            assert!(
+                !text.contains(&wine),
+                "the standing id must not leak: {text}"
+            );
+            assert_eq!(
+                text.replace("wine", "ghost"),
+                absent["error"].as_str().unwrap(),
+                "a standing name and an absent one must read alike"
+            );
+            assert_eq!(beyond["integrity"], "nothing_written", "{beyond}");
+            assert_eq!(absent["integrity"], "nothing_written", "{absent}");
+        }
+        assert!(
+            state.directory().iter().all(|row| row.name != "ghost"),
+            "the absent name's create block must not have minted a context"
+        );
+
+        let response = call_import_as(&state, &batch("kura"), Some(grant)).await;
+        let body = json_body(response).await;
+        assert_eq!(body["status"], "ok", "{body}");
+        assert_eq!(body["result"]["batches"][0]["context_id"], kura, "{body}");
+    }
+
+    /// A group restore stopped by a spent budget or an `Io` fault after
+    /// fsyncing records, or refused after a schema record already
+    /// installed, must not claim `nothing_written` — and only the
+    /// validation arm invites a corrected resend.
+    #[tokio::test]
+    async fn restore_refusal_counts_landed_group_and_schema_records_as_written() {
+        use crate::registry::RestoreGroupsError;
+        let state = scratch_state("restore-refusal-integrity");
+        let refuse =
+            |refusal, schemas| restore_refusal(&state, refusal, 0, schemas, Instant::now());
+
+        let body = json_body(refuse(RestoreGroupsError::Timeout { applied: 1 }, 0)).await;
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert!(body["durable_batches"].is_null(), "{body}");
+
+        let body = json_body(refuse(
+            RestoreGroupsError::Io {
+                group: "00000000-0000-4000-9000-000000000001".to_string(),
+                applied: 1,
+                error: std::io::Error::other("disk gone"),
+            },
+            0,
+        ))
+        .await;
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert!(
+            body["retryable_after_correction"].is_null(),
+            "a disk fault is not something a corrected stream resolves: {body}"
+        );
+
+        let body = json_body(refuse(RestoreGroupsError::Duplicate("g".to_string()), 1)).await;
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["retryable_after_correction"], true, "{body}");
+
+        // Nothing anywhere: the honest `nothing_written` still stands.
+        let body = json_body(refuse(RestoreGroupsError::Timeout { applied: 0 }, 0)).await;
+        assert_eq!(body["integrity"], "nothing_written", "{body}");
+        let body = json_body(refuse(
+            RestoreGroupsError::Io {
+                group: "00000000-0000-4000-9000-000000000001".to_string(),
+                applied: 0,
+                error: std::io::Error::other("disk gone"),
+            },
+            0,
+        ))
+        .await;
+        assert_eq!(body["integrity"], "nothing_written", "{body}");
+    }
+
+    /// End to end: the stream's only group record publishes (its rename
+    /// lands) but its directory fsync fails. The `.group` file is
+    /// there and the next boot registers it, so the response must not
+    /// claim `nothing_written` — before the fix the record went
+    /// uncounted and the refusal denied a file the disk held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_group_record_published_before_its_fsync_failed_reports_a_durable_prefix() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
+        let state = scratch_state("group-published-unsynced");
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
+        let group = "00000000-0000-4000-9000-000000000001";
+        let body = format!(
+            "{{\"type\": \"group\", \"id\": \"{group}\", \"name\": \"g\", \
+             \"context_ids\": [\"{sake}\"]}}\n"
+        );
+        // `block_in_place` off a worker thread runs inline, so the
+        // thread-local fault reaches the restore's write.
+        fail_publish_syncs_after(0);
+        let body = json_body(call_import(&state, &body).await).await;
+        assert!(
+            !clear_publish_sync_fault(),
+            "the group's publish sync must fail"
+        );
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert!(
+            state.group(group).is_some(),
+            "memory must hold the record its file holds"
+        );
+    }
+
+    /// End to end: a schema record installs, then the stream's group
+    /// record is refused — the response must own up to the schema.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_group_refusal_after_a_schema_record_installed_reports_a_durable_prefix() {
+        let state = scratch_state("group-refusal-after-schema");
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
+        let body = format!(
+            "{}{{\"type\": \"group\", \"id\": \"00000000-0000-4000-9000-000000000001\", \
+             \"name\": \"g\", \"context_ids\": [\"cef2e28b-43f0-4b6c-8201-abab0785399f\"]}}\n",
+            schema_line(&sake)
+        );
+        let body = json_body(call_import(&state, &body).await).await;
+        assert_eq!(body["code"], ErrorCode::NoContext.as_str(), "{body}");
+        assert!(has_installed_schema(&state, "sake"), "the schema landed");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert!(body["durable_batches"].is_null(), "{body}");
     }
 
     /// A batch that got partway (`Partial`) wrote something: its

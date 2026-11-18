@@ -562,7 +562,8 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
 
     // Writes judge every involved context — current members included.
     // Touching a group with an out-of-grant member refuses whole, even
-    // for a description-only change.
+    // for a description-only change — without naming that member: it
+    // is exactly what the listing above filtered from this key's view.
     let (status, refused) = call(
         "PATCH",
         &format!("/groups/{}", server.gx("mixed")),
@@ -570,13 +571,12 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         "stok",
     );
     assert_eq!(status, 403, "{refused}");
+    let message = refused["error"].as_str().unwrap();
     assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
+        message.contains("a group this request involves reaches"),
         "{refused}"
     );
+    assert!(!message.contains(&server.cx("bunko")), "{refused}");
 
     // The oracle stays shut: an out-of-scope name answers the same 403
     // whether it exists (bunko) or not (ghost) — never a revealing 404.
@@ -696,12 +696,14 @@ fn key_grants_filter_group_members_and_gate_group_writes() {
         "stok",
     );
     assert_eq!(status, 403, "{refused}");
+    let message = refused["error"].as_str().unwrap();
     assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("no grant on context '{}'", server.cx("bunko"))),
+        message.contains("a group this request involves reaches"),
         "{refused}"
+    );
+    assert!(
+        !message.contains(&server.cx("bunko")),
+        "a member reached through a child stays unnamed too: {refused}"
     );
     // Naming such a child in a delta refuses the same way — a
     // context-scoped key cannot create a parent over contexts it has

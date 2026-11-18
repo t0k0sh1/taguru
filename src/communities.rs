@@ -961,19 +961,32 @@ fn lookup_passages(
     context: &str,
     sources: &[String],
 ) -> Result<BTreeMap<String, String>, String> {
-    let body = json!({"source_ids": sources});
-    let result = api
-        .post_envelope(&["contexts", context, "sources", "lookup"], &body)
-        .map_err(|failure| failure.into_message())?;
     let mut passages = BTreeMap::new();
-    if let Some(map) = result["passages"].as_object() {
-        for (source, text) in map {
-            if let Some(text) = text.as_str() {
-                passages.insert(source.clone(), text.to_string());
+    for body in lookup_bodies(sources) {
+        let result = api
+            .post_envelope(&["contexts", context, "sources", "lookup"], &body)
+            .map_err(|failure| failure.into_message())?;
+        if let Some(map) = result["passages"].as_object() {
+            for (source, text) in map {
+                if let Some(text) = text.as_str() {
+                    passages.insert(source.clone(), text.to_string());
+                }
             }
         }
     }
     Ok(passages)
+}
+
+/// The lookup request bodies for `sources`, each within the server's
+/// per-request list cap (`MAX_INPUT_ITEMS`): one unchunked request
+/// carrying more than a thousand reused communities was refused
+/// whole, so every rerun of a large analysis failed. Source ids are
+/// distinct, so the per-chunk answers merge without overlap.
+fn lookup_bodies(sources: &[String]) -> Vec<Value> {
+    sources
+        .chunks(crate::api::MAX_INPUT_ITEMS)
+        .map(|chunk| json!({"source_ids": chunk}))
+        .collect()
 }
 
 /// Every stored `community:*` summary's fingerprint tag (ADR 0056),
@@ -1025,6 +1038,25 @@ fn retract_source(api: &Api, context: &str, source: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// More reused summaries than one lookup may carry: every body
+    /// stays within the server's list cap, and together they carry
+    /// each source exactly once, in order.
+    #[test]
+    fn lookup_bodies_split_at_the_server_input_cap() {
+        let cap = crate::api::MAX_INPUT_ITEMS;
+        let sources: Vec<String> = (0..2 * cap + 1).map(|i| format!("community:{i}")).collect();
+        let bodies = lookup_bodies(&sources);
+        assert_eq!(bodies.len(), 3);
+        let mut carried = Vec::new();
+        for body in &bodies {
+            let ids = body["source_ids"].as_array().unwrap();
+            assert!(ids.len() <= cap, "{} ids", ids.len());
+            carried.extend(ids.iter().map(|id| id.as_str().unwrap().to_string()));
+        }
+        assert_eq!(carried, sources);
+        assert!(lookup_bodies(&[]).is_empty());
+    }
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {

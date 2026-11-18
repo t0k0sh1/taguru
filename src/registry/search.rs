@@ -445,27 +445,21 @@ impl AppState {
         );
 
         let chosen = paragraph
-            .or_else(|| {
-                full.iter()
-                    .find(|hit| hit.source == source)
-                    .map(|hit| hit.index)
-            })
+            .or_else(|| ranked_paragraph_of(&full, source, &record))
             .unwrap_or_else(|| {
-                // Nothing of the source ranked at all: the best showing
-                // is the paragraph sharing the most query terms (the
-                // first one, when they tie — including at zero).
+                // Nothing of this record generation ranked: the best
+                // showing is the paragraph sharing the most query terms
+                // (the first one, when they tie — including at zero).
                 //
-                // "Ranked nowhere" is itself proof `shared` is 0 for
-                // EVERY paragraph here (issue #604): a live posting
+                // When the source ranked nowhere at all, `shared` is 0
+                // for EVERY paragraph here (issue #604): a live posting
                 // with `tf > 0.0` for any query gram is precisely what
-                // `Bm25Index::search` touches to populate `full`, so
-                // this closure only ever runs over a uniformly-zero
-                // `shared`. `tf > 0.0`'s `==`/`<`/`>=` siblings and
-                // `shared > best.1`'s `<` sibling are consequently
-                // unkillable mutants, not missing tests — every
-                // variant that only changes behavior when some
-                // paragraph's real count is nonzero can never diverge
-                // from this loop's actual, always-uniform input.
+                // `Bm25Index::search` touches to populate `full`. The
+                // loop sees a nonzero count only when hits of a NEWER
+                // generation (a re-register racing this read) were set
+                // aside by `ranked_paragraph_of`; whatever it then picks
+                // is in range for `record`, and the hash filter below
+                // withholds evidence about bytes this record lacks.
                 let mut best = (0u32, 0usize);
                 for at in 0..paragraphs as u32 {
                     let shared = index.explain(&query_grams, source, at).map_or(0, |lex| {
@@ -477,9 +471,15 @@ impl AppState {
                 }
                 best.0
             });
-        let (span, text) = record
-            .paragraph(chosen as usize)
-            .expect("the chosen paragraph is within the record");
+        // `chosen` is in range by construction: an explicit `paragraph`
+        // was bounds-checked against `record` above, a ranked one is
+        // taken only from a hit carrying this very `record` generation
+        // (`ranked_paragraph_of`), and the fallback loop walks
+        // `0..paragraphs`. The `let else` keeps that a checked
+        // invariant rather than a panic if any of those ever drifts.
+        let Some((span, text)) = record.paragraph(chosen as usize) else {
+            return Some(Ok(PassageExplainLookup::IndexOutOfRange { paragraphs }));
+        };
 
         // The index answered for the text it saw; evidence about an
         // edited paragraph would explain the wrong bytes, so it is
@@ -534,7 +534,11 @@ impl AppState {
             Err(idle) => idle.into(),
         };
 
-        let is_target = |hit: &RankedPassage| hit.source == source && hit.index == chosen;
+        // Generation-safe like `chosen` itself: a newer generation's
+        // hit at the same (source, index) is evidence about other
+        // bytes, so it neither supplies the rank/lane evidence nor
+        // counts as served / reached.
+        let is_target = |hit: &RankedPassage| is_hit_of_record(hit, source, chosen, &record);
         let rank = full.iter().position(is_target);
         let target = rank.map(|at| &full[at]);
         let served = served_hits.iter().any(is_target);
@@ -945,6 +949,40 @@ fn semantic_lane_hits(
         .filter(|&(_, score)| score >= floor)
         .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
         .collect()
+}
+
+/// The best-ranked paragraph of `source` in `ranking`, counting only
+/// hits validated against the SAME record generation as `record`
+/// (`Arc::ptr_eq`). `explain_passage_search` holds `record` from one
+/// `store.get`, while fusion re-reads the store per candidate; a
+/// concurrent `store_passages` (not excluded by the shared
+/// `read_unless_deleted` fence) can swap in a new generation between
+/// the two, whose hit may name a paragraph the held record does not
+/// have — or a different text at the same index. Such a hit is not
+/// evidence about `record`, so it is treated as not ranked.
+fn ranked_paragraph_of(
+    ranking: &[RankedPassage],
+    source: &str,
+    record: &Arc<crate::passages::PassageRecord>,
+) -> Option<u32> {
+    ranking
+        .iter()
+        .find(|hit| hit.source == source && Arc::ptr_eq(&hit.record, record))
+        .map(|hit| hit.index)
+}
+
+/// Whether `hit` is paragraph `index` of `source` validated against
+/// the SAME record generation as `record` — the identity
+/// [`ranked_paragraph_of`] selects by, applied to locating the chosen
+/// paragraph's rank/lane evidence so a racing newer generation's hit
+/// at the same index is never mistaken for it.
+fn is_hit_of_record(
+    hit: &RankedPassage,
+    source: &str,
+    index: u32,
+    record: &Arc<crate::passages::PassageRecord>,
+) -> bool {
+    hit.source == source && hit.index == index && Arc::ptr_eq(&hit.record, record)
 }
 
 /// One ranked candidate, staleness-validated against the store's
@@ -3687,5 +3725,58 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_selection_skips_hits_from_a_newer_record_generation() {
+        // A concurrent re-store swapped in a longer generation between
+        // explain's `store.get` and fusion's per-candidate re-read: its
+        // hit names paragraph 2, which the held one-paragraph record
+        // lacks. Taking it would panic in `record.paragraph(..)`.
+        let held = crate::passages::PassageRecord::for_tests("one");
+        let newer = crate::passages::PassageRecord::for_tests("one\n\ntwo\n\nthree");
+        let hit = |index: u32, record: &Arc<crate::passages::PassageRecord>| RankedPassage {
+            source: "a.md".to_string(),
+            index,
+            score: 1.0,
+            bm25: None,
+            vector: None,
+            record: Arc::clone(record),
+        };
+
+        let stale_first = vec![hit(2, &newer), hit(0, &held)];
+        assert_eq!(ranked_paragraph_of(&stale_first, "a.md", &held), Some(0));
+
+        let only_stale = vec![hit(2, &newer)];
+        assert_eq!(ranked_paragraph_of(&only_stale, "a.md", &held), None);
+
+        // No race: the same generation's best hit is taken as before.
+        let same = vec![hit(0, &held)];
+        assert_eq!(ranked_paragraph_of(&same, "b.md", &held), None);
+        assert_eq!(ranked_paragraph_of(&same, "a.md", &held), Some(0));
+    }
+
+    #[test]
+    fn explain_target_match_skips_a_newer_generations_hit_at_the_same_index() {
+        let held = crate::passages::PassageRecord::for_tests("one");
+        let newer = crate::passages::PassageRecord::for_tests("uno");
+        let hit = |index: u32, record: &Arc<crate::passages::PassageRecord>| RankedPassage {
+            source: "a.md".to_string(),
+            index,
+            score: 1.0,
+            bm25: None,
+            vector: None,
+            record: Arc::clone(record),
+        };
+        let ranking = [hit(0, &newer), hit(0, &held)];
+        assert_eq!(
+            ranking
+                .iter()
+                .position(|h| is_hit_of_record(h, "a.md", 0, &held)),
+            Some(1),
+            "the newer generation's same-index hit must not be the target"
+        );
+        assert!(!is_hit_of_record(&hit(0, &held), "b.md", 0, &held));
+        assert!(!is_hit_of_record(&hit(1, &held), "a.md", 0, &held));
     }
 }

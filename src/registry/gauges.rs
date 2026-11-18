@@ -117,7 +117,7 @@ impl AppState {
                 &guard.meta,
                 &guard.stats,
                 &entry.usage.snapshot(),
-                entry.revision_snapshot(&guard),
+                entry.sidecar_revision(&guard, self.0.wal_enabled),
                 guard.schema_digest.as_deref(),
             );
             if let Err(error) = outcome {

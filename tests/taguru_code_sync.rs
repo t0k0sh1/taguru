@@ -269,12 +269,13 @@ fn fact_model_rebuild_still_retracts_deleted_sources() {
     fs::remove_file(repo.dir.join("src/beta.rs")).unwrap();
     repo.commit("delete beta");
 
-    // Simulate a binary upgrade: the recorded facts version is older.
+    // Simulate a binary upgrade: the recorded facts version is older
+    // than any this binary writes.
     let state_path = repo.dir.join(".taguru/code-sync.json");
-    let doctored = fs::read_to_string(&state_path)
-        .unwrap()
-        .replace("\"facts_version\":1", "\"facts_version\":0");
-    fs::write(&state_path, doctored).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["facts_version"] = serde_json::json!(0);
+    fs::write(&state_path, state.to_string()).unwrap();
 
     let (code, out) = repo.run(&["sync", "."]);
     assert_eq!(code, 0, "{out}");
@@ -392,6 +393,225 @@ fn first_sync_of_a_repo_with_no_supported_files_succeeds() {
     let (code, out) = repo.run(&["sync", "."]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("up to date"), "{out}");
+}
+
+/// A synced `.rs` that can no longer be read as text — swapped for a
+/// symlink (never followed) or re-saved as Latin-1 — used to count as
+/// "non-text" and keep its old facts and fingerprint forever. Its
+/// truth now is "no facts": the old symbols must retract.
+#[test]
+fn a_synced_file_that_stops_being_text_retracts_its_old_facts() {
+    let repo = Repo::new();
+    repo.write("src/keep.rs", "pub fn survivor() {}\n");
+    repo.write("src/latin.rs", "pub fn latin_before() {}\n");
+    #[cfg(unix)]
+    {
+        repo.write("src/linked.rs", "pub fn was_plain_text() {}\n");
+        repo.write("notes.txt", "pub fn via_link() {}\n");
+    }
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "latin_before"]);
+    assert_eq!(code, 0, "{out}");
+
+    fs::write(
+        repo.dir.join("src/latin.rs"),
+        b"// caf\xe9\npub fn latin_after() {}\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        fs::remove_file(repo.dir.join("src/linked.rs")).unwrap();
+        std::os::unix::fs::symlink("../notes.txt", repo.dir.join("src/linked.rs")).unwrap();
+    }
+    repo.commit("no longer text");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "latin_before"]);
+    assert_eq!(
+        code, 1,
+        "a Latin-1 re-save must retract the old facts: {out}"
+    );
+    let (code, out) = repo.run(&["find", "latin_after"]);
+    assert_eq!(code, 1, "non-UTF-8 bytes are never imported: {out}");
+    #[cfg(unix)]
+    {
+        let (code, out) = repo.run(&["find", "was_plain_text"]);
+        assert_eq!(code, 1, "a file swapped for a symlink must retract: {out}");
+        let (code, out) = repo.run(&["find", "via_link"]);
+        assert_eq!(code, 1, "the link's target is never read: {out}");
+    }
+    let (code, out) = repo.run(&["find", "survivor"]);
+    assert_eq!(code, 0, "{out}");
+    // The retraction dropped the fingerprints too: nothing pending.
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("up to date"), "{out}");
+}
+
+/// A sync that applied its imports but never saved its state (killed
+/// mid-run, or ended with a failure) leaves facts in the map that the
+/// state file's fingerprints do not name. Gating the unimportable-file
+/// retraction on the fingerprints alone kept those facts forever once
+/// the file stopped being importable; the map's own holdings decide.
+#[cfg(unix)]
+#[test]
+fn facts_persisted_by_an_unsaved_sync_still_retract_when_unreadable() {
+    let repo = Repo::new();
+    repo.write("src/keep.rs", "pub fn anchor_survivor() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let state_path = repo.dir.join(".taguru/code-sync.json");
+    let checkpoint = fs::read(&state_path).unwrap();
+
+    repo.write("src/late.rs", "pub fn imported_then_interrupted() {}\n");
+    repo.commit("add late");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "imported_then_interrupted"]);
+    assert_eq!(code, 0, "{out}");
+    // The interruption: facts persisted, checkpoint still the one
+    // from before — its fingerprints never name src/late.rs.
+    fs::write(&state_path, checkpoint).unwrap();
+
+    fs::remove_file(repo.dir.join("src/late.rs")).unwrap();
+    std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/late.rs")).unwrap();
+    repo.commit("late becomes a dangling symlink");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "imported_then_interrupted"]);
+    assert_eq!(
+        code, 1,
+        "facts the map holds must retract even without a fingerprint: {out}"
+    );
+    let (code, out) = repo.run(&["find", "anchor_survivor"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+/// A full re-sync (unusable anchor, or no state file at all) used to
+/// list only the universe plus the dirty sets — a file deleted
+/// between the anchor and HEAD is in neither, so its facts stayed in
+/// the map forever. Every path the map holds facts for must be a
+/// candidate of a full re-sync.
+#[test]
+fn a_full_resync_retracts_files_deleted_since_the_anchor() {
+    let repo = Repo::new();
+    repo.write("src/keep.rs", "pub fn stays_put() {}\n");
+    repo.write("src/gap.rs", "pub fn deleted_across_gap() {}\n");
+    repo.write("src/lost.rs", "pub fn deleted_while_stateless() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let state_path = repo.dir.join(".taguru/code-sync.json");
+
+    // Unusable anchor: a well-formed object name git does not have.
+    fs::remove_file(repo.dir.join("src/gap.rs")).unwrap();
+    repo.commit("delete gap");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["commit"] = serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    fs::write(&state_path, state.to_string()).unwrap();
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("full re-sync"), "{out}");
+    let (code, out) = repo.run(&["find", "deleted_across_gap"]);
+    assert_eq!(code, 1, "deleted behind an unusable anchor: {out}");
+
+    // No state file at all: the map itself is the only record left.
+    fs::remove_file(repo.dir.join("src/lost.rs")).unwrap();
+    repo.commit("delete lost");
+    fs::remove_file(&state_path).unwrap();
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "deleted_while_stateless"]);
+    assert_eq!(code, 1, "deleted while the state file was gone: {out}");
+    let (code, out) = repo.run(&["find", "stays_put"]);
+    assert_eq!(code, 0, "survivors must re-import: {out}");
+}
+
+/// One file whose rendered batch refuses (here: a passage past the
+/// 8 MiB cap) used to abort the whole sync before anything applied —
+/// every later sync, and `watch`'s first one, failed on it forever.
+/// It is now counted and skipped, the rest of the repo still syncs,
+/// and the version an earlier sync imported for it retracts.
+#[test]
+fn a_refused_file_is_skipped_and_its_old_facts_retract() {
+    let repo = Repo::new();
+    repo.write("src/ok.rs", "pub fn fine_one() {}\n");
+    repo.write("src/huge.rs", "pub fn was_small() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    // One const whose signature (its whole type) runs past 8 MiB: a
+    // single string token, so parsing it stays cheap.
+    repo.write(
+        "src/huge.rs",
+        &format!(
+            "pub const HUGE: [u8; \"{}\".len()] = [0; 0];\n",
+            "x".repeat(9 * 1024 * 1024)
+        ),
+    );
+    repo.write("src/ok.rs", "pub fn fine_one() {}\npub fn fine_two() {}\n");
+    repo.commit("grow past the cap");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "a refused file must not fail the sync: {out}");
+    assert!(
+        out.contains("src/huge.rs") && out.contains("1 refused"),
+        "{out}"
+    );
+    let (code, out) = repo.run(&["find", "fine_two"]);
+    assert_eq!(code, 0, "the rest of the repo must still sync: {out}");
+    let (code, out) = repo.run(&["find", "was_small"]);
+    assert_eq!(code, 1, "the refused file's old facts must retract: {out}");
+    // The sync point advanced: a clean tree is up to date.
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("up to date"), "{out}");
+}
+
+/// Same-name definitions in one file — two traits' `fmt` on one type,
+/// `#[cfg]`-split twins — used to share one qualified name, and the
+/// map keeps one location per (name, file): every definition after the
+/// first was unfindable. Each must answer with its own lines, by the
+/// bare name and by `Type::name` alike.
+#[test]
+fn every_same_name_definition_keeps_its_own_location() {
+    let repo = Repo::new();
+    repo.write(
+        "src/shapes.rs",
+        "pub struct Shape;\n\
+         impl std::fmt::Display for Shape {\n\
+         \x20   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n\
+         }\n\
+         impl std::fmt::Debug for Shape {\n\
+         \x20   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n\
+         }\n\
+         #[cfg(unix)]\n\
+         pub fn platform_name() -> &'static str { \"unix\" }\n\
+         #[cfg(not(unix))]\n\
+         pub fn platform_name() -> &'static str { \"other\" }\n",
+    );
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    for cue in ["fmt", "Shape::fmt"] {
+        let (code, out) = repo.run(&["find", cue]);
+        assert_eq!(code, 0, "{cue}: {out}");
+        assert!(
+            out.contains("src/shapes.rs:3-3") && out.contains("src/shapes.rs:6-6"),
+            "{cue} must find both trait impls' fmt: {out}"
+        );
+    }
+    let (code, out) = repo.run(&["find", "platform_name"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("src/shapes.rs:9-9") && out.contains("src/shapes.rs:11-11"),
+        "both cfg twins must be findable: {out}"
+    );
 }
 
 /// Kills the watch process even when an assertion panics first.

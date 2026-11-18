@@ -470,7 +470,7 @@ impl Run {
 
     /// The manifest/checkpoint value of the redaction control (ADR
     /// 0038 §3.5): `""` when off, so pre-ADR entries keep matching a
-    /// default run; `redact2`, `redact2:secrets`, or `redact2:pii`
+    /// default run; `redact4`, `redact4:secrets`, or `redact4:pii`
     /// when on, `+<sha256 of the rules file>` appended under
     /// `--redact-rules` (#884).
     pub(super) fn redaction_manifest_value(&self) -> String {
@@ -546,6 +546,7 @@ impl Run {
         // The manifest's hash is the FILE's (did it change); the
         // redaction version below is the reading's (ADR 0038 §3.3).
         let hash = sha256_hex(text.as_bytes());
+        let read_bytes = text.len();
         // ADR 0038 §3.3: with `--redact` on, the redacted text IS the
         // segment from here on — prompt, chunks, candidates, passage,
         // checkpoint, trace, attempts log, coverage all read it.
@@ -562,6 +563,14 @@ impl Run {
         if let Some(line) = redaction_stderr_line(&redactions) {
             eprintln!("taguru: extract: {source}: {line}");
         }
+        // `read_segment` capped the UNMASKED text; a placeholder is
+        // often longer than what it replaced (`«redacted phone abcd»`
+        // is 23 bytes for the 13-byte `090-1234-5678`), so a near-cap
+        // segment dense with matches can outgrow the passage cap only
+        // here. Refused now, before any completion is paid for —
+        // otherwise the written batch's passage line fails
+        // self-validation after every model call, blamed on taguru.
+        masked_within_passage_cap(read_bytes, &text)?;
         // The fingerprint's source-id value is the EFFECTIVE written
         // source, but only under the flag — "" when off, so pre-S1
         // manifest entries (no field) keep matching default runs.
@@ -2219,6 +2228,24 @@ pub(super) enum OverviewOutcome {
     Failed(String),
 }
 
+/// `Err` when the masked segment no longer fits the passage cap
+/// [`read_segment`] held the file to: placeholders can be longer than
+/// what they replaced, so `--redact` alone can push a near-cap segment
+/// over. Without `--redact` the text is unchanged and always fits.
+/// `read_bytes` is the segment as read, for a message that says the
+/// growth came from redaction (the segment is not wrong as written,
+/// only too dense to mask under the cap).
+pub(super) fn masked_within_passage_cap(read_bytes: usize, masked: &str) -> Result<(), String> {
+    if masked.len() > MAX_PASSAGE_BYTES {
+        return Err(format!(
+            "redaction grew the segment from {read_bytes} to {} bytes, over the \
+             {MAX_PASSAGE_BYTES}-byte passage cap — split the segment",
+            masked.len()
+        ));
+    }
+    Ok(())
+}
+
 /// The dry run's note: `, N redaction(s)` when the read masked
 /// anything (pre-existing placeholders excluded), nothing otherwise.
 pub(super) fn redaction_plan_note(redactions: &[crate::sensitive::Redaction]) -> String {
@@ -2284,15 +2311,43 @@ pub(super) fn redaction_stderr_line(redactions: &[crate::sensitive::Redaction]) 
 /// as (1-based batch line, rule) — `None` when the body is clean or
 /// carries only pre-existing placeholders (the masked passage is
 /// made of them). ADR 0038 §3.3's output scan.
+///
+/// Each line is scanned as the text it carries — every JSON string
+/// value, decoded — never as the encoded line: the encoding is not
+/// content. Scanned raw, `\"` and `\n` escapes read as text
+/// (`DB_PASSWORD=\"«redacted …»\"` takes the lone `\` as the
+/// assignment's value), and a passage's blank lines vanish into `\n\n`,
+/// so the output scan would see paragraphs the input scan never did.
 pub(super) fn batch_sensitive_hit(
     body: &str,
     rules: &crate::sensitive::RuleSet,
 ) -> Option<(usize, String)> {
-    crate::sensitive::scan(body, rules)
-        .into_iter()
-        .find(|found| !found.preexisting)
-        .map(|found| {
-            let line = body[..found.start].matches('\n').count() + 1;
-            (line, found.rule)
-        })
+    fn strings<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::String(text) => out.push(text),
+            serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+            serde_json::Value::Object(fields) => {
+                fields.values().for_each(|item| strings(item, out))
+            }
+            _ => {}
+        }
+    }
+    body.lines().enumerate().find_map(|(at, line)| {
+        let hit = |text: &str| {
+            crate::sensitive::scan(text, rules)
+                .into_iter()
+                .find(|found| !found.preexisting)
+                .map(|found| (at + 1, found.rule))
+        };
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => {
+                let mut texts = Vec::new();
+                strings(&value, &mut texts);
+                texts.into_iter().find_map(hit)
+            }
+            // `parse_batch` validated the body first, so every line is
+            // JSON; were one not, the encoded line is still scanned.
+            Err(_) => hit(line),
+        }
+    })
 }

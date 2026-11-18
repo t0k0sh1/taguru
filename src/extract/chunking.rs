@@ -506,13 +506,35 @@ pub(super) struct PieceContext<'a> {
 /// this same function with their own text, the one guard at the top
 /// covers every recursion depth — a resumed run whose earlier attempt
 /// split differently still reuses whatever units match today's actual
-/// piece texts, and nothing else.
+/// piece texts, and nothing else. A piece an earlier attempt SPLIT has
+/// no unit of its own, so the store also records the split
+/// ([`CheckpointStore::record_split`]): a resume re-splits it at the
+/// recorded cap with no model call, instead of re-paying every failed
+/// round that led to the split.
 pub(super) fn extract_piece(
     context: &PieceContext,
     piece: &str,
 ) -> Result<Vec<ChunkOutput>, String> {
     if let Some(cached) = checkpointed_piece(context.checkpoints, piece) {
         return Ok(vec![cached]);
+    }
+    let piece_id = sha256_hex(piece.as_bytes());
+    if let Some(cap) = context.checkpoints.split_cap(&piece_id) {
+        let sub_pieces = split_labeled_piece(piece, cap);
+        // A recorded split always re-splits (the split is a pure
+        // function of the text and the cap), but a split that no
+        // longer yields pieces is simply not reused — the ladder
+        // below judges the piece afresh.
+        if sub_pieces.len() > 1 {
+            return extract_split(
+                context,
+                &piece_id,
+                piece.len(),
+                cap,
+                &sub_pieces,
+                "the checkpoint records this piece split on an earlier attempt",
+            );
+        }
     }
     let user = user_message(
         context.source,
@@ -525,7 +547,6 @@ pub(super) fn extract_piece(
     // its rounds, so a demotion is judged against the rung this piece
     // actually failed under.
     let rung = context.ladder.rung();
-    let piece_id = sha256_hex(piece.as_bytes());
     let mut outcome = extract_round(
         context,
         &user,
@@ -669,29 +690,54 @@ pub(super) fn extract_piece(
                 };
                 return Err(piece_failure(piece, &piece_id, floor));
             }
-            // ADR 0029: the split, as a record — reason in the same
-            // vocabulary the attempt states use.
-            let mut record = MoveRecord::blank(
-                "split",
-                context.completions.run_id(),
+            // Recorded durably BEFORE any child is asked, so a kill
+            // mid-children still resumes straight into them.
+            context
+                .checkpoints
+                .record_split(context.source, piece_id.clone(), cap);
+            extract_split(
+                context,
                 &piece_id,
-                context.chunk_index,
+                piece.len(),
+                cap,
+                &sub_pieces,
                 match outcome {
                     RoundOutcome::TimedOut(_) => "the completion timed out (ADR 0020)",
                     _ => "the answer still ended at the output cap",
                 },
-            );
-            record.piece_bytes = Some(piece.len());
-            record.split_cap = Some(cap);
-            record.sub_pieces = Some(sub_pieces.len());
-            context.observers.move_event(&record);
-            let mut outputs = Vec::new();
-            for sub_piece in &sub_pieces {
-                outputs.extend(extract_piece(context, sub_piece)?);
-            }
-            Ok(outputs)
+            )
         }
     }
+}
+
+/// The split rung's second half, shared by a fresh split and one a
+/// resume replays from the checkpoint: the ADR 0029 `split` record
+/// (reason in the same vocabulary the attempt states use), then each
+/// sub-piece through [`extract_piece`] in order.
+fn extract_split(
+    context: &PieceContext,
+    piece_id: &str,
+    piece_bytes: usize,
+    cap: usize,
+    sub_pieces: &[String],
+    reason: &str,
+) -> Result<Vec<ChunkOutput>, String> {
+    let mut record = MoveRecord::blank(
+        "split",
+        context.completions.run_id(),
+        piece_id,
+        context.chunk_index,
+        reason,
+    );
+    record.piece_bytes = Some(piece_bytes);
+    record.split_cap = Some(cap);
+    record.sub_pieces = Some(sub_pieces.len());
+    context.observers.move_event(&record);
+    let mut outputs = Vec::new();
+    for sub_piece in sub_pieces {
+        outputs.extend(extract_piece(context, sub_piece)?);
+    }
+    Ok(outputs)
 }
 
 /// ADR 0037 §3.1 (#850): a piece's own failure names the piece — its

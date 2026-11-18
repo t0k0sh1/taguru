@@ -220,6 +220,9 @@ impl AppState {
         let published = match outcome {
             Ok(()) => {
                 inner.stats = stats;
+                // The staged capture, not the live value: these are
+                // the bytes that just became the image.
+                inner.published_graph_revision = staged_graph_revision;
                 self.0.metrics.record_flush(name, true);
                 // `dirty` stays as claimed: clear (nothing raced) means the
                 // image is current; a racing write re-set it and will
@@ -257,7 +260,7 @@ impl AppState {
     /// whole-image upload instead of a few log records. Bounded by the
     /// shipper's own deferral budget, so a dead bucket can never walk
     /// this log into its cap.
-    fn truncate_wal(&self, name: &str, stem: &str, inner: &mut EntryInner) {
+    pub(super) fn truncate_wal(&self, name: &str, stem: &str, inner: &mut EntryInner) {
         let path = wal_path(&self.0.data_dir, stem);
         if let Some(progress) = &self.0.ship_progress
             && !progress.allows_reset(&path, inner.wal_seq.saturating_sub(1), inner.wal_bytes)
@@ -267,6 +270,9 @@ impl AppState {
         match wal::reset(&path) {
             Ok(()) => inner.wal_bytes = 0,
             Err(error) => {
+                // `reset` may have shrunk the file and failed only its
+                // sync: count what is there, not what was.
+                inner.wal_bytes = wal::restat_len(&path, inner.wal_bytes);
                 tracing::warn!("WAL for '{name}' not truncated (harmless): {error}");
             }
         }
@@ -454,6 +460,7 @@ impl AppState {
                                     "WAL rollback after a failed append also failed; \
                                      flushing the image now to retire any leaked tail"
                                 );
+                                inner.wal_bytes = wal::restat_len(&path, inner.wal_bytes);
                                 entry.dirty.store(true, Ordering::Relaxed);
                                 wal_behind = true;
                             }
@@ -541,7 +548,7 @@ impl AppState {
                                 "WAL re-append after a partial apply failed; \
                                  flushing the image now to re-cover memory"
                             );
-                            inner.wal_bytes = len_before;
+                            inner.wal_bytes = wal::restat_len(&path, len_before);
                             inner.wal_seq = first_seq;
                             wal_behind = true;
                         }
@@ -557,16 +564,17 @@ impl AppState {
                         // of this lock). Its watermark covers the
                         // whole batch's seqs, so the tail becomes
                         // replay-inert even if the log keeps
-                        // refusing to shrink. Bookkeeping stays at
-                        // the full-batch values: that is what the
-                        // file still holds if the truncate never
-                        // landed, and a successful flush resets
-                        // both anyway.
+                        // refusing to shrink. Bookkeeping follows
+                        // the file: the truncate may have landed
+                        // and failed only its sync, and a count
+                        // left ahead of the file would send the
+                        // next rewind into the middle of a record.
                         tracing::warn!(
                             context = %id, %error,
                             "WAL truncate after a partial apply failed; \
                              flushing the image now to retire the untried tail"
                         );
+                        inner.wal_bytes = wal::restat_len(&path, inner.wal_bytes);
                         wal_behind = true;
                     }
                 }
@@ -837,6 +845,7 @@ impl AppState {
                     return false;
                 }
                 inner.stats = stats;
+                inner.published_graph_revision = inner.graph_revision;
                 entry.dirty.store(false, Ordering::Relaxed);
                 self.truncate_wal(name, &entry.id, inner);
             } else {
@@ -3732,6 +3741,50 @@ mod tests {
             .map_err(|_| "read")
             .unwrap();
         assert_eq!(count, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A WAL reset that fails after the file already shrank (its
+    /// `set_len` landed, its sync did not) leaves `wal_bytes` counting
+    /// what is on disk — not the old length, which the next
+    /// partial-apply rewind would land inside a fresh record.
+    #[test]
+    fn a_failed_wal_reset_recounts_the_bytes_on_disk() {
+        let dir = scratch_dir("wal-reset-drift");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                &state.id_of("sake"),
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup_named("sake").unwrap();
+        let stem = state.stem_of("sake").unwrap();
+        let path = wal_path(&dir, &stem);
+        let mut inner = entry.inner.write();
+        assert!(inner.wal_bytes > 0);
+
+        // The shrink landed; the reset then reports failure.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        crate::storage::fail_persistence_ops_after(0);
+        state.truncate_wal("sake", &stem, &mut inner);
+        assert!(
+            !crate::storage::clear_persistence_fault(),
+            "the injected reset failure must have fired"
+        );
+        assert_eq!(inner.wal_bytes, fs::metadata(&path).unwrap().len());
+        drop(inner);
         let _ = fs::remove_dir_all(dir);
     }
 

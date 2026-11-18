@@ -59,9 +59,15 @@ impl SymbolKind {
 /// `qualified_name` is minted by the grammar as
 /// `<repo-relative path><sep><name path>` (Rust: `::`), so it is
 /// globally unique without any language-specific module resolution —
-/// the file path IS the namespace. `parent` carries the enclosing
-/// symbol's qualified name when the definition is nested (a method in
-/// an `impl`); `None` means the file itself is the container.
+/// the file path IS the namespace — provided the grammar also keeps it
+/// unique WITHIN the file: the map holds one location per (name,
+/// file), so two definitions sharing a name would leave all but the
+/// first unfindable. A name path that repeats (Rust's `#[cfg]`-split
+/// twins) takes an ordinal on its last segment, `name#2`, which
+/// lookups strip. `name` stays the bare identifier. `parent` carries
+/// the enclosing symbol's qualified name when the definition is nested
+/// (a method in an `impl`); `None` means the file itself is the
+/// container.
 ///
 /// `signature` must be a single line with no blank-line potential —
 /// it becomes one passage paragraph verbatim, and the paragraph

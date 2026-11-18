@@ -208,8 +208,9 @@ async fn serve(
     // operator-invoked heavy calls contend on one ceiling instead of
     // stacking two.
     let heavy_ops_limiter = limits::HeavyOpsLimiter::new(max_concurrent_heavy);
-    // Failed-auth attempts are throttled per source IP so the gate
-    // cannot be brute-forced for free (default 10/min; 0 disables).
+    // Failed-auth attempts are throttled per source IP (default
+    // 10/min; 0 disables) — a back-off signal, not a brute-force
+    // barrier; see `auth::Gate`.
     let auth_fail_per_minute = resolve_per_minute(
         "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
         env_number("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", 10),
@@ -259,8 +260,9 @@ async fn serve(
     }
     // The swappable handle every auth surface reads through — SIGHUP
     // and the config-file watch (armed after boot, below) rotate the
-    // table at runtime without a restart.
-    let keyring = auth::SharedKeyring::new(keyring);
+    // table at runtime without a restart. The digest of the config
+    // bytes boot just applied seeds its reload ledger (#942).
+    let keyring = auth::SharedKeyring::with_config_digest(keyring, boot_config_digest);
 
     // Declared quotas share the credential story's failure posture: a
     // ceiling that silently failed to arm is an unbounded `context`.
@@ -405,6 +407,22 @@ async fn serve(
     // replica takes the sibling path: always a cache, never a claimant,
     // no guard to trip (it deposes nobody).
     let take_over = serve_args.take_over || env_bool("TAGURU_TAKEOVER", false);
+    // The intent only means something to a writer claiming a bucket.
+    // Warned, not refused: main.rs refuses only a configuration that
+    // cannot run (`--replica` without a bucket, above), and an
+    // ignored acknowledgment harms nothing — `TAGURU_TAKEOVER=1` in a
+    // shared env file can reach a replica service legitimately — but
+    // silence let an operator believe a takeover was armed.
+    if take_over && (replica_mode || replicate.is_none()) {
+        tracing::warn!(
+            "--take-over / TAGURU_TAKEOVER is ignored: {}",
+            if replica_mode {
+                "a replica claims nothing, so it deposes nobody"
+            } else {
+                "without TAGURU_REPLICATE_URL there is no bucket writer to depose"
+            }
+        );
+    }
     let hydrator = match &replicate {
         Some((replicate, store, root)) if replica_mode => {
             match hydrate::prepare_replica(store, root, &replicate.url, &config.data_dir).await {
@@ -487,7 +505,6 @@ async fn serve(
         keyring.clone(),
         auth_source,
         state.clone(),
-        boot_config_digest,
     ));
 
     let shipper = match &replicate {
@@ -972,28 +989,77 @@ fn routes(
 /// knob.
 const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long [`read_off_worker`] waits for a config/route-map read
-/// before treating that tick as unreadable. Comfortably above what
-/// even a slow network mount needs for these small files, and well
-/// under `CONFIG_WATCH_INTERVAL` so a genuinely stalled mount never
-/// piles up unfinished reads across ticks.
+/// How long [`read_off_worker`] waits for a config/route-map reload —
+/// its file read, mostly — before treating that tick as unreadable,
+/// and how long a SIGHUP's [`read_off_worker_queued`] waits before it
+/// logs that it is still waiting. Comfortably above what even a slow
+/// network mount needs for these small files, and well under
+/// `CONFIG_WATCH_INTERVAL` so a genuinely stalled mount never piles up
+/// unfinished reloads across ticks.
 const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Whether a [`read_off_worker`] thread for one watched path is still
-/// running from an earlier call — set the instant that thread starts,
-/// cleared only when its `std::fs::read` actually returns (however
-/// long that takes). Share one of these between every caller that can
-/// read the same path — a periodic tick and, for the route-map watch,
-/// its SIGHUP handler — so a mount that is still stuck from the last
-/// attempt never gets a second thread piled behind the first.
-pub(crate) type ReadInFlight = Arc<std::sync::atomic::AtomicBool>;
+/// One watched path's off-worker state: whether a [`read_off_worker`]
+/// (or [`read_off_worker_queued`]) thread for it is still running from
+/// an earlier call — set the instant that thread starts, cleared only
+/// when its work (the read, and the judging behind it) actually
+/// returns or unwinds, however long that takes. Share one, as an
+/// `Arc`, between every caller that can read the same path — a
+/// periodic tick and its SIGHUP handler — so a mount that is still
+/// stuck from the last attempt never gets a second thread piled
+/// behind the first.
+#[derive(Default)]
+pub(crate) struct ReadInFlight {
+    busy: std::sync::atomic::AtomicBool,
+    /// Signalled each time `busy` clears, waking a SIGHUP queued behind
+    /// the work that held it.
+    settled: tokio::sync::Notify,
+}
 
-/// Reads `path` off a plain OS thread, not tokio's blocking pool, with
-/// a deadline (issue #900). Both the keyring config watch and the
-/// route-map watch share this: the file can live on a network mount
-/// (a Kubernetes secret volume is the documented case), and a stalled
-/// read must neither wedge this watch's own tick loop nor outlive
-/// graceful shutdown.
+/// Spawns `work`'s thread for a caller that has just claimed
+/// `in_flight.busy`; the receiver yields `work`'s answer. The claim is
+/// released — and a queued SIGHUP woken — the moment `work` returns or
+/// unwinds: a panicking reload must not leave the path busy for good,
+/// every later tick skipped and every later SIGHUP queued behind
+/// nothing.
+fn spawn_holding<T: Send + 'static>(
+    in_flight: &Arc<ReadInFlight>,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> tokio::sync::oneshot::Receiver<Option<T>> {
+    struct Release(Arc<ReadInFlight>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0
+                .busy
+                .store(false, std::sync::atomic::Ordering::Release);
+            self.0.settled.notify_one();
+        }
+    }
+    let release = Release(Arc::clone(in_flight));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        // Scoped so `release` drops before `tx` sends — or, on unwind,
+        // before `tx` drops: whoever sees this call finish must find the
+        // path already free.
+        let outcome = {
+            let _release = release;
+            work()
+        };
+        let _ = tx.send(outcome);
+    });
+    rx
+}
+
+/// Runs `work` — one whole reload, starting with the read of its
+/// watched file — off a plain OS thread, not tokio's blocking pool,
+/// with a deadline (issue #900): the periodic watch ticks' path, for
+/// the keyring config and the route map alike. The file can live on a
+/// network mount (a Kubernetes secret volume is the documented case),
+/// and a stalled read must neither wedge the caller's own loop nor
+/// outlive graceful shutdown. The judging runs on this thread too, not
+/// back on the async side: each reload reads its file UNDER its reload
+/// lock — a lock no task can hold across an await — and reading under
+/// that lock is what keeps a stale read from ever being swapped in
+/// over a newer reload's result.
 ///
 /// `tokio::task::spawn_blocking` cannot do this: it has no way to
 /// cancel work already handed to the blocking pool, and
@@ -1004,41 +1070,80 @@ pub(crate) type ReadInFlight = Arc<std::sync::atomic::AtomicBool>;
 /// process exit tears it down like any other unjoined thread instead
 /// of waiting on it.
 ///
-/// A timed-out read's thread is still out there, blocked on the same
-/// stuck mount — `in_flight` is what stops the NEXT call (this watch's
-/// next tick, or a SIGHUP landing mid-stall) from starting a second
-/// one behind it: a still-set flag returns `None` with no thread spawn
-/// at all. Left unchecked, a mount stuck for the life of the process
-/// would otherwise accumulate one thread per tick forever.
+/// A timed-out call's thread is still out there, blocked on the same
+/// stuck mount (and, should the mount recover, finishing its reload
+/// under that same lock, ordered like any other) — `in_flight` is what
+/// stops the next tick from starting a second one behind it: a path
+/// still busy returns `None` with no thread spawn at all, and the tick
+/// is simply skipped (the next one re-reads the file anyway). Left
+/// unchecked, a mount stuck for the life of the process would
+/// otherwise accumulate one thread per tick forever. A SIGHUP must not
+/// be skipped like that — see [`read_off_worker_queued`].
 ///
-/// `None` covers a failed read, a timed-out read, an already-in-flight
-/// read and a thread that panicked — every caller already treats
-/// "unreadable this tick" as one outcome, never poisoning the
-/// change-detection baseline.
-pub(crate) async fn read_off_worker(
-    path: std::path::PathBuf,
-    in_flight: &ReadInFlight,
-) -> Option<Vec<u8>> {
-    if in_flight.swap(true, std::sync::atomic::Ordering::AcqRel) {
+/// `None` covers whatever `work` itself answers `None` for (a failed
+/// read among them), a timed-out call, a still-busy path and a thread
+/// that panicked — every tick already treats "nothing judged this
+/// time" as one outcome.
+pub(crate) async fn read_off_worker<T: Send + 'static>(
+    in_flight: &Arc<ReadInFlight>,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    if in_flight
+        .busy
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
         return None;
     }
-    let flag = Arc::clone(in_flight);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let bytes = std::fs::read(path).ok();
-        flag.store(false, std::sync::atomic::Ordering::Release);
-        let _ = tx.send(bytes);
-    });
-    tokio::time::timeout(CONFIG_READ_TIMEOUT, rx)
+    tokio::time::timeout(CONFIG_READ_TIMEOUT, spawn_holding(in_flight, work))
         .await
         .ok()?
         .ok()
         .flatten()
 }
 
+/// SIGHUP's [`read_off_worker`]: an operator's signal must never be
+/// dropped, so instead of skipping while earlier work on this path is
+/// still in flight it waits for that work to settle, then runs `work`
+/// — and awaits it to the end, past any deadline. Waiting wedges
+/// nothing: it is an await (graceful shutdown aborts it like any
+/// other) and no thread is spawned until the path is free, so a mount
+/// stuck for the life of the process still holds exactly one thread.
+/// Further signals meanwhile coalesce in the signal stream and run once
+/// this returns, against the file as it stands by then.
+///
+/// `stalled` runs once if all that has not finished within
+/// `CONFIG_READ_TIMEOUT` — the caller's chance to say why its SIGHUP
+/// has not answered yet. `None` covers whatever `work` itself answers
+/// `None` for and a thread that panicked.
+pub(crate) async fn read_off_worker_queued<T: Send + 'static>(
+    in_flight: &Arc<ReadInFlight>,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+    stalled: impl FnOnce(),
+) -> Option<T> {
+    let mut run = std::pin::pin!(async move {
+        // A wakeup landing between the claim attempt and the await is
+        // kept as `notify_one`'s stored permit, so none is ever missed;
+        // a stale permit costs one extra claim attempt.
+        while in_flight
+            .busy
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            in_flight.settled.notified().await;
+        }
+        spawn_holding(in_flight, work).await.ok().flatten()
+    });
+    if let Ok(outcome) = tokio::time::timeout(CONFIG_READ_TIMEOUT, &mut run).await {
+        return outcome;
+    }
+    stalled();
+    run.await
+}
+
 /// Arms the keyring hot-reload triggers (issue #134); the reload work
 /// itself — source re-read, fail-closed rules, the audit line — is
-/// [`auth::reload_keyring`]. Two triggers, same swap:
+/// [`auth::reload_keyring`] for SIGHUP and
+/// [`auth::reload_keyring_if_changed`] for the file watch. Two
+/// triggers, same swap:
 ///
 /// - **SIGHUP** (unix only, registered like [`TerminateSignals`] — a
 ///   failed registration degrades to "no signal reload" with a
@@ -1046,7 +1151,10 @@ pub(crate) async fn read_off_worker(
 ///   who wants the rotation NOW. Before this handler existed the
 ///   default disposition made SIGHUP kill the process, so this is
 ///   strictly an upgrade — but it does mean a foreground server now
-///   survives its terminal closing.
+///   survives its terminal closing. Its reload runs off the worker
+///   like the watch's ([`read_off_worker_queued`]), so a stalled
+///   mount wedges neither a worker thread nor graceful shutdown, and
+///   a SIGHUP landing mid-tick waits its turn instead of being lost.
 /// - **The `--config` file watch** (every platform, only when a file
 ///   was given): a poll of the file's content digest — NOT `(mtime,
 ///   len)` alone (issue #309), which misses a same-length rotation
@@ -1063,15 +1171,19 @@ fn spawn_keyring_reload_tasks(
     keyring: auth::SharedKeyring,
     source: auth::AuthSource,
     state: AppState,
-    boot_config_digest: Option<String>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     let source = Arc::new(source);
+    // Both triggers read the same file, so they share one flag: a
+    // mount stuck under a tick's read never gets a SIGHUP's thread
+    // piled behind it — the SIGHUP queues instead.
+    let in_flight = Arc::new(ReadInFlight::default());
     #[cfg(unix)]
     {
         let keyring = keyring.clone();
         let source = Arc::clone(&source);
         let state = state.clone();
+        let in_flight = Arc::clone(&in_flight);
         // Registered before the task is spawned, for the same reason
         // `shutdown_signal` installs at construction (#892): a SIGHUP
         // landing before the spawned task's first poll would be the
@@ -1086,81 +1198,50 @@ fn spawn_keyring_reload_tasks(
         if let Some(mut hangup) = hangup {
             tasks.push(tokio::spawn(async move {
                 while hangup.recv().await.is_some() {
-                    let outcome = auth::reload_keyring(&keyring, &source, "sighup");
-                    state
-                        .metrics()
-                        .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+                    let (keyring, source, state) =
+                        (keyring.clone(), Arc::clone(&source), state.clone());
+                    let reload = move || {
+                        let outcome = auth::reload_keyring(&keyring, &source, "sighup");
+                        state.metrics().record_keyring_reload(outcome.succeeded());
+                        Some(())
+                    };
+                    let _ = read_off_worker_queued(&in_flight, reload, || {
+                        warn!(
+                            "SIGHUP keyring reload is waiting on a config-file read that has \
+                             not returned yet — it runs once that read does; the current table \
+                             stays armed meanwhile"
+                        );
+                    })
+                    .await;
                 }
             }));
         }
     }
-    let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
+    if source.config_path().is_none() {
         return tasks;
-    };
+    }
     tasks.push(tokio::spawn(async move {
-        // A content digest, not `(mtime, len)`: a same-length rotation
-        // that lands on an unchanged mtime — a fixed-width token swap,
-        // a metadata-preserving copy, or an atomic symlink swap inside
-        // one filesystem-clock tick — must still register as a
-        // change. `std::fs::read` already follows the symlink hop a
-        // Kubernetes secret volume performs, so the swapped target's
-        // bytes are what get hashed either way. The file is the same
-        // small KEY=VALUE table a reload is about to parse in full the
-        // moment a change fires, so hashing it every tick costs
-        // nothing close to a full parse.
-        // SHA-256, not the FNV-1a fold `hash.rs` owns for change
-        // detection elsewhere: rotation here gates a keyring reload, so
-        // the signature needs collision resistance FNV-1a does not
-        // offer, not just speed.
-        //
-        // This read is also THE read the reload itself uses: passing
-        // its bytes straight into `reload_keyring_with_bytes` below
-        // means change detection and the reload can never disagree
-        // about what the file said — there is no second, independent
-        // read of the file left to race a concurrent rewrite. (A
-        // second read used to exist here, and a transient miss on it
-        // could refuse a reload for content `last` had already
-        // recorded as seen, silently dropping it forever.)
-        // Only this loop ever reads this path (the SIGHUP handler
-        // above reloads straight from `source`, not through
-        // `read_off_worker`), so the flag only ever needs to answer
-        // this loop's own overlapping ticks.
-        let in_flight: ReadInFlight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // The baseline is the digest of the bytes boot APPLIED — not a
-        // fresh read taken here (#942): a rotation landing between
-        // boot's read and this task's first read would otherwise become
-        // the baseline, recorded as already seen and never applied,
-        // until the file changed again. The router's map watch seeds
-        // itself the same way. (`None` only when no config path was
-        // given, in which case this task is never spawned; kept as an
-        // `Option` so a first tick against an unknown baseline still
-        // reads as a change.)
-        let mut last: Option<String> = boot_config_digest;
+        // Change detection is a content digest (#309), and lives with
+        // the reload itself — `auth::reload_keyring_if_changed` — where
+        // the SIGHUP handler shares it. `std::fs::read` already follows
+        // the symlink hop a Kubernetes secret volume performs, so the
+        // swapped target's bytes are what get hashed either way.
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {
             ticker.tick().await;
-            // An unreadable file is NOT a change: transient volume
-            // states must neither trigger a reload nor poison `last`.
-            // This same read serves the reload below too — no second
-            // read of the file exists to race a concurrent rewrite
-            // anymore.
-            let Some(bytes) = read_off_worker(path.clone(), &in_flight).await else {
-                continue;
-            };
-            let current = sha256::sha256_hex(&bytes);
-            if last.as_ref() != Some(&current) {
-                // Remember the state we ATTEMPTED, refusal included:
-                // one loud line per change, not one per tick. A
-                // reverted file hashes differently again and
-                // re-triggers.
-                last = Some(current);
-                let outcome =
-                    auth::reload_keyring_with_bytes(&keyring, &source, "config-watch", &bytes);
-                state
-                    .metrics()
-                    .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
-            }
+            let (keyring, source, state) = (keyring.clone(), Arc::clone(&source), state.clone());
+            // The whole reload runs off the worker, not just its read:
+            // the file is read under the keyring's reload lock, which
+            // is what keeps this tick from ever arming bytes a SIGHUP
+            // reload already superseded. Counted on that thread too, so
+            // a reload that finishes past the deadline still counts.
+            let _ = read_off_worker(&in_flight, move || {
+                let outcome = auth::reload_keyring_if_changed(&keyring, &source)?;
+                state.metrics().record_keyring_reload(outcome.succeeded());
+                Some(())
+            })
+            .await;
         }
     }));
     tasks
@@ -1411,8 +1492,7 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (filter, unparseable_log_filter) = crate::env::log_filter("info");
     let (json, unrecognized_log_format) = match std::env::var("TAGURU_LOG_FORMAT") {
         Ok(value) if value.eq_ignore_ascii_case("json") => (true, None),
         Ok(value) => (false, Some(value)),
@@ -1432,16 +1512,20 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
         registry.with(stderr_layer.with_filter(filter)).init();
     }
 
-    // Deferred from the TAGURU_LOG_FORMAT read above: logging works only now.
+    // Deferred from the RUST_LOG and TAGURU_LOG_FORMAT reads above:
+    // logging works only now.
+    if let Some(warning) = unparseable_log_filter {
+        warn!("{warning}");
+    }
     if let Some(value) = unrecognized_log_format {
         warn!(
             "ignoring TAGURU_LOG_FORMAT={value}: not a recognized format (json); using human-readable"
         );
     }
     // Deferred from trace::provider(): logging works only now.
-    if let Some(error) = exporter_error {
+    if let Some(export_error) = exporter_error {
         warn!(
-            error,
+            export_error,
             "span export disabled: the OTLP exporter failed to build"
         );
     }
@@ -1630,6 +1714,85 @@ mod tests {
         assert!(probes.iter().all(|probe| !probe.is_finished()));
         super::stop_background_tasks(tasks).await;
         assert!(probes.iter().all(tokio::task::AbortHandle::is_finished));
+    }
+
+    /// A SIGHUP landing while a tick's reload still holds the path is
+    /// queued, not dropped: nothing of it starts while that work is in
+    /// flight (a tick arriving meanwhile is skipped, as ever), and it
+    /// runs the moment the path settles.
+    #[tokio::test]
+    async fn a_sighup_reload_queues_behind_in_flight_work_instead_of_being_dropped() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let in_flight = Arc::new(super::ReadInFlight::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let tick = tokio::spawn({
+            let in_flight = Arc::clone(&in_flight);
+            async move {
+                super::read_off_worker(&in_flight, move || {
+                    let _ = started_tx.send(());
+                    release_rx.recv().unwrap();
+                    Some("tick")
+                })
+                .await
+            }
+        });
+        started_rx.await.unwrap();
+
+        assert_eq!(
+            super::read_off_worker(&in_flight, || Some("next tick")).await,
+            None,
+            "a tick finding the path busy is skipped"
+        );
+        let ran = Arc::new(AtomicBool::new(false));
+        let sighup = super::read_off_worker_queued(
+            &in_flight,
+            {
+                let ran = Arc::clone(&ran);
+                move || {
+                    ran.store(true, Ordering::SeqCst);
+                    Some("sighup")
+                }
+            },
+            || {},
+        );
+        let mut sighup = std::pin::pin!(sighup);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut sighup)
+                .await
+                .is_err(),
+            "the SIGHUP must wait for the in-flight work, not answer without it"
+        );
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "the SIGHUP's reload started while the path was still busy"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(sighup.await, Some("sighup"));
+        assert!(ran.load(Ordering::SeqCst));
+        assert_eq!(tick.await.unwrap(), Some("tick"));
+    }
+
+    /// A reload that panics still releases its path — otherwise every
+    /// later tick would be skipped, and every later SIGHUP queued, for
+    /// the life of the process.
+    #[tokio::test]
+    async fn a_panicking_reload_still_releases_its_path() {
+        let in_flight = std::sync::Arc::new(super::ReadInFlight::default());
+        let panicked =
+            super::read_off_worker(&in_flight, || -> Option<()> { panic!("reload bug") }).await;
+        assert_eq!(panicked, None);
+        assert_eq!(
+            super::read_off_worker(&in_flight, || Some(1)).await,
+            Some(1)
+        );
+        assert_eq!(
+            super::read_off_worker_queued(&in_flight, || Some(2), || {}).await,
+            Some(2)
+        );
     }
 
     /// Whether `handlers` calls axum's `name` method router: the token

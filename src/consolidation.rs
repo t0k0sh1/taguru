@@ -602,13 +602,34 @@ fn judgment_batch(
             }),
     );
     let association = json!({
-        "subject": candidate.headline,
+        "subject": judgment_subject(candidate),
         "label": judgment["verdict"],
         "object": candidate.kind,
         "weight": 1.0,
     });
     let passage = json!({"passage": text.to_string()});
     format!("{header}\n{association}\n{passage}")
+}
+
+/// The association subject for `candidate`: its headline, cut to the
+/// import's name cap. A merge pair of two long names (or a long
+/// contradiction triple) builds a headline past `MAX_NAME_BYTES`, and
+/// the import refused the whole batch — after the LLM judgment was
+/// already paid for. The cut lands on a char boundary and ends with
+/// the candidate's fingerprint, so the subject stays stable across
+/// reruns and distinct per candidate; the full headline still rides
+/// in the passage's `candidate` field.
+fn judgment_subject(candidate: &Candidate) -> String {
+    let headline = &candidate.headline;
+    if headline.len() <= crate::api::MAX_NAME_BYTES {
+        return headline.clone();
+    }
+    let suffix = format!(" … #{}", candidate.fingerprint);
+    let room = crate::api::MAX_NAME_BYTES.saturating_sub(suffix.len());
+    format!(
+        "{}{suffix}",
+        &headline[..headline.floor_char_boundary(room)]
+    )
 }
 
 /// What a stored manifest's stamp says it is.
@@ -713,6 +734,51 @@ mod tests {
             judge_manifest(&json!({"type": "communities_manifest", "version": "2026-10-01"}))
                 .is_err()
         );
+    }
+
+    /// A merge of two long multibyte names builds a headline past the
+    /// import's name cap; the association subject must fit it (on a
+    /// char boundary, fingerprint-suffixed) while the passage keeps
+    /// the full headline. A short headline passes through untouched.
+    #[test]
+    fn an_overlong_headline_is_cut_to_the_name_cap_in_the_subject() {
+        let name = "青嶺酒造".repeat(60); // 720 bytes
+        let candidate = Candidate {
+            fingerprint: "00ff".into(),
+            kind: "merge",
+            headline: format!("{name} ↔ {name}"),
+            payload: json!({}),
+        };
+        assert!(candidate.headline.len() > crate::api::MAX_NAME_BYTES);
+        let batch = judgment_batch(
+            "a",
+            "n",
+            "c",
+            &candidate,
+            &json!({"verdict": "apply"}),
+            false,
+        );
+        let lines: Vec<&str> = batch.lines().collect();
+        let association: Value = serde_json::from_str(lines[1]).unwrap();
+        let subject = association["subject"].as_str().unwrap();
+        assert!(
+            subject.len() <= crate::api::MAX_NAME_BYTES,
+            "{} bytes",
+            subject.len()
+        );
+        assert!(
+            subject.starts_with("青嶺酒造") && subject.ends_with(" … #00ff"),
+            "{subject}"
+        );
+        let passage: Value = serde_json::from_str(lines[2]).unwrap();
+        let stored: Value = serde_json::from_str(passage["passage"].as_str().unwrap()).unwrap();
+        assert_eq!(stored["candidate"], candidate.headline);
+
+        let short = Candidate {
+            headline: "a ↔ b".into(),
+            ..candidate
+        };
+        assert_eq!(judgment_subject(&short), "a ↔ b");
     }
 
     #[test]

@@ -12,12 +12,13 @@
 //! name keeps the historical full grant (admin over every `context`),
 //! so existing deployments change nothing by upgrading.
 //!
-//! The whole table hot-reloads ([`reload_keyring`], driven by SIGHUP
-//! and the `--config` file watch in main): rotation is a table swap,
-//! not a restart. Every gate reads the ring through [`SharedKeyring`]
-//! and holds ONE snapshot per request, so an in-flight request sees
-//! the old table or the new one — never a torn one, and never a
-//! removed key re-graded against a table it was not checked into.
+//! The whole table hot-reloads ([`reload_keyring`] on SIGHUP,
+//! [`reload_keyring_if_changed`] for the `--config` file watch in
+//! main): rotation is a table swap, not a restart. Every gate reads
+//! the ring through [`SharedKeyring`] and holds ONE snapshot per
+//! request, so an in-flight request sees the old table or the new one
+//! — never a torn one, and never a removed key re-graded against a
+//! table it was not checked into.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -477,24 +478,52 @@ impl KeyringDiff {
 #[derive(Clone)]
 pub struct SharedKeyring {
     ring: Arc<parking_lot::RwLock<Arc<Keyring>>>,
-    /// Serializes whole reloads (source read → parse → judge → swap),
-    /// NOT request loads. Two triggers watch the same sources (SIGHUP
-    /// and the config watch), and without this their read-compute-
-    /// write cycles can interleave: the loser stores a table parsed
-    /// from a file state the winner already superseded, and — because
-    /// the config watch has by then recorded the newest (mtime, len)
-    /// as seen — nothing re-triggers until the file changes again.
-    /// The stale table would sit armed indefinitely. Held inside
-    /// [`reload_keyring`] so every trigger, future ones included, is
-    /// serialized by construction rather than by caller discipline.
-    reload_serial: Arc<parking_lot::Mutex<()>>,
+    /// Serializes whole reloads — source read → parse → judge → swap
+    /// — NOT request loads, and guards the digest of the config-file
+    /// content the newest reload judged. Two triggers read the same
+    /// file (SIGHUP and the config watch), and each reads it UNDER
+    /// this lock: a read taken before it could see file state v1, lose
+    /// the lock to a reload that arms the rewritten v2, then swap v1
+    /// back in — re-arming every token v2 revoked. Reading under the
+    /// lock makes each reload's view of the file at least as new as
+    /// every swap ordered before it.
+    ///
+    /// The digest is the config watch's change detector, shared on
+    /// purpose: SIGHUP records what it judged too. A watch-private
+    /// digest goes stale the moment a SIGHUP arms other content — a
+    /// file then reverted to what the watch last judged would read as
+    /// unchanged, leaving the SIGHUP's table armed against a file that
+    /// says otherwise, with nothing left to re-trigger. Refusals are
+    /// recorded like applies: one loud line per change, not one per
+    /// tick. `None` until boot (see
+    /// [`SharedKeyring::with_config_digest`]) or a reload has judged
+    /// any content.
+    ///
+    /// Held inside the reload functions so every trigger, future ones
+    /// included, is serialized by construction rather than by caller
+    /// discipline.
+    reload_serial: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl SharedKeyring {
+    /// A ring with no config file behind it, so nothing judged yet —
+    /// the tests' shorthand (here and in other modules). Boot always
+    /// goes through [`SharedKeyring::with_config_digest`].
+    #[cfg(test)]
     pub fn new(keyring: Keyring) -> Self {
+        Self::with_config_digest(keyring, None)
+    }
+
+    /// The shared handle over the keyring boot built. `config_digest`,
+    /// the digest of the config-file bytes boot APPLIED (`None`
+    /// without a config file), starts out as already judged (#942) —
+    /// not a fresh read taken later, or a rotation landing between
+    /// boot's read and the watch's first one would be recorded as
+    /// judged without ever being applied.
+    pub fn with_config_digest(keyring: Keyring, config_digest: Option<String>) -> Self {
         Self {
             ring: Arc::new(parking_lot::RwLock::new(Arc::new(keyring))),
-            reload_serial: Arc::new(parking_lot::Mutex::new(())),
+            reload_serial: Arc::new(parking_lot::Mutex::new(config_digest)),
         }
     }
 
@@ -577,46 +606,39 @@ impl AuthSource {
         self.config.as_deref()
     }
 
-    /// The auth values as they stand now, in [`AUTH_VARS`]
-    /// order. `Err` is a reload refusal: an unreadable or malformed
-    /// file must keep the previous table, unlike boot where the same
-    /// failure refuses to start.
-    fn read_current(&self) -> Result<[Option<String>; AUTH_VARS.len()], String> {
-        let file_text = match &self.config {
-            None => None,
-            Some(path) => Some(
-                std::fs::read_to_string(path)
-                    .map_err(|error| format!("cannot read config {}: {error}", path.display()))?,
-            ),
+    /// The config file's current bytes, `None` without a config file.
+    /// `Err` is a reload refusal: an unreadable file must keep the
+    /// previous table, unlike boot where the same failure refuses to
+    /// start. Raw bytes, not text, so a reload digests exactly what it
+    /// judges.
+    fn read_config(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(path) = &self.config else {
+            return Ok(None);
         };
-        self.table_from(file_text.as_deref())
+        std::fs::read(path)
+            .map(Some)
+            .map_err(|error| format!("cannot read config {}: {error}", path.display()))
     }
 
-    /// Parses `file_text` (the config file's contents, already read by
-    /// the caller) into `read_current`'s table. Split out so a caller
-    /// that already has the file's bytes in hand — the config-watch loop,
-    /// which read them to compute this tick's change-detection digest —
-    /// can reuse them here instead of reading the file a second time,
-    /// closing the race where the file changes between two independent
-    /// reads: a transient miss on a second read would otherwise refuse a
-    /// reload whose content was already known-good, with no registered
-    /// change left to retry it on later.
-    fn table_from(
-        &self,
-        file_text: Option<&str>,
-    ) -> Result<[Option<String>; AUTH_VARS.len()], String> {
-        let file: HashMap<String, String> = match file_text {
+    /// The auth values as `file` (the config file's bytes, from
+    /// `read_config`) and the shell set them, in [`AUTH_VARS`] order.
+    /// `Err` is a reload refusal, as for an unreadable file: a
+    /// malformed one must keep the previous table too.
+    fn table_from(&self, file: Option<&[u8]>) -> Result<[Option<String>; AUTH_VARS.len()], String> {
+        let file: HashMap<String, String> = match file {
             None => HashMap::new(),
-            Some(text) => {
+            Some(bytes) => {
+                let path = self
+                    .config
+                    .as_deref()
+                    .expect("file is Some only when self.config names the file it came from");
+                let text = std::str::from_utf8(bytes).map_err(|error| {
+                    format!("config {}: not valid UTF-8: {error}", path.display())
+                })?;
                 // Collecting in file order makes later duplicates win,
                 // exactly as `load_config` applies them at boot.
                 crate::config::parse_config(text)
-                    .map_err(|message| {
-                        let path = self.config.as_deref().expect(
-                            "file_text is Some only when self.config names the file it came from",
-                        );
-                        format!("config {}: {message}", path.display())
-                    })?
+                    .map_err(|message| format!("config {}: {message}", path.display()))?
                     .into_iter()
                     .collect()
             }
@@ -643,6 +665,15 @@ pub enum ReloadOutcome {
     Refused,
 }
 
+impl ReloadOutcome {
+    /// Whether the reload counts as a success for the reload counter:
+    /// a refusal is the one failure — an unchanged table is a clean
+    /// read that simply had nothing to arm.
+    pub fn succeeded(self) -> bool {
+        self != Self::Refused
+    }
+}
+
 /// Rebuilds the keyring from its current sources and swaps it in,
 /// fail closed on every path: an unreadable or malformed source, and
 /// the one transition that must be impossible — "tokens configured" →
@@ -654,43 +685,84 @@ pub enum ReloadOutcome {
 /// since armed → empty is the only transition that could break it.)
 ///
 /// Concurrent triggers (a SIGHUP racing the config watch) are
-/// serialized end-to-end on [`SharedKeyring::reload_serial`]: without
-/// that, two reloads straddling a file rewrite could finish in the
-/// wrong order and leave the SUPERSEDED table armed — permanently,
-/// since the watch has by then already recorded the newest file state
-/// as seen. Request loads never touch this lock.
+/// serialized end-to-end on [`SharedKeyring::reload_serial`], and the
+/// source read happens UNDER that lock, not before it — see that field
+/// for the stale swap this rules out. Request loads never touch this
+/// lock. Unlike the watch, this never skips content already judged:
+/// an operator who sent a SIGHUP gets a judgment either way. Blocking
+/// for as long as the read takes, so main runs it off the async worker
+/// (`read_off_worker_queued`), never on it: a stalled mount must wedge
+/// neither a worker thread nor graceful shutdown.
 pub fn reload_keyring(
     shared: &SharedKeyring,
     source: &AuthSource,
     trigger: &'static str,
 ) -> ReloadOutcome {
-    apply_reload(shared, source.read_current(), trigger)
+    let mut judged = shared.reload_serial.lock();
+    let file = match source.read_config() {
+        Ok(file) => file,
+        Err(error) => return apply_reload(shared, Err(error), trigger),
+    };
+    if let Some(bytes) = &file {
+        *judged = Some(crate::sha256::sha256_hex(bytes));
+    }
+    apply_reload(shared, source.table_from(file.as_deref()), trigger)
 }
 
-/// Like [`reload_keyring`], but for a caller that already has the
-/// config file's current bytes in hand — see `AuthSource::table_from`
-/// for why reusing them here (instead of reading the file again)
-/// matters.
-pub fn reload_keyring_with_bytes(
+/// The `--config` file watch's tick: [`reload_keyring`], but only for
+/// content no reload has judged yet — a content digest, not `(mtime,
+/// len)` (#309), so a same-length rotation landing on an unchanged
+/// mtime still registers — and an unreadable file is not a change:
+/// transient volume states must neither trigger a reload nor poison
+/// the digest. `None` when nothing was judged; `Some` is a reload that
+/// ran, for the caller's counters.
+///
+/// Blocking, on purpose: the file is read while holding
+/// [`SharedKeyring::reload_serial`], exactly as [`reload_keyring`]
+/// reads it, so main runs this whole call on the watch's off-worker
+/// thread (`read_off_worker`) instead of reading there and judging
+/// afterwards. A read finished before the lock is a snapshot a SIGHUP
+/// reload may already have superseded, and no check after the fact
+/// can order the two: the superseding reload's own read may be older
+/// or newer than it.
+pub fn reload_keyring_if_changed(
     shared: &SharedKeyring,
     source: &AuthSource,
-    trigger: &'static str,
-    bytes: &[u8],
-) -> ReloadOutcome {
-    let values = std::str::from_utf8(bytes)
-        .map_err(|error| format!("config is not valid UTF-8: {error}"))
-        .and_then(|text| source.table_from(Some(text)));
-    apply_reload(shared, values, trigger)
+) -> Option<ReloadOutcome> {
+    let mut judged = shared.reload_serial.lock();
+    let Ok(Some(file)) = source.read_config() else {
+        return None;
+    };
+    // SHA-256, not the FNV-1a fold `hash.rs` owns for change detection
+    // elsewhere: rotation here gates a keyring reload, so the
+    // signature needs collision resistance FNV-1a does not offer, not
+    // just speed.
+    let digest = crate::sha256::sha256_hex(&file);
+    if judged.as_ref() == Some(&digest) {
+        return None;
+    }
+    *judged = Some(digest);
+    Some(apply_reload(
+        shared,
+        source.table_from(Some(file.as_slice())),
+        "config-watch",
+    ))
 }
 
+/// Parse → judge → swap. Callers MUST hold
+/// [`SharedKeyring::reload_serial`] — and must have read `values`'
+/// source under it, never before (see that field).
 fn apply_reload(
     shared: &SharedKeyring,
     values: Result<[Option<String>; AUTH_VARS.len()], String>,
     trigger: &'static str,
 ) -> ReloadOutcome {
-    let _serialized = shared.reload_serial.lock();
     let refused = |error: String| {
-        tracing::error!(%error, trigger, "keyring reload refused; the previous table stays armed");
+        tracing::error!(
+            reload_error = %error,
+            trigger,
+            "keyring reload refused; the previous table stays armed"
+        );
         ReloadOutcome::Refused
     };
     let [single, named, grants, retired_grants] = match values {
@@ -742,9 +814,17 @@ fn apply_reload(
 
 /// Everything the bearer gate consults: the static keyring, the OAuth
 /// subsystem when the operator enabled it, and a per-source-IP throttle
-/// on FAILED attempts (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`) so the gate
-/// cannot be brute-forced — or used to burn CPU on the constant-time
-/// scan — for free.
+/// on FAILED attempts (`TAGURU_AUTH_FAIL_LIMIT_PER_MIN`).
+///
+/// What that throttle does NOT do: it is consulted only AFTER the
+/// constant-time scan has judged the token, so it neither saves the
+/// scan's CPU nor stops a guess from being graded — over budget, a
+/// wrong token gets 429 + Retry-After instead of 401, but a correct
+/// one still passes from the same IP. That ordering is deliberate:
+/// checking the budget first would let anyone sharing the client's
+/// source IP (a NAT, a proxy) lock the legitimate caller out just by
+/// spending it. Brute-force resistance rests on token entropy; the
+/// throttle only tells a misconfigured or hostile client to back off.
 pub struct Gate {
     pub keyring: SharedKeyring,
     pub oauth: Option<Arc<crate::oauth::Oauth>>,
@@ -821,8 +901,11 @@ pub async fn require_bearer(
     // No credential matched. Throttle repeated failures per source IP:
     // successful auth returned above without touching this limiter, so a
     // legitimate caller presenting the right token is never throttled —
-    // only a brute-forcer (or a client burning the constant-time scan)
-    // spends here, and once over budget gets a 429 instead of a 401.
+    // not even after a neighbor on the same IP spent the budget. The
+    // flip side (see `Gate`): the scan above already ran and already
+    // graded this guess, so over budget a wrong token gets a 429 instead
+    // of a 401, but the throttle neither saves that CPU nor stops a
+    // correct guess from passing. Token entropy is the brute-force bar.
     if !gate.fail_limiter.is_disabled() {
         let peer = crate::limits::peer_ip(&request).unwrap_or_else(|| Arc::from("peer:unknown"));
         if let Err(retry_after) = gate.fail_limiter.admit(&peer, started_at) {
@@ -1031,6 +1114,14 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use axum::routing::get;
     use tower::util::ServiceExt;
+
+    /// The reload counter's success split: only a refusal fails.
+    #[test]
+    fn only_a_refused_reload_counts_as_a_failure() {
+        assert!(ReloadOutcome::Applied.succeeded());
+        assert!(ReloadOutcome::Unchanged.succeeded());
+        assert!(!ReloadOutcome::Refused.succeeded());
+    }
 
     fn ring(single: Option<&str>, named: Option<&str>) -> SharedKeyring {
         SharedKeyring::new(
@@ -1443,56 +1534,184 @@ mod tests {
         assert!(granted.diff(&granted).is_empty());
     }
 
-    /// `table_from` fed the exact bytes on disk must agree with
-    /// `read_current`'s own read of that same file — the config-watch
-    /// loop passes pre-read bytes through `table_from` instead of
-    /// letting the reload read the file a second time, and that split
-    /// must not silently change what a reload sees. Covers a normal
-    /// file, a malformed one (both must refuse identically, same
-    /// message), and no config file at all (`table_from`'s `None`
-    /// branch, exercised the same way `read_current` hits it).
+    /// Every reload — SIGHUP's and the config watch's alike — reads its
+    /// source UNDER `reload_serial`, not before taking it. A read taken
+    /// first could see file state v1, lose the race to another reload
+    /// that arms the rewritten v2, then swap v1 back in — re-arming
+    /// tokens v2 revoked, and, should the file turn invalid before the
+    /// next tick, keeping them armed with nothing left to re-trigger.
+    ///
+    /// Deterministic via a FIFO as the config file: the reader's
+    /// `open` blocks until this test opens the write end, so the
+    /// moment our `open` returns the reload thread is provably INSIDE
+    /// its read — and at that moment the lock must already be held.
+    #[cfg(unix)]
     #[test]
-    fn table_from_pre_read_bytes_agrees_with_read_current() {
-        let dir = std::env::temp_dir().join(format!("taguru-tablefrom-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn every_reload_reads_its_source_while_holding_the_reload_lock() {
+        use std::io::Write;
+
+        let dir = crate::registry::test_support::scratch_dir("auth-reload-read-under-lock");
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("taguru.env");
-        std::fs::write(
-            &config,
-            "TAGURU_API_TOKENS=ci:tok-a,laptop:tok-b\nTAGURU_KEY_GRANTS={\"ci\": \"read\"}\n",
-        )
-        .unwrap();
-
-        // File-only source: from_shell all false, so every value comes
-        // from parsing the file.
-        let file_source = AuthSource {
+        let status = std::process::Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed");
+        let source = AuthSource {
             config: Some(config.clone()),
             from_shell: [false; AUTH_VARS.len()],
         };
-        let via_read_current = file_source.read_current().unwrap();
-        let text = std::fs::read_to_string(&config).unwrap();
-        let via_table_from = file_source.table_from(Some(&text)).unwrap();
-        assert_eq!(via_read_current, via_table_from);
+        let keyring = ring(None, Some("ci:tok-old"));
 
-        // A malformed file: both paths must refuse, with the identical
-        // message — `table_from` still owns the same error formatting
-        // `read_current` used to produce inline.
-        std::fs::write(&config, "not a valid line at all\n").unwrap();
-        let malformed_text = std::fs::read_to_string(&config).unwrap();
-        let read_current_error = file_source.read_current().unwrap_err();
-        let table_from_error = file_source.table_from(Some(&malformed_text)).unwrap_err();
-        assert_eq!(read_current_error, table_from_error);
+        let sighup = || Some(reload_keyring(&keyring, &source, "test"));
+        let watch = || reload_keyring_if_changed(&keyring, &source);
+        let reloads: [(&str, &(dyn Fn() -> Option<ReloadOutcome> + Sync)); 2] =
+            [("sighup", &sighup), ("config-watch", &watch)];
+        for (trigger, reload) in reloads {
+            let token = format!("tok-{trigger}");
+            let (locked_during_read, outcome) = std::thread::scope(|scope| {
+                let reload = scope.spawn(reload);
+                // Returns only once the reload thread has opened the
+                // read end, i.e. is mid-read.
+                let mut writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&config)
+                    .unwrap();
+                let locked = keyring.reload_serial.is_locked();
+                // Finish the read either way, so a failing assertion
+                // below reports instead of hanging the reload thread.
+                writer
+                    .write_all(format!("TAGURU_API_TOKENS=ci:{token}\n").as_bytes())
+                    .unwrap();
+                drop(writer);
+                (locked, reload.join().unwrap())
+            });
 
-        // No config file at all: `read_current` never reads anything
-        // and `table_from(None)` is its exact stand-in.
-        let no_config = AuthSource {
-            config: None,
+            assert!(
+                locked_during_read,
+                "{trigger}: the source read ran outside reload_serial, so it can race another \
+                 reload's swap"
+            );
+            assert_eq!(outcome, Some(ReloadOutcome::Applied), "{trigger}");
+            assert_eq!(
+                keyring.load().authenticate(&token).as_deref(),
+                Some("ci"),
+                "{trigger}"
+            );
+        }
+        assert!(keyring.load().authenticate("tok-old").is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A config file under a fresh scratch dir, and the reload source
+    /// that follows it for every auth variable.
+    fn watched_config(tag: &str) -> (PathBuf, PathBuf, AuthSource) {
+        let dir = crate::registry::test_support::scratch_dir(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("taguru.env");
+        let source = AuthSource {
+            config: Some(config.clone()),
             from_shell: [false; AUTH_VARS.len()],
         };
+        (dir, config, source)
+    }
+
+    /// A ring armed with `named`, booted from config-file bytes
+    /// `boot` — the digest main seeds the reload ledger with (#942).
+    fn booted_ring(named: &str, boot: &str) -> SharedKeyring {
+        SharedKeyring::with_config_digest(
+            Keyring::parse(None, Some(named.into())).unwrap(),
+            Some(crate::sha256::sha256_hex(boot.as_bytes())),
+        )
+    }
+
+    /// The watch's change detector is shared with SIGHUP: content a
+    /// SIGHUP judged counts as judged, and — what a watch-private
+    /// digest gets wrong — content the watch judged EARLIER is a
+    /// change again once a SIGHUP has armed something else. Here a
+    /// rotation is picked up by SIGHUP and then reverted before the
+    /// next tick: a private digest still matching the reverted bytes
+    /// would leave the rotation armed against a file that no longer
+    /// says it, with no digest change left to re-trigger.
+    #[test]
+    fn a_file_reverted_after_a_sighup_reload_still_reads_as_a_change() {
+        let (dir, config, source) = watched_config("auth-watch-revert");
+        let boot = "TAGURU_API_TOKENS=ci:tok-a\n";
+        std::fs::write(&config, boot).unwrap();
+        let keyring = booted_ring("ci:tok-a", boot);
+
+        std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-b\n").unwrap();
         assert_eq!(
-            no_config.read_current().unwrap(),
-            no_config.table_from(None).unwrap()
+            reload_keyring(&keyring, &source, "sighup"),
+            ReloadOutcome::Applied
         );
+        // The SIGHUP's judgment is the watch's too: no second reload.
+        assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+
+        std::fs::write(&config, boot).unwrap();
+        assert_eq!(
+            reload_keyring_if_changed(&keyring, &source),
+            Some(ReloadOutcome::Applied),
+            "the reverted file must still read as a change"
+        );
+        let armed = keyring.load();
+        assert_eq!(armed.authenticate("tok-a").as_deref(), Some("ci"));
+        assert!(armed.authenticate("tok-b").is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The watch's change detector: boot's own bytes (#942) and
+    /// content already judged are no reload, an unreadable file
+    /// neither reloads nor moves the baseline, and each content change
+    /// is judged exactly once — a refusal included (malformed or not
+    /// UTF-8), one loud line per change rather than per tick — while a
+    /// SIGHUP judges whatever the file says, judged or not, and the
+    /// last good table stays armed through every refusal.
+    #[test]
+    fn the_config_watch_judges_each_content_change_once() {
+        let (dir, config, source) = watched_config("auth-watch-change-detection");
+        let boot = "TAGURU_API_TOKENS=ci:tok-a\n";
+        std::fs::write(&config, boot).unwrap();
+        let keyring = booted_ring("ci:tok-a", boot);
+        assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+        // Unseeded, the very same bytes are a (no-op) change.
+        assert_eq!(
+            reload_keyring_if_changed(&ring(None, Some("ci:tok-a")), &source),
+            Some(ReloadOutcome::Unchanged)
+        );
+
+        std::fs::remove_file(&config).unwrap();
+        assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+        std::fs::write(&config, boot).unwrap();
+        assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+
+        std::fs::write(&config, "TAGURU_API_TOKENS=ci:tok-b\n").unwrap();
+        assert_eq!(
+            reload_keyring_if_changed(&keyring, &source),
+            Some(ReloadOutcome::Applied)
+        );
+        assert_eq!(keyring.load().authenticate("tok-b").as_deref(), Some("ci"));
+        assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+
+        for refused in [
+            b"TAGURU_API_TOKENS=token-pasted-alone\n".as_slice(),
+            b"TAGURU_API_TOKENS=ci:\xff\n".as_slice(),
+        ] {
+            std::fs::write(&config, refused).unwrap();
+            assert_eq!(
+                reload_keyring_if_changed(&keyring, &source),
+                Some(ReloadOutcome::Refused)
+            );
+            assert_eq!(reload_keyring_if_changed(&keyring, &source), None);
+            assert_eq!(
+                reload_keyring(&keyring, &source, "sighup"),
+                ReloadOutcome::Refused
+            );
+            assert_eq!(keyring.load().authenticate("tok-b").as_deref(), Some("ci"));
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1749,8 +1968,8 @@ mod tests {
 
     /// Repeated failures from one source IP trip a 429 with a
     /// Retry-After, but a valid token from that very IP still passes:
-    /// the throttle bites brute force, never a caller who finally
-    /// presents the right credential.
+    /// a neighbor spending the shared IP's budget can never lock the
+    /// legitimate caller out (the trade `Gate`'s doc spells out).
     #[tokio::test]
     async fn failed_auth_is_throttled_per_source_ip() {
         use axum::extract::connect_info::MockConnectInfo;

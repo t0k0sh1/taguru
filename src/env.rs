@@ -255,9 +255,51 @@ pub(crate) fn resolve_mcp_max_result_bytes(requested: usize) -> usize {
     requested
 }
 
+/// The stderr log filter from `RUST_LOG`, falling back to `default`
+/// when unset — and, when set but unparseable, also falling back but
+/// handing back the warning to log once the subscriber is up (nothing
+/// can be logged before it is; the caller defers it, as it does the
+/// `TAGURU_LOG_FORMAT` one). A typo'd filter used to vanish into the
+/// default with no word, leaving an operator chasing debug lines that
+/// were never going to appear.
+pub(crate) fn log_filter(default: &str) -> (tracing_subscriber::EnvFilter, Option<String>) {
+    log_filter_from(std::env::var("RUST_LOG").ok().as_deref(), default)
+}
+
+/// [`log_filter`]'s env-free core.
+fn log_filter_from(
+    value: Option<&str>,
+    default: &str,
+) -> (tracing_subscriber::EnvFilter, Option<String>) {
+    let fallback = || tracing_subscriber::EnvFilter::new(default);
+    let Some(value) = value else {
+        return (fallback(), None);
+    };
+    match tracing_subscriber::EnvFilter::try_new(value) {
+        Ok(filter) => (filter, None),
+        Err(parse) => (
+            fallback(),
+            Some(format!(
+                "ignoring RUST_LOG={value}: {parse}; using {default}"
+            )),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set-but-unparseable `RUST_LOG` yields the warning naming the
+    /// bad value; unset and valid filters yield none.
+    #[test]
+    fn an_unparseable_rust_log_is_named_in_a_warning() {
+        let (_, warning) = log_filter_from(Some("taguru=loud"), "info");
+        let warning = warning.expect("an invalid filter must be reported");
+        assert!(warning.contains("RUST_LOG=taguru=loud"), "{warning}");
+        assert!(log_filter_from(None, "info").1.is_none());
+        assert!(log_filter_from(Some("taguru=debug"), "info").1.is_none());
+    }
 
     #[test]
     fn flush_secs_zero_is_floored_to_one_instead_of_panicking_the_flusher() {

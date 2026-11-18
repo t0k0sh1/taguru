@@ -57,11 +57,21 @@ pub(super) fn report(batch: &Batch, applied: &Applied) -> String {
 /// does (RUST_LOG, stderr) so registry warnings — WAL replay notes,
 /// load failures — are not dropped on the floor, but stdout stays
 /// pure report.
+///
+/// Installs the process-global subscriber and nothing else: the only
+/// effect a mutant could remove is log output, which no test captures
+/// (no tracing-capture dev-dependency), and installing it in a test
+/// would poison every later test's own `init`. The RUST_LOG parsing it
+/// delegates is tested in `crate::env::log_filter_from`.
+#[mutants::skip]
 pub(crate) fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (filter, unparseable_log_filter) = crate::env::log_filter("info");
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+    // Deferred from the RUST_LOG read above: logging works only now.
+    if let Some(warning) = unparseable_log_filter {
+        tracing::warn!("{warning}");
+    }
 }

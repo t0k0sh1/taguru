@@ -677,6 +677,10 @@ impl Entry {
                 slot,
                 wal_seq: 1,
                 graph_revision: revision.graph,
+                // Every constructor seeds from a sidecar (or create's
+                // zeros) sitting beside the image it describes, so
+                // the published value starts equal to the live one.
+                published_graph_revision: revision.graph,
                 config_revision: revision.config,
                 cache_identity: next_cache_identity(),
                 wal_bytes,
@@ -773,14 +777,35 @@ impl Entry {
     }
 
     /// [`Self::revision_snapshot`] with `graph` overridden — for the
-    /// one caller (`flush_entry`) whose `graph` must name a value
-    /// captured earlier than `inner`'s current one: `passages`/`config`
+    /// callers whose `graph` must name a value other than `inner`'s
+    /// current one (`flush_entry`'s staging-time capture,
+    /// [`Self::sidecar_revision`]'s published value): `passages`/`config`
     /// never live in the image bytes, so reading them fresh here is
     /// still exactly right.
     fn revision_snapshot_with_graph(&self, inner: &EntryInner, graph: u64) -> ContextRevision {
         ContextRevision {
             graph,
             ..self.revision_snapshot(inner)
+        }
+    }
+
+    /// The revision a sidecar write that publishes NO image should
+    /// persist — every `write_meta` caller except an image publish
+    /// (rename, `update_meta`, `put_schema`, a config bump, the usage
+    /// sweep). With the WAL on that is simply the live snapshot: a
+    /// write the image does not hold yet still has its WAL record,
+    /// which the next load replays to earn the credit back. With the
+    /// WAL off nothing records such a write, so the sidecar's `graph`
+    /// must stay at what the published image actually reflects
+    /// ([`EntryInner::published_graph_revision`]) — persisting the live
+    /// value would claim writes a crash right after loses, and nothing
+    /// ever floors that claim back down (the same hazard
+    /// `flush_entry`'s staged capture closes for its own write).
+    fn sidecar_revision(&self, inner: &EntryInner, wal_enabled: bool) -> ContextRevision {
+        if wal_enabled {
+            self.revision_snapshot(inner)
+        } else {
+            self.revision_snapshot_with_graph(inner, inner.published_graph_revision)
         }
     }
 
@@ -909,6 +934,19 @@ struct EntryInner {
     /// the applied ops stand. Seeded from the sidecar at scan, floored
     /// with the replay top on load so a lagging sidecar catches up.
     graph_revision: u64,
+    /// The `graph_revision` the image currently on disk reflects:
+    /// seeded with `graph_revision` at construction (every entry is
+    /// built from a sidecar beside its image, or create's zeros), and
+    /// re-set by every path that publishes or loads an image —
+    /// `flush_entry` (to its staging-time capture), the eviction save,
+    /// compaction, and `ensure_hot`. (A replica's tailed refresh needs
+    /// no entry here: it leaves the slot Cold, so the next load sets
+    /// it, and a replica never writes a sidecar meanwhile.) Read
+    /// only by [`Entry::sidecar_revision`] with the WAL off, where it
+    /// is the sole honest `graph` value for a sidecar written between
+    /// image publishes; with the WAL on the live value is persisted
+    /// instead and this field is bookkeeping only.
+    published_graph_revision: u64,
     /// [`ContextRevision::config`]'s live value: metadata updates and
     /// embedding-refresh publications. Under the entry lock like its
     /// siblings so `update_meta` can bump-and-persist atomically (and
@@ -1149,7 +1187,10 @@ pub enum RestoreGroupsError {
     Nesting(groups::NestingViolation),
     /// A record would not persist; the `applied` records before it did
     /// (children-first order, so what landed never dangles on what did
-    /// not).
+    /// not). `applied` counts `group` itself too when its rename landed
+    /// and only the directory fsync after it failed
+    /// ([`crate::storage::is_published_unsynced`]): its file is there,
+    /// the next boot registers it, and memory already holds it.
     Io {
         group: String,
         applied: usize,
@@ -1179,9 +1220,10 @@ impl RestoreGroupsError {
         }
     }
 
-    /// How many records durably landed despite the refusal — zero for
-    /// every validation arm, the write count for [`Self::Io`] and
-    /// [`Self::Timeout`].
+    /// How many records landed despite the refusal — zero for every
+    /// validation arm, the write count for [`Self::Io`] (the failing
+    /// record included when it was published before its fsync failed)
+    /// and [`Self::Timeout`].
     pub fn applied(&self) -> usize {
         match self {
             Self::Io { applied, .. } | Self::Timeout { applied } => *applied,
@@ -1289,13 +1331,17 @@ pub struct CompactOutcome {
     /// --url` still reads an older server's response.
     #[serde(default)]
     pub passages_compacted: bool,
-    /// Whether the rebuilt image this response describes actually
-    /// reached disk (#586). `bytes_after` is computed from the
-    /// in-memory rebuild alone — a `flush_entry` that cannot publish
-    /// it (a full disk, most plausibly, on the very endpoint whose job
-    /// is reclaiming space) still leaves the graph compacted in
-    /// memory, so the call is not a failure, but the response must not
-    /// silently claim the smaller footprint is durable when it is not.
+    /// Whether the rebuilt image this response describes was durably
+    /// published (#586). `bytes_after` is computed from the in-memory
+    /// rebuild alone, so the call is not a failure when the publish
+    /// falls short, but the response must not silently claim the
+    /// smaller footprint is durable when it is not. `false` has two
+    /// shapes: the image never landed (a full disk, most plausibly, on
+    /// the very endpoint whose job is reclaiming space) — the `context`
+    /// keeps its previous image and the numbers describe the rebuild
+    /// that was not applied; compact again — or it landed but its
+    /// directory fsync failed — the `context` now runs on the compacted
+    /// image and the next flush re-publishes it durably.
     /// `#[serde(default = "default_image_persisted")]` reads an older
     /// server's response (which never lied about this — it simply
     /// never said) as the historically true case, not a false alarm.
@@ -2697,6 +2743,11 @@ struct StateInner {
     /// [`AppState::create`] needs no entry here: its id is minted on
     /// the spot, so nothing else can be working under it.
     pending_creates: Mutex<HashSet<String>>,
+    /// Signalled whenever a `pending_creates` reservation is released:
+    /// a create that lost the claim waits here for the winner to
+    /// register (or fail) instead of answering before the context
+    /// exists.
+    creates_settled: parking_lot::Condvar,
     /// Ids an [`AppState::delete`] has unregistered but is still
     /// unlinking the files of. Inserted in the same registry write
     /// section that unregisters the id and released after the unlink
@@ -3220,7 +3271,7 @@ impl AppState {
             &inner.meta,
             &inner.stats,
             &entry.usage.snapshot(),
-            entry.revision_snapshot(inner),
+            entry.sidecar_revision(inner, self.0.wal_enabled),
             inner.schema_digest.as_deref(),
         ) {
             tracing::warn!(
@@ -3651,6 +3702,9 @@ fn ensure_hot(
     // the WAL disabled (or a WAL-off history) the sidecar value is the
     // one that kept counting and the stale top must not regress it.
     inner.graph_revision = inner.graph_revision.max(top);
+    // The image just read (plus its replayed log) is exactly what
+    // memory now holds: nothing unpublished exists yet.
+    inner.published_graph_revision = inner.graph_revision;
     // Re-stat rather than trust the registration-time size: appends
     // and truncations may have happened while this entry sat cold.
     inner.wal_bytes = fs::metadata(wal_path(data_dir, stem))
