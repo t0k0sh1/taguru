@@ -301,6 +301,29 @@ impl AppState {
                     "{}",
                     unpersisted_compact_warning(false).unwrap_or_default()
                 );
+                // `save_files` lands the sidecar first: an image that
+                // failed after it (a full disk refuses the big write,
+                // not the small one) leaves the sidecar describing the
+                // compacted graph — near-zero dead weight a cold read
+                // would trust, dropping this context from every
+                // compaction sweep. Put the previous context's account
+                // back; best effort, the next flush rewrites it anyway.
+                let previous_stats = ContextStats::of(hot_context(inner));
+                if let Err(restore_error) = write_meta(
+                    &self.0.data_dir,
+                    &entry.id,
+                    &inner.name,
+                    &inner.meta,
+                    &previous_stats,
+                    &entry.usage.snapshot(),
+                    entry.sidecar_revision(inner, self.0.wal_enabled),
+                    inner.schema_digest.as_deref(),
+                ) {
+                    tracing::warn!(
+                        context = %id, restore_error = %restore_error,
+                        "sidecar not restored after the failed compaction publish"
+                    );
+                }
                 return Ok((bytes_before, bytes_after, stats, false));
             }
             inner.slot = Slot::Hot(Box::new(fresh));
@@ -1200,6 +1223,52 @@ mod tests {
         assert_eq!(retried.dead_edges, 1, "{retried:?}");
         assert!(footprint(&state) < before);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The realistic full-disk shape: the publish's small sidecar lands
+    /// and its big image does not. The sidecar must not keep the
+    /// compacted graph's account — a cold read trusts it, and its
+    /// near-zero dead weight would drop the context from every
+    /// compaction sweep.
+    #[test]
+    fn a_compaction_whose_image_fails_after_its_sidecar_restores_the_sidecar() {
+        let dir = scratch_dir("compact-sidecar-restore");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    &state.id_of("sake"),
+                    vec![
+                        assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                    ],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .retract_source(&state.id_of("sake"), "gone.md")
+                .unwrap();
+            state.flush_dirty();
+
+            // Ops: sidecar stage (0), sidecar commit (1), image stage
+            // (2) — fail the image, after the sidecar has landed.
+            fail_persistence_ops_after(2);
+            let outcome = state
+                .compact_context(&state.id_of("sake"), Deadline::unbounded())
+                .unwrap();
+            assert!(!clear_persistence_fault(), "the image stage must fail");
+            assert!(!outcome.image_persisted, "{outcome:?}");
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let row = state.directory_entry("sake").unwrap();
+        assert!(!row.loaded, "the row must come from the sidecar");
+        assert_eq!(row.stats.dead_edges, 1, "{:?}", row.stats);
         let _ = fs::remove_dir_all(&dir);
     }
 
