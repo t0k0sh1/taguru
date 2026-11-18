@@ -2499,3 +2499,38 @@ fn an_unreachable_cached_owner_is_forgotten() {
     assert_eq!(status, 200, "{second}");
     assert!(second.get("unreached").is_none(), "{second}");
 }
+
+/// One shard and no `*` fallback: an import `create` block naming a
+/// context the map does not route is refused, exactly as with several
+/// shards — the router's single-shard shortcut used to skip the
+/// existence probe that guards it, so the lone shard created a
+/// context `POST /contexts` refuses by the same name. A routed name
+/// still lands.
+#[test]
+fn a_single_shard_router_refuses_an_import_create_the_map_does_not_route() {
+    let shard = Server::start("router-import-one");
+    let router = Server::start_router(
+        "router-import-one",
+        &format!("sake = {}\n", shard.base),
+        &[],
+    );
+    let (status, body) = router.call("POST", "/contexts", Some(json!({"name": "unmapped"})));
+    assert_eq!(status, 400, "{body}");
+    let ghost = fixed_id("unmapped");
+    let header = json!({
+        "type": "source", "context_id": ghost, "id": "seed:create",
+        "create": {"name": "unmapped"},
+    });
+    let (status, body) = post_import(&router, &format!("{header}\n"), None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "no_context", "{body}");
+    let (status, body) = shard.call("GET", &format!("/contexts/{ghost}"), None);
+    assert_eq!(status, 404, "nothing was created on the shard: {body}");
+
+    let header = json!({
+        "type": "source", "context_id": fixed_id("sake"), "id": "seed:create",
+        "create": {"name": "sake"},
+    });
+    let (status, body) = post_import(&router, &format!("{header}\n"), None);
+    assert_eq!(status, 200, "{body}");
+}

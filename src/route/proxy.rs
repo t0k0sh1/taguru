@@ -302,14 +302,33 @@ pub(super) async fn probe_owner(
     started_at: Instant,
 ) -> Located {
     let shards: Vec<usize> = map.all().collect();
+    // One shard is the only place any verdict can land, so asking it
+    // would only cost a hop. A caller whose verdict depends on whether
+    // the id EXISTS (an import `create` block whose name the map does
+    // not route) calls [`ask_shards`] directly instead.
     if let [only] = shards.as_slice() {
         return Located::Shard(*only);
     }
+    ask_shards(state, map, &shards, id, headers, deadline, started_at).await
+}
+
+/// [`probe_owner`] without its single-shard shortcut: always asks
+/// every shard in `shards` whether it holds `id`, so a lone shard's
+/// 404 still comes back as [`Located::Missing`].
+pub(super) async fn ask_shards(
+    state: &RouterState,
+    map: &RouteMap,
+    shards: &[usize],
+    id: &str,
+    headers: &HeaderMap,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Located {
     let path = format!("/contexts/{id}");
     let outcomes = state
         .fan_out(
             map,
-            &shards,
+            shards,
             Method::GET,
             &path,
             &hop_headers(headers),

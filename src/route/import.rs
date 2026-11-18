@@ -53,16 +53,41 @@ pub(super) async fn route_import(
         let shard = match owner_of.get(&batch.context_id) {
             Some(shard) => *shard,
             None => {
-                let shard = match probe_owner(
-                    &state,
-                    &map,
-                    &batch.context_id,
-                    &headers,
-                    deadline,
-                    started_at,
-                )
-                .await
-                {
+                // A create block whose name the map routes nowhere is
+                // refused when no shard holds the id — the refusal
+                // `POST /contexts` gives the same name. That verdict
+                // hinges on existence, so it always asks the shards:
+                // `probe_owner`'s single-shard shortcut would answer
+                // `Shard(only)` without asking and let the lone shard
+                // create a context the map does not route.
+                let unrouted_create = batch
+                    .create
+                    .as_ref()
+                    .is_some_and(|spec| map.shard_of(&spec.name).is_none());
+                let located = if unrouted_create {
+                    let shards: Vec<usize> = map.all().collect();
+                    ask_shards(
+                        &state,
+                        &map,
+                        &shards,
+                        &batch.context_id,
+                        &headers,
+                        deadline,
+                        started_at,
+                    )
+                    .await
+                } else {
+                    probe_owner(
+                        &state,
+                        &map,
+                        &batch.context_id,
+                        &headers,
+                        deadline,
+                        started_at,
+                    )
+                    .await
+                };
+                let shard = match located {
                     Located::Shard(shard) => shard,
                     Located::Answered(response) => return response,
                     Located::Unreached { refusal, .. } => return refusal,
