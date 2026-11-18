@@ -6,13 +6,18 @@
 //! the working tree's dirty set — current AND the one recorded last
 //! run, so a revert or a since-committed file heals back to its real
 //! content. A candidate that is gone from disk retracts its source
-//! (deletions and renames included). Batches go through the same
-//! parse/apply the server's own import uses, into a data directory
-//! that defaults to `$PROJECT_ROOT/.taguru` — a normal taguru data
-//! dir, so `taguru serve` can serve it later unchanged. The one piece
-//! of state this verb owns is `code-sync.json` in that directory
-//! (last synced commit + last dirty set); a lost, corrupt, or
-//! gc-orphaned anchor degrades to a full re-sync, which the
+//! (deletions and renames included), and so does a synced file whose
+//! bytes can no longer be imported (turned binary, symlink, or
+//! non-UTF-8, or past a batch cap — counted and named, never a
+//! failure that would freeze the sync point). Batches go through the
+//! same parse/apply the server's own import uses, into a data
+//! directory that defaults to `$PROJECT_ROOT/.taguru` — a normal
+//! taguru data dir, so `taguru serve` can serve it later unchanged.
+//! The one piece of state this verb owns is `code-sync.json` in that
+//! directory (last synced commit + last dirty set + per-file
+//! fingerprints); a lost, corrupt, or gc-orphaned anchor degrades to
+//! a full re-sync — the universe plus every path the map still holds
+//! facts for, so files deleted meanwhile retract too — which the
 //! retract-then-apply batch contract makes idempotent.
 
 use std::path::{Path, PathBuf};
@@ -176,17 +181,67 @@ fn data_dir_of(args: &SyncArgs, walk: &RepoWalk) -> PathBuf {
 }
 
 /// The one data-dir resolution `sync`, `status`, and `watch` share.
-/// `under_data_dir` compares against absolute worktree paths, so a
-/// relative `--data-dir` must be absolutized first or the
-/// self-storage exclusion could never match it.
+/// `under_data_dir` compares against worktree paths under git's
+/// toplevel — which git reports with every symlink resolved
+/// (`/private/var/…` on macOS, never `/var/…`) — so the data dir must
+/// be put in that same shape or the self-storage exclusion silently
+/// misses and `watch` keeps seeing its own writes: a relative
+/// `--data-dir` is absolutized, then [`settle`]d.
 pub(crate) fn resolve_data_dir(data_dir: Option<PathBuf>, root: &Path) -> PathBuf {
-    match data_dir {
+    let absolute = match data_dir {
         None => root.join(".taguru"),
         Some(dir) if dir.is_absolute() => dir,
         Some(dir) => std::env::current_dir()
             .map(|cwd| cwd.join(&dir))
             .unwrap_or(dir),
+    };
+    settle(&absolute)
+}
+
+/// `path` with its ancestors canonicalized — symlinks and `..`/`.`
+/// resolved — and its last component kept as named. The leaf is NOT
+/// followed on purpose: a `.taguru` that is itself a symlink to
+/// another disk shows up in git's listing as `.taguru`, never as the
+/// link's target, so only the unresolved leaf can match it. Ancestors
+/// that do not exist yet (the first sync creates the directory, and
+/// `watch` resolves before that sync runs) are appended lexically
+/// below the deepest one that does — with no symlink possible there,
+/// lexical `..` is the truth. Unresolvable altogether (no ancestor
+/// canonicalizes), the path stays as given.
+fn settle(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let (Some(parent), Some(leaf @ Component::Normal(_))) =
+        (path.parent(), path.components().next_back())
+    else {
+        // A leaf of `..`/`.` or a bare root names no entry of its own:
+        // resolving the whole path is the only reading.
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    };
+    let mut missing = Vec::new();
+    let mut existing = parent;
+    let mut settled = loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            break canonical;
+        }
+        match (existing.parent(), existing.components().next_back()) {
+            (Some(up), Some(component)) => {
+                missing.push(component);
+                existing = up;
+            }
+            _ => return path.to_path_buf(),
+        }
+    };
+    for component in missing.into_iter().rev() {
+        match component {
+            Component::ParentDir => {
+                settled.pop();
+            }
+            Component::CurDir => {}
+            other => settled.push(other),
+        }
     }
+    settled.push(leaf);
+    settled
 }
 
 /// Whether a repo-relative path lives inside the data directory. The
@@ -265,7 +320,11 @@ fn save_state(data_dir: &Path, state: &SyncState) -> Result<(), String> {
         "fingerprints": state.fingerprints,
         "facts_version": state.facts_version,
     });
-    std::fs::write(data_dir.join(STATE_FILE), format!("{value}\n"))
+    // Atomic: a crash mid-write must leave the previous state, never
+    // a torn file — a torn one reads as "no state" and costs the next
+    // run a full re-sync plus a whole-map read to recover what the
+    // fingerprints would have said (see `previously_synced` in `sync`).
+    crate::storage::write_atomic(&data_dir.join(STATE_FILE), format!("{value}\n").as_bytes())
         .map_err(|error| format!("writing {STATE_FILE}: {error}"))
 }
 
@@ -317,12 +376,35 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // 0010 §3: a gitignored file, secrets included, is never in the
     // universe, however it became a candidate).
     let universe: std::collections::BTreeSet<String> = walk.full_listing()?.into_iter().collect();
+    // What the map holds facts for right now: every path an earlier
+    // sync imported. The state file's fingerprints are that record
+    // (inserted on each successful import, dropped on each
+    // retraction); without a state file — lost, corrupt — the stored
+    // map itself is read back instead, or a full re-sync could never
+    // retract the files deleted while the record was missing. Two
+    // things need it: a full re-sync must make every such path a
+    // candidate (the universe lists only survivors, so a file deleted
+    // between the anchor and HEAD is in neither the universe nor any
+    // dirty set — only this record still names it), and a candidate
+    // that can no longer be imported must retract what an earlier
+    // sync imported for it.
+    let recovered = match &previous {
+        None => crate::code::query::stored_sources(&data_dir, &args.context),
+        Some(_) => std::collections::BTreeSet::new(),
+    };
+    let previously_synced = |path: &str| match &previous {
+        Some(state) => state.fingerprints.contains_key(path),
+        None => recovered.contains(path),
+    };
     // Candidates: every path whose truth may have moved since the
     // last sync. What each one becomes — re-import or retraction —
     // is decided by the disk below, not by which list found it.
     let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     match &previous {
-        None => candidates.extend(universe.iter().cloned()),
+        None => {
+            candidates.extend(universe.iter().cloned());
+            candidates.extend(recovered.iter().cloned());
+        }
         Some(state)
             if !rebuild
                 && state.commit == head
@@ -333,11 +415,9 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             return Ok(0);
         }
         Some(state) => {
-            if rebuild {
-                // Every survivor re-imports under the new model; the
-                // diff and dirty sets below still add the deletions.
-                candidates.extend(universe.iter().cloned());
-            }
+            // A rebuild re-imports every survivor under the new model;
+            // the diff and dirty sets below still add the deletions.
+            let mut full = rebuild;
             let committed = if state.commit == head {
                 Vec::new()
             } else {
@@ -351,11 +431,19 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
                             "taguru-code: sync: {message} — sync anchor unusable, \
                              falling back to a full re-sync"
                         );
-                        candidates.extend(universe.iter().cloned());
+                        full = true;
                         Vec::new()
                     }
                 }
             };
+            if full {
+                // Survivors from the universe, deletions from the
+                // record: with no usable diff, the synced paths the
+                // universe no longer lists are the only trace of what
+                // was deleted since the anchor.
+                candidates.extend(universe.iter().cloned());
+                candidates.extend(state.fingerprints.keys().cloned());
+            }
             for change in committed {
                 match change {
                     Change::Added(path) | Change::Modified(path) | Change::Deleted(path) => {
@@ -373,9 +461,10 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
 
     // The disk decides each candidate's fate: present and claimed by
-    // a grammar → re-import; present but unclaimed → skipped (counted,
-    // never silently); gone → retract its source, whatever its
-    // extension once was.
+    // a grammar → re-import (or, when its bytes cannot be imported,
+    // a retraction — below, once they are read); present but
+    // unclaimed → skipped (counted, never silently); gone → retract
+    // its source, whatever its extension once was.
     let mut supported = Vec::new();
     let mut retractions = Vec::new();
     let mut skipped = 0usize;
@@ -388,7 +477,11 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         // .gitignore, nothing committed — still exists on disk, but
         // it has LEFT the universe, so it must never re-import and
         // whatever an earlier sync imported for it retracts now.
-        if !universe.contains(&path) || !walk.root().join(&path).exists() {
+        // "On disk" is the directory entry itself, never what a
+        // symlink points at: a link is read (and refused) as what it
+        // is below, not judged present or gone by its target.
+        if !universe.contains(&path) || std::fs::symlink_metadata(walk.root().join(&path)).is_err()
+        {
             retractions.push(path);
             continue;
         }
@@ -444,11 +537,22 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     let header_context_id = crate::registry::derived_context_id(&args.context);
     let mut warnings = Vec::new();
     let mut binaries = 0usize;
+    let mut refused = 0usize;
     let mut unchanged = 0usize;
     let mut symbol_count = 0usize;
     for ((path, grammar), (_, content)) in supported.iter().zip(contents) {
         let Some(content) = content else {
+            // Present, but not a plain UTF-8 file inside the repo — a
+            // binary, a symlink (never followed, see `open_inside`),
+            // a Latin-1 re-save, an unreadable mode. Its current truth
+            // is "no facts": a `.rs` that WAS synced and then got
+            // swapped for any of these must not keep serving the old
+            // version's symbols (and fingerprint) forever. One never
+            // synced has nothing to withdraw, so it costs no boot.
             binaries += 1;
+            if previously_synced(path.as_str()) {
+                retractions.push(path.clone());
+            }
             continue;
         };
         let fingerprint = crate::sha256::sha256_hex(content.as_bytes());
@@ -457,9 +561,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             continue;
         }
         let symbols = grammar.symbols(&content, path);
-        symbol_count += symbols.len();
         let facts = facts::build(path, &symbols);
-        warnings.extend(facts.warnings.iter().cloned());
         let rendered = facts::render_batch(
             &header_context_id,
             &facts,
@@ -468,9 +570,34 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
                 description: CREATE_DESCRIPTION,
             }),
         );
-        let batch = crate::ingest::parse_batch(rendered.as_bytes())
-            .map_err(|message| format!("{path}: rendered source file refused: {message}"))?;
-        batches.push((path.clone(), batch, fingerprint));
+        match crate::ingest::parse_batch(rendered.as_bytes()) {
+            Ok(batch) => {
+                symbol_count += symbols.len();
+                warnings.extend(facts.warnings);
+                batches.push((path.clone(), batch, fingerprint));
+            }
+            Err(message) => {
+                // A cap the rendered batch exceeds (an over-long
+                // path, a passage past 8 MiB) is a property of this
+                // file's bytes, not turbulence: no re-run succeeds
+                // until the file changes. Failing the sync on it
+                // froze the sync point — every later sync, and
+                // `watch`'s first one, refused on this one file while
+                // the rest of the repo went stale. So it is counted,
+                // named, and skipped like an unsupported file: never
+                // fingerprinted (it re-tries whenever it is a
+                // candidate again), and whatever an earlier sync
+                // imported for it is retracted — the map must not
+                // keep answering for a version that no longer exists.
+                eprintln!(
+                    "taguru-code: sync: {path}: rendered source file refused, skipped: {message}"
+                );
+                refused += 1;
+                if previously_synced(path.as_str()) {
+                    retractions.push(path.clone());
+                }
+            }
+        }
     }
 
     // Nothing survived the fingerprints and nothing is gone: no lock,
@@ -493,7 +620,17 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             },
         )?;
         println!(
-            "nothing to apply ({unchanged} unchanged, {skipped} unsupported) at {head} in {:.1}s",
+            "nothing to apply ({unchanged} unchanged, {skipped} unsupported{}{}) at {head} in {:.1}s",
+            if binaries > 0 {
+                format!(", {binaries} non-text")
+            } else {
+                String::new()
+            },
+            if refused > 0 {
+                format!(", {refused} refused")
+            } else {
+                String::new()
+            },
             started.elapsed().as_secs_f64()
         );
         return Ok(0);
@@ -654,9 +791,14 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
     println!(
         "synced {imported} file(s) ({symbol_count} symbols), retracted {retracted}, \
-         {unchanged} unchanged, skipped {skipped} unsupported{} at {head} in {:.1}s",
+         {unchanged} unchanged, skipped {skipped} unsupported{}{} at {head} in {:.1}s",
         if binaries > 0 {
             format!(" and {binaries} non-text")
+        } else {
+            String::new()
+        },
+        if refused > 0 {
+            format!(" and {refused} refused")
         } else {
             String::new()
         },
@@ -668,4 +810,72 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         );
     }
     Ok(if failures == 0 { 0 } else { 1 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch tree under the platform temp dir — deliberately the
+    /// UNcanonical spelling (`/var/…` on macOS), the shape a user's
+    /// `--data-dir` arrives in — removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("taguru-code-sync-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("repo/sub")).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The self-exclusion compares against git's toplevel, which git
+    /// reports canonical. A data dir spelled through `..`, through a
+    /// symlinked ancestor, or not created yet must still exclude the
+    /// map's own files — or `watch` re-syncs on its own writes
+    /// forever.
+    #[test]
+    fn the_data_dir_exclusion_survives_dotdot_symlinks_and_absence() {
+        let scratch = Scratch::new("settle");
+        let repo = scratch.0.join("repo");
+        // What `RepoWalk::discover` would hand over: git's toplevel.
+        let root = repo.canonicalize().unwrap();
+        std::fs::create_dir_all(repo.join(".taguru")).unwrap();
+
+        // Existing, spelled through `..` (and, on macOS, through the
+        // `/var` → `/private/var` symlink).
+        let dotdot = resolve_data_dir(Some(repo.join("sub/../.taguru")), &root);
+        assert!(
+            under_data_dir(".taguru/code-sync.json", &root, &dotdot),
+            "{} must cover the repo's .taguru",
+            dotdot.display()
+        );
+        // Not created yet — `watch` resolves before its first sync.
+        let fresh = resolve_data_dir(Some(repo.join("sub/../later/.map")), &root);
+        assert!(under_data_dir("later/.map/x.bin", &root, &fresh));
+        assert!(!under_data_dir("later/other.rs", &root, &fresh));
+        // The default is unchanged by settling.
+        let default = resolve_data_dir(None, &root);
+        assert_eq!(default, root.join(".taguru"));
+
+        // A data dir that is itself a symlink shows up in git's
+        // listing under the LINK's name; following it would point the
+        // exclusion at the target and miss every listed path.
+        #[cfg(unix)]
+        {
+            let target = scratch.0.join("elsewhere");
+            std::fs::create_dir_all(&target).unwrap();
+            std::os::unix::fs::symlink(&target, repo.join(".linked")).unwrap();
+            let linked = resolve_data_dir(Some(repo.join(".linked")), &root);
+            assert!(under_data_dir(".linked", &root, &linked));
+        }
+    }
 }

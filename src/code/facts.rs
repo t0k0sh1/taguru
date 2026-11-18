@@ -28,10 +28,12 @@ const MAX_SECTION_BYTES: usize = 512;
 /// Version of the fact model this builder produces. The sync state
 /// records it beside its content fingerprints: a fingerprint says
 /// "this file's bytes produced the facts already stored", which stops
-/// being true the moment build()/render_batch() change shape — bump
-/// this on any such change and every map rebuilds in full instead of
-/// serving stale facts behind fresh-looking fingerprints.
-pub(crate) const FACTS_VERSION: u32 = 1;
+/// being true the moment build()/render_batch() — or a grammar's
+/// naming — change shape: bump this on any such change and every map
+/// rebuilds in full instead of serving stale facts behind
+/// fresh-looking fingerprints. v2: trait-impl scopes name as
+/// `<Type as Trait>` and repeated name paths take `#N` ordinals.
+pub(crate) const FACTS_VERSION: u32 = 2;
 
 /// One association line's fields, pre-render.
 #[derive(Debug, Clone, PartialEq)]

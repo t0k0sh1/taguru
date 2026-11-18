@@ -98,30 +98,7 @@ impl CodeMap {
     /// AccessError mapping took when reads still went through the
     /// registry).
     pub(crate) fn open(data_dir: &std::path::Path, name: &str) -> Result<CodeMap, String> {
-        // The stem is the context's id (ADR 0045), recorded in the
-        // sidecar metas — resolve the name offline the same way boot
-        // would, refusing an ambiguous one instead of picking.
-        let stems = crate::registry::stems_named(data_dir, name)
-            .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
-        let stem = match stems.as_slice() {
-            [stem] => stem.clone(),
-            [] => {
-                return Err(format!(
-                    "context '{name}' not found — run `taguru-code sync` first"
-                ));
-            }
-            several => {
-                return Err(format!(
-                    "context name '{name}' is ambiguous ({} contexts share it); \
-                     rename them apart",
-                    several.len()
-                ));
-            }
-        };
-        let image_path = crate::registry::image_path(data_dir, &stem);
-        let bytes = std::fs::read(&image_path)
-            .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
-        let context = taguru::context::Context::from_bytes(&bytes).map_err(|_| damaged(name))?;
+        let (context, stem) = open_context(data_dir, name)?;
         // heal=false keeps this strictly read-only, the same load
         // `taguru inspect` runs; 0 = no log ceiling on a read.
         let (passages, _, _) = crate::passages::PassageStore::load(
@@ -157,6 +134,62 @@ fn damaged(name: &str) -> String {
         "context '{name}' could not be read — re-run `taguru-code sync` \
          (a full re-sync rebuilds a damaged data directory)"
     )
+}
+
+/// The named `context`'s graph image from `data_dir`, read-only, with
+/// the file stem the rest of its family lives under. The stem is the
+/// context's id (ADR 0045), recorded in the sidecar metas — the name
+/// resolves offline the same way boot would, refusing an ambiguous
+/// one instead of picking.
+fn open_context(
+    data_dir: &std::path::Path,
+    name: &str,
+) -> Result<(taguru::context::Context, String), String> {
+    let stems = crate::registry::stems_named(data_dir, name)
+        .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
+    let stem = match stems.as_slice() {
+        [stem] => stem.clone(),
+        [] => {
+            return Err(format!(
+                "context '{name}' not found — run `taguru-code sync` first"
+            ));
+        }
+        several => {
+            return Err(format!(
+                "context name '{name}' is ambiguous ({} contexts share it); \
+                 rename them apart",
+                several.len()
+            ));
+        }
+    };
+    let image_path = crate::registry::image_path(data_dir, &stem);
+    let bytes = std::fs::read(&image_path)
+        .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
+    let context = taguru::context::Context::from_bytes(&bytes).map_err(|_| damaged(name))?;
+    Ok((context, stem))
+}
+
+/// Every source the named `context` in `data_dir` still attributes an
+/// edge to — the files whose facts the map holds right now. `sync`
+/// asks this only when its own record of that (the state file's
+/// fingerprints) is gone: a full re-sync must still retract what the
+/// map holds for files that have since vanished. Empty when there is
+/// no readable map: a data directory that never synced holds nothing
+/// to retract, and a damaged one is the sync's own boot to report.
+pub(crate) fn stored_sources(
+    data_dir: &std::path::Path,
+    name: &str,
+) -> std::collections::BTreeSet<String> {
+    let Ok((context, _)) = open_context(data_dir, name) else {
+        return std::collections::BTreeSet::new();
+    };
+    // Retracted ghosts carry no attributions, so they add nothing.
+    context
+        .query(None, None, None)
+        .into_iter()
+        .flat_map(|assoc| assoc.attributions)
+        .map(|attribution| attribution.source)
+        .collect()
 }
 
 /// Opens the map the same place sync writes it: default
@@ -226,6 +259,61 @@ fn test_rank(qualified: &str) -> u8 {
         || qualified.contains("_tests.rs");
     let tail = qualified.rsplit("::").next().unwrap_or(qualified);
     u8::from(in_test_module || tail.starts_with("test_"))
+}
+
+/// A qualified name's last segment as a reader names it: a repeat's
+/// ordinal (`platform#2`, see `grammars/rust.rs`) stripped.
+fn tail_of(qualified: &str) -> &str {
+    strip_ordinal(qualified.rsplit("::").next().unwrap_or(qualified))
+}
+
+/// `name#N` → `name`; anything else unchanged. Only an all-digit
+/// suffix after a non-empty stem is an ordinal, so a path segment
+/// that merely contains `#` (`a#b.rs`) keeps its text.
+fn strip_ordinal(segment: &str) -> &str {
+    match segment.rsplit_once('#') {
+        Some((stem, ordinal))
+            if !stem.is_empty()
+                && !ordinal.is_empty()
+                && ordinal.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            stem
+        }
+        _ => segment,
+    }
+}
+
+/// The name path a reader types for a qualified name: every ordinal
+/// stripped and every trait-impl scope `<X as Display>` read as its
+/// type `X` — so `X::fmt` still finds each trait's `fmt` and
+/// `inner::open` each `#[cfg]` twin's. Borrowed when the grammar
+/// minted neither form (the common case, no allocation).
+fn plain_name(qualified: &str) -> std::borrow::Cow<'_, str> {
+    if !qualified.contains(['#', '<']) {
+        return std::borrow::Cow::Borrowed(qualified);
+    }
+    let segments: Vec<&str> = qualified
+        .split("::")
+        .map(|segment| {
+            let segment = strip_ordinal(segment);
+            segment
+                .strip_prefix('<')
+                .and_then(|inner| inner.strip_suffix('>'))
+                .and_then(|inner| inner.split_once(" as "))
+                .map_or(segment, |(type_name, _)| type_name)
+        })
+        .collect();
+    std::borrow::Cow::Owned(segments.join("::"))
+}
+
+/// Whether `subject` names `cue` as a qualified suffix: `Type::method`
+/// after a `::`, a file-qualified `extract.rs::run` after a `/`, or
+/// the whole name.
+fn ends_with_qualified(subject: &str, cue: &str) -> bool {
+    subject == cue
+        || subject
+            .strip_suffix(cue)
+            .is_some_and(|head| head.ends_with("::") || head.ends_with('/'))
 }
 
 /// One `find` hit, fully dereferenced.
@@ -337,20 +425,22 @@ pub(crate) fn find_hits(map: &CodeMap, cue: &str, limit: usize) -> Vec<Hit> {
         let mut tiers: [Vec<&taguru::context::Association>; 4] =
             [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for assoc in &symbols {
-            let tail = assoc.subject.rsplit("::").next().unwrap_or(&assoc.subject);
+            let tail = tail_of(&assoc.subject);
             if tail == cue {
                 tiers[0].push(assoc);
             } else if cue.contains("::")
-                && (assoc.subject.ends_with(&format!("::{cue}"))
-                    || assoc.subject.ends_with(&format!("/{cue}"))
-                    || assoc.subject == cue)
+                && (ends_with_qualified(&assoc.subject, cue)
+                    || ends_with_qualified(&plain_name(&assoc.subject), cue))
             {
                 // `::` suffix is `Type::method`; `/` suffix lets a
                 // file-qualified cue (`extract.rs::run`) pin a
                 // top-level symbol the same way. Both are gated on
                 // the cue containing `::` on purpose: a bare path
                 // fragment (`src/ingest/model.rs`) is not a symbol
-                // lookup and belongs to the path tier below.
+                // lookup and belongs to the path tier below. The raw
+                // name answers a cue spelled the grammar's way
+                // (`<X as Display>::fmt`), the plain one the way a
+                // reader spells it (`X::fmt`).
                 tiers[1].push(assoc);
             } else if tail.starts_with(cue) {
                 tiers[2].push(assoc);
@@ -411,7 +501,7 @@ pub(crate) fn find_hits(map: &CodeMap, cue: &str, limit: usize) -> Vec<Hit> {
             let mut scored: Vec<(f64, &taguru::context::Association)> = symbols
                 .iter()
                 .map(|assoc| {
-                    let tail = assoc.subject.rsplit("::").next().unwrap_or(&assoc.subject);
+                    let tail = tail_of(&assoc.subject);
                     (bigram_dice(cue, tail), assoc)
                 })
                 .filter(|(score, _)| *score >= FUZZY_FLOOR)
@@ -578,5 +668,35 @@ mod tests {
         let ab = bigram_dice("alpha", "alphabet");
         let ba = bigram_dice("alphabet", "alpha");
         assert!((ab - ba).abs() < f64::EPSILON);
+    }
+
+    /// The grammar's distinct names (`<X as Display>::fmt`,
+    /// `platform#2`) must stay findable the way a reader spells them:
+    /// bare tail for the exact tier, `X::fmt` for the qualified one.
+    #[test]
+    fn trait_impl_and_ordinal_names_answer_reader_spelled_cues() {
+        assert_eq!(tail_of("src/x.rs::<X as Display>::fmt"), "fmt");
+        assert_eq!(tail_of("src/x.rs::platform#2"), "platform");
+        // Not an ordinal: a stem is required and the suffix is digits.
+        assert_eq!(strip_ordinal("#2"), "#2");
+        assert_eq!(strip_ordinal("a#b"), "a#b");
+        assert_eq!(
+            plain_name("src/x.rs::<X as Display>::fmt"),
+            "src/x.rs::X::fmt"
+        );
+        assert_eq!(plain_name("src/x.rs::imp#2::open#3"), "src/x.rs::imp::open");
+        assert!(matches!(
+            plain_name("src/x.rs::X::fmt"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let debug_fmt = "src/x.rs::<X as Debug>::fmt";
+        assert!(ends_with_qualified(&plain_name(debug_fmt), "X::fmt"));
+        assert!(ends_with_qualified(debug_fmt, "<X as Debug>::fmt"));
+        assert!(ends_with_qualified(
+            "src/extract.rs::run",
+            "extract.rs::run"
+        ));
+        // A suffix that only matches mid-segment is not a qualified hit.
+        assert!(!ends_with_qualified("src/x.rs::MyX::fmt", "X::fmt"));
     }
 }
