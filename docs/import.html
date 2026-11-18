@@ -419,7 +419,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
           <tr><td><code>group</code> membership (member <code>context_ids</code> / child <code>group_ids</code>, each)</td><td>1,000 ids</td></tr>
           <tr><td>create.description</td><td>4,096 bytes</td></tr>
           <tr><td>weight</td><td>finite, |w| ≤ 1e6</td></tr>
-          <tr><td>passage</td><td>8 MiB (the default HTTP body cap)</td></tr>
+          <tr><td>passage</td><td>8 MiB (also enforced by <code>POST /contexts/{id}/sources</code>, whatever <code>TAGURU_MAX_BODY_BYTES</code> allows, so every stored passage restores)</td></tr>
           <tr><td>one question</td><td>512 bytes</td></tr>
           <tr><td>questions per paragraph</td><td>8</td></tr>
           <tr><td>one section</td><td>512 bytes</td></tr>
@@ -631,7 +631,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     </p>
     <ul>
       <li><b>Fidelity</b>: a fact the same source asserted n times reproduces as n association lines (corroboration <code>count</code> survives the round trip). Paragraph locators ride the first assertion line (reproducing first-write-wins).</li>
-      <li><b>Sourceless weight</b> (entered via the API with <code>source_id</code> omitted) rides under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
+      <li><b>Sourceless weight</b> (entered via the API with <code>source_id</code> omitted) rides under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story; an attribution already named <code>export:unsourced</code> (a previous round trip) folds back into that same batch. The other reserved id, <code>export:empty</code>, only ever heads the header-only batch of an empty context. Writers refuse what export could not render: a passage under either id (<code>POST /contexts/{id}/sources</code> and an import passage line), and an association under <code>export:empty</code> (<code>POST /contexts/{id}/associations</code> and an import batch headed by it).</li>
       <li><b>Fully retracted edges (weight 0) are not emitted</b>: an export → import round trip sheds the dead records an append-only image accumulates — doubling as offline compaction.</li>
       <li>An alias whose canonical has no live associations is dropped and the count reported (under the import contract, canonicals are minted by association lines).</li>
       <li><code>POST /import</code> always answers <code>{"status": "ok", "result": {"batches": [per-source results…]}, "time": ...}</code> (a single source is the same shape with one element — one shape to parse), <code>result</code> gaining <code>schemas</code>/<code>groups</code> whenever the stream carried either. If the stream is refused midway, the earlier sources (and any schema record that already installed) have landed — each source is retract-then-apply and each schema install is independent, so re-POSTing the corrected stream converges exactly.</li>
@@ -686,7 +686,11 @@ taguru export --url "$TAGURU_URL" --out backups/</code></pre>
         <code>create</code> block the import brings for it. An absent name with no create block
         anywhere in the import is refused by name, as 0.9.7 refused it. A name that several
         <code>contexts</code> share is refused (<code>409 conflict</code> over HTTP), never
-        guessed; rename all but one first.</li>
+        guessed; rename all but one first. Over <code>POST /import</code> with a context-scoped
+        key (<code>TAGURU_KEY_GRANTS</code>), names resolve only against the contexts the grant
+        covers: a namesake outside the grant is invisible, nothing is minted, and a name no
+        granted context carries is refused <code>403 forbidden</code> naming only the name sent
+        — the same answer whether or not a context of that name exists elsewhere.</li>
       <li><b>Sources</b> keep their id as <code>source_id</code>. Passages (with
         <code>stored_at</code>, <code>date</code> and <code>tags</code>), questions, sections,
         locators, associations and aliases are read exactly as 0.9.7 wrote them.</li>

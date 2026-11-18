@@ -35,8 +35,9 @@ pub struct LookupPassagesRequest {
 /// The `empty`/`oversized` gate every source-shaped field goes through
 /// before it reaches a lookup or write that would otherwise pay for a
 /// disk read (or fsync) before failing to find it. Shared by
-/// `lookup_passages`, `citation`, and `retract_source`; `field` names
-/// the request field in the refusal.
+/// `lookup_passages`, `citation`, `retract_source`, and
+/// `explain_search_passages`; `field` names the request field in the
+/// refusal.
 fn invalid_source(field: &str, source: &str, started_at: Instant) -> Option<Response> {
     if let Some(refusal) = empty(field, source, started_at) {
         return Some(refusal);
@@ -1548,6 +1549,12 @@ pub async fn explain_search_passages(
     AppJson(request): AppJson<ExplainSearchRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // The gate every other source-addressed endpoint runs: an empty or
+    // over-cap source id names nothing any write could have stored, so
+    // it is a malformed request, not a `not_stored` verdict.
+    if let Some(refusal) = invalid_source("source_id", &request.source_id, started_at) {
+        return refusal;
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
@@ -2177,8 +2184,13 @@ fn check_orphaned_source(
 }
 
 /// Interprets `passages`: an object of source id → text. Source ids are
-/// names like any other (empty or oversized refused), the text itself
-/// rides under the body cap instead.
+/// names like any other (empty or oversized refused), and the two ids
+/// export reserves for its own stream artifacts are refused outright —
+/// export refuses to render a context holding a passage under either,
+/// so storing one would make the context's backup unrenderable. The
+/// text is capped at import's [`crate::ingest::MAX_PASSAGE_BYTES`] —
+/// not just the body cap, which an operator may raise past it — so
+/// every stored passage is one an export → import round trip restores.
 fn interpret_passages(
     obj: &serde_json::Map<String, Value>,
     issues: &mut Vec<Issue>,
@@ -2190,21 +2202,32 @@ fn interpret_passages(
         }
         Some(Value::Object(map)) => {
             for (source, text) in map {
-                check_bounded_len(
-                    source,
-                    format!("passages['{source}']"),
-                    MAX_NAME_BYTES,
-                    issues,
-                );
+                let path = format!("passages['{source}']");
+                check_bounded_len(source, path.clone(), MAX_NAME_BYTES, issues);
+                if [
+                    taguru::context::UNSOURCED_SOURCE,
+                    crate::export::EMPTY_SOURCE,
+                ]
+                .contains(&source.as_str())
+                {
+                    issues.push(Issue::conflict(
+                        path.clone(),
+                        "a source id export does not reserve",
+                        format!("'{source}', reserved by export for its own stream"),
+                    ));
+                }
                 match text {
                     Value::String(text) => {
+                        if text.len() > crate::ingest::MAX_PASSAGE_BYTES {
+                            issues.push(Issue::too_long(
+                                path,
+                                crate::ingest::MAX_PASSAGE_BYTES,
+                                text.len(),
+                            ));
+                        }
                         passages.insert(source.clone(), text.clone());
                     }
-                    other => issues.push(Issue::wrong_type(
-                        format!("passages['{source}']"),
-                        "a string",
-                        other,
-                    )),
+                    other => issues.push(Issue::wrong_type(path, "a string", other)),
                 }
             }
         }
@@ -3373,5 +3396,82 @@ mod tests {
         assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str(), "{body}");
         assert_eq!(body["integrity"], "nothing_written", "{body}");
         assert_eq!(body["retryable_after_correction"], true, "{body}");
+    }
+
+    /// Explain runs the same source-id gate as every other
+    /// source-addressed endpoint: an empty or over-cap id is a 400, not
+    /// a 200 `not_stored` verdict about a source nothing could store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_search_passages_refuses_an_empty_or_oversized_source_id() {
+        let (state, _dir) = scratch_state("explain-invalid-source");
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        for source_id in [String::new(), "x".repeat(MAX_NAME_BYTES + 1)] {
+            let request = ExplainSearchRequest {
+                query: "AAA".to_string(),
+                source_id,
+                paragraph: None,
+                limit: None,
+                semantic_floor: None,
+                tags: Vec::new(),
+                since: None,
+                until: None,
+            };
+            let response = explain_search_passages(
+                State(state.clone()),
+                ContextIdPath(id.clone()),
+                axum::Extension(Deadline::unbounded()),
+                AppJson(request),
+            )
+            .await;
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str(), "{body}");
+        }
+    }
+
+    /// Neither id export reserves for its own stream may name a stored
+    /// passage — export refuses to render a context holding one, so the
+    /// store would make the context's backup unrenderable.
+    #[test]
+    fn store_passages_refuses_the_ids_export_reserves() {
+        for reserved in [
+            taguru::context::UNSOURCED_SOURCE,
+            crate::export::EMPTY_SOURCE,
+        ] {
+            let body = serde_json::json!({"passages": {reserved: "本文", "a.md": "本文"}});
+            let Err(issues) = interpret_store_passages(&body) else {
+                panic!("'{reserved}' must be refused as a passage source id");
+            };
+            let found: Vec<(&str, &str)> = issues
+                .iter()
+                .map(|issue| (issue.path.as_str(), issue.kind))
+                .collect();
+            assert_eq!(
+                found,
+                [(format!("passages['{reserved}']").as_str(), "conflict")]
+            );
+        }
+    }
+
+    /// The passage cap is import's own, not just the (raisable) body
+    /// cap: exactly `MAX_PASSAGE_BYTES` stores, one byte past it is
+    /// refused — so every stored passage survives export → import.
+    #[test]
+    fn store_passages_caps_a_passage_at_imports_passage_cap() {
+        let cap = crate::ingest::MAX_PASSAGE_BYTES;
+        let at_cap = serde_json::json!({"passages": {"a.md": "x".repeat(cap)}});
+        assert!(interpret_store_passages(&at_cap).is_ok());
+
+        let over = serde_json::json!({"passages": {"a.md": "x".repeat(cap + 1)}});
+        let Err(issues) = interpret_store_passages(&over) else {
+            panic!("a passage one byte past the import cap must be refused");
+        };
+        let found: Vec<(&str, &str)> = issues
+            .iter()
+            .map(|issue| (issue.path.as_str(), issue.kind))
+            .collect();
+        assert_eq!(found, [("passages['a.md']", "too_long")]);
     }
 }

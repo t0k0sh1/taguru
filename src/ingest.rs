@@ -225,9 +225,11 @@ does not read it. See docs/import.html#upgrading-from-0-9-7.
                no successful outcome to report for it.
 ";
 
-/// Passage cap, mirroring the HTTP default: over the API a passage
-/// rides under `TAGURU_MAX_BODY_BYTES` (8 MiB), and a file must not
-/// smuggle in what a request could not. Extract caps whole documents
+/// Passage cap, shared by every entrance that stores one: an import
+/// line, `POST /contexts/{id}/sources` (which enforces it on top of
+/// `TAGURU_MAX_BODY_BYTES`, 8 MiB by default — an operator who raises
+/// the body cap must not thereby store a passage its own export →
+/// import could not restore), and extract, which caps whole documents
 /// here too — a document over it could not ride as a passage.
 pub(crate) const MAX_PASSAGE_BYTES: usize = 8 * 1024 * 1024;
 

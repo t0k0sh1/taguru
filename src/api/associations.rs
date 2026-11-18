@@ -26,6 +26,15 @@ use super::{
 /// would intern a real, permanent source id that unrelated callers'
 /// mistakes then silently merge into.
 ///
+/// [`crate::export::EMPTY_SOURCE`] is refused: export reserves it for
+/// the header-only batch of an empty context and refuses to render a
+/// context whose weight is attributed to it, so accepting it here would
+/// make the context's backup unrenderable. Its sibling
+/// [`taguru::context::UNSOURCED_SOURCE`] stays accepted — it means
+/// "sourceless" everywhere (export folds it back into the residual it
+/// renders under that same id), so an attribution to it exports as
+/// exactly what it says.
+///
 /// The pre-#1039 key `source` is refused by name: the walk ignores keys
 /// it does not know, so an old caller's `source` would otherwise land
 /// its facts unsourced — provenance lost without a word.
@@ -43,6 +52,14 @@ fn interpret_source(
     }
     match obj.get("source_id") {
         None | Some(Value::Null) => None,
+        Some(Value::String(text)) if text == crate::export::EMPTY_SOURCE => {
+            issues.push(Issue::conflict(
+                format!("{path}.source_id"),
+                "a source id export does not reserve",
+                format!("'{text}', reserved by export for its own stream"),
+            ));
+            None
+        }
         Some(Value::String(text)) => {
             if check_bounded_len(text, format!("{path}.source_id"), MAX_NAME_BYTES, issues) {
                 Some(text.clone())
@@ -231,7 +248,7 @@ pub async fn add_associations(
         // enforcement because a read failed. Unlike a schema violation,
         // no correction on the caller's side fixes this.
         Some(Err(message)) => {
-            tracing::warn!(context = %id, error = %message, "schema load failed");
+            tracing::warn!(context = %id, load_error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             return validation_error(
                 ErrorCode::Internal,
@@ -486,5 +503,31 @@ mod tests {
         assert_eq!(body["integrity"], "nothing_written", "{body}");
         assert_eq!(body["retryable_after_correction"], false, "{body}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `export:empty` is refused as a `source_id` (export refuses to
+    /// render weight attributed to it), while `export:unsourced` — the
+    /// id export itself renders sourceless weight under, and folds back
+    /// in on the way out — stays an accepted spelling of "sourceless".
+    #[test]
+    fn the_export_empty_sentinel_is_refused_as_a_source_id() {
+        let item = |source: &str| {
+            serde_json::json!([
+                {"subject": "a", "label": "b", "object": "c", "weight": 1.0, "source_id": source}
+            ])
+        };
+        let Err(issues) = interpret_associations(&item(crate::export::EMPTY_SOURCE)) else {
+            panic!("the export:empty sentinel must be refused");
+        };
+        let paths: Vec<&str> = issues.iter().map(|issue| issue.path.as_str()).collect();
+        assert_eq!(paths, ["associations[0].source_id"]);
+        assert_eq!(issues[0].kind, "conflict");
+
+        let ops = interpret_associations(&item(taguru::context::UNSOURCED_SOURCE))
+            .expect("export:unsourced means sourceless and stays accepted");
+        assert_eq!(
+            ops[0].source.as_deref(),
+            Some(taguru::context::UNSOURCED_SOURCE)
+        );
     }
 }

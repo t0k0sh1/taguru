@@ -63,7 +63,7 @@ pub async fn get_schema(
             // and unreadable-file messages both do) is for the operator,
             // not an authenticated HTTP client: logged here, never
             // forwarded into the response.
-            tracing::warn!(context = %id, error = %message, "schema load failed");
+            tracing::warn!(context = %id, load_error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
@@ -140,7 +140,7 @@ pub async fn put_schema(
             // Same posture as `get_schema`'s Load arm just above: the
             // detail can name a filesystem path, so it is logged, not
             // returned.
-            tracing::warn!(context = %id, error = %message, "schema load failed");
+            tracing::warn!(context = %id, load_error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
@@ -527,7 +527,7 @@ pub async fn audit_schema(
                 // Same posture as `get_schema`'s Load arm: the detail can
                 // name a filesystem path, so it is logged, never
                 // forwarded.
-                tracing::warn!(context = %id, error = %message, "schema load failed");
+                tracing::warn!(context = %id, load_error = %message, "schema load failed");
                 state.metrics().record_error(ErrorKind::Load);
                 error(
                     ErrorCode::Internal,

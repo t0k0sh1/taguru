@@ -1009,6 +1009,20 @@ fn parse_op(
             check_size(number, field, text, MAX_NAME_BYTES)?;
             check_nonempty(number, field, text)?;
         }
+        // `export:empty` labels the header-only batch an empty context
+        // exports — it never carries an association, and export refuses
+        // to render weight attributed to it, so a batch landing one
+        // would restore a context its own export then refuses. (The
+        // sourceless sibling `export:unsourced` is the opposite case:
+        // export renders residual weight under it, so its association
+        // lines are the round trip itself.)
+        if batch.source == crate::export::EMPTY_SOURCE {
+            return Err(format!(
+                "line {number}: an association under source '{}', which export reserves for an \
+                 empty context's header-only batch — rename the source",
+                batch.source
+            ));
+        }
         if op.paragraph.is_some() {
             batch.first_paragraph_line.get_or_insert(number);
         }
@@ -1040,6 +1054,22 @@ fn parse_op(
     } else if object.contains_key("passage") {
         let op: PassageLine = serde_json::from_value(value)
             .map_err(|error| format!("line {number}: passage: {error}"))?;
+        // Neither id export reserves ever heads a passage in its own
+        // output (it refuses to render a context holding one), so a
+        // passage under either can only be hand-made — and would land a
+        // context whose next export refuses.
+        if [
+            taguru::context::UNSOURCED_SOURCE,
+            crate::export::EMPTY_SOURCE,
+        ]
+        .contains(&batch.source.as_str())
+        {
+            return Err(format!(
+                "line {number}: a passage under source '{}', which export reserves for its own \
+                 stream — rename the source",
+                batch.source
+            ));
+        }
         if op.passage.len() > MAX_PASSAGE_BYTES {
             return Err(format!(
                 "line {number}: passage of {} bytes exceeds the {MAX_PASSAGE_BYTES}-byte cap",

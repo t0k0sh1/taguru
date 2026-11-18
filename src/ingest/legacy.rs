@@ -255,6 +255,14 @@ pub(crate) enum LegacyRefusal {
     /// import brings a create block for it — what v0.9.7 refused as
     /// "does not exist and the batch brought no create block".
     NoContext { name: String, needed_by: String },
+    /// A context-scoped key's import named a context no `context` within
+    /// its grant carries. One answer whether a `context` of that name
+    /// exists beyond the grant or nowhere at all, and never an id: the
+    /// scoped resolution never looks past the grant (see
+    /// [`resolve_legacy`]), so the refusal cannot become an oracle for
+    /// what lies there. A create block does not help — a freshly minted
+    /// id sits outside every grant.
+    OutOfGrant { name: String, needed_by: String },
     /// A child `group` that is neither a record of the import nor a
     /// standing `group`.
     NoGroup { name: String, needed_by: String },
@@ -275,6 +283,11 @@ impl LegacyRefusal {
                 "context '{name}' ({needed_by}) is not on this server, and no v0.9.7 source of \
                  this import brings a create block for it; nothing was applied"
             ),
+            Self::OutOfGrant { name, needed_by } => format!(
+                "no context within this key's grant is named '{name}' ({needed_by}): a \
+                 context-scoped key's v0.9.7 import settles names only on the contexts its grant \
+                 covers, and cannot mint new ones; nothing was applied"
+            ),
             Self::NoGroup { name, needed_by } => format!(
                 "group '{name}' ({needed_by}) is neither a record of this import nor a group on \
                  this server; nothing was applied"
@@ -290,7 +303,15 @@ impl LegacyRefusal {
 /// The context-name half of [`resolve_legacy`]: each name settled once,
 /// in the order the import first mentions it.
 struct ContextNames<'a> {
+    /// Standing `contexts` by name — only those within the grant, when
+    /// the import runs under a context-scoped key.
     standing: HashMap<String, Vec<String>>,
+    /// The import runs under a context-scoped key: a name nothing
+    /// within the grant carries is [`LegacyRefusal::OutOfGrant`], never
+    /// minted (a minted id is outside every grant) and never
+    /// [`LegacyRefusal::NoContext`] (that would tell absent from
+    /// beyond-the-grant).
+    scoped: bool,
     /// The first create block the import brings per name — a v0.9.7
     /// export puts it on a context's first source only.
     creates: HashMap<&'a str, &'a CreateSpec>,
@@ -317,6 +338,12 @@ impl ContextNames<'_> {
                     kind: "context",
                     name: name.to_string(),
                     count: ids.len(),
+                });
+            }
+            _ if self.scoped => {
+                return Err(LegacyRefusal::OutOfGrant {
+                    name: name.to_string(),
+                    needed_by: needed_by(),
                 });
             }
             _ => match self.creates.get(name) {
@@ -354,15 +381,30 @@ impl ContextNames<'_> {
 ///   sorted in never matters.
 /// - A name several standing `contexts` or `groups` carry is refused.
 ///
+/// `grant` is the importing key's, when the import arrives over HTTP
+/// (the offline CLI has none). A context-scoped grant confines the
+/// context half to the grant: only `contexts` it covers are standing,
+/// so a namesake beyond it neither resolves nor makes an in-grant name
+/// ambiguous, and a name nothing within it carries refuses
+/// [`LegacyRefusal::OutOfGrant`] whether or not it exists elsewhere —
+/// every answer depends only on what the key may already see, so the
+/// resolution is no existence oracle for what it may not. `group`
+/// names still resolve against every standing `group`: a scoped key
+/// lists every `group` (only their members are filtered), and the
+/// import gate judges the resolved records' context closures after.
+///
 /// Read-only: nothing is created here; a refusal leaves the instance
 /// untouched.
 pub(crate) fn resolve_legacy(
     state: &AppState,
     streams: Vec<LegacyStream>,
+    grant: Option<&crate::auth::KeyGrant>,
 ) -> Result<Vec<Stream>, LegacyRefusal> {
     let mut standing_contexts: HashMap<String, Vec<String>> = HashMap::new();
     for row in state.directory() {
-        standing_contexts.entry(row.name).or_default().push(row.id);
+        if grant.is_none_or(|grant| grant.allows_context(&row.id)) {
+            standing_contexts.entry(row.name).or_default().push(row.id);
+        }
     }
     let mut standing_groups: HashMap<String, Vec<String>> = HashMap::new();
     for view in state.group_page(None, None, usize::MAX).1 {
@@ -371,6 +413,7 @@ pub(crate) fn resolve_legacy(
 
     let mut names = ContextNames {
         standing: standing_contexts,
+        scoped: grant.is_some_and(|grant| grant.contexts.is_some()),
         creates: HashMap::new(),
         settled: HashMap::new(),
     };
@@ -632,7 +675,7 @@ mod tests {
     #[test]
     fn absent_names_mint_ids_and_every_batch_carries_the_create() {
         let state = scratch_state("mint");
-        let streams = resolve_legacy(&state, vec![legacy(EXPORT)]).unwrap();
+        let streams = resolve_legacy(&state, vec![legacy(EXPORT)], None).unwrap();
         let stream = &streams[0];
         let kura = stream.batches[0].context_id.clone();
         assert!(crate::registry::is_context_id(&kura), "{kura}");
@@ -666,7 +709,7 @@ mod tests {
             )
             .unwrap()
             .id;
-        let streams = resolve_legacy(&state, vec![legacy(EXPORT)]).unwrap();
+        let streams = resolve_legacy(&state, vec![legacy(EXPORT)], None).unwrap();
         let stream = &streams[0];
         assert_eq!(stream.batches[0].context_id, kura);
         // A standing context keeps the header's own create (ignored on
@@ -683,7 +726,7 @@ mod tests {
         let state = scratch_state("ambiguous");
         state.create("wine", ContextMeta::default()).unwrap();
         state.create("wine", ContextMeta::default()).unwrap();
-        let refusal = resolve_legacy(&state, vec![legacy(EXPORT)]).unwrap_err();
+        let refusal = resolve_legacy(&state, vec![legacy(EXPORT)], None).unwrap_err();
         assert_eq!(
             refusal,
             LegacyRefusal::Ambiguous {
@@ -707,7 +750,7 @@ mod tests {
                 .create_group(None, "all", String::new(), BTreeSet::new(), BTreeSet::new())
                 .unwrap();
         }
-        let refusal = resolve_legacy(&state, vec![legacy(EXPORT)]).unwrap_err();
+        let refusal = resolve_legacy(&state, vec![legacy(EXPORT)], None).unwrap_err();
         assert_eq!(
             refusal,
             LegacyRefusal::Ambiguous {
@@ -741,6 +784,7 @@ mod tests {
             vec![legacy(
                 "{\"taguru_group\":1,\"name\":\"parent\",\"groups\":[\"kids\"]}\n",
             )],
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -782,6 +826,7 @@ mod tests {
             vec![legacy(
                 "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\"}\n",
             )],
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -796,6 +841,7 @@ mod tests {
             vec![legacy(
                 "{\"taguru_group\":1,\"name\":\"g\",\"groups\":[\"h\"]}\n",
             )],
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -810,6 +856,7 @@ mod tests {
             vec![legacy(
                 "{\"taguru_group\":1,\"name\":\"g\",\"contexts\":[\"x\"]}\n",
             )],
+            None,
         )
         .unwrap_err();
         assert!(matches!(refusal, LegacyRefusal::NoContext { ref name, .. } if name == "x"));
@@ -827,10 +874,11 @@ mod tests {
                 legacy("{\"taguru_group\":1,\"name\":\"all\",\"groups\":[\"drinks\"]}\n"),
                 legacy(
                     "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\",\
-                     \"create\":{\"description\":\"\"}}\n",
+                 \"create\":{\"description\":\"\"}}\n",
                 ),
                 legacy("{\"taguru_group\":1,\"name\":\"drinks\",\"contexts\":[\"sake\"]}\n"),
             ],
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -847,6 +895,7 @@ mod tests {
                 legacy("{\"taguru_group\":1,\"name\":\"g\"}\n"),
                 legacy("{\"taguru_group\":1,\"name\":\"g\"}\n"),
             ],
+            None,
         )
         .unwrap_err();
         assert_eq!(refusal, LegacyRefusal::DuplicateGroup("g".to_string()));
@@ -857,7 +906,7 @@ mod tests {
     #[test]
     fn nested_groups_restore_whatever_order_their_records_came_in() {
         let state = scratch_state("nested-restore");
-        let streams = resolve_legacy(&state, vec![legacy(EXPORT)]).unwrap();
+        let streams = resolve_legacy(&state, vec![legacy(EXPORT)], None).unwrap();
         for batch in &streams[0].batches {
             apply_batch(&state, batch, Deadline::unbounded()).unwrap();
         }
@@ -870,6 +919,81 @@ mod tests {
         assert_eq!(
             all.record.group_ids,
             BTreeSet::from([streams[0].groups[1].id.clone()])
+        );
+    }
+
+    /// A context-scoped key's resolution sees only its grant: a namesake
+    /// beyond it neither resolves nor makes the in-grant name ambiguous,
+    /// and a name nothing within the grant carries refuses identically
+    /// whether it is standing beyond the grant or absent (create block
+    /// or not) — never minted, never `NoContext`, never an id.
+    #[test]
+    fn a_scoped_grant_settles_names_only_within_itself() {
+        let state = scratch_state("scoped");
+        let kura = state.create("sake/kura", ContextMeta::default()).unwrap();
+        // Beyond the grant: a namesake of the in-grant context, and the
+        // stream's `wine`.
+        state.create("sake/kura", ContextMeta::default()).unwrap();
+        state.create("wine", ContextMeta::default()).unwrap();
+        let grant = crate::auth::KeyGrant {
+            role: crate::auth::Role::Admin,
+            contexts: Some(std::sync::Arc::new(HashSet::from([kura.clone()]))),
+        };
+        let kura_only = concat!(
+            "{\"taguru_batch\":1,\"context\":\"sake/kura\",\"source\":\"a.md\"}\n",
+            "{\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":2.0}\n",
+        );
+        let streams = resolve_legacy(&state, vec![legacy(kura_only)], Some(&grant)).unwrap();
+        assert_eq!(streams[0].batches[0].context_id, kura);
+
+        // Unscoped, the same stream is ambiguous — the namesake is real.
+        assert!(matches!(
+            resolve_legacy(&state, vec![legacy(kura_only)], None),
+            Err(LegacyRefusal::Ambiguous {
+                kind: "context",
+                ..
+            })
+        ));
+
+        let out_of_grant = |name: &str| LegacyRefusal::OutOfGrant {
+            name: name.to_string(),
+            needed_by: "source 'a.md'".to_string(),
+        };
+        // Standing beyond the grant, absent without a create, absent
+        // with one: one answer for all three.
+        for (text, name) in [
+            (
+                "{\"taguru_batch\":1,\"context\":\"wine\",\"source\":\"a.md\"}\n",
+                "wine",
+            ),
+            (
+                "{\"taguru_batch\":1,\"context\":\"ghost\",\"source\":\"a.md\"}\n",
+                "ghost",
+            ),
+            (
+                "{\"taguru_batch\":1,\"context\":\"ghost\",\"source\":\"a.md\",\
+                 \"create\":{\"description\":\"\"}}\n",
+                "ghost",
+            ),
+        ] {
+            assert_eq!(
+                resolve_legacy(&state, vec![legacy(text)], Some(&grant)).unwrap_err(),
+                out_of_grant(name),
+                "{text}"
+            );
+        }
+        // A group member name is judged the same way.
+        let refusal = resolve_legacy(
+            &state,
+            vec![legacy(
+                "{\"taguru_group\":1,\"name\":\"g\",\"contexts\":[\"wine\"]}\n",
+            )],
+            Some(&grant),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&refusal, LegacyRefusal::OutOfGrant { name, .. } if name == "wine"),
+            "{refusal:?}"
         );
     }
 }

@@ -221,7 +221,7 @@ pub(super) fn cross_targets(
         .into_iter()
         .filter(|id| seen.insert(id.clone()))
         .collect();
-    if let Some(refusal) = scope_refusal(grant, key, &ids, started_at) {
+    if let Some(refusal) = scope_refusal(grant, key, &ids, std::iter::empty(), started_at) {
         return Err(Box::new(refusal));
     }
     // A missing listed context refuses now, exactly as the old

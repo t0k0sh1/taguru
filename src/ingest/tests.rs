@@ -221,6 +221,53 @@ fn duplicate_aliases_and_second_passages_are_refused() {
     );
 }
 
+/// The ids export reserves keep their round-trip uses — a header-only
+/// `export:empty` batch, and `export:unsourced` association lines (the
+/// residual export renders) — but a passage under either, or an
+/// association under `export:empty`, would land a context its next
+/// export refuses, so the line is refused by number.
+#[test]
+fn the_ids_export_reserves_keep_only_their_round_trip_shapes() {
+    let header = |id: &str| {
+        format!(
+            "{{\"type\": \"source\", \"context_id\": \"cef2e28b-43f0-4b6c-8201-abab0785399f\", \
+             \"id\": \"{id}\"}}\n"
+        )
+    };
+    let association =
+        "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n";
+    let passage = "{\"passage\": \"本文。\"}\n";
+
+    parse(&header(crate::export::EMPTY_SOURCE)).expect("the header-only empty batch");
+    let unsourced = parse(&format!(
+        "{}{association}",
+        header(taguru::context::UNSOURCED_SOURCE)
+    ))
+    .expect("the sourceless residual export renders");
+    assert_eq!(unsourced.associations.len(), 1);
+
+    for (text, what) in [
+        (
+            format!("{}{association}", header(crate::export::EMPTY_SOURCE)),
+            "an association",
+        ),
+        (
+            format!("{}{passage}", header(crate::export::EMPTY_SOURCE)),
+            "a passage",
+        ),
+        (
+            format!("{}{passage}", header(taguru::context::UNSOURCED_SOURCE)),
+            "a passage",
+        ),
+    ] {
+        let error = parse(&text).unwrap_err();
+        assert!(
+            error.starts_with("line 2: ") && error.contains(what) && error.contains("reserves"),
+            "{error}"
+        );
+    }
+}
+
 /// An empty alias spelling would containment-match every future
 /// cue (`str::contains("")` is always true) — the import surface
 /// must refuse it just like the HTTP one does.

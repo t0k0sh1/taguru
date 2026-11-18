@@ -261,36 +261,59 @@ pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
 /// Checked BEFORE existence on purpose: existence-first would answer
 /// 404 for an id the grant excludes and 403 for a live one, handing
 /// a context-scoped key an oracle for which `context` ids exist beyond
-/// its grant. For the same reason the refusal echoes the id as given
-/// and never the context's display name — a name would tell the key
-/// both that the id is live and what it is called.
-pub(super) fn scope_refusal<'a>(
+/// its grant. For the same reason the refusal never names a context's
+/// display name — a name would tell the key both that the id is live
+/// and what it is called.
+///
+/// The involved ids come in two kinds, and only one is ever echoed:
+/// `sent` are the ids the caller itself put in the request, named back
+/// as given; `reached` are the ids a `group` closure contributes (the
+/// standing members of an addressed or named `group`, transitively).
+/// Those are exactly what `GET /groups` hides from a scoped key
+/// ([`scoped_member_contexts`]), so a refusal reached through them
+/// names no id at all — only that some `group` the operation involves
+/// reaches beyond the grant. `sent` is judged first, so an id the
+/// caller sent is named even when a closure reaches it too.
+pub(super) fn scope_refusal<'s, 'r>(
     grant: &Option<axum::Extension<crate::auth::KeyGrant>>,
     key: &Option<axum::Extension<crate::auth::AuthKey>>,
-    involved: impl IntoIterator<Item = &'a String>,
+    sent: impl IntoIterator<Item = &'s String>,
+    reached: impl IntoIterator<Item = &'r String>,
     started_at: Instant,
 ) -> Option<Response> {
     let Some(axum::Extension(grant)) = grant else {
         return None;
     };
-    let refused = involved
+    let message = if let Some(refused) = sent
         .into_iter()
-        .find(|context| !grant.allows_context(context))?;
-    Some(error(
-        ErrorCode::Forbidden,
+        .find(|context| !grant.allows_context(context))
+    {
         format!(
             "key '{}' has no grant on context '{refused}'; nothing was applied",
             key_name(key),
-        ),
-        started_at,
-    ))
+        )
+    } else if reached
+        .into_iter()
+        .any(|context| !grant.allows_context(context))
+    {
+        format!(
+            "key '{}' has no grant on every context a group this request involves reaches \
+             (members beyond the grant stay unnamed, as GET /groups shows them); nothing was \
+             applied",
+            key_name(key),
+        )
+    } else {
+        return None;
+    };
+    Some(error(ErrorCode::Forbidden, message, started_at))
 }
 
 /// The gate every `group` write runs, wrapped around
 /// [`scope_refusal`]: resolves what the operation involves — the
 /// transitive `context` closure of the addressed `group` (by id, when
-/// the operation addresses one), those of the `named` child `groups`,
-/// plus the `direct` `context` ids — and refuses if any of it sits
+/// the operation addresses one) and those of the `named` child
+/// `groups` (all `reached`, never echoed), plus the `direct` `context`
+/// ids the request carries (`sent`) — and refuses if any of it sits
 /// beyond the grant. A key with no grant passes immediately, without
 /// paying for the closure read.
 fn scoped_group_refusal<'r, 'd>(
@@ -305,12 +328,11 @@ fn scoped_group_refusal<'r, 'd>(
     if grant.is_none() {
         return None;
     }
-    let mut involved = state.group_context_closures(named);
+    let mut reached = state.group_context_closures(named);
     if let Some(id) = addressed {
-        involved.extend(state.group_context_closure_of(id));
+        reached.extend(state.group_context_closure_of(id));
     }
-    involved.extend(direct.into_iter().cloned());
-    scope_refusal(grant, key, &involved, started_at)
+    scope_refusal(grant, key, direct, &reached, started_at)
 }
 
 /// The `group` directory: every `group`'s name, description, member
@@ -1048,5 +1070,75 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["status"], "error", "{body}");
         assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// A scoped key refused through a standing `group`'s closure must not
+    /// learn the out-of-grant member's id — the one `GET /groups` filters
+    /// from its view — while an id the caller itself sent is still named
+    /// back as given.
+    #[tokio::test]
+    async fn a_closure_reached_refusal_names_no_member_beyond_the_grant() {
+        let state = scratch_state("scope-closure-leak");
+        let sake = state.create("sake", ContextMeta::default()).unwrap();
+        let bunko = state.create("bunko", ContextMeta::default()).unwrap();
+        let group = state
+            .create_group(
+                None,
+                "mixed",
+                String::new(),
+                BTreeSet::from([sake.clone(), bunko.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap()
+            .id;
+        let grant = Some(axum::Extension(crate::auth::KeyGrant {
+            role: crate::auth::Role::Admin,
+            contexts: Some(std::sync::Arc::new(std::collections::HashSet::from([
+                sake.clone()
+            ]))),
+        }));
+
+        let response = delete_group(
+            State(state.clone()),
+            GroupIdPath(group.clone()),
+            grant.clone(),
+            None,
+            axum::Extension(Deadline::unbounded()),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Forbidden.as_str(), "{body}");
+        assert!(
+            !body["error"].as_str().unwrap().contains(&bunko),
+            "the hidden member's id must not leak: {body}"
+        );
+        assert!(
+            state.group(&group).is_some(),
+            "the refused delete applied nothing"
+        );
+
+        // The id the caller sent is its own to hear back.
+        let refusal = scope_refusal(
+            &grant,
+            &None,
+            [&bunko],
+            &BTreeSet::from([bunko.clone()]),
+            Instant::now(),
+        )
+        .expect("an out-of-grant sent id refuses");
+        let bytes = axum::body::to_bytes(refusal.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("no grant on context '{bunko}'")),
+            "{body}"
+        );
     }
 }
