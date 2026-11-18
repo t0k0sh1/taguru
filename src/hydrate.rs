@@ -736,11 +736,20 @@ impl Hydrator {
         inner.target.as_ref().map(|target| target.generation)
     }
 
-    /// Every `context` stem the current target carries, for boot's
+    /// Every live `context` stem the current target carries, for boot's
     /// registry registration — the sidecar metas these describe are
     /// already local by the time boot runs ([`Self::hydrate_shared`]).
+    /// A vetoed stem is not one: its family was deleted (boot's own
+    /// deletion sweep vetoes before it unlinks), and registering it
+    /// would bring the deleted context back.
     pub(crate) fn context_stems(&self) -> Vec<String> {
-        self.inner.lock().states.keys().cloned().collect()
+        self.inner
+            .lock()
+            .states
+            .iter()
+            .filter(|(_, state)| !matches!(state, StemState::Vetoed))
+            .map(|(stem, _)| stem.clone())
+            .collect()
     }
 
     /// Whether every family is settled (hydrated or vetoed): the
@@ -2385,9 +2394,11 @@ mod tests {
         hydrator.ensure_context(CTX_A).unwrap();
         hydrator.ensure_context("never-shipped").unwrap();
 
-        // A vetoed family stays vetoed (drained, but never refetched).
+        // A vetoed family stays vetoed (drained, but never refetched),
+        // and boot no longer enumerates it as a context.
         hydrator.veto(CTX_A);
         assert!(hydrator.drained());
+        assert!(hydrator.context_stems().is_empty());
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&target);
     }

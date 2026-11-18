@@ -248,18 +248,18 @@ impl AppState {
 /// removals so the three cannot drift on wording or on which errors
 /// they consider worth a log line.
 ///
-/// Which branch runs has no bearing on program behavior — both attempt
-/// the same unlink — so a mutated condition here can never be caught
-/// by a behavioral test; the difference is purely how noisy the logs
-/// are for the routine "no marker to begin with" case.
-#[mutants::skip]
-fn remove_persisted_file_quietly(path: &Path, what: &str) {
-    if let Err(error) = remove_persisted_file(path)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        // Never a bare `error` field — see the same note on
-        // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
-        tracing::warn!(path = %path.display(), removal_error = %error, "{what}");
+/// `true` when the file is gone afterwards (removed now, or never
+/// there); `false` when it is still held — the sweep keeps the
+/// deletion marker for that family.
+fn remove_persisted_file_quietly(path: &Path, what: &str) -> bool {
+    match remove_persisted_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            // Never a bare `error` field — see the same note on
+            // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
+            tracing::warn!(path = %path.display(), removal_error = %error, "{what}");
+            false
+        }
+        _ => true,
     }
 }
 
@@ -332,6 +332,9 @@ fn scan_data_dir(
     // leak forever). Resuming the deletion here makes the marker the
     // durable half of the operation: acknowledged deletes stay deleted
     // across any crash or IO failure, eventually.
+    // Families whose deletion could not finish this boot: the marker
+    // stays, and the scan below must not register what is left.
+    let mut still_held: HashSet<String> = HashSet::new();
     for dir_entry in fs::read_dir(data_dir)? {
         let path = dir_entry?.path();
         if path.extension().and_then(|e| e.to_str()) == Some("deleted")
@@ -350,8 +353,9 @@ fn scan_data_dir(
             if let Some(hydrator) = hydrator {
                 hydrator.veto(&stem);
             }
+            let mut family_gone = true;
             for file in context_files(&stem) {
-                remove_persisted_file_quietly(
+                family_gone &= remove_persisted_file_quietly(
                     &data_dir.join(file),
                     "unfinished deletion: file still held",
                 );
@@ -366,7 +370,11 @@ fn scan_data_dir(
                 );
             }
             // The marker goes last: it only leaves once the family did.
-            if remove_persisted_file(&path).is_err() {
+            // A family still held keeps it, so the next boot resumes
+            // again — and this boot does not register the remains.
+            if !family_gone {
+                still_held.insert(stem);
+            } else if remove_persisted_file(&path).is_err() {
                 tracing::warn!(path = %path.display(), "unfinished deletion: marker still held");
             }
         }
@@ -392,6 +400,9 @@ fn scan_data_dir(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        if still_held.contains(stem) {
+            continue;
+        }
         candidates.push(stem.to_string());
     }
 
@@ -652,6 +663,49 @@ mod tests {
             !deleted_marker_path(&dir, &stem).exists(),
             "the marker leaves once the family did"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A resumed deletion that still cannot unlink the image keeps its
+    /// marker and registers nothing: the remains are not a context, and
+    /// the next boot resumes again until the family is gone.
+    #[test]
+    fn a_deletion_that_cannot_finish_at_boot_keeps_its_marker_and_stays_deleted() {
+        let dir = scratch_dir("deleted-sweep-held");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let stem = stem_on_disk(&dir, "sake");
+        fs::write(deleted_marker_path(&dir, &stem), b"").unwrap();
+
+        // The sweep's first unlink is the image's (`context_files`
+        // order): it fails, so the `.ctx` survives this boot.
+        crate::storage::fail_persistence_ops_after(0);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            !crate::storage::clear_persistence_fault(),
+            "the injected unlink failure must have fired"
+        );
+        assert!(image_path(&dir, &stem).exists(), "the image is still held");
+        assert!(
+            state.directory_entry("sake").is_none(),
+            "a held family must not be registered"
+        );
+        assert!(
+            deleted_marker_path(&dir, &stem).exists(),
+            "the marker stays until the family is gone"
+        );
+        drop(state);
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        assert!(!image_path(&dir, &stem).exists());
+        assert!(!deleted_marker_path(&dir, &stem).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
