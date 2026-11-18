@@ -1572,7 +1572,8 @@ pub(crate) const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 /// any read endpoint serves, so a paged bulk workflow
 /// (list_sources → lookup_passages) fits exactly (issue #622 finding 7:
 /// a compiler-linked equality, not just matching literals).
-const MAX_INPUT_ITEMS: usize = MAX_MATCH_LIMIT;
+/// (`pub(crate)`: `taguru communities` chunks its lookups by it.)
+pub(crate) const MAX_INPUT_ITEMS: usize = MAX_MATCH_LIMIT;
 
 /// Refuses a list-shaped input field longer than [`MAX_INPUT_ITEMS`],
 /// before any lock is taken. `None` means the length is fine.
@@ -3132,6 +3133,7 @@ mod tests {
             &state,
             RestoreGroupsError::Timeout { applied: 2 },
             2,
+            0,
             Instant::now(),
         );
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
@@ -3243,6 +3245,7 @@ mod tests {
             &state,
             RestoreGroupsError::Duplicate("kura".to_string()),
             2,
+            0,
             Instant::now(),
         );
         let bytes = axum::body::to_bytes(response.into_body(), 4096)

@@ -141,7 +141,18 @@ struct Refusal {
 impl HttpEmbeddings {
     pub fn from_env(shutdown: ShutdownFlag) -> Option<Self> {
         let url = std::env::var("TAGURU_EMBED_URL").ok()?;
-        let model = std::env::var("TAGURU_EMBED_MODEL").ok()?;
+        // A URL without a model is almost certainly a typo, not a
+        // deliberate choice — warn as `HttpReranker::from_env` does for
+        // its own half-configuration, rather than leaving the lane off
+        // with nothing in the boot log to say why.
+        let Ok(model) = std::env::var("TAGURU_EMBED_MODEL") else {
+            tracing::warn!(
+                "TAGURU_EMBED_URL and TAGURU_EMBED_MODEL must both be set \
+                 (url set: true, model set: false); the embedding lane stays off"
+            );
+            tracing::info!(taguru.reason = "vector_off", "taguru.degrade");
+            return None;
+        };
         // The per-attempt ceiling (TAGURU_EMBED_TIMEOUT_SECS, default
         // 60): one provider round trip never runs longer — and a
         // request deadline tighter than this bounds the attempt

@@ -58,10 +58,13 @@ pub(super) fn report(batch: &Batch, applied: &Applied) -> String {
 /// load failures — are not dropped on the floor, but stdout stays
 /// pure report.
 pub(crate) fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (filter, unparseable_log_filter) = crate::env::log_filter("info");
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+    // Deferred from the RUST_LOG read above: logging works only now.
+    if let Some(warning) = unparseable_log_filter {
+        tracing::warn!("{warning}");
+    }
 }

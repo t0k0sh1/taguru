@@ -208,8 +208,9 @@ async fn serve(
     // operator-invoked heavy calls contend on one ceiling instead of
     // stacking two.
     let heavy_ops_limiter = limits::HeavyOpsLimiter::new(max_concurrent_heavy);
-    // Failed-auth attempts are throttled per source IP so the gate
-    // cannot be brute-forced for free (default 10/min; 0 disables).
+    // Failed-auth attempts are throttled per source IP (default
+    // 10/min; 0 disables) — a back-off signal, not a brute-force
+    // barrier; see `auth::Gate`.
     let auth_fail_per_minute = resolve_per_minute(
         "TAGURU_AUTH_FAIL_LIMIT_PER_MIN",
         env_number("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", 10),
@@ -405,6 +406,22 @@ async fn serve(
     // replica takes the sibling path: always a cache, never a claimant,
     // no guard to trip (it deposes nobody).
     let take_over = serve_args.take_over || env_bool("TAGURU_TAKEOVER", false);
+    // The intent only means something to a writer claiming a bucket.
+    // Warned, not refused: main.rs refuses only a configuration that
+    // cannot run (`--replica` without a bucket, above), and an
+    // ignored acknowledgment harms nothing — `TAGURU_TAKEOVER=1` in a
+    // shared env file can reach a replica service legitimately — but
+    // silence let an operator believe a takeover was armed.
+    if take_over && (replica_mode || replicate.is_none()) {
+        tracing::warn!(
+            "--take-over / TAGURU_TAKEOVER is ignored: {}",
+            if replica_mode {
+                "a replica claims nothing, so it deposes nobody"
+            } else {
+                "without TAGURU_REPLICATE_URL there is no bucket writer to depose"
+            }
+        );
+    }
     let hydrator = match &replicate {
         Some((replicate, store, root)) if replica_mode => {
             match hydrate::prepare_replica(store, root, &replicate.url, &config.data_dir).await {
@@ -1411,8 +1428,7 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (filter, unparseable_log_filter) = crate::env::log_filter("info");
     let (json, unrecognized_log_format) = match std::env::var("TAGURU_LOG_FORMAT") {
         Ok(value) if value.eq_ignore_ascii_case("json") => (true, None),
         Ok(value) => (false, Some(value)),
@@ -1432,16 +1448,20 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
         registry.with(stderr_layer.with_filter(filter)).init();
     }
 
-    // Deferred from the TAGURU_LOG_FORMAT read above: logging works only now.
+    // Deferred from the RUST_LOG and TAGURU_LOG_FORMAT reads above:
+    // logging works only now.
+    if let Some(warning) = unparseable_log_filter {
+        warn!("{warning}");
+    }
     if let Some(value) = unrecognized_log_format {
         warn!(
             "ignoring TAGURU_LOG_FORMAT={value}: not a recognized format (json); using human-readable"
         );
     }
     // Deferred from trace::provider(): logging works only now.
-    if let Some(error) = exporter_error {
+    if let Some(export_error) = exporter_error {
         warn!(
-            error,
+            export_error,
             "span export disabled: the OTLP exporter failed to build"
         );
     }
