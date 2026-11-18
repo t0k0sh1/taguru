@@ -52,7 +52,7 @@ pub(super) struct Run {
     /// off, the default).
     pub(super) fact_budget: usize,
     /// Resolved from TAGURU_EXTRACT_MAX_ATTEMPTS/
-    /// TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES.
+    /// TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES.
     pub(super) correction: CorrectionPolicy,
     /// Resolved from `--structured-output`/
     /// TAGURU_EXTRACT_STRUCTURED_OUTPUT (`Off`, the default). Kept
@@ -73,9 +73,9 @@ pub(super) struct Run {
     /// `--chunk-bytes`/TAGURU_EXTRACT_CHUNK_BYTES, resolved
     /// ([`CHUNK_BYTES`] by default) — ADR 0020 (#762).
     pub(super) chunk_bytes: usize,
-    /// `--chunk-context`/TAGURU_EXTRACT_CHUNK_CONTEXT, resolved
+    /// `--chunk-briefing`/TAGURU_EXTRACT_CHUNK_BRIEFING, resolved
     /// (`Off` by default) — ADR 0033 (#782).
-    pub(super) chunk_context: ChunkContextMode,
+    pub(super) chunk_briefing: ChunkBriefingMode,
     /// `Some` exactly when a mechanism or an output budget is engaged
     /// on a live run: the §7 ladder replaces the legacy corrective
     /// loop. `None` under all-defaults — byte-for-byte today's
@@ -136,11 +136,11 @@ pub(super) struct Run {
     /// manifest/checkpoint computation input like `schema_digest`.
     pub(super) vocabulary_digest: String,
     /// ADR 0033 §3.2: the export's relations per concept name,
-    /// offered under `--chunk-context ingested` (empty otherwise, or
+    /// offered under `--chunk-briefing ingested` (empty otherwise, or
     /// with no `--vocabulary`).
     pub(super) vocabulary_known: BTreeMap<String, Vec<KnownRelation>>,
     /// The digest of `vocabulary_known` — part of the manifest's
-    /// `chunk_context` value under `ingested`.
+    /// `chunk_briefing` value under `ingested`.
     pub(super) known_digest: String,
     /// Resolved from `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
@@ -405,11 +405,11 @@ impl Run {
     /// digest of the relations the export offers appended
     /// (`ingested:<digest>`), since those relations are prompt content
     /// and a changed export changes what every chunk is told.
-    pub(super) fn chunk_context_value(&self) -> String {
-        if self.chunk_context.ingested() {
+    pub(super) fn chunk_briefing_value(&self) -> String {
+        if self.chunk_briefing.ingested() {
             format!("ingested:{}", self.known_digest)
         } else {
-            self.chunk_context.manifest_value().to_string()
+            self.chunk_briefing.manifest_value().to_string()
         }
     }
 
@@ -459,7 +459,7 @@ impl Run {
             ),
             runaway_ratio: runaway_manifest_value(self.runaway_ratio),
             chunk_bytes: chunk_bytes_manifest_value(self.chunk_bytes),
-            chunk_context: self.chunk_context_value(),
+            chunk_briefing: self.chunk_briefing_value(),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -583,7 +583,7 @@ impl Run {
             escalation_manifest_value(self.max_output_tokens, self.escalation_factor);
         let runaway_ratio = runaway_manifest_value(self.runaway_ratio);
         let chunk_bytes = chunk_bytes_manifest_value(self.chunk_bytes);
-        let chunk_context_value = self.chunk_context_value();
+        let chunk_briefing_value = self.chunk_briefing_value();
         let inputs = ComputationInputs {
             sha256: &hash,
             model: &self.model_name,
@@ -597,7 +597,7 @@ impl Run {
             escalation_factor: &escalation_factor,
             runaway_ratio: &runaway_ratio,
             chunk_bytes: &chunk_bytes,
-            chunk_context: &chunk_context_value,
+            chunk_briefing: &chunk_briefing_value,
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),
@@ -659,7 +659,7 @@ impl Run {
         // headings, articles, and speakers, from its own lines — and
         // the chunk boundaries it makes `plan` prefer. Off: no units,
         // no preferred breaks, today's plan byte for byte.
-        let units: Vec<Unit> = if self.chunk_context.is_on() {
+        let units: Vec<Unit> = if self.chunk_briefing.is_on() {
             detect_units(&text, &paragraph_spans)
         } else {
             Vec::new()
@@ -743,7 +743,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0),
                 chunk_bytes: &chunk_bytes,
-                chunk_context: &chunk_context_value,
+                chunk_briefing: &chunk_briefing_value,
                 lossy: self.lossy,
                 schema_digest: &self.schema_digest,
                 candidates: candidates_manifest_value(self.candidates),
@@ -774,7 +774,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value().to_string(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0) as u64,
                 chunk_bytes: chunk_bytes.clone(),
-                chunk_context: self.chunk_context_value(),
+                chunk_briefing: self.chunk_briefing_value(),
                 lossy: self.lossy,
                 schema_digest: self.schema_digest.clone(),
                 candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -804,7 +804,7 @@ impl Run {
         // ADR 0033 §3.5: the `overview` step — one call per chunk,
         // before any extraction, answers cached in the checkpoint —
         // and the extraction units bound to the overview they saw.
-        let overview_answers: Vec<Option<OverviewAnswer>> = if self.chunk_context.overview() {
+        let overview_answers: Vec<Option<OverviewAnswer>> = if self.chunk_briefing.overview() {
             let answers = self.overview_pass(source, &plan, &units, &checkpoints, &observers);
             if self.stop.check() {
                 return Ok(Outcome::Interrupted);
@@ -814,21 +814,21 @@ impl Run {
             vec![None; plan.len()]
         };
         let overview = self
-            .chunk_context
+            .chunk_briefing
             .overview()
             .then(|| Overview::merge(&overview_answers));
         if let Some(overview) = overview.as_ref() {
             let discarded = checkpoints.bind_overview(source, &overview.digest);
             if discarded > 0 {
                 eprintln!(
-                    "taguru: extract: {source}: chunk context: the overview changed since \
+                    "taguru: extract: {source}: chunk briefing: the overview changed since \
                      {discarded} unit(s) were checkpointed — they are re-extracted"
                 );
             }
         }
         // The `annotate` step: one block per chunk, or none under `off`
         // (and none for a chunk nothing applies to).
-        let blocks: Vec<Option<ContextBlock>> = if self.chunk_context.is_on() {
+        let blocks: Vec<Option<BriefingBlock>> = if self.chunk_briefing.is_on() {
             let cap = block_cap(self.chunk_bytes);
             plan.iter()
                 .map(|descriptor| {
@@ -841,7 +841,7 @@ impl Run {
                         &descriptor.text,
                         cap,
                         overview.as_ref(),
-                        self.chunk_context
+                        self.chunk_briefing
                             .ingested()
                             .then_some(&self.vocabulary_known),
                         &candidates,
@@ -855,7 +855,7 @@ impl Run {
             .iter()
             .map(|descriptor| descriptor.text.clone())
             .collect();
-        let context_blocks: Vec<Option<&str>> = blocks
+        let briefing_blocks: Vec<Option<&str>> = blocks
             .iter()
             .map(|block| block.as_ref().map(|block| block.text.as_str()))
             .collect();
@@ -863,7 +863,7 @@ impl Run {
             .extract_chunks(
                 source,
                 &chunks,
-                &context_blocks,
+                &briefing_blocks,
                 canonical_paragraphs,
                 &resolved_system.text,
                 &checkpoints,
@@ -1475,7 +1475,7 @@ impl Run {
         &self,
         source: &str,
         chunks: &[String],
-        context_blocks: &[Option<&str>],
+        briefing_blocks: &[Option<&str>],
         paragraph_count: usize,
         system: &str,
         checkpoints: &CheckpointStore,
@@ -1485,7 +1485,7 @@ impl Run {
             return self.extract_chunks_concurrently(
                 source,
                 chunks,
-                context_blocks,
+                briefing_blocks,
                 paragraph_count,
                 system,
                 checkpoints,
@@ -1509,7 +1509,7 @@ impl Run {
                 index,
                 chunks.len(),
                 piece,
-                context_blocks.get(index).copied().flatten(),
+                briefing_blocks.get(index).copied().flatten(),
                 &self.correction,
                 self.fact_budget,
                 self.ladder.as_ref(),
@@ -1551,7 +1551,7 @@ impl Run {
         &self,
         source: &str,
         chunks: &[String],
-        context_blocks: &[Option<&str>],
+        briefing_blocks: &[Option<&str>],
         paragraph_count: usize,
         system: &str,
         checkpoints: &CheckpointStore,
@@ -1574,7 +1574,7 @@ impl Run {
                     index,
                     chunks.len(),
                     piece,
-                    context_blocks.get(index).copied().flatten(),
+                    briefing_blocks.get(index).copied().flatten(),
                     &self.correction,
                     self.fact_budget,
                     self.ladder.as_ref(),
@@ -1664,7 +1664,7 @@ impl Run {
             let messages = [
                 serde_json::json!({"role": "system", "content": system}),
                 serde_json::json!({"role": "user", "content": &user}),
-                corrective_assistant_turn(&answer, self.correction.corrective_context_cap),
+                corrective_assistant_turn(&answer, self.correction.corrective_replay_cap),
                 serde_json::json!({
                     "role": "user",
                     "content": corrective_validation_message(&issues),

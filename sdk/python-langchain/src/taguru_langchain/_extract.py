@@ -40,11 +40,14 @@ from taguru import LocatorSpec, SchemaDocument, SectionSpec, TypeDef
 # shown (the framing, the user turn's preamble, the candidates/
 # vocabulary/chunk-context blocks) is now "segment" (#851's terminology
 # split). 7 (#851/#1057): the user turn's "part K of N" is now "chunk K
-# of N". A schema DOCUMENT's own content changing without a prompt
+# of N". 8 (#851): extract.rs's chunk-briefing block (formerly "Chunk
+# context") opens with "Chunk briefing (" — this port has no such block,
+# so its own wording is unchanged; the number tracks extract.rs. A schema
+# DOCUMENT's own content changing without a prompt
 # revision is instead covered by the checkpoint's schema digest
 # (checkpoints.py) — the same division --fact-budget (a computation input)
 # and PROMPT_VERSION (the prompt's wording) already draw.
-PROMPT_VERSION = 7
+PROMPT_VERSION = 8
 # The file-format revision every record this module writes is stamped
 # with (taguru ADR 0042; src/format.rs FORMAT_VERSION): a date, in the
 # record's ``version`` column beside its ``type``.
@@ -317,7 +320,7 @@ def _split_oversized(paragraph: str, cap: int) -> list[str]:
 
 def corrective_assistant_turn_content(content: str, cap: int | None) -> str:
     """The corrective turn's replay of the model's own prior bad answer,
-    shaped by ``cap`` (``TaguruIngester``'s ``corrective_context_bytes``):
+    shaped by ``cap`` (``TaguruIngester``'s ``corrective_replay_bytes``):
     ``None`` replays it in full (the default), ``0`` omits it behind a
     placeholder, and any other value truncates it to that many bytes —
     multibyte-safe via the same ``errors="ignore"`` decode

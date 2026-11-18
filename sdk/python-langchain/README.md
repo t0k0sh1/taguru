@@ -404,10 +404,10 @@ retry behaves, all optional and all unchanged by default: `fact_budget`
 asks the model to keep a chunk's answer to at most N associations;
 `max_attempts` (default 2, 1-10) raises or lowers the total attempts at
 valid JSON per chunk before the document fails; and
-`corrective_context_bytes` caps how much of a malformed answer gets
+`corrective_replay_bytes` caps how much of a malformed answer gets
 replayed back on the next attempt (`0` omits it behind a placeholder;
 left unset, the default, replays it in full). Worth raising
-`max_attempts` or setting `fact_budget`/`corrective_context_bytes` on slow
+`max_attempts` or setting `fact_budget`/`corrective_replay_bytes` on slow
 local models, where a large malformed answer near the output cap can
 otherwise stall a chunk for minutes.
 

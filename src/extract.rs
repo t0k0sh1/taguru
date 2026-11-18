@@ -78,8 +78,8 @@ mod candidates;
 mod chat_client;
 #[path = "extract/checkpoint.rs"]
 mod checkpoint;
-#[path = "extract/chunk_context.rs"]
-mod chunk_context;
+#[path = "extract/chunk_briefing.rs"]
+mod chunk_briefing;
 #[path = "extract/chunking.rs"]
 mod chunking;
 #[path = "extract/completions.rs"]
@@ -167,14 +167,14 @@ use chat_client::{
 #[cfg(test)]
 use checkpoint::stale_checkpoint_notice;
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
-use chunk_context::{
-    BLOCK_PREAMBLE_OPENING, CAST_PREFIX, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock,
-    KNOWN_PREFIX, Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkContext, TraceOverview,
+use chunk_briefing::{
+    BLOCK_PREAMBLE_OPENING, BriefingBlock, CAST_PREFIX, CHUNK_BRIEFING_MODES, ChunkBriefingMode,
+    KNOWN_PREFIX, Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkBriefing, TraceOverview,
     TraceStructure, Unit, block_cap, block_preamble, detect_units, overview_system_prompt,
     overview_user_message, parse_overview_answer, preferred_breaks, render_block, units_opening_in,
 };
 #[cfg(test)]
-use chunk_context::{
+use chunk_briefing::{
     CastEntry, UnitSummary, heading_of, position, references, strip_html_comments, truncate_at_char,
 };
 use chunking::{
@@ -269,7 +269,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--chunk-bytes N] [--chunk-context MODE]
+                      [--chunk-bytes N] [--chunk-briefing MODE]
                       [--lossy] [--candidates] [--redact [secrets|pii]]
                       [--redact-rules FILE] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
@@ -277,7 +277,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
                       --context ID [--name NAME [--description TEXT]] --out DIR FILE|DIR...
 
-Reads documents (.md/.txt; a directory expands to its files, sorted by
+Reads segments (.md/.txt; a directory expands to its files, sorted by
 name) and writes one source file per input into --out, ready for
 `taguru import` or POST /import. The model is any OpenAI-compatible
 chat endpoint:
@@ -286,10 +286,10 @@ chat endpoint:
   TAGURU_EXTRACT_MODEL    model name (required)
   TAGURU_EXTRACT_API_KEY  bearer credential (optional)
   TAGURU_EXTRACT_TIMEOUT_SECS  per-completion budget; 0 = none (300)
-  TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (1)
+  TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per segment (1)
   TAGURU_EXTRACT_FACT_BUDGET  default for --fact-budget (0, off)
   TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10 (2)
-  TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+  TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES  cap a corrective turn's replay of
                       the model's own prior bad answer to this many bytes;
                       0 omits it entirely (unset: replay it in full)
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
@@ -302,7 +302,7 @@ chat endpoint:
                       split — the segment fails after a demotion attempt;
                       0 = no runaway judgment (8)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
-  TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
+  TAGURU_EXTRACT_CHUNK_BRIEFING  default for --chunk-briefing (off)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_REDACT  default for --redact: 1/true (both groups),
@@ -311,7 +311,7 @@ chat endpoint:
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
   TAGURU_EXTRACT_COVERAGE  default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
-  TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log
+  TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-segment attempts log
                       under OUT/.extract-trace/ (every completion's full
                       prompt and answer; on by default — ADR 0025)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
@@ -322,7 +322,7 @@ chat endpoint:
   TAGURU_EXTRACT_REPLAY_FROM  default for --replay-from (OUT/.extract-trace)
 
   --dry-run           list what would extract or skip; call nothing
-  --force             re-extract documents the manifest says are unchanged
+  --force             re-extract segments the manifest says are unchanged
   --no-passage        omit the passage from the source file (facts only)
   --questions N       doc2query: also propose up to N search questions per
                       paragraph (embedded beside it by servers running
@@ -342,18 +342,18 @@ chat endpoint:
                       at the budget escalates once without it, then splits
                       the chunk — never re-asked under the limit it just
                       hit
-  --chunk-bytes N     document bytes per model call (default 24576, at least
+  --chunk-bytes N     segment bytes per model call (default 24576, at least
                       512); chunks split at paragraph boundaries — lower it
-                      for a slow provider or output-dense documents (statutes,
+                      for a slow provider or output-dense segments (statutes,
                       minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
-  --chunk-context MODE  what each chunk is told about its place in the
-                      document (ADR 0033): off (default) sends the chunk
-                      alone; structure detects the document's headings,
+  --chunk-briefing MODE  what each chunk is told about its place in the
+                      segment (ADR 0033): off (default) sends the chunk
+                      alone; structure detects the segment's headings,
                       articles, and speakers, prefers chunk boundaries at
                       the outermost ones, and prefixes every chunk with
                       its heading path, the openings of the units it
                       refers to (第三条, 前条, §2, a quoted heading), and
-                      the paragraphs just before it — document text
+                      the paragraphs just before it — segment text
                       only, no model call, capped at a quarter of
                       --chunk-bytes; overview adds an overview pass
                       first (one call per chunk, before extraction)
@@ -361,14 +361,14 @@ chat endpoint:
                       in the block; ingested (needs --vocabulary) adds,
                       from that export, what the target context already
                       holds about the cast — and, under --candidates,
-                      about the document's own candidate names (their
+                      about the segment's own candidate names (their
                       strongest relations). A
                       computation input: changing it re-extracts. The
                       pipeline steps: structure (after read), overview
                       (after plan), annotate
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
-                      document (1, sequential); documents themselves stay
+                      segment (1, sequential); segments themselves stay
                       sequential — vocabulary accumulates as they land
   --lossy             restore the pre-#199 behavior: a business-rule-invalid
                       item (bad weight, dangling alias, out-of-range
@@ -378,14 +378,14 @@ chat endpoint:
                       Default (off): an invalid item earns one targeted
                       corrective turn; if it is still invalid afterward,
                       the segment fails and nothing is written.
-  --candidates        offer the document's own names (kanji/katakana
+  --candidates        offer the segment's own names (kanji/katakana
                       compounds, ASCII identifiers — segmented
                       deterministically, no dictionary) to the model as
                       preferred subject/object spellings. Non-restrictive:
                       names outside the list stay allowed. Off by default;
                       toggling it re-extracts (a computation input)
   --redact [GROUP]    mask secrets and pattern-recognisable personal data
-                      in the document BEFORE anything reads it (ADR 0038):
+                      in the segment BEFORE anything reads it (ADR 0038):
                       each match becomes «redacted <rule> <hex>» in the
                       prompt, the passage, the checkpoint, the trace, and
                       the attempts log alike. GROUP = secrets (API keys,
@@ -412,7 +412,7 @@ chat endpoint:
                       context spelling never fails the occurrence check.
                       Off by default; changing the names re-extracts
   --coverage          report every sentence that holds two or more of the
-                      document's own names (the --candidates segmentation)
+                      segment's own names (the --candidates segmentation)
                       yet is covered by no extracted association — one
                       stderr line per sentence, a count on the report
                       line. Report-only: the source file is never changed, no
@@ -425,22 +425,22 @@ chat endpoint:
                       one \"attempt\" record per LLM attempt (source, chunk,
                       attempt, ADR 0001 §7 state, finish_reason, token
                       usage, latency, parse/validation issues); one
-                      \"document\" record per document written (association/
+                      \"segment\" record per segment written (association/
                       alias/duplicate/dropped/uncovered counts) — metadata only;
                       TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts an \"attempt\"
                       record into a byte-capped raw answer. The first record
                       is \"run\" (run_id), and every \"attempt\" carries run_id/
-                      attempt_seq/piece_id — the keys the per-document trace
+                      attempt_seq/piece_id — the keys the per-segment trace
                       under OUT/.extract-trace/ joins on (ADR 0023). Truncated
                       fresh at open: FILE describes this run, not a log
                       appended across runs. Default (unset): no sidecar,
                       stdout/stderr unchanged. Ignored under --dry-run, which
                       calls nothing to record.
   --source-id ID      write ID as the header line's id instead of the
-                      document path — the promotion runbook's
+                      segment file's path — the promotion runbook's
                       session:{agent}:{id} convention (docs/promotion.html).
-                      With several documents, each gets ID/{file stem}; two
-                      documents landing on one source id is an error (import
+                      With several segments, each gets ID/{file stem}; two
+                      segments landing on one source id is an error (import
                       retracts-then-applies per source id). Changing it
                       rewrites the source file but reuses cached chunk answers
   --date WHEN         the session's own date, written on the source file's passage
@@ -470,7 +470,7 @@ chat endpoint:
   --replay MODE       satisfy completions from a prior run's attempts log
                       instead of a live call (ADR 0031): 'auto' falls
                       through to a live call when nothing matches; 'strict'
-                      fails the document instead, for a run with no model
+                      fails the segment instead, for a run with no model
                       endpoint at all (TAGURU_EXTRACT_URL becomes optional,
                       TAGURU_EXTRACT_MODEL stays required). 'off' (default)
                       never consults the log. A request is matched by its
@@ -541,7 +541,45 @@ Contract and discipline: docs/extract.html.
 /// terminology split). The wording the model reads changed, so an
 /// answer cached under 6 must not be silently reused.
 ///
-pub(crate) const PROMPT_VERSION: u32 = 7;
+/// 8 (#851): the chunk-context block's opening `Chunk context (` is
+/// now `Chunk briefing (` — `context` names only the Taguru `context`
+/// (`--chunk-context` became `--chunk-briefing`). Only a run with the
+/// block on sees different wording, but the version is one number for
+/// every mode, so an answer cached under 7 is not silently reused.
+///
+pub(crate) const PROMPT_VERSION: u32 = 8;
+
+/// #851: extract variables renamed so `context` names only the Taguru
+/// `context`, as `(retired, current)` — refused at startup if set.
+const RETIRED_EXTRACT_VARS: [(&str, &str); 2] = [
+    (
+        "TAGURU_EXTRACT_CHUNK_CONTEXT",
+        "TAGURU_EXTRACT_CHUNK_BRIEFING",
+    ),
+    (
+        "TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES",
+        "TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES",
+    ),
+];
+
+/// The refusal for the first [`RETIRED_EXTRACT_VARS`] entry set in this
+/// process's environment, or `None`. Refused, never ignored: a run
+/// configured for the old name would otherwise fall back to the default
+/// without a word (no briefing, a full replay). Presence alone, an
+/// empty value included, as with TAGURU_KEY_SCOPES. `pub(crate)` so
+/// `benchmark extract` refuses up front instead of spawning cells that
+/// each inherit the variable and refuse one by one.
+pub(crate) fn retired_extract_var() -> Option<String> {
+    RETIRED_EXTRACT_VARS
+        .iter()
+        .find(|(retired, _)| std::env::var_os(retired).is_some())
+        .map(|(retired, current)| {
+            format!(
+                "{retired} is set, but extract now reads {current} instead (#851): rename it, \
+                 or unset it"
+            )
+        })
+}
 
 /// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
 /// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,
@@ -769,6 +807,9 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => 0,
         },
     };
+    if let Some(refusal) = retired_extract_var() {
+        return crate::config::subcommand_usage_error("extract", &refusal);
+    }
     // Same "hard usage error, not a silent warning" reasoning as
     // --parallel/--fact-budget above.
     let max_attempts = match std::env::var("TAGURU_EXTRACT_MAX_ATTEMPTS") {
@@ -790,7 +831,7 @@ pub fn run(args: &[String]) -> i32 {
     // bad answer entirely) rather than the sentinel for "unset" — so
     // this resolves to an Option directly instead of routing through a
     // sentinel-then-default step.
-    let corrective_context_cap = match std::env::var("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES") {
+    let corrective_replay_cap = match std::env::var("TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES") {
         // "" reads as unset, matching the path-valued keys
         // (VOCABULARY/DIAGNOSTICS/SCHEMA) — it is how `benchmark`'s
         // scrub-then-pin block spells "explicitly the default"
@@ -801,7 +842,7 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => {
                 return crate::config::subcommand_usage_error(
                     "extract",
-                    "TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES needs an integer",
+                    "TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES needs an integer",
                 );
             }
         },
@@ -873,23 +914,23 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => CHUNK_BYTES,
         },
     };
-    // ADR 0033: chunk context. Same resolution as --chunk-bytes; a
+    // ADR 0033: chunk briefing. Same resolution as --chunk-bytes; a
     // spelling outside the mode list is a usage error either way.
-    let chunk_context = match args.chunk_context {
+    let chunk_briefing = match args.chunk_briefing {
         Some(mode) => mode,
-        None => match std::env::var("TAGURU_EXTRACT_CHUNK_CONTEXT") {
-            Ok(value) => match ChunkContextMode::parse(&value) {
+        None => match std::env::var("TAGURU_EXTRACT_CHUNK_BRIEFING") {
+            Ok(value) => match ChunkBriefingMode::parse(&value) {
                 Some(mode) => mode,
                 None => {
                     return crate::config::subcommand_usage_error(
                         "extract",
                         &format!(
-                            "TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: {CHUNK_CONTEXT_MODES}"
+                            "TAGURU_EXTRACT_CHUNK_BRIEFING takes one of: {CHUNK_BRIEFING_MODES}"
                         ),
                     );
                 }
             },
-            Err(_) => ChunkContextMode::Off,
+            Err(_) => ChunkBriefingMode::Off,
         },
     };
     // ADR 0019: the escalation rung's cap as a multiple of the budget.
@@ -1076,10 +1117,10 @@ pub fn run(args: &[String]) -> i32 {
     // ADR 0033 §3.2: the ingested lane reads the export; without one
     // there is nothing to offer, and silently running as `overview`
     // would misreport what the run did.
-    if chunk_context.ingested() && context_vocabulary.is_none() {
+    if chunk_briefing.ingested() && context_vocabulary.is_none() {
         return crate::config::subcommand_usage_error(
             "extract",
-            "--chunk-context ingested needs --vocabulary (the target context's export)",
+            "--chunk-briefing ingested needs --vocabulary (the target context's export)",
         );
     }
     // Flag-over-env, same pattern as --parallel above. Unlike a parsed
@@ -1097,7 +1138,7 @@ pub fn run(args: &[String]) -> i32 {
     // silent no-op just because --diagnostics-out was left off too.
     let diagnostics_raw_bytes = match std::env::var("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES") {
         // "" reads as unset — same spelling as
-        // TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES above (issue #734).
+        // TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES above (issue #734).
         Ok(value) if value.is_empty() => None,
         Ok(value) => match value.parse::<usize>() {
             Ok(n) => Some(n),
@@ -1219,14 +1260,14 @@ pub fn run(args: &[String]) -> i32 {
         fact_budget,
         correction: CorrectionPolicy {
             max_attempts,
-            corrective_context_cap,
+            corrective_replay_cap,
         },
         structured_output,
         max_output_tokens,
         escalation_factor,
         runaway_ratio,
         chunk_bytes,
-        chunk_context,
+        chunk_briefing,
         ladder,
         out: args.out,
         completions,

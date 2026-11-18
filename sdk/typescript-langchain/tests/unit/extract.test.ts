@@ -267,12 +267,12 @@ describe("chunking and paragraph split", () => {
 });
 
 describe("the producer parity contract", () => {
-  // PROMPT_VERSION equals src/extract.rs's (7: #851/#1057's part -> chunk
-  // rename; 6: #851/#904's document -> segment rename; 5: #812's citation
-  // rule; 4: #852's ground rules) and the wording that earned each bump is
-  // present.
+  // PROMPT_VERSION equals src/extract.rs's (8: #851's chunk context ->
+  // chunk briefing, extract.rs only; 7: #851/#1057's part -> chunk rename;
+  // 6: #851/#904's document -> segment rename; 5: #812's citation rule; 4:
+  // #852's ground rules) and the wording that earned each bump is present.
   it("tracks extract.rs's PROMPT_VERSION and the wording behind it", () => {
-    expect(PROMPT_VERSION).toBe(7);
+    expect(PROMPT_VERSION).toBe(8);
     // The file-format revision (src/format.rs FORMAT_VERSION): pinned as a
     // literal so a drift from the Rust side is a visible edit here.
     expect(FORMAT_VERSION).toBe("2026-11-13");

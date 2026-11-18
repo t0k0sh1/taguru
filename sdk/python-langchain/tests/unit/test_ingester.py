@@ -603,7 +603,7 @@ def test_validation_rejects_bad_construction(
         TaguruIngester(context="c", llm=llm, client=sync_client, questions=99)
 
 
-def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_context_bytes(
+def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_replay_bytes(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
     llm = FakeListChatModel(responses=["{}"])
@@ -613,8 +613,8 @@ def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_context_
         TaguruIngester(context="c", llm=llm, client=sync_client, max_attempts=0)
     with pytest.raises(ValueError, match="max_attempts must be between 1 and 10"):
         TaguruIngester(context="c", llm=llm, client=sync_client, max_attempts=11)
-    with pytest.raises(ValueError, match="corrective_context_bytes"):
-        TaguruIngester(context="c", llm=llm, client=sync_client, corrective_context_bytes=-1)
+    with pytest.raises(ValueError, match="corrective_replay_bytes"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, corrective_replay_bytes=-1)
 
 
 def test_validation_rejects_bad_chunk_bytes_and_vocabulary_cap(
@@ -755,12 +755,12 @@ def test_max_attempts_of_one_skips_the_corrective_turn(
     assert len(llm.seen_prompts) == 1
 
 
-def test_corrective_context_bytes_caps_the_replayed_bad_answer(
+def test_corrective_replay_bytes_caps_the_replayed_bad_answer(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
     bad_answer = "not json at all, definitely not a JSON object"
     ingester, llm = make_ingester(
-        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_context_bytes=10
+        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_replay_bytes=10
     )
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok
@@ -770,12 +770,12 @@ def test_corrective_context_bytes_caps_the_replayed_bad_answer(
     assert bad_answer not in replayed
 
 
-def test_corrective_context_bytes_of_zero_omits_the_bad_answer(
+def test_corrective_replay_bytes_of_zero_omits_the_bad_answer(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
     bad_answer = "not json at all, definitely not a JSON object"
     ingester, llm = make_ingester(
-        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_context_bytes=0
+        sync_client, async_client, [bad_answer, MODEL_ANSWER], corrective_replay_bytes=0
     )
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok

@@ -412,7 +412,7 @@ describe("TaguruIngester", () => {
     );
   });
 
-  it("rejects bad fact_budget, max_attempts, and corrective_context_bytes", () => {
+  it("rejects bad fact_budget, max_attempts, and corrective_replay_bytes", () => {
     const llm = new FakeListChatModel({ responses: ["{}"] });
     const client = new FakeServer().client();
     expect(() => new TaguruIngester({ context: "c", llm, client, fact_budget: 0 })).toThrow(
@@ -425,8 +425,8 @@ describe("TaguruIngester", () => {
       /max_attempts must be between 1 and 10/,
     );
     expect(
-      () => new TaguruIngester({ context: "c", llm, client, corrective_context_bytes: -1 }),
-    ).toThrow(/corrective_context_bytes/);
+      () => new TaguruIngester({ context: "c", llm, client, corrective_replay_bytes: -1 }),
+    ).toThrow(/corrective_replay_bytes/);
   });
 
   it("folds fact_budget into the system prompt", async () => {
@@ -499,12 +499,12 @@ describe("TaguruIngester", () => {
     expect(llm.seenPrompts).toHaveLength(1);
   });
 
-  it("corrective_context_bytes caps the replayed bad answer", async () => {
+  it("corrective_replay_bytes caps the replayed bad answer", async () => {
     const badAnswer = "not json at all, definitely not a JSON object";
     const { ingester, llm } = makeWithMessages(
       new FakeServer(),
       [new AIMessage(badAnswer), new AIMessage(MODEL_ANSWER)],
-      { corrective_context_bytes: 10 },
+      { corrective_replay_bytes: 10 },
     );
     const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     expect(outcome.ok).toBe(true);
@@ -513,12 +513,12 @@ describe("TaguruIngester", () => {
     expect(replayed).not.toContain(badAnswer);
   });
 
-  it("corrective_context_bytes of 0 omits the bad answer", async () => {
+  it("corrective_replay_bytes of 0 omits the bad answer", async () => {
     const badAnswer = "not json at all, definitely not a JSON object";
     const { ingester, llm } = makeWithMessages(
       new FakeServer(),
       [new AIMessage(badAnswer), new AIMessage(MODEL_ANSWER)],
-      { corrective_context_bytes: 0 },
+      { corrective_replay_bytes: 0 },
     );
     const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
     expect(outcome.ok).toBe(true);

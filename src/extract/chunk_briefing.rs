@@ -1,13 +1,13 @@
-//! ADR 0033 (#782): chunk context — what a chunk is told about where
-//! it sits in its document and what came before it, so the model
+//! ADR 0033 (#782): chunk briefing — what a chunk is told about where
+//! it sits in its segment and what came before it, so the model
 //! reads `同法`, `前条`, `この製品`, or a bare `## Borrowing` section
-//! knowing what they refer to. "Context" here is 文脈, never the
-//! `context` that `--context NAME` targets; everything
-//! user-facing says *chunk context* and every identifier carries
-//! `chunk_context`.
+//! knowing what they refer to. ADR 0033 called it "chunk context";
+//! #851 renamed it so `context` names only the Taguru `context` that
+//! `--context ID` targets. Everything user-facing says *chunk
+//! briefing* and every identifier carries `chunk_briefing`.
 //!
-//! `--chunk-context structure` (this module, ADR 0033 §3.3 stage a) is
-//! entirely mechanical: the document's structure is detected from its
+//! `--chunk-briefing structure` (this module, ADR 0033 §3.3 stage a) is
+//! entirely mechanical: the segment's structure is detected from its
 //! own lines (§3.4), and each chunk's block is rendered from that
 //! structure and the paragraphs before the chunk (§3.6). No model
 //! call, no dictionary, deterministic — the same text always yields
@@ -16,18 +16,18 @@
 //!
 //! The block is prompt input only. It carries no `[N]` paragraph
 //! label, so nothing in it can be tagged as a fact's paragraph (ADR
-//! 0003 §7 untouched); it is text the document itself holds, so the
+//! 0003 §7 untouched); it is text the segment itself holds, so the
 //! occurrence check reads it (ADR 0013, extended by §3.6.2); and it is
 //! bounded to a fraction of the chunk cap so the chunk is never
 //! squeezed.
 
 use super::*;
 
-/// `--chunk-context MODE`, cumulative (ADR 0033 §3.3). Only the modes
+/// `--chunk-briefing MODE`, cumulative (ADR 0033 §3.3). Only the modes
 /// this version implements parse; `overview` and `ingested` are named
 /// by the ADR and land with their own PRs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum ChunkContextMode {
+pub(super) enum ChunkBriefingMode {
     /// Today's prompt, byte for byte.
     #[default]
     Off,
@@ -45,7 +45,7 @@ pub(super) enum ChunkContextMode {
     Ingested,
 }
 
-impl ChunkContextMode {
+impl ChunkBriefingMode {
     pub(super) fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" => Some(Self::Off),
@@ -86,7 +86,7 @@ impl ChunkContextMode {
 }
 
 /// The accepted spellings, for usage text and errors.
-pub(super) const CHUNK_CONTEXT_MODES: &str = "off, structure, overview, ingested";
+pub(super) const CHUNK_BRIEFING_MODES: &str = "off, structure, overview, ingested";
 
 /// One structural unit of a document (ADR 0033 §3.4): a heading and
 /// the paragraphs it governs, up to the next heading. `level` is
@@ -489,11 +489,11 @@ fn reference_key(heading: &str) -> String {
     heading.to_string()
 }
 
-/// What one chunk's block was built from — the `chunk_context` trace
+/// What one chunk's block was built from — the `chunk_briefing` trace
 /// record's contribution list (ADR 0033 §3.6.4), so #783 can credit a
 /// gained fact to a kind.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(super) struct ContextBlock {
+pub(super) struct BriefingBlock {
     /// The block text as placed in the user turn: one preamble
     /// section, no blank line inside (so `user_message_segment`'s
     /// first-blank-line rule still finds the chunk).
@@ -589,7 +589,7 @@ pub(super) fn render_block(
     overview: Option<&Overview>,
     known: Option<&BTreeMap<String, Vec<KnownRelation>>>,
     candidates: &[String],
-) -> Option<ContextBlock> {
+) -> Option<BriefingBlock> {
     let path = position(units, chunk_first);
     let refs = references(
         units,
@@ -843,7 +843,7 @@ pub(super) fn render_block(
     let body = lines.join("\n");
     debug_assert!(!body.contains("\n\n"));
     debug_assert!(body.len() <= cap, "{} > {cap}", body.len());
-    Some(ContextBlock {
+    Some(BriefingBlock {
         sha256: sha256_hex(body.as_bytes()),
         bytes: body.len(),
         position: position_ids,
@@ -858,7 +858,7 @@ pub(super) fn render_block(
 
 /// How the block's preamble line opens — what
 /// `user_message_occurrence_text` recognizes it by.
-pub(super) const BLOCK_PREAMBLE_OPENING: &str = "Chunk context (";
+pub(super) const BLOCK_PREAMBLE_OPENING: &str = "Chunk briefing (";
 
 /// The block's own preamble line — what tells the model the block is
 /// not the chunk to extract from (ADR 0033 §3.6, rules 1 and 2 in the
@@ -885,15 +885,15 @@ pub(super) struct TraceStructure<'a> {
     pub(super) unit: &'a Unit,
 }
 
-/// ADR 0033 §3.6.4's `chunk_context` trace record: one per chunk that
+/// ADR 0033 §3.6.4's `chunk_briefing` trace record: one per chunk that
 /// got a block.
 #[derive(serde::Serialize)]
-pub(super) struct TraceChunkContext<'a> {
+pub(super) struct TraceChunkBriefing<'a> {
     #[serde(rename = "type")]
     pub(super) record_type: &'static str,
     pub(super) chunk_index: usize,
     #[serde(flatten)]
-    pub(super) block: &'a ContextBlock,
+    pub(super) block: &'a BriefingBlock,
 }
 
 // ------------------------------------------------------------ overview

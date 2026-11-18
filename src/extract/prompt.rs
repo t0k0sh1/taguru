@@ -236,7 +236,7 @@ pub(super) fn user_message(
     } else {
         format!("Segment '{source}':")
     };
-    // ADR 0033 §3.6: the chunk context block rides in the preamble
+    // ADR 0033 §3.6: the chunk briefing block rides in the preamble
     // section — single newlines only, so the first blank line is
     // still where the segment starts (`user_message_segment`).
     if let Some(block) = block {
@@ -249,7 +249,7 @@ pub(super) fn user_message(
 }
 
 /// The text the occurrence check (ADR 0013) judges names against:
-/// the chunk context block when there is one (ADR 0033 §3.6.2: a name
+/// the chunk briefing block when there is one (ADR 0033 §3.6.2: a name
 /// the block states is the segment's own, never a fabrication) and
 /// the chunk. Never the first line — it embeds the source path — and
 /// never the block's own preamble sentence, which is taguru's

@@ -45,12 +45,12 @@ pub(super) struct CheckpointFingerprint {
     /// relying on every hash missing.
     #[serde(default)]
     pub(super) chunk_bytes: String,
-    /// `--chunk-context` as [`ChunkContextMode::manifest_value`]
+    /// `--chunk-briefing` as [`ChunkBriefingMode::manifest_value`]
     /// encodes it (`""` = off) — ADR 0033. Same `default` reasoning as
     /// `chunk_bytes`: a unit's prompt changes with the mode, so a
     /// checkpoint written under another mode is not consulted.
     #[serde(default)]
-    pub(super) chunk_context: String,
+    pub(super) chunk_briefing: String,
     pub(super) lossy: bool,
     /// `--schema`'s document digest (`""` = no schema). Same default
     /// as [`ManifestEntry::schema_digest`] and the same reasoning: a
@@ -130,7 +130,7 @@ pub(super) struct SegmentCheckpoints {
     /// `chunk_sha256`), so a resumed segment reuses the pass without
     /// a call — an EMPTY answer for a chunk whose ask failed (ADR 0034
     /// §3.3: fixed for the checkpoint's life, never re-asked). Empty
-    /// below `--chunk-context overview`.
+    /// below `--chunk-briefing overview`.
     #[serde(default)]
     pub(super) overview: BTreeMap<String, OverviewAnswer>,
     /// The digest of the merged overview the cached `units` were

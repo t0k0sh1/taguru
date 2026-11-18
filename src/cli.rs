@@ -366,11 +366,11 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_API_KEY       extraction provider credential
   TAGURU_EXTRACT_TIMEOUT_SECS  extract's per-completion budget; local models
                                may need more; 0 = no limit (300)
-  TAGURU_EXTRACT_PARALLEL      concurrent chunk completions per document (1)
+  TAGURU_EXTRACT_PARALLEL      concurrent chunk completions per segment (1)
   TAGURU_EXTRACT_FACT_BUDGET   default for --fact-budget (0, off)
   TAGURU_EXTRACT_MAX_ATTEMPTS  total attempts at valid JSON per chunk, 1-10
                                (2)
-  TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
+  TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES  cap a corrective turn's replay of
                                the model's own prior bad answer to this many
                                bytes; 0 omits it entirely (unset: replay it
                                in full)
@@ -381,8 +381,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_RUNAWAY_RATIO  fail a piece whose length-limited answer
                       outgrows this multiple of its bytes; 0 = off (8)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
-  TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
-  TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log (ADR 0025)
+  TAGURU_EXTRACT_CHUNK_BRIEFING  default for --chunk-briefing (off)
+  TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-segment attempts log (ADR 0025)
   TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES    default for --candidates (0/false)
   TAGURU_EXTRACT_REDACT        default for --redact (0/false; 1, secrets, pii)

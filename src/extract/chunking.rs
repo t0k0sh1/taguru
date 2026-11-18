@@ -86,7 +86,7 @@ impl CorrectiveAsk {
 /// `policy.max_attempts - 1` corrective turns (1 total attempt at the
 /// policy's floor). Each retry rebuilds the conversation from the
 /// system/user base and appends only the most recent bad turn — never
-/// the whole history — so `policy.corrective_context_cap` bounds every
+/// the whole history — so `policy.corrective_replay_cap` bounds every
 /// retry alike, not just the first one. When the provider's own
 /// `finish_reason` says the bad answer was cut off at the output cap,
 /// the next corrective turn asks for a SHORTER answer instead of
@@ -123,7 +123,7 @@ pub(super) fn extract_chunk(
         if let Some(bad_answer) = &prior_bad_answer {
             messages.push(corrective_assistant_turn(
                 bad_answer,
-                policy.corrective_context_cap,
+                policy.corrective_replay_cap,
             ));
             messages.push(serde_json::json!({
                 "role": "user",
@@ -378,7 +378,7 @@ pub(super) fn extract_chunk_or_ladder(
     chunk_index: usize,
     chunk_total: usize,
     piece: &str,
-    context_block: Option<&str>,
+    briefing_block: Option<&str>,
     policy: &CorrectionPolicy,
     fact_budget: usize,
     ladder: Option<&LadderConfig>,
@@ -392,7 +392,7 @@ pub(super) fn extract_chunk_or_ladder(
             if let Some(cached) = checkpointed_unit(checkpoints, piece) {
                 return Ok(vec![cached]);
             }
-            let user = user_message(source, chunk_index, chunk_total, piece, context_block);
+            let user = user_message(source, chunk_index, chunk_total, piece, briefing_block);
             let piece_id = sha256_hex(piece.as_bytes());
             // Off the ladder the chunk is the piece; its failure is
             // named the same way (ADR 0037 §3.1).
@@ -420,7 +420,7 @@ pub(super) fn extract_chunk_or_ladder(
                 source,
                 chunk_index,
                 chunk_total,
-                context_block,
+                briefing_block,
                 ladder,
                 policy,
                 fact_budget,
@@ -445,10 +445,10 @@ pub(super) struct PieceContext<'a> {
     pub(super) source: &'a str,
     pub(super) chunk_index: usize,
     pub(super) chunk_total: usize,
-    /// ADR 0033: the ORIGINAL chunk's context block, carried down to
+    /// ADR 0033: the ORIGINAL chunk's briefing block, carried down to
     /// every split sub-piece the same way `chunk_index` is — a
-    /// sub-piece is still chunk K, read in chunk K's context.
-    pub(super) context_block: Option<&'a str>,
+    /// sub-piece is still chunk K, read with chunk K's briefing.
+    pub(super) briefing_block: Option<&'a str>,
     pub(super) ladder: &'a LadderConfig,
     pub(super) policy: &'a CorrectionPolicy,
     pub(super) fact_budget: usize,
@@ -516,7 +516,7 @@ pub(super) fn extract_piece(
         context.chunk_index,
         context.chunk_total,
         piece,
-        context.context_block,
+        context.briefing_block,
     );
     // ADR 0021: the rung is read once per piece and carried through
     // its rounds, so a demotion is judged against the rung this piece
@@ -808,7 +808,7 @@ pub(super) fn extract_round(
         if let Some(bad_answer) = &prior_bad_answer {
             messages.push(corrective_assistant_turn(
                 bad_answer,
-                context.policy.corrective_context_cap,
+                context.policy.corrective_replay_cap,
             ));
             messages.push(serde_json::json!({
                 "role": "user",
@@ -1359,7 +1359,7 @@ pub(super) fn evaluate_answer(
 }
 
 /// The corrective turn's replay of the model's own prior bad answer,
-/// shaped by `cap` (`Run::correction`'s `corrective_context_cap`):
+/// shaped by `cap` (`Run::correction`'s `corrective_replay_cap`):
 /// `None` replays it in full, `Some(0)` omits it behind a placeholder,
 /// `Some(n)` truncates it to `n` bytes at a char boundary with a
 /// trailing marker. The turn itself is always present at some content

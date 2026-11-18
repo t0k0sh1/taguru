@@ -138,7 +138,7 @@ discarded.
 - `max_attempts` — total attempts (1 initial + corrections) at getting the
   model to answer with the JSON object asked for, `1..=10` (default `2`;
   `1` skips the corrective turn entirely).
-- `corrective_context_bytes` — how much of the model's own prior bad
+- `corrective_replay_bytes` — how much of the model's own prior bad
   answer is replayed back to it in the next attempt's corrective turn:
   unset replays it in full (default), `0` omits it behind a placeholder,
   any other value truncates it to that many bytes.

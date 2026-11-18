@@ -388,9 +388,9 @@ class TaguruIngester:
             ``MAX_ATTEMPTS_CEILING`` (default ``DEFAULT_MAX_ATTEMPTS`` = 2,
             today's fixed behavior). Each retry rebuilds the conversation
             from the system/user base and appends only the most recent bad
-            turn, so ``corrective_context_bytes`` bounds every retry alike,
+            turn, so ``corrective_replay_bytes`` bounds every retry alike,
             not just the first.
-        corrective_context_bytes: How much of the model's own prior bad
+        corrective_replay_bytes: How much of the model's own prior bad
             answer gets replayed back to it in the next attempt's corrective
             turn: ``None`` replays it in full (the default, today's
             behavior), ``0`` omits it behind a placeholder, and any other
@@ -467,7 +467,7 @@ class TaguruIngester:
         questions: int | None = None,
         fact_budget: int | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        corrective_context_bytes: int | None = None,
+        corrective_replay_bytes: int | None = None,
         structured_output: bool = False,
         include_passage: bool = True,
         chunk_bytes: int = CHUNK_BYTES,
@@ -489,9 +489,9 @@ class TaguruIngester:
             )
         if not 1 <= max_attempts <= MAX_ATTEMPTS_CEILING:
             raise ValueError(f"max_attempts must be between 1 and {MAX_ATTEMPTS_CEILING}")
-        if corrective_context_bytes is not None and corrective_context_bytes < 0:
+        if corrective_replay_bytes is not None and corrective_replay_bytes < 0:
             raise ValueError(
-                "corrective_context_bytes must be a non-negative integer, or None to replay "
+                "corrective_replay_bytes must be a non-negative integer, or None to replay "
                 "the prior bad answer in full"
             )
         if chunk_bytes < 1:
@@ -518,7 +518,7 @@ class TaguruIngester:
         self.questions = questions or 0
         self.fact_budget = fact_budget or 0
         self.max_attempts = max_attempts
-        self.corrective_context_bytes = corrective_context_bytes
+        self.corrective_replay_bytes = corrective_replay_bytes
         self.structured_output = structured_output
         self._structured_llm: Runnable[LanguageModelInput, dict[str, Any] | BaseModel] | None = (
             llm.with_structured_output(MODEL_OUTPUT_JSON_SCHEMA, include_raw=True)
@@ -557,7 +557,7 @@ class TaguruIngester:
         self, base_messages: list[BaseMessage], prior_answer: str, ask: str
     ) -> list[BaseMessage]:
         """Rebuilds from the system/user base plus only the most recent bad
-        turn — never the whole history — so ``corrective_context_bytes``
+        turn — never the whole history — so ``corrective_replay_bytes``
         bounds every retry alike, not just the first. At the all-defaults
         policy, with a normal (non-length-limited, syntactically bad)
         answer, this reproduces the previous fixed implementation's
@@ -567,7 +567,7 @@ class TaguruIngester:
             *base_messages,
             AIMessage(
                 content=corrective_assistant_turn_content(
-                    prior_answer, self.corrective_context_bytes
+                    prior_answer, self.corrective_replay_bytes
                 )
             ),
             HumanMessage(content=ask),

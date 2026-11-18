@@ -2215,7 +2215,7 @@ struct ExtractionSettings {
     /// config.rs's TAGURU_EXTRACT_* inventory; keep these fields in
     /// step with that function.
     #[serde(default)]
-    corrective_context_bytes: Option<usize>,
+    corrective_replay_bytes: Option<usize>,
     #[serde(default)]
     coverage: bool,
     #[serde(default)]
@@ -2237,11 +2237,11 @@ struct ExtractionSettings {
     /// fingerprint extract folds into its own manifests.
     #[serde(default)]
     redact_rules_sha256: String,
-    /// The knobs added to extract after #734 (chunk context, the
+    /// The knobs added to extract after #734 (chunk briefing, the
     /// ladder's escalation factor and runaway ratio, the attempts log,
     /// replay), pinned at extract's defaults like the five above.
-    #[serde(default = "default_chunk_context")]
-    chunk_context: String,
+    #[serde(default = "default_chunk_briefing")]
+    chunk_briefing: String,
     #[serde(default = "default_escalation_factor")]
     escalation_factor: usize,
     #[serde(default = "default_runaway_ratio")]
@@ -2259,7 +2259,7 @@ fn default_redact() -> String {
     redact_env_value(None).to_string()
 }
 
-fn default_chunk_context() -> String {
+fn default_chunk_briefing() -> String {
     "off".to_string()
 }
 
@@ -2555,7 +2555,7 @@ mod manifest_tests {
             parallel: 1,
             timeout_secs: 300,
             redact: redact_env_value(None).to_string(),
-            chunk_context: default_chunk_context(),
+            chunk_briefing: default_chunk_briefing(),
             escalation_factor: default_escalation_factor(),
             runaway_ratio: default_runaway_ratio(),
             replay: default_replay(),
@@ -2563,7 +2563,7 @@ mod manifest_tests {
         };
         assert_eq!(old, current);
         assert_eq!(old.redact, "0");
-        assert_eq!(old.chunk_context, "off");
+        assert_eq!(old.chunk_briefing, "off");
         assert_eq!(old.escalation_factor, 2);
         assert_eq!(old.runaway_ratio, 8);
         assert_eq!(old.replay, "off");
@@ -3080,7 +3080,7 @@ fn cell_extract_env(
         // it does not — an empty TAGURU_EXTRACT_CHUNK_BYTES is a usage
         // error, not a default).
         (
-            "TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES",
+            "TAGURU_EXTRACT_CORRECTIVE_REPLAY_BYTES",
             Some(String::new()),
         ),
         ("TAGURU_EXTRACT_COVERAGE", Some("0".to_string())),
@@ -3091,7 +3091,7 @@ fn cell_extract_env(
             "TAGURU_EXTRACT_CHUNK_BYTES",
             Some(crate::extract::CHUNK_BYTES.to_string()),
         ),
-        ("TAGURU_EXTRACT_CHUNK_CONTEXT", Some("off".to_string())),
+        ("TAGURU_EXTRACT_CHUNK_BRIEFING", Some("off".to_string())),
         (
             "TAGURU_EXTRACT_ESCALATION_FACTOR",
             Some(crate::extract::DEFAULT_ESCALATION_FACTOR.to_string()),
@@ -3627,6 +3627,11 @@ fn run_extract(args: &[String]) -> i32 {
         Ok(args) => args,
         Err(code) => return code,
     };
+    // #851: a retired extract variable in this environment would reach
+    // every cell, and each would refuse it — refuse once, up front.
+    if let Some(refusal) = crate::extract::retired_extract_var() {
+        return subcommand_usage_error("benchmark", &refusal);
+    }
 
     let (models_bytes, models, warnings) = match load_models_file(&args.models) {
         Ok(v) => v,
@@ -3700,14 +3705,14 @@ fn run_extract(args: &[String]) -> i32 {
         // The knobs `cell_extract_env` pins at extract's defaults
         // (issue #734) — mirrored here verbatim; "" / None / false all
         // mean "explicitly the default".
-        corrective_context_bytes: None,
+        corrective_replay_bytes: None,
         coverage: false,
         diagnostics: String::new(),
         diagnostics_raw_bytes: None,
         context_schema: String::new(),
         redact: redact_env_value(args.redact).to_string(),
         redact_rules_sha256,
-        chunk_context: default_chunk_context(),
+        chunk_briefing: default_chunk_briefing(),
         escalation_factor: default_escalation_factor(),
         runaway_ratio: default_runaway_ratio(),
         trace_attempts: String::new(),
