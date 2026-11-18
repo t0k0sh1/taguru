@@ -2420,6 +2420,26 @@ fn redaction_accounting_names_rules_and_positions_never_content() {
         batch_sensitive_hit(&body[..body.rfind('{').unwrap()], &rules),
         None
     );
+    // The scan reads the decoded text, not the JSON encoding: a masked
+    // quoted assignment (`\"` escapes) and a masked value on the next
+    // line (`\n` escape) are clean, while a secret behind the same
+    // escapes is still found.
+    let masked = [
+        serde_json::json!({ "passage": "DB_PASSWORD=\"«redacted credential_assignment abcd»\"" }),
+        serde_json::json!({ "passage": "password:\n  «redacted credential_assignment abcd»" }),
+    ];
+    for line in masked {
+        let body = format!("{line}\n");
+        assert_eq!(batch_sensitive_hit(&body, &rules), None, "{body}");
+    }
+    let leaked = format!(
+        "{{\"a\":1}}\n{}\n",
+        serde_json::json!({ "label": "DB_PASSWORD=\"hunter2\"" })
+    );
+    assert_eq!(
+        batch_sensitive_hit(&leaked, &rules),
+        Some((2, "credential_assignment".to_string()))
+    );
 }
 
 #[test]

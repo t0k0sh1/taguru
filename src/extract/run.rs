@@ -2284,15 +2284,43 @@ pub(super) fn redaction_stderr_line(redactions: &[crate::sensitive::Redaction]) 
 /// as (1-based batch line, rule) — `None` when the body is clean or
 /// carries only pre-existing placeholders (the masked passage is
 /// made of them). ADR 0038 §3.3's output scan.
+///
+/// Each line is scanned as the text it carries — every JSON string
+/// value, decoded — never as the encoded line: the encoding is not
+/// content. Scanned raw, `\"` and `\n` escapes read as text
+/// (`DB_PASSWORD=\"«redacted …»\"` takes the lone `\` as the
+/// assignment's value), and a passage's blank lines vanish into `\n\n`,
+/// so the output scan would see paragraphs the input scan never did.
 pub(super) fn batch_sensitive_hit(
     body: &str,
     rules: &crate::sensitive::RuleSet,
 ) -> Option<(usize, String)> {
-    crate::sensitive::scan(body, rules)
-        .into_iter()
-        .find(|found| !found.preexisting)
-        .map(|found| {
-            let line = body[..found.start].matches('\n').count() + 1;
-            (line, found.rule)
-        })
+    fn strings<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::String(text) => out.push(text),
+            serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+            serde_json::Value::Object(fields) => {
+                fields.values().for_each(|item| strings(item, out))
+            }
+            _ => {}
+        }
+    }
+    body.lines().enumerate().find_map(|(at, line)| {
+        let hit = |text: &str| {
+            crate::sensitive::scan(text, rules)
+                .into_iter()
+                .find(|found| !found.preexisting)
+                .map(|found| (at + 1, found.rule))
+        };
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => {
+                let mut texts = Vec::new();
+                strings(&value, &mut texts);
+                texts.into_iter().find_map(hit)
+            }
+            // `parse_batch` validated the body first, so every line is
+            // JSON; were one not, the encoded line is still scanned.
+            Err(_) => hit(line),
+        }
+    })
 }
