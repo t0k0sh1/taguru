@@ -109,6 +109,7 @@ enum Group {
 /// optional check the regex cannot express (a check digit).
 struct Rule {
     name: String,
+    group: Group,
     regex: Regex,
     value_group: Option<usize>,
     validate: Option<fn(&str) -> bool>,
@@ -270,6 +271,7 @@ impl RuleSet {
             })
             .map(|builtin| Rule {
                 name: builtin.name.to_string(),
+                group: builtin.group,
                 regex: Regex::new(builtin.pattern).expect("built-in patterns are valid"),
                 value_group: builtin.value_group,
                 validate: builtin.validate,
@@ -331,6 +333,9 @@ impl RuleSet {
             seen.push((name.to_string(), line_number));
             self.rules.push(Rule {
                 name: name.to_string(),
+                // A user rule's group is unknown; it is held to the
+                // stricter, secrets standard of shadowing in `scan`.
+                group: Group::Secrets,
                 regex,
                 value_group: None,
                 validate: None,
@@ -402,6 +407,9 @@ struct Candidate {
     order: usize,
     rule: String,
     preexisting: bool,
+    /// A secrets-group rule's candidate: only an owned span holding
+    /// it whole shadows it (see `scan`).
+    secret: bool,
     owns: Option<(usize, usize)>,
 }
 
@@ -440,6 +448,7 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                 order: 0,
                 rule: PREEXISTING_RULE.to_string(),
                 preexisting: true,
+                secret: false,
                 owns: None,
             });
         }
@@ -464,6 +473,7 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                     order,
                     rule: rule.name.clone(),
                     preexisting: false,
+                    secret: rule.group == Group::Secrets,
                     owns,
                 });
             }
@@ -485,11 +495,23 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                     .map(|(from, to)| (candidate.rule.clone(), from, to))
             })
             .collect();
+        // An overlap shadows PII (`https://user:me@example.com` — the
+        // e-mail-shaped userinfo is one redaction under the URL's rule,
+        // and the host stays readable), but a secret only when the
+        // owned match holds it whole: a secret that runs past the
+        // owned span (`SECRET_KEY=-----BEGIN PRIVATE KEY-----…` — the
+        // assignment's value is `-----BEGIN`, the key block runs on
+        // past it) would otherwise leave everything beyond the span in
+        // plain text. Kept, the ordering below lets it compete with the
+        // owner's value like any other overlap.
         candidates.retain(|candidate| {
             candidate.preexisting
                 || candidate.owns.is_some()
                 || !owned.iter().any(|(rule, from, to)| {
-                    *rule != candidate.rule && candidate.start < *to && candidate.end > *from
+                    *rule != candidate.rule
+                        && candidate.start < *to
+                        && candidate.end > *from
+                        && (!candidate.secret || (candidate.start >= *from && candidate.end <= *to))
                 })
         });
         // Start ascending, then length descending — which, once the
@@ -1056,6 +1078,19 @@ mod tests {
         let found = scan(text, &rules);
         assert_eq!(names_of(&found), vec!["private_key", "aws_access_key"]);
         assert_eq!(found[0].end, found[1].start);
+    }
+
+    /// A candidate that starts inside an owned match but runs past its
+    /// end is not shadowed: the assignment's value is only `-----BEGIN`,
+    /// the key block runs on past it, and the block is what gets masked.
+    #[test]
+    fn a_key_block_running_past_an_assignment_is_not_shadowed() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        let text = "SECRET_KEY=-----BEGIN PRIVATE KEY-----\nMIIEbody\n-----END PRIVATE KEY-----";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["private_key"]);
+        let (masked, _) = mask(text, "d", &rules);
+        assert!(!masked.contains("MIIEbody"), "{masked}");
     }
 
     #[test]
