@@ -76,7 +76,7 @@ from .checkpoints import (
     CheckpointStore,
     _AppendCapableCheckpointStore,
     _CheckpointFingerprint,
-    _CheckpointUnit,
+    _CheckpointPiece,
     _derive_model_identity,
     _DocumentCheckpoints,
 )
@@ -374,9 +374,9 @@ class TaguruIngester:
         create_context: Stamp a create block on each source file so the ``context`` is
             created on first ingest (requires ``context_description``).
         source_key: Document metadata key holding the source id — REQUIRED on
-            every document, no hashing fallback: the source id is the
-            retract-then-apply idempotency unit, and a content hash would mint
-            a new source on every edit, orphaning the old one forever.
+            every document, no hashing fallback: the source is what
+            retract-then-apply replaces as a whole, and a content hash would
+            mint a new source on every edit, orphaning the old one forever.
         questions: doc2query questions per paragraph (None/0 = don't ask;
             capped at 8, the server's own per-paragraph cap).
         fact_budget: Soft cap on associations per chunk, folded into the
@@ -548,8 +548,8 @@ class TaguruIngester:
         source = document.metadata.get(self.source_key)
         if not isinstance(source, str) or not source:
             raise ValueError(
-                f"document metadata lacks a {self.source_key!r} key — the source id is "
-                "the retract-then-apply idempotency unit and cannot be invented"
+                f"document metadata lacks a {self.source_key!r} key — the source id names "
+                "what retract-then-apply replaces as a whole and cannot be invented"
             )
         return source
 
@@ -673,7 +673,7 @@ class TaguruIngester:
     # every checkpoint insertion point.
 
     def _checkpoint_fingerprint(self, text: str, schema_digest: str) -> _CheckpointFingerprint:
-        """The compatibility inputs a cached unit's reuse depends on: the
+        """The compatibility inputs a cached piece's reuse depends on: the
         document's own content plus every setting that shapes what a valid
         answer looks like. Any mismatch on rerun degrades the whole
         checkpoint file to empty (``_load_checkpoints``) — a settings
@@ -724,14 +724,14 @@ class TaguruIngester:
         return _DocumentCheckpoints.from_bytes(data, fingerprint)
 
     @staticmethod
-    def _unit_hash(piece: str) -> str:
-        """Content hash of one extraction unit's OWN text — never the
+    def _piece_hash(piece: str) -> str:
+        """Content hash of one extraction piece's OWN text — never the
         chunk's index — so a resume whose chunking differs from a prior
         run still reuses whatever pieces happen to match today's actual
         text and only re-extracts the rest."""
         return hashlib.sha256(piece.encode("utf-8")).hexdigest()
 
-    def _checkpointed_unit(
+    def _checkpointed_piece(
         self, checkpoints: _DocumentCheckpoints | None, piece: str
     ) -> _ChunkRecord | None:
         """A cache hit reconstructs ``_ChunkRecord`` from the STORED
@@ -740,11 +740,14 @@ class TaguruIngester:
         exactly like a freshly-extracted one."""
         if checkpoints is None:
             return None
-        unit = checkpoints.lookup(self._unit_hash(piece))
-        if unit is None:
+        cached = checkpoints.lookup(self._piece_hash(piece))
+        if cached is None:
             return None
         return _ChunkRecord(
-            output=unit.output, chunk_index=unit.chunk_index, user=unit.user, answer=unit.answer
+            output=cached.output,
+            chunk_index=cached.chunk_index,
+            user=cached.user,
+            answer=cached.answer,
         )
 
     def _record_checkpoint(
@@ -754,18 +757,18 @@ class TaguruIngester:
         piece: str,
         record: _ChunkRecord,
     ) -> None:
-        """Persists the completed unit before returning, so a kill
+        """Persists the completed piece before returning, so a kill
         immediately after this call still finds it on the next run. The
-        FIRST unit recorded this run always goes through a full ``save()``
-        — establishing the file (in today's JSONL format, whatever format
-        it was in before) atomically; every later unit is streamed with
+        FIRST piece recorded this run always goes through a full ``save()``
+        — establishing the file (replacing whatever stale or corrupt
+        checkpoint it held before) atomically; every later piece is streamed with
         the store's own ``append()`` when it has one, an O(1)-per-chunk
         write instead of ``save()``'s O(document size) full rewrite (issue
         #<O(N^2) checkpoint saves>). A store without ``append`` keeps
         paying the old full-rewrite cost every time — a correctness no-op,
         just not the perf win.
 
-        A save/append failure only warns — the unit still counts for THIS
+        A save/append failure only warns — the piece still counts for THIS
         run; a resume that hits the same failure again would simply
         re-extract it. A lock-contention failure (another run already
         holds ``source``) is different in kind: it warns ONCE and disables
@@ -774,10 +777,10 @@ class TaguruIngester:
         chunk."""
         if checkpoints is None or self.checkpoint_store is None or checkpoints.locked_out:
             return
-        unit_hash = self._unit_hash(piece)
+        piece_hash = self._piece_hash(piece)
         checkpoints.record(
-            unit_hash,
-            _CheckpointUnit(
+            piece_hash,
+            _CheckpointPiece(
                 chunk_index=record.chunk_index,
                 output=record.output,
                 user=record.user,
@@ -787,7 +790,7 @@ class TaguruIngester:
         store = self.checkpoint_store
         try:
             if checkpoints.established_on_disk and isinstance(store, _AppendCapableCheckpointStore):
-                store.append(source, checkpoints.unit_bytes(unit_hash))
+                store.append(source, checkpoints.piece_bytes(piece_hash))
             else:
                 store.save(source, checkpoints.to_bytes())
                 checkpoints.established_on_disk = True
@@ -887,7 +890,7 @@ class TaguruIngester:
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
-            cached = self._checkpointed_unit(checkpoints, piece)
+            cached = self._checkpointed_piece(checkpoints, piece)
             if cached is not None:
                 records.append(cached)
                 outcome.chunks_reused += 1
@@ -1342,7 +1345,7 @@ class TaguruIngester:
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
-            cached = self._checkpointed_unit(checkpoints, piece)
+            cached = self._checkpointed_piece(checkpoints, piece)
             if cached is not None:
                 records.append(cached)
                 outcome.chunks_reused += 1
@@ -1597,10 +1600,10 @@ class TaguruIngester:
         """Async twin of ``_record_checkpoint``."""
         if checkpoints is None or self.checkpoint_store is None or checkpoints.locked_out:
             return
-        unit_hash = self._unit_hash(piece)
+        piece_hash = self._piece_hash(piece)
         checkpoints.record(
-            unit_hash,
-            _CheckpointUnit(
+            piece_hash,
+            _CheckpointPiece(
                 chunk_index=record.chunk_index,
                 output=record.output,
                 user=record.user,
@@ -1610,7 +1613,7 @@ class TaguruIngester:
         store = self.checkpoint_store
         try:
             if checkpoints.established_on_disk and isinstance(store, _AppendCapableCheckpointStore):
-                await asyncio.to_thread(store.append, source, checkpoints.unit_bytes(unit_hash))
+                await asyncio.to_thread(store.append, source, checkpoints.piece_bytes(piece_hash))
             else:
                 await asyncio.to_thread(store.save, source, checkpoints.to_bytes())
                 checkpoints.established_on_disk = True

@@ -156,18 +156,18 @@ def _recover_with_ocr(
 
     requested = set(empty_pages)
     recovered: dict[int, str] = {}
-    for unit in result.units:
-        if unit.locator.kind != "page":
+    for recovered_text in result.texts:
+        if recovered_text.locator.kind != "page":
             continue
         try:
-            page_number = int(unit.locator.value)
+            page_number = int(recovered_text.locator.value)
         except ValueError:
             continue
         if page_number not in requested or page_number in recovered:
             continue
-        if _page_char_count(unit.text) < min_chars_per_page:
+        if _page_char_count(recovered_text.text) < min_chars_per_page:
             continue
-        recovered[page_number] = unit.text
+        recovered[page_number] = recovered_text.text
 
     if not recovered:
         return page_texts, empty_pages, list(result.diagnostics), None

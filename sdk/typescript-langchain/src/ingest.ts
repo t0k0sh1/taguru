@@ -828,7 +828,7 @@ export class TaguruIngester {
         total: chunks.length,
       });
       const chunkStartedAt = performance.now();
-      const cached = await this.checkpointedUnit(checkpoints, chunks[index]!);
+      const cached = await this.checkpointedPiece(checkpoints, chunks[index]!);
       if (cached !== null) {
         records.push(cached);
         outcome.chunks_reused += 1;
@@ -1109,8 +1109,8 @@ export class TaguruIngester {
     const source = document.metadata[this.source_key];
     if (typeof source !== "string" || source === "") {
       throw new Error(
-        `document metadata lacks a '${this.source_key}' key — the source id is the ` +
-          "retract-then-apply idempotency unit and cannot be invented",
+        `document metadata lacks a '${this.source_key}' key — the source id names ` +
+          "what retract-then-apply replaces as a whole and cannot be invented",
       );
     }
     return source;
@@ -1283,18 +1283,18 @@ export class TaguruIngester {
    * `ChunkRecord` from the STORED user/answer/output rather than
    * recomputing anything.
    */
-  private async checkpointedUnit(
+  private async checkpointedPiece(
     checkpoints: DocumentCheckpoints | null,
     piece: string,
   ): Promise<ChunkRecord | null> {
     if (checkpoints === null) {
       return null;
     }
-    const unit = checkpoints.lookup(await sha256Hex(piece));
-    if (unit === null) {
+    const cached = checkpoints.lookup(await sha256Hex(piece));
+    if (cached === null) {
       return null;
     }
-    return { output: unit.output, chunkIndex: unit.chunk_index, user: unit.user, answer: unit.answer };
+    return { output: cached.output, chunkIndex: cached.chunk_index, user: cached.user, answer: cached.answer };
   }
 
   /**

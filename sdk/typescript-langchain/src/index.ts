@@ -70,7 +70,7 @@ export { DocxConnector, type DocxConnectorOptions } from "./ingest-connectors/do
 export { PptxConnector, type PptxConnectorOptions } from "./ingest-connectors/pptx.js";
 export {
   type OcrAdapter,
-  OcrRecoveredUnit,
+  OcrRecoveredText,
   OcrRequest,
   OcrResult,
 } from "./ingest-connectors/ocr.js";

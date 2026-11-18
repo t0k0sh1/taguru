@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Diagnostic } from "../../src/ingest-connectors/document.js";
-import { OcrRecoveredUnit, OcrRequest, OcrResult, type OcrAdapter } from "../../src/ingest-connectors/ocr.js";
+import { OcrRecoveredText, OcrRequest, OcrResult, type OcrAdapter } from "../../src/ingest-connectors/ocr.js";
 import { PdfConnector } from "../../src/ingest-connectors/pdf.js";
 import { scannedPdf, textPdf } from "../pdfs.js";
 
@@ -65,10 +65,10 @@ class FakeOcrAdapter implements OcrAdapter {
     if (this.fixedResult !== null) {
       return this.fixedResult;
     }
-    const units = request.locators
+    const texts = request.locators
       .filter((locator) => this.recovered.has(locator.value))
-      .map((locator) => new OcrRecoveredUnit({ locator, text: this.recovered.get(locator.value)! }));
-    return new OcrResult({ units, diagnostics: this.diagnostics });
+      .map((locator) => new OcrRecoveredText({ locator, text: this.recovered.get(locator.value)! }));
+    return new OcrResult({ texts, diagnostics: this.diagnostics });
   }
 }
 
@@ -175,18 +175,18 @@ describe("OcrAdapter call-out (PdfConnector)", () => {
     expect(message).toContain("OCR adapter failed: engine unavailable");
   });
 
-  it("adapter returning an unrequested or too-thin unit is discarded", async () => {
+  it("adapter returning an unrequested or too-thin text is discarded", async () => {
     // A misbehaving (or merely imperfect) adapter must not corrupt the
     // document: a locator nobody asked about, and text too thin to clear
     // the same minCharsPerPage bar every other page's text must clear, are
     // both silently dropped rather than spliced in.
     const fixed = new OcrResult({
-      units: [
-        new OcrRecoveredUnit({
+      texts: [
+        new OcrRecoveredText({
           locator: { kind: "page", value: "99" },
           text: "Text for a page nobody asked about, plenty long enough.",
         }),
-        new OcrRecoveredUnit({ locator: { kind: "page", value: "1" }, text: "x" }),
+        new OcrRecoveredText({ locator: { kind: "page", value: "1" }, text: "x" }),
       ],
     });
     const adapter = new FakeOcrAdapter({ fixedResult: fixed });
@@ -214,6 +214,11 @@ describe("OcrAdapter call-out (PdfConnector)", () => {
     expect(document.text).toBe("Recovered page text, plenty of characters.");
     expect(document.diagnostics.map((d) => d.code)).toEqual(["partial_extraction"]);
     expect(document.diagnostics[0]!.message).toBe("adapter skipped a region");
+  });
+
+  it("OcrResult refuses the retired `units` key instead of returning nothing", () => {
+    const legacy = { units: [new OcrRecoveredText({ locator: { kind: "page", value: "1" }, text: "x" })] };
+    expect(() => new OcrResult(legacy as never)).toThrow(/`texts`, not `units`/);
   });
 
   it("configuring an adapter changes the digest but not the raw hash", async () => {

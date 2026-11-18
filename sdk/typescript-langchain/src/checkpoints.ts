@@ -6,7 +6,7 @@
  *
  * The SDK owns every correctness-critical piece of checkpoint/resume — the
  * fingerprint gate that invalidates a whole document's cache on any
- * output-shaping settings change, the unit-content-hash keying that
+ * output-shaping settings change, the piece-content-hash keying that
  * survives a differently-chunked resume, and the JSON schema on disk. A
  * `CheckpointStore` is only durable blob storage keyed by source id;
  * implementing one for object storage or a database is three small async
@@ -21,7 +21,7 @@
  * Constraint: no top-level `node:` import in this module. Hashing uses the
  * Web Crypto global (`crypto.subtle`, available in Node >= 20 with no
  * import and browser-safe), so `ingest.ts` can statically import the
- * fingerprint/unit machinery without dragging Node builtins into a
+ * fingerprint/piece machinery without dragging Node builtins into a
  * non-Node bundle. `FilesystemCheckpointStore` alone needs `node:fs`/
  * `node:path`; it imports them dynamically inside its methods, the same
  * pattern the core SDK's `Context.exportToFile` already uses
@@ -76,7 +76,7 @@ export class CheckpointLockedError extends Error {
 }
 
 /** SHA-256 of `text`'s UTF-8 bytes, as lowercase hex — the one hash primitive
- * every checkpoint identity (fingerprint content hash, unit hash, long
+ * every checkpoint identity (fingerprint content hash, piece hash, long
  * source-name suffix) is built from. */
 export async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -494,19 +494,19 @@ function fingerprintsEqual(a: CheckpointFingerprint, b: CheckpointFingerprint): 
 }
 
 /**
- * One durable unit of extraction work — a top-level chunk (TypeScript has
- * no length-ladder split rung yet, but the schema and the unit-hash keying
+ * One durable piece of extraction work — a top-level chunk (TypeScript has
+ * no length-ladder split rung yet, but the schema and the piece-hash keying
  * already anticipate one, exactly like the Rust/Python twins'
- * `CheckpointUnit` anticipated issue #179's amendment before #210
- * implemented it). Keyed by the unit's OWN content hash rather than
+ * `CheckpointPiece` anticipated issue #179's amendment before #210
+ * implemented it). Keyed by the piece's OWN content hash rather than
  * `chunk_index` alone, so a resumed run whose chunking differs from a
  * prior one never misattributes a piece's output to the wrong text.
- * `user`/`answer` are stored (not just `output`) so a reused unit can
+ * `user`/`answer` are stored (not just `output`) so a reused piece can
  * still participate in Stage 2 cross-chunk correction exactly like a
  * freshly-extracted one — `correctCrossChunkIssues` rebuilds a chunk's own
  * conversation from these.
  */
-export interface CheckpointUnit {
+export interface CheckpointPiece {
   /** The chunk's coordinates in ITS run, kept only for the same "chunk i/n"
    * reporting ChunkCompleted already carries — not part of the cache key. */
   chunk_index: number;
@@ -540,7 +540,7 @@ function modelOutputFromJson(data: unknown): ModelOutput | null {
   };
 }
 
-function checkpointUnitFromJson(data: unknown): CheckpointUnit | null {
+function checkpointPieceFromJson(data: unknown): CheckpointPiece | null {
   if (typeof data !== "object" || data === null) {
     return null;
   }
@@ -558,18 +558,18 @@ function checkpointUnitFromJson(data: unknown): CheckpointUnit | null {
 
 /**
  * One document's durable checkpoint state: the settings it was extracted
- * under, and every unit completed so far, keyed by content hash.
+ * under, and every piece completed so far, keyed by content hash.
  * Serialized as one small JSON object, rewritten in full (`writeAtomic`)
- * after every new unit lands — small enough that a read-modify-write-
+ * after every new piece lands — small enough that a read-modify-write-
  * whole-file is simpler, and just as durable, as an append-only log.
  *
- * `units` is a `Map` rather than a plain object so a maliciously- or
+ * `pieces` is a `Map` rather than a plain object so a maliciously- or
  * accidentally-shaped on-disk file (e.g. a `"__proto__"` key) can never
  * touch anything but the map's own entries.
  */
 export class DocumentCheckpoints {
   readonly fingerprint: CheckpointFingerprint;
-  private readonly units: Map<string, CheckpointUnit>;
+  private readonly pieces: Map<string, CheckpointPiece>;
   /**
    * Set by the ingester when another run holds this source's advisory
    * lock (`CheckpointLockedError`): every later save is skipped for this
@@ -579,9 +579,9 @@ export class DocumentCheckpoints {
    */
   lockedOut = false;
 
-  private constructor(fingerprint: CheckpointFingerprint, units: Map<string, CheckpointUnit>) {
+  private constructor(fingerprint: CheckpointFingerprint, pieces: Map<string, CheckpointPiece>) {
     this.fingerprint = fingerprint;
-    this.units = units;
+    this.pieces = pieces;
   }
 
   static empty(fingerprint: CheckpointFingerprint): DocumentCheckpoints {
@@ -592,8 +592,8 @@ export class DocumentCheckpoints {
    * Missing, unreadable, corrupt, or fingerprint-mismatched checkpoints all
    * degrade to "nothing cached" — never an error, and never a false reuse
    * of an incompatible output. A single parse failure anywhere in the file
-   * (including one corrupted unit) invalidates the WHOLE file rather than
-   * salvaging the units that happen to still parse, mirroring the Rust
+   * (including one corrupted piece) invalidates the WHOLE file rather than
+   * salvaging the pieces that happen to still parse, mirroring the Rust
    * twin's single-parse posture: a partially-trustworthy checkpoint file
    * is treated exactly like an absent one.
    */
@@ -626,34 +626,34 @@ export class DocumentCheckpoints {
     if (loadedFingerprint === null || !fingerprintsEqual(loadedFingerprint, fingerprint)) {
       return null;
     }
-    const rawUnits = container.units;
-    if (typeof rawUnits !== "object" || rawUnits === null || Array.isArray(rawUnits)) {
+    const rawPieces = container.pieces;
+    if (typeof rawPieces !== "object" || rawPieces === null || Array.isArray(rawPieces)) {
       return null;
     }
-    const units = new Map<string, CheckpointUnit>();
-    for (const [key, value] of Object.entries(rawUnits as Record<string, unknown>)) {
-      const unit = checkpointUnitFromJson(value);
-      if (unit === null) {
+    const pieces = new Map<string, CheckpointPiece>();
+    for (const [key, value] of Object.entries(rawPieces as Record<string, unknown>)) {
+      const piece = checkpointPieceFromJson(value);
+      if (piece === null) {
         return null;
       }
-      units.set(key, unit);
+      pieces.set(key, piece);
     }
-    return new DocumentCheckpoints(fingerprint, units);
+    return new DocumentCheckpoints(fingerprint, pieces);
   }
 
   toBytes(): Uint8Array {
     const payload = {
       fingerprint: this.fingerprint,
-      units: Object.fromEntries(this.units),
+      pieces: Object.fromEntries(this.pieces),
     };
     return new TextEncoder().encode(JSON.stringify(payload));
   }
 
-  lookup(unitHash: string): CheckpointUnit | null {
-    return this.units.get(unitHash) ?? null;
+  lookup(pieceHash: string): CheckpointPiece | null {
+    return this.pieces.get(pieceHash) ?? null;
   }
 
-  record(unitHash: string, unit: CheckpointUnit): void {
-    this.units.set(unitHash, unit);
+  record(pieceHash: string, piece: CheckpointPiece): void {
+    this.pieces.set(pieceHash, piece);
   }
 }

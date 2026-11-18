@@ -624,7 +624,7 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
         ),
         format!("1 group record(s) after this request were never sent, from {path}: group 'g'"),
         format!(
-            "this request carried 1 unit: {path}: context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' source 'bad.md'"
+            "this request carried 1 record: {path}: context 'ffa63583-dfa6-406b-87d2-84b86b0d693a' source 'bad.md'"
         ),
     ] {
         assert!(stderr.contains(&line), "missing {line:?} in: {stderr}");
@@ -1075,7 +1075,7 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
     );
     assert!(
         stderr.contains(&format!(
-            "not confirmed — this request carried 1 unit: {path}: context 'b' source 'b.md'"
+            "not confirmed — this request carried 1 record: {path}: context 'b' source 'b.md'"
         )),
         "{stderr}"
     );
@@ -1172,7 +1172,7 @@ fn a_lost_connection_tallies_the_chunks_still_queued_behind_it() {
     );
     assert!(
         stderr.contains(&format!(
-            "not confirmed — this request carried 1 unit: {path}: context 'b' source 'b.md'"
+            "not confirmed — this request carried 1 record: {path}: context 'b' source 'b.md'"
         )),
         "{stderr}"
     );

@@ -90,8 +90,8 @@ def _check_nonempty_size(field_name: str, value: str, max_bytes: int) -> None:
 
 def _parse_list(items: object, parser: Callable[[object], _T | None]) -> list[_T] | None:
     """Parses a JSON array field where a single unparseable element
-    invalidates the whole list — the same "one bad unit invalidates the
-    file" posture ``checkpoints._DocumentCheckpoints._parse`` already
+    invalidates the whole list — the same "one bad piece invalidates the
+    file" posture ``checkpoints._DocumentCheckpoints.from_bytes`` already
     takes, applied per-field instead of per-file."""
     if not isinstance(items, list):
         return None

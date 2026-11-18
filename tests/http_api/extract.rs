@@ -1002,7 +1002,7 @@ fn a_late_chunk_failure_names_its_checkpoints_and_a_rerun_resumes_from_them() {
     assert!(stderr.contains("chunk 2/2"), "{stderr}");
     assert!(
         stderr.contains(
-            "(1 extracted unit(s) are checkpointed — a rerun without --force resumes from them)"
+            "(1 extracted piece(s) are checkpointed — a rerun without --force resumes from them)"
         ),
         "{stderr}"
     );
@@ -7733,15 +7733,15 @@ fn checkpoint_file_path(out: &std::path::Path, source: &str) -> std::path::PathB
         .join(format!("{name}-{}.json", &hash[..16]))
 }
 
-/// The number of units recorded in one document's checkpoint file, or
+/// The number of pieces recorded in one document's checkpoint file, or
 /// 0 if it doesn't exist (never created yet, or already cleared once
 /// that document's batch landed).
-fn checkpoint_units_count(out: &std::path::Path, source: &str) -> usize {
+fn checkpoint_pieces_count(out: &std::path::Path, source: &str) -> usize {
     let Ok(text) = std::fs::read_to_string(checkpoint_file_path(out, source)) else {
         return 0;
     };
     let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    value["units"].as_object().map_or(0, |units| units.len())
+    value["pieces"].as_object().map_or(0, |pieces| pieces.len())
 }
 
 /// Runs one 2-top-level-chunk document (`multi_chunk_document(9)`, see
@@ -7820,7 +7820,7 @@ fn setup_one_checkpointed_chunk_and_one_failure(
         "a failed document must not leave a batch file behind"
     );
     assert_eq!(
-        checkpoint_units_count(&out, &doc_src),
+        checkpoint_pieces_count(&out, &doc_src),
         1,
         "chunk 0's checkpoint must survive chunk 1's failure"
     );
@@ -7861,7 +7861,7 @@ fn checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_recalling
         "chunk 0 must be served from its checkpoint, not re-requested"
     );
     assert_eq!(
-        checkpoint_units_count(&out, doc_src),
+        checkpoint_pieces_count(&out, doc_src),
         0,
         "the checkpoint file must be cleared once the batch lands"
     );
@@ -8095,7 +8095,7 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut landed = false;
     while std::time::Instant::now() < deadline {
-        if checkpoint_units_count(&out, &doc_src) >= 1 {
+        if checkpoint_pieces_count(&out, &doc_src) >= 1 {
             landed = true;
             break;
         }
@@ -8195,7 +8195,7 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut landed = false;
     while std::time::Instant::now() < deadline {
-        if checkpoint_units_count(&out, &doc_src) >= 1 {
+        if checkpoint_pieces_count(&out, &doc_src) >= 1 {
             landed = true;
             break;
         }
@@ -8208,7 +8208,7 @@ fn checkpoint_resumes_the_not_yet_completed_sub_piece_after_a_kill_mid_split() {
         "the completed sub-piece's checkpoint never landed before the kill"
     );
     assert_eq!(
-        checkpoint_units_count(&out, &doc_src),
+        checkpoint_pieces_count(&out, &doc_src),
         1,
         "only the completed sub-piece, never the pre-split piece, should be checkpointed"
     );
@@ -8416,7 +8416,7 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
         "an interrupted document must not leave a batch file behind"
     );
     assert_eq!(
-        checkpoint_units_count(&out, &doc_src),
+        checkpoint_pieces_count(&out, &doc_src),
         1,
         "chunk 0 must be checkpointed before the stop takes effect"
     );
@@ -8557,7 +8557,7 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
         "extract must exit after the second SIGINT: {output:?}"
     );
     assert_eq!(
-        checkpoint_units_count(&out, &doc_src),
+        checkpoint_pieces_count(&out, &doc_src),
         0,
         "the one chunk never completed, so nothing should be checkpointed"
     );
@@ -8806,7 +8806,7 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(requests.join().unwrap().len(), 3);
-    assert_eq!(checkpoint_units_count(&out, doc_src), 1);
+    assert_eq!(checkpoint_pieces_count(&out, doc_src), 1);
     // A failed document writes no trace file — only its attempts log
     // (ADR 0025), which is the directory's one entry here.
     let entries: Vec<String> = std::fs::read_dir(out.join(".extract-trace"))
@@ -11470,7 +11470,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("(1 extracted unit(s) are checkpointed"),
+        stderr.contains("(1 extracted piece(s) are checkpointed"),
         "{stderr}"
     );
     assert!(
@@ -11490,7 +11490,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
         stderr.contains(&format!(
             "taguru: extract: ignoring an unreadable checkpoint at {}: ",
             checkpoint.display()
-        )) && stderr.contains("— every unit of this segment re-extracts"),
+        )) && stderr.contains("— every piece of this segment re-extracts"),
         "{stderr}"
     );
 
@@ -11517,7 +11517,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
     // Other settings: said with the unit count, and re-asked.
     let mut state: Value =
         serde_json::from_str(&std::fs::read_to_string(&checkpoint).unwrap()).unwrap();
-    assert_eq!(state["units"].as_object().unwrap().len(), 1, "{state}");
+    assert_eq!(state["pieces"].as_object().unwrap().len(), 1, "{state}");
     state["fingerprint"]["model"] = json!("some-other-model");
     std::fs::write(&checkpoint, state.to_string()).unwrap();
     let (url, requests) = stub_chat_server(vec![good, "not json".to_string()]);
@@ -11526,7 +11526,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
     assert_eq!(requests.join().unwrap().len(), 2, "{stderr}");
     assert!(
         stderr.contains(&format!(
-            "taguru: extract: checkpoint at {} was written under different settings — 1 unit(s) re-extract",
+            "taguru: extract: checkpoint at {} was written under different settings — 1 piece(s) re-extract",
             checkpoint.display()
         )),
         "{stderr}"

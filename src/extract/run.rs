@@ -393,7 +393,7 @@ impl Run {
 /// [`Run::extract_chunks`]'s result: either every chunk completed, or a
 /// cooperative stop request (issue #179) was observed between chunks
 /// first. Distinct from `Err` — an interruption isn't a failure, and
-/// whatever units already landed are still durably checkpointed.
+/// whatever pieces already landed are still durably checkpointed.
 pub(super) enum ChunkLoopResult {
     Complete(Vec<ChunkOutput>),
     Interrupted,
@@ -725,7 +725,7 @@ impl Run {
         let run_id = self.run_id();
         let attempt_log = self.open_attempt_log(
             &file_name,
-            checkpoints.unit_count() > 0 || self.replaying,
+            checkpoints.piece_count() > 0 || self.replaying,
             &run_id,
             source,
             &hash,
@@ -822,7 +822,7 @@ impl Run {
             if discarded > 0 {
                 eprintln!(
                     "taguru: extract: {source}: chunk briefing: the overview changed since \
-                     {discarded} unit(s) were checkpointed — they are re-extracted"
+                     {discarded} piece(s) were checkpointed — they are re-extracted"
                 );
             }
         }
@@ -1901,12 +1901,12 @@ pub(super) fn labeled_segment(text: &str, cap: usize) -> String {
 /// A failing segment keeps its checkpoint file, so the failure line
 /// says what a plain rerun resumes from (#763) — the operator's reflex
 /// after a late-chunk failure was `--force`, which is exactly the flag
-/// that discards those units.
+/// that discards those pieces.
 pub(super) fn with_resume_hint(checkpoints: &CheckpointStore, message: String) -> String {
-    match checkpoints.unit_count() {
+    match checkpoints.piece_count() {
         0 => message,
-        units => format!(
-            "{message} ({units} extracted unit(s) are checkpointed — a rerun without \
+        pieces => format!(
+            "{message} ({pieces} extracted piece(s) are checkpointed — a rerun without \
              --force resumes from them)"
         ),
     }

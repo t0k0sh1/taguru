@@ -17,18 +17,18 @@ from taguru_langchain.checkpoints import (
     FilesystemCheckpointStore,
     _checkpoint_file_name,
     _CheckpointFingerprint,
-    _CheckpointUnit,
+    _CheckpointPiece,
     _DocumentCheckpoints,
 )
 
 
-def test_filesystem_store_round_trips_units(tmp_path: Path) -> None:
+def test_filesystem_store_round_trips_pieces(tmp_path: Path) -> None:
     store = FilesystemCheckpointStore(tmp_path)
     assert store.load("docs/aomine.md") is None
-    store.save("docs/aomine.md", b'{"fingerprint": {}, "units": {}}')
-    assert store.load("docs/aomine.md") == b'{"fingerprint": {}, "units": {}}'
-    store.save("docs/aomine.md", b'{"fingerprint": {}, "units": {"x": 1}}')
-    assert store.load("docs/aomine.md") == b'{"fingerprint": {}, "units": {"x": 1}}'
+    store.save("docs/aomine.md", b'{"fingerprint": {}}\n')
+    assert store.load("docs/aomine.md") == b'{"fingerprint": {}}\n'
+    store.save("docs/aomine.md", b'{"fingerprint": {}}\n{"piece": "x"}\n')
+    assert store.load("docs/aomine.md") == b'{"fingerprint": {}}\n{"piece": "x"}\n'
 
 
 def test_checkpoint_file_name_flattens_path_separators() -> None:
@@ -152,104 +152,75 @@ def _fingerprint(
 
 def test_document_checkpoints_round_trips_through_bytes() -> None:
     fingerprint = _fingerprint()
-    unit = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
-    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"hash1": unit})
+    piece = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, pieces={"hash1": piece})
     restored = _DocumentCheckpoints.from_bytes(checkpoints.to_bytes(), fingerprint)
-    assert restored.lookup("hash1") == unit
+    assert restored.lookup("hash1") == piece
 
 
 def test_document_checkpoints_degrades_to_empty_on_fingerprint_mismatch() -> None:
     fingerprint = _fingerprint()
-    unit = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
-    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"hash1": unit})
+    piece = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, pieces={"hash1": piece})
     other = _fingerprint(model="a-different-model")
     restored = _DocumentCheckpoints.from_bytes(checkpoints.to_bytes(), other)
-    assert restored.units == {}
+    assert restored.pieces == {}
     assert restored.fingerprint == other
 
 
 def test_document_checkpoints_degrades_to_empty_on_missing_data() -> None:
     fingerprint = _fingerprint()
-    assert _DocumentCheckpoints.from_bytes(None, fingerprint).units == {}
+    assert _DocumentCheckpoints.from_bytes(None, fingerprint).pieces == {}
 
 
 @pytest.mark.parametrize(
     "data",
-    [b"not json at all", b"[1, 2, 3]", b'{"units": {}}', b'{"fingerprint": {}, "units": "nope"}'],
-    ids=["invalid_json", "wrong_top_level_type", "missing_fingerprint", "units_wrong_type"],
+    [b"not json at all\n", b"[1, 2, 3]\n", b"{}\n", b'{"fingerprint": {}}\n'],
+    ids=["invalid_json", "wrong_top_level_type", "missing_fingerprint", "malformed_fingerprint"],
 )
 def test_document_checkpoints_degrades_to_empty_on_malformed_bytes(data: bytes) -> None:
     fingerprint = _fingerprint()
-    assert _DocumentCheckpoints.from_bytes(data, fingerprint).units == {}
-
-
-def test_document_checkpoints_a_single_corrupt_unit_invalidates_the_whole_file() -> None:
-    fingerprint = _fingerprint()
-    good_unit = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
-    payload = {
-        "fingerprint": fingerprint.to_dict(),
-        "units": {
-            "good": good_unit.to_dict(),
-            "bad": {"chunk_index": 0},  # missing output/user/answer
-        },
-    }
-    data = json.dumps(payload).encode("utf-8")
-    restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
-    # The whole file degrades to empty — the still-good "good" unit is NOT
-    # salvaged, matching Rust's single-serde-parse posture.
-    assert restored.units == {}
+    assert _DocumentCheckpoints.from_bytes(data, fingerprint).pieces == {}
 
 
 # -- _DocumentCheckpoints: JSON Lines format (issue #<O(N^2) checkpoint saves>) --
 
 
-def test_document_checkpoints_round_trips_two_units_through_jsonl_bytes() -> None:
+def test_document_checkpoints_round_trips_two_pieces_through_jsonl_bytes() -> None:
     fingerprint = _fingerprint()
-    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
-    unit2 = _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
-    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1, "h2": unit2})
+    piece1 = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    piece2 = _CheckpointPiece(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, pieces={"h1": piece1, "h2": piece2})
     restored = _DocumentCheckpoints.from_bytes(checkpoints.to_bytes(), fingerprint)
-    assert restored.lookup("h1") == unit1
-    assert restored.lookup("h2") == unit2
+    assert restored.lookup("h1") == piece1
+    assert restored.lookup("h2") == piece2
 
 
 def test_document_checkpoints_tolerates_a_torn_trailing_line_from_a_crash_mid_append() -> None:
     fingerprint = _fingerprint()
-    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
-    unit2 = _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
-    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1, "h2": unit2})
+    piece1 = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    piece2 = _CheckpointPiece(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, pieces={"h1": piece1, "h2": piece2})
     data = checkpoints.to_bytes()
     # Simulate a crash mid-`append`: the last line's own trailing newline
     # (and a few bytes before it) never made it to disk.
     torn = data[:-6]
     assert not torn.endswith(b"\n")
     restored = _DocumentCheckpoints.from_bytes(torn, fingerprint)
-    # The complete "h1" unit (and the header) survive; the torn "h2" line
+    # The complete "h1" piece (and the header) survive; the torn "h2" line
     # is discarded rather than invalidating everything already durably
     # appended before it.
-    assert restored.lookup("h1") == unit1
+    assert restored.lookup("h1") == piece1
     assert restored.lookup("h2") is None
 
 
-def test_document_checkpoints_still_loads_the_legacy_single_object_format_with_real_units() -> None:
+def test_document_checkpoints_jsonl_duplicate_piece_lines_let_the_last_one_win() -> None:
     fingerprint = _fingerprint()
-    unit = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
-    legacy_payload = {"fingerprint": fingerprint.to_dict(), "units": {"h1": unit.to_dict()}}
-    data = json.dumps(legacy_payload).encode("utf-8")
-    # An in-flight pre-migration checkpoint keeps resuming exactly as
-    # before the JSONL migration — never treated as corrupt just because
-    # it predates it.
-    restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
-    assert restored.lookup("h1") == unit
-
-
-def test_document_checkpoints_jsonl_duplicate_unit_lines_let_the_last_one_win() -> None:
-    fingerprint = _fingerprint()
-    stale = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="stale", answer="stale")
-    fresh = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="fresh", answer="fresh")
+    stale = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="stale", answer="stale")
+    fresh = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="fresh", answer="fresh")
     header = json.dumps({"fingerprint": fingerprint.to_dict()}).encode("utf-8")
-    stale_line = json.dumps({"unit": "h1", **stale.to_dict()}).encode("utf-8")
-    fresh_line = json.dumps({"unit": "h1", **fresh.to_dict()}).encode("utf-8")
+    stale_line = json.dumps({"piece": "h1", **stale.to_dict()}).encode("utf-8")
+    fresh_line = json.dumps({"piece": "h1", **fresh.to_dict()}).encode("utf-8")
     data = header + b"\n" + stale_line + b"\n" + fresh_line + b"\n"
     restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
     assert restored.lookup("h1") == fresh
@@ -257,18 +228,29 @@ def test_document_checkpoints_jsonl_duplicate_unit_lines_let_the_last_one_win() 
 
 def test_document_checkpoints_a_corrupt_middle_line_in_jsonl_invalidates_the_whole_file() -> None:
     fingerprint = _fingerprint()
-    good = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    good = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u", answer="a")
     header = json.dumps({"fingerprint": fingerprint.to_dict()}).encode("utf-8")
-    bad_line = json.dumps({"unit": "bad", "chunk_index": 0}).encode(
+    bad_line = json.dumps({"piece": "bad", "chunk_index": 0}).encode(
         "utf-8"
     )  # no output/user/answer
-    good_line = json.dumps({"unit": "good", **good.to_dict()}).encode("utf-8")
+    good_line = json.dumps({"piece": "good", **good.to_dict()}).encode("utf-8")
     # The bad line has a well-formed trailing newline AND a line after it
     # — genuine corruption, not the crash-mid-append tail the test above
     # tolerates.
     data = header + b"\n" + bad_line + b"\n" + good_line + b"\n"
     restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
-    assert restored.units == {}
+    # The whole file degrades to empty — the still-good "good" piece is NOT
+    # salvaged, matching Rust's single-serde-parse posture.
+    assert restored.pieces == {}
+
+
+def test_document_checkpoints_a_line_without_a_piece_key_invalidates_the_whole_file() -> None:
+    fingerprint = _fingerprint()
+    good = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    header = json.dumps({"fingerprint": fingerprint.to_dict()}).encode("utf-8")
+    keyless_line = json.dumps(good.to_dict()).encode("utf-8")
+    data = header + b"\n" + keyless_line + b"\n"
+    assert _DocumentCheckpoints.from_bytes(data, fingerprint).pieces == {}
 
 
 # -- FilesystemCheckpointStore: append() and the advisory per-source lock ------
@@ -280,15 +262,15 @@ def test_filesystem_store_append_adds_only_the_new_record_not_a_full_rewrite(
 ) -> None:
     store = FilesystemCheckpointStore(tmp_path)
     fingerprint = _fingerprint()
-    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
-    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1})
+    piece1 = _CheckpointPiece(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, pieces={"h1": piece1})
     store.save("docs/aomine.md", checkpoints.to_bytes())
     size_after_save = store.path_for("docs/aomine.md").stat().st_size
 
     checkpoints.record(
-        "h2", _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+        "h2", _CheckpointPiece(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
     )
-    new_record = checkpoints.unit_bytes("h2")
+    new_record = checkpoints.piece_bytes("h2")
     store.append("docs/aomine.md", new_record)
     size_after_append = store.path_for("docs/aomine.md").stat().st_size
 
@@ -296,7 +278,7 @@ def test_filesystem_store_append_adds_only_the_new_record_not_a_full_rewrite(
     # never touched (let alone rewrote) what `save` already wrote.
     assert size_after_append - size_after_save == len(new_record)
     restored = _DocumentCheckpoints.from_bytes(store.load("docs/aomine.md"), fingerprint)
-    assert set(restored.units) == {"h1", "h2"}
+    assert set(restored.pieces) == {"h1", "h2"}
 
 
 def test_filesystem_store_save_raises_when_another_holder_already_locked_the_source(
@@ -324,7 +306,7 @@ def test_filesystem_store_append_raises_when_another_holder_already_locked_the_s
     fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         with pytest.raises(CheckpointLockedError, match="docs/aomine.md"):
-            store.append("docs/aomine.md", b'{"unit": "h1"}\n')
+            store.append("docs/aomine.md", b'{"piece": "h1"}\n')
     finally:
         external.close()
 
@@ -394,7 +376,7 @@ def test_filesystem_store_a_forked_child_still_conflicts_on_an_inherited_source(
         os.close(same_r)
         os.close(diff_r)
         try:
-            store.append("parent.md", b'{"unit": "h1"}\n')
+            store.append("parent.md", b'{"piece": "h1"}\n')
             os.write(same_w, b"no-conflict")
         except CheckpointLockedError:
             os.write(same_w, b"conflict")

@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
-  OcrRecoveredUnit,
+  OcrRecoveredText,
   OcrResult,
   type OcrAdapter,
   type OcrRequest,
@@ -33,12 +33,12 @@ class FakeOcrAdapter implements OcrAdapter {
   }
 
   async recognize(request: OcrRequest): Promise<OcrResult> {
-    const units = request.locators
+    const texts = request.locators
       .filter((locator) => this.recovered.has(locator.value))
       .map(
-        (locator) => new OcrRecoveredUnit({ locator, text: this.recovered.get(locator.value)! }),
+        (locator) => new OcrRecoveredText({ locator, text: this.recovered.get(locator.value)! }),
       );
-    return new OcrResult({ units, diagnostics: [] });
+    return new OcrResult({ texts, diagnostics: [] });
   }
 }
 

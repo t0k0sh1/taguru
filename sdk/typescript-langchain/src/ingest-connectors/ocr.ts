@@ -74,7 +74,7 @@ export class OcrRequest {
  * into its own document (§7.4: a locator is derived from the source
  * document's own structure, never from anything chunk-shaped).
  */
-export class OcrRecoveredUnit {
+export class OcrRecoveredText {
   readonly locator: Locator;
   readonly text: string;
 
@@ -87,7 +87,7 @@ export class OcrRecoveredUnit {
 /**
  * An adapter's answer to one `OcrRequest`.
  *
- * `units` covers whatever the adapter could recover — a subset of the
+ * `texts` covers whatever the adapter could recover — a subset of the
  * requested locators is expected and normal (some pages may still have no
  * usable text even after OCR); the calling connector decides what to do
  * with a locator it asked for but did not get back. `diagnostics` lets an
@@ -97,11 +97,17 @@ export class OcrRecoveredUnit {
  * itself takes.
  */
 export class OcrResult {
-  readonly units: readonly OcrRecoveredUnit[];
+  readonly texts: readonly OcrRecoveredText[];
   readonly diagnostics: readonly Diagnostic[];
 
-  constructor(fields?: { units?: readonly OcrRecoveredUnit[]; diagnostics?: readonly Diagnostic[] }) {
-    this.units = Object.freeze([...(fields?.units ?? [])]);
+  constructor(fields?: { texts?: readonly OcrRecoveredText[]; diagnostics?: readonly Diagnostic[] }) {
+    // #1069 renamed `units` to `texts`. Refused, never ignored: a JavaScript
+    // (or `any`-typed) caller still passing `units` would otherwise get an
+    // empty result and every page it recovered would stay ocr_required.
+    if (fields !== undefined && Object.prototype.hasOwnProperty.call(fields, "units")) {
+      throw new TypeError("OcrResult takes `texts`, not `units` (renamed in #1069)");
+    }
+    this.texts = Object.freeze([...(fields?.texts ?? [])]);
     this.diagnostics = Object.freeze([...(fields?.diagnostics ?? [])]);
   }
 }

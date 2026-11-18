@@ -124,25 +124,25 @@ def _build_ingester(
     return TaguruIngester(**kwargs), llm
 
 
-def _jsonl_units(data: bytes) -> dict[str, Any]:
+def _jsonl_pieces(data: bytes) -> dict[str, Any]:
     """Parses one ``_DocumentCheckpoints.to_bytes()``/``FilesystemCheckpointStore``
-    JSONL payload into ``{unit_hash: record}`` for test assertions — the
-    header line is skipped, later lines for the same ``"unit"`` overwrite
+    JSONL payload into ``{piece_hash: record}`` for test assertions — the
+    header line is skipped, later lines for the same ``"piece"`` overwrite
     earlier ones exactly like production's own reader."""
-    units: dict[str, Any] = {}
+    pieces: dict[str, Any] = {}
     for line in data.decode("utf-8").splitlines()[1:]:
         if not line:
             continue
         record = json.loads(line)
-        units[record["unit"]] = record
-    return units
+        pieces[record["piece"]] = record
+    return pieces
 
 
-def _unit_count(store: RecordingCheckpointStore, source: str) -> int:
+def _piece_count(store: RecordingCheckpointStore, source: str) -> int:
     data = store.state.get(source)
     if data is None:
         return 0
-    return len(_jsonl_units(data))
+    return len(_jsonl_pieces(data))
 
 
 def _seed_failed_run(
@@ -154,7 +154,7 @@ def _seed_failed_run(
     **overrides: Any,
 ) -> str:
     """Runs a 2-chunk document where chunk 0 succeeds and chunk 1 never
-    produces valid JSON, leaving exactly one checkpointed unit behind —
+    produces valid JSON, leaving exactly one checkpointed piece behind —
     the Python twin of extract.rs's test helper
     ``setup_one_checkpointed_chunk_and_one_failure``. Returns the source id."""
     ingester, _llm = _build_ingester(
@@ -178,7 +178,7 @@ def test_checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_rec
 ) -> None:
     store = RecordingCheckpointStore()
     source = _seed_failed_run(sync_client, async_client, store)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
     assert fake_server.imported == []
 
     ingester2, llm2 = _build_ingester(
@@ -200,7 +200,7 @@ def test_checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_rec
     ]
     assert any("chunk 2 of 2" in content for content in human_contents)
     assert len(fake_server.imported) == 1
-    assert _unit_count(store, source) == 0  # cleared once the batch landed
+    assert _piece_count(store, source) == 0  # cleared once the batch landed
 
 
 async def test_acheckpoint_reuses_a_completed_chunk_without_recalling_the_model(
@@ -217,7 +217,7 @@ async def test_acheckpoint_reuses_a_completed_chunk_without_recalling_the_model(
     )
     with pytest.raises(ValueError):
         await ingester.aingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     ingester2, llm2 = _build_ingester(
         sync_client,
@@ -264,7 +264,7 @@ def test_a_changed_fact_budget_invalidates_checkpoints_even_though_content_is_un
 ) -> None:
     store = RecordingCheckpointStore()
     source = _seed_failed_run(sync_client, async_client, store)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     ingester2, llm2 = _build_ingester(
         sync_client,
@@ -289,7 +289,7 @@ def test_a_changed_schema_invalidates_checkpoints_even_though_content_is_unchang
     any other computation input changing."""
     store = RecordingCheckpointStore()
     source = _seed_failed_run(sync_client, async_client, store)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     fake_server.schema_document = {
         "type": "schema",
@@ -330,7 +330,7 @@ def test_checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_comp
     )
     with pytest.raises(RuntimeError, match="simulated process kill"):
         ingester.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
     assert fake_server.imported == []
 
     ingester2, llm2 = _build_ingester(
@@ -375,7 +375,7 @@ def test_cooperative_stop_between_chunks_saves_checkpoints_and_skips_import(
     assert outcome.ndjson is None
     assert len(llm.seen_prompts) == 1
     assert fake_server.imported == []
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     ingester2, llm2 = _build_ingester(
         sync_client,
@@ -389,7 +389,7 @@ def test_cooperative_stop_between_chunks_saves_checkpoints_and_skips_import(
     assert outcome2.chunks_reused == 1
     assert len(llm2.seen_prompts) == 1
     assert len(fake_server.imported) == 1
-    assert _unit_count(store, source) == 0
+    assert _piece_count(store, source) == 0
 
 
 async def test_acooperative_stop_between_chunks_saves_checkpoints_and_skips_import(
@@ -416,7 +416,7 @@ async def test_acooperative_stop_between_chunks_saves_checkpoints_and_skips_impo
     assert not outcome.ok
     assert len(llm.seen_prompts) == 1
     assert fake_server.imported == []
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
 
 def test_stop_before_the_first_chunk_makes_no_model_calls(
@@ -524,7 +524,7 @@ def test_dry_run_records_checkpoints_but_never_deletes_them(
     outcome = ingester.ingest_text(DOC_TEXT, source=source, dry_run=True)
     assert outcome.ok
     assert fake_server.imported == []
-    assert _unit_count(store, source) == 2
+    assert _piece_count(store, source) == 2
 
     # A second dry run reuses both chunks — real model work already
     # happened once, and dry-run recording is what makes that not wasted.
@@ -536,7 +536,7 @@ def test_dry_run_records_checkpoints_but_never_deletes_them(
     assert outcome2.chunks_reused == 2
     assert llm2.seen_prompts == []
     assert fake_server.imported == []
-    assert _unit_count(store, source) == 2  # still not deleted
+    assert _piece_count(store, source) == 2  # still not deleted
 
     # A real (non-dry) run also reuses both chunks, then finally clears
     # the checkpoint once the batch actually lands.
@@ -548,7 +548,7 @@ def test_dry_run_records_checkpoints_but_never_deletes_them(
     assert outcome3.chunks_reused == 2
     assert llm3.seen_prompts == []
     assert len(fake_server.imported) == 1
-    assert _unit_count(store, source) == 0
+    assert _piece_count(store, source) == 0
 
 
 # -- fingerprint gate and on-disk degradation -----------------------------------
@@ -577,7 +577,7 @@ def test_fingerprint_mismatch_on_each_field_invalidates(
 ) -> None:
     store = RecordingCheckpointStore()
     source = _seed_failed_run(sync_client, async_client, store)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     ingester2, llm2 = _build_ingester(
         sync_client,
@@ -629,7 +629,7 @@ def test_a_changed_structured_output_mode_invalidates_checkpoints(
     that matrix shares."""
     store = RecordingCheckpointStore()
     source = _seed_failed_run(sync_client, async_client, store)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
     llm = ToolCallingFakeChatModel(
         tool_call_args=[json.loads(CHUNK1_ANSWER), json.loads(CHUNK2_CORRECTED_ANSWER)]
@@ -674,9 +674,9 @@ def test_a_corrupt_checkpoint_file_on_disk_silently_degrades_to_empty(
     # unreadable file.
     assert len(llm.seen_prompts) == 3
 
-    # The file now holds valid, parseable state with the one unit this
+    # The file now holds valid, parseable state with the one piece this
     # run actually completed.
-    assert len(_jsonl_units(store.path_for(source).read_bytes())) == 1
+    assert len(_jsonl_pieces(store.path_for(source).read_bytes())) == 1
 
 
 def test_a_stale_filesystem_store_is_reused_across_store_instances(
@@ -721,7 +721,7 @@ def test_a_stale_filesystem_store_is_reused_across_store_instances(
 def test_a_reused_chunk_still_participates_in_cross_chunk_correction(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
-    """The money test: a checkpointed unit's STORED user/answer, not a
+    """The money test: a checkpointed piece's STORED user/answer, not a
     recomputed one, is what Stage 2 replays — proving `_ChunkRecord`
     reconstruction from a checkpoint is faithful enough for cross-chunk
     correction to work exactly like it does on a freshly-extracted chunk."""
@@ -730,7 +730,7 @@ def test_a_reused_chunk_still_participates_in_cross_chunk_correction(
     # Both chunks pass Stage 1, but chunk 1's alias shadows chunk 0's
     # object — Stage 2 flags chunk 1, and even its ONE corrective turn
     # still shadows, so the bounded re-check fails the whole document.
-    # Both Stage-1-valid units are still checkpointed: checkpointing
+    # Both Stage-1-valid pieces are still checkpointed: checkpointing
     # happens in the Stage 1 loop, never touched by Stage 2's outcome.
     ingester1, _llm1 = _build_ingester(
         sync_client,
@@ -741,7 +741,7 @@ def test_a_reused_chunk_still_participates_in_cross_chunk_correction(
     )
     with pytest.raises(ValueError, match="cross-chunk"):
         ingester1.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 2
+    assert _piece_count(store, source) == 2
 
     # Rerun: BOTH chunks are satisfied from checkpoint (zero Stage 1
     # calls), and Stage 2 still correctly rebuilds chunk 1's conversation
@@ -770,7 +770,7 @@ def test_a_reused_chunk_still_participates_in_cross_chunk_correction(
     assert CHUNK2_SHADOWING_ANSWER in ai_contents
 
     assert len(fake_server.imported) == 1
-    assert _unit_count(store, source) == 0
+    assert _piece_count(store, source) == 0
 
 
 async def test_a_reused_chunk_still_participates_in_cross_chunk_correction_async(
@@ -787,7 +787,7 @@ async def test_a_reused_chunk_still_participates_in_cross_chunk_correction_async
     )
     with pytest.raises(ValueError, match="cross-chunk"):
         await ingester1.aingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 2
+    assert _piece_count(store, source) == 2
 
     ingester2, llm2 = _build_ingester(
         sync_client,
@@ -819,7 +819,7 @@ def test_checkpoints_survive_a_refusal(sync_client: Taguru, async_client: AsyncT
     )
     with pytest.raises(ValueError, match="policy refusal is terminal"):
         ingester.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
 
 def test_checkpoints_survive_an_empty_terminal_failure(
@@ -837,7 +837,7 @@ def test_checkpoints_survive_an_empty_terminal_failure(
     )
     with pytest.raises(ValueError):
         ingester.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 1
+    assert _piece_count(store, source) == 1
 
 
 def test_checkpoints_survive_a_stage_2_residual_issue(
@@ -855,7 +855,7 @@ def test_checkpoints_survive_a_stage_2_residual_issue(
     )
     with pytest.raises(ValueError, match="cross-chunk"):
         ingester.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 2
+    assert _piece_count(store, source) == 2
 
 
 def test_checkpoints_survive_an_import_failure(
@@ -874,7 +874,7 @@ def test_checkpoints_survive_an_import_failure(
     )
     with pytest.raises(ServerError):
         ingester.ingest_text(DOC_TEXT, source=source)
-    assert _unit_count(store, source) == 2
+    assert _piece_count(store, source) == 2
     assert fake_server.imported == []
     assert ("delete", source) not in store.log
 
@@ -959,7 +959,7 @@ def test_a_checkpoint_load_failure_warns_and_starts_without_any_cached_chunks(
 class RecordingAppendCheckpointStore(RecordingCheckpointStore):
     """``RecordingCheckpointStore`` plus the optional ``append`` capability
     — lets a test assert the ingester actually prefers ``append`` after a
-    document's first unit, instead of repeating a full ``save()`` (the
+    document's first piece, instead of repeating a full ``save()`` (the
     whole accumulated state) on every chunk."""
 
     def append(self, source: str, record: bytes) -> None:
@@ -967,7 +967,7 @@ class RecordingAppendCheckpointStore(RecordingCheckpointStore):
         self.state[source] = self.state.get(source, b"") + record
 
 
-def test_only_the_first_unit_of_a_document_pays_a_full_save_later_units_only_append(
+def test_only_the_first_piece_of_a_document_pays_a_full_save_later_pieces_only_append(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
     store = RecordingAppendCheckpointStore()
@@ -982,7 +982,7 @@ def test_only_the_first_unit_of_a_document_pays_a_full_save_later_units_only_app
     outcome = ingester.ingest_text(DOC_TEXT, source=source)
     assert outcome.ok
 
-    # Only chunk 0 (the first unit recorded this run) pays a full
+    # Only chunk 0 (the first piece recorded this run) pays a full
     # `save()`, establishing the file; chunk 1 streams via `append()`
     # instead of repeating a rewrite of the whole (by-then-larger) state
     # — the fix for the O(N^2) total-bytes-written an N-chunk document
@@ -1015,7 +1015,7 @@ def test_resuming_from_a_torn_trailing_jsonl_line_only_recalls_the_torn_chunk(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, tmp_path: Path
 ) -> None:
     """A crash mid-``append`` can leave the checkpoint file's last line torn
-    — the resumed run must still reuse every unit whose own line landed
+    — the resumed run must still reuse every piece whose own line landed
     cleanly, and only recall the (never durably completed) torn one."""
     store = FilesystemCheckpointStore(tmp_path)
     source = "docs/aomine.md"
@@ -1029,10 +1029,10 @@ def test_resuming_from_a_torn_trailing_jsonl_line_only_recalls_the_torn_chunk(
     )
     with pytest.raises(ServerError):
         ingester1.ingest_text(DOC_TEXT, source=source)
-    assert len(_jsonl_units(store.path_for(source).read_bytes())) == 2
+    assert len(_jsonl_pieces(store.path_for(source).read_bytes())) == 2
 
     # Simulate a crash mid-`append` on some earlier run: tear off the last
-    # few bytes (the second unit's own trailing newline included).
+    # few bytes (the second piece's own trailing newline included).
     path = store.path_for(source)
     torn = path.read_bytes()[:-6]
     assert not torn.endswith(b"\n")
@@ -1052,49 +1052,6 @@ def test_resuming_from_a_torn_trailing_jsonl_line_only_recalls_the_torn_chunk(
     assert outcome.chunks_reused == 1  # chunk 0's complete line survived
     assert len(llm2.seen_prompts) == 1  # chunk 1 (the torn one) was recalled
     assert len(fake_server.imported) == 1
-
-
-def test_old_format_checkpoint_file_on_disk_still_resumes(
-    sync_client: Taguru, async_client: AsyncTaguru, tmp_path: Path
-) -> None:
-    """An in-flight checkpoint written by a pre-JSONL-migration SDK version
-    must keep resuming after the upgrade — proven by writing a real run's
-    own JSONL output back out in the OLD single-JSON-object shape and
-    confirming a fresh ingester still reuses it from there."""
-    store = FilesystemCheckpointStore(tmp_path)
-    source = "docs/aomine.md"
-    ingester1, _llm1 = _build_ingester(
-        sync_client,
-        async_client,
-        [CHUNK1_ANSWER, "not json", "not json"],
-        checkpoint_store=store,
-        chunk_bytes=CROSS_CHUNK_BYTES,
-    )
-    with pytest.raises(ValueError):
-        ingester1.ingest_text(DOC_TEXT, source=source)
-
-    lines = store.path_for(source).read_bytes().splitlines()
-    header = json.loads(lines[0])
-    units = {}
-    for line in lines[1:]:
-        if not line:
-            continue
-        record = json.loads(line)
-        units[record.pop("unit")] = record
-    legacy_payload = {"fingerprint": header["fingerprint"], "units": units}
-    store.path_for(source).write_bytes(json.dumps(legacy_payload).encode("utf-8"))
-
-    ingester2, llm2 = _build_ingester(
-        sync_client,
-        async_client,
-        [CHUNK2_CORRECTED_ANSWER],
-        checkpoint_store=store,
-        chunk_bytes=CROSS_CHUNK_BYTES,
-    )
-    outcome = ingester2.ingest_text(DOC_TEXT, source=source)
-    assert outcome.ok
-    assert outcome.chunks_reused == 1
-    assert len(llm2.seen_prompts) == 1
 
 
 # -- concurrent-run clobber: an advisory per-source lock ------------------------

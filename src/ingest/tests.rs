@@ -1909,7 +1909,10 @@ fn chunk_carried_names_the_one_unit_or_the_first_and_last() {
             UnitKind::Batch,
         )],
     };
-    assert_eq!(one.carried(), "1 unit: a.jsonl: context 'a' source 'a.md'");
+    assert_eq!(
+        one.carried(),
+        "1 record: a.jsonl: context 'a' source 'a.md'"
+    );
     let three = Chunk {
         units: vec![
             labeled("a.jsonl: context 'a' source 'a.md'", UnitKind::Batch),
@@ -1919,9 +1922,9 @@ fn chunk_carried_names_the_one_unit_or_the_first_and_last() {
     };
     assert_eq!(
         three.carried(),
-        "3 units, from a.jsonl: context 'a' source 'a.md' through c.jsonl: group 'g'"
+        "3 records, from a.jsonl: context 'a' source 'a.md' through c.jsonl: group 'g'"
     );
-    assert_eq!(Chunk { units: Vec::new() }.carried(), "no unit");
+    assert_eq!(Chunk { units: Vec::new() }.carried(), "no record");
 }
 
 /// Every "needs a passage" refusal names the first offending line and

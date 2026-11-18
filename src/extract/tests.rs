@@ -951,13 +951,13 @@ fn stale_checkpoint_notice_counts_the_units_it_discards() {
         stale_checkpoint_notice(path, 1).as_deref(),
         Some(
             "taguru: extract: checkpoint at /tmp/x.json was written under different settings \
-             — 1 unit(s) re-extract"
+             — 1 piece(s) re-extract"
         )
     );
     assert!(
         stale_checkpoint_notice(path, 7)
             .unwrap()
-            .contains("7 unit(s)")
+            .contains("7 piece(s)")
     );
 }
 
@@ -1968,9 +1968,12 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
     assert_eq!(mixed[0].output.aliases.len(), 1);
 }
 
-/// The resume hint rides only when there is something to resume from.
+/// The resume hint rides only when there is something to resume from,
+/// and a changed overview reports how many pieces it discarded — the
+/// count the "N piece(s) were checkpointed — they are re-extracted"
+/// line prints.
 #[test]
-fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
+fn the_resume_hint_and_an_overview_change_count_the_checkpointed_pieces() {
     let dir = std::env::temp_dir().join(format!("taguru-hint-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1996,12 +1999,12 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         vocabulary_digest: String::new(),
     };
     let store = CheckpointStore::empty(dir.join("unit.json"), fingerprint);
-    assert_eq!(store.unit_count(), 0);
+    assert_eq!(store.piece_count(), 0);
     assert_eq!(
         with_resume_hint(&store, "chunk 2/3: boom".to_string()),
         "chunk 2/3: boom"
     );
-    let unit = |text: &str| CheckpointUnit {
+    let piece = |text: &str| CheckpointPiece {
         chunk_index: 0,
         attempt: None,
         output: ModelOutput {
@@ -2014,14 +2017,21 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         removed: Vec::new(),
         unparsed: Vec::new(),
     };
-    store.record("doc.md", "h1".to_string(), unit("a"));
-    store.record("doc.md", "h2".to_string(), unit("b"));
-    assert_eq!(store.unit_count(), 2);
+    store.record("doc.md", "h1".to_string(), piece("a"));
+    store.record("doc.md", "h2".to_string(), piece("b"));
+    assert_eq!(store.piece_count(), 2);
     assert_eq!(
         with_resume_hint(&store, "chunk 3/3: boom".to_string()),
-        "chunk 3/3: boom (2 extracted unit(s) are checkpointed — a rerun without --force \
+        "chunk 3/3: boom (2 extracted piece(s) are checkpointed — a rerun without --force \
          resumes from them)"
     );
+    // The empty store's digest is ""; a first overview binds and
+    // discards both pieces, the same overview again discards nothing.
+    assert_eq!(store.bind_overview("doc.md", "d1"), 2);
+    assert_eq!(store.piece_count(), 0);
+    store.record("doc.md", "h3".to_string(), piece("c"));
+    assert_eq!(store.bind_overview("doc.md", "d1"), 0);
+    assert_eq!(store.piece_count(), 1);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -2744,7 +2754,7 @@ fn manifests_reextract_when_the_vocabulary_digest_changes() {
 /// removed" rather than invalidating the file.
 #[test]
 fn checkpoint_unit_without_a_removed_field_deserializes_empty() {
-    let unit: CheckpointUnit = serde_json::from_str(
+    let unit: CheckpointPiece = serde_json::from_str(
         r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
             "user": "u", "answer": "a"}"#,
     )
@@ -6313,7 +6323,7 @@ fn paragraph_range_reads_labels_and_declines_unlabeled_text() {
 }
 
 /// `Completions::next_attempt` numbers completions 1, 2, 3… under one
-/// run id; a pre-0023 checkpoint unit (no `attempt` key) still loads
+/// run id; a pre-0023 checkpointed piece (no `attempt` key) still loads
 /// with `attempt: None`, and a unit written today round-trips it.
 #[test]
 fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
@@ -6325,13 +6335,13 @@ fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
     assert_eq!(first.run_id, second.run_id);
     assert_eq!(first.run_id.len(), 16);
 
-    let legacy: CheckpointUnit = serde_json::from_str(
+    let legacy: CheckpointPiece = serde_json::from_str(
         r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
             "user": "u", "answer": "a"}"#,
     )
     .unwrap();
     assert_eq!(legacy.attempt, None);
-    let unit = CheckpointUnit {
+    let unit = CheckpointPiece {
         chunk_index: 0,
         attempt: Some(first.clone()),
         output: legacy.output.clone(),
@@ -6340,7 +6350,7 @@ fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
         removed: Vec::new(),
         unparsed: Vec::new(),
     };
-    let reloaded: CheckpointUnit =
+    let reloaded: CheckpointPiece =
         serde_json::from_str(&serde_json::to_string(&unit).unwrap()).unwrap();
     assert_eq!(reloaded.attempt, Some(first));
 }
@@ -6903,7 +6913,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
     assert_eq!(strict.removed.len(), 1);
 
     // And a pre-field checkpoint loads with it empty.
-    let legacy: CheckpointUnit = serde_json::from_str(
+    let legacy: CheckpointPiece = serde_json::from_str(
         r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
             "user": "u", "answer": "a"}"#,
     )

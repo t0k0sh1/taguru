@@ -135,7 +135,7 @@ test("namespace prevents collision with TaguruIngester's own checkpoint", async 
     // constructing a full ingester.
     await store.save(
       "shared-source.md",
-      new TextEncoder().encode('{"fingerprint": {}, "units": {}}'),
+      new TextEncoder().encode('{"fingerprint": {}, "pieces": {}}'),
     );
 
     // The connector's own entry is untouched by the ingester writing under

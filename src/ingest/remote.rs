@@ -142,14 +142,15 @@ pub(super) struct Chunk {
 impl Chunk {
     /// What this chunk carries, for a refusal or a lost connection to
     /// name (#863): a chunk is the packer's unit, not the operator's,
-    /// so the line says which files' batches it holds — the one unit,
-    /// or the first and the last with the count between.
+    /// so the line says which records it holds — a source's whole
+    /// record set, a schema, or a group — the one record, or the first
+    /// and the last with the count between.
     pub(super) fn carried(&self) -> String {
         match self.units.as_slice() {
-            [] => "no unit".to_string(),
-            [only] => format!("1 unit: {}", only.label),
+            [] => "no record".to_string(),
+            [only] => format!("1 record: {}", only.label),
             [first, .., last] => format!(
-                "{} units, from {} through {}",
+                "{} records, from {} through {}",
                 self.units.len(),
                 first.label,
                 last.label

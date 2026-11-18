@@ -113,7 +113,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/   <span class
       association's <code>subject</code>/<code>label</code>/<code>object</code>, every alias
       spelling, and every question before the source is applied (offline) or packed
       (<code>--url</code> — nothing of a refused source is sent). A hit refuses the
-      <b>source</b>, the unit import already refuses on: it is named on stderr by path in
+      <b>source</b>, the same whole-source granularity import already refuses at: it is named on stderr by path in
       <code>schema/check</code>'s shape and by rule — <code>batches[3].passage: sensitive: email
       (paragraph 2)</code>, <code>batches[3].associations[7].object: sensitive:
       aws_access_key</code> (<code>aliases[k]</code> counts concept aliases in spelling order, then
@@ -309,7 +309,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv sources/
       server's own splitter, so it cannot drift.
     </p>
 
-    <h3>Section lines</h3>
+    <h3 id="section-lines">Section lines</h3>
     <p>
       <code>paragraph</code> / <code>section</code>: a heading marking where a named section
       <b>starts</b> within this file's passage (0-based, same split convention as questions;
@@ -570,19 +570,19 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       </li>
       <li>
         A refused request is reported by what it carried, not just by number (#863): the line
-        after the refusal names the request's one unit, or its first and last, as
+        after the refusal names the request's one record, or its first and last, as
         <code>&lt;file&gt;: context '…' source '…'</code>; the server's own <code>issues[]</code>
         follow, each re-addressed from the request-relative <code>batches[N].…</code> to that
-        unit's file, <code>context</code>, and source with the in-source remainder kept
+        record's file, <code>context</code>, and source with the in-source remainder kept
         (<code>b.jsonl: context 'a' source 'b.md': associations[1].subject: expected a Brewery,
         got Person</code>), and when the server capped its list a final line says how many more
-        it did not list. Each "never sent" tally names the first unit of its kind by file and
+        it did not list. Each "never sent" tally names the first record of its kind by file and
         source — the resume point.
       </li>
       <li>
         A lost connection reports which request landed and points at <code>--dry-run</code> to
         confirm what remains before resuming — nothing past that point is retried automatically.
-        It also names the last unit the server confirmed and what the unconfirmed request carried,
+        It also names the last record the server confirmed and what the unconfirmed request carried,
         by file and source (#863). Import's retract-then-apply contract makes any resend exact,
         so this is a "where," never a "was it safe," question.
       </li>

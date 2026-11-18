@@ -63,7 +63,7 @@ class OcrRequest:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
-class OcrRecoveredUnit:
+class OcrRecoveredText:
     """Recovered text for exactly one requested locator — the adapter's own
     twin of a connector's ``{"paragraph": N, "locator": {...}}`` line,
     minus the paragraph index a connector assigns only after splicing this
@@ -78,7 +78,7 @@ class OcrRecoveredUnit:
 class OcrResult:
     """An adapter's answer to one :class:`OcrRequest`.
 
-    ``units`` covers whatever the adapter could recover — a subset of the
+    ``texts`` covers whatever the adapter could recover — a subset of the
     requested locators is expected and normal (some pages may still have no
     usable text even after OCR); the calling connector decides what to do
     with a locator it asked for but did not get back. ``diagnostics`` lets
@@ -88,7 +88,7 @@ class OcrResult:
     :meth:`~.protocol.Connector.read` itself takes.
     """
 
-    units: tuple[OcrRecoveredUnit, ...] = ()
+    texts: tuple[OcrRecoveredText, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
 
 

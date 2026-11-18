@@ -132,18 +132,18 @@ function buildIngester(
 
 export { buildIngester };
 
-function unitCount(store: RecordingCheckpointStore, source: string): number {
+function pieceCount(store: RecordingCheckpointStore, source: string): number {
   const data = store.state.get(source);
   if (data === undefined) {
     return 0;
   }
-  return Object.keys(JSON.parse(new TextDecoder().decode(data)).units as Record<string, unknown>)
+  return Object.keys(JSON.parse(new TextDecoder().decode(data)).pieces as Record<string, unknown>)
     .length;
 }
 
 /**
  * Runs a 2-chunk document where chunk 0 succeeds and chunk 1 never produces
- * valid JSON, leaving exactly one checkpointed unit behind. Returns the
+ * valid JSON, leaving exactly one checkpointed piece behind. Returns the
  * source id.
  */
 async function seedFailedRun(
@@ -172,7 +172,7 @@ describe("checkpoint reuse", () => {
     const server = new FakeServer();
     const store = new RecordingCheckpointStore();
     const source = await seedFailedRun(server, store);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
     expect(server.imported).toEqual([]);
 
     const { ingester: ingester2, llm: llm2 } = buildIngester(server, [CHUNK2_CORRECTED_ANSWER], {
@@ -191,7 +191,7 @@ describe("checkpoint reuse", () => {
     );
     expect(humanContents.some((c) => String(c).includes("chunk 2 of 2"))).toBe(true);
     expect(server.imported.length).toBe(1);
-    expect(unitCount(store, source)).toBe(0); // cleared once the batch landed
+    expect(pieceCount(store, source)).toBe(0); // cleared once the batch landed
   });
 
   it("no checkpoint store means no reuse and unchanged behavior", async () => {
@@ -219,7 +219,7 @@ describe("checkpoint reuse", () => {
     const server = new FakeServer();
     const store = new RecordingCheckpointStore();
     const source = await seedFailedRun(server, store);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
 
     const { ingester: ingester2, llm: llm2 } = buildIngester(
       server,
@@ -240,7 +240,7 @@ describe("checkpoint reuse", () => {
     const server = new FakeServer();
     const store = new RecordingCheckpointStore();
     const source = await seedFailedRun(server, store);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
 
     server.schemaDocument = {
       type: "schema",
@@ -281,7 +281,7 @@ describe("checkpoint reuse", () => {
     await expect(ingester.ingestText(DOC_TEXT, { source })).rejects.toThrow(
       "simulated process kill",
     );
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
     expect(server.imported).toEqual([]);
 
     const { ingester: ingester2, llm: llm2 } = buildIngester(server, [CHUNK2_CORRECTED_ANSWER], {
@@ -320,7 +320,7 @@ describe("cooperative stop", () => {
     expect(outcome.ndjson).toBeNull();
     expect(llm.seenPrompts.length).toBe(1);
     expect(server.imported).toEqual([]);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
 
     const { ingester: ingester2, llm: llm2 } = buildIngester(server, [CHUNK2_CORRECTED_ANSWER], {
       checkpoint_store: store,
@@ -331,7 +331,7 @@ describe("cooperative stop", () => {
     expect(outcome2.chunks_reused).toBe(1);
     expect(llm2.seenPrompts.length).toBe(1);
     expect(server.imported.length).toBe(1);
-    expect(unitCount(store, source)).toBe(0);
+    expect(pieceCount(store, source)).toBe(0);
   });
 
   it("an aborted AbortSignal stops between chunks", async () => {
@@ -358,7 +358,7 @@ describe("cooperative stop", () => {
     expect(outcome.ok).toBe(false);
     expect(llm.seenPrompts.length).toBe(1);
     expect(server.imported).toEqual([]);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
   });
 
   it("stop before the first chunk makes no model calls", async () => {
@@ -445,7 +445,7 @@ it("dry run records checkpoints but never deletes them", async () => {
   const outcome = await ingester.ingestText(DOC_TEXT, { source, dry_run: true });
   expect(outcome.ok).toBe(true);
   expect(server.imported).toEqual([]);
-  expect(unitCount(store, source)).toBe(2);
+  expect(pieceCount(store, source)).toBe(2);
 
   // A second dry run reuses both chunks — real model work already happened
   // once, and dry-run recording is what makes that not wasted.
@@ -458,7 +458,7 @@ it("dry run records checkpoints but never deletes them", async () => {
   expect(outcome2.chunks_reused).toBe(2);
   expect(llm2.seenPrompts).toEqual([]);
   expect(server.imported).toEqual([]);
-  expect(unitCount(store, source)).toBe(2); // still not deleted
+  expect(pieceCount(store, source)).toBe(2); // still not deleted
 
   // A real (non-dry) run also reuses both chunks, then finally clears the
   // checkpoint once the batch actually lands.
@@ -471,7 +471,7 @@ it("dry run records checkpoints but never deletes them", async () => {
   expect(outcome3.chunks_reused).toBe(2);
   expect(llm3.seenPrompts).toEqual([]);
   expect(server.imported.length).toBe(1);
-  expect(unitCount(store, source)).toBe(0);
+  expect(pieceCount(store, source)).toBe(0);
 });
 
 // -- fingerprint gate and on-disk degradation -----------------------------------
@@ -497,7 +497,7 @@ describe("fingerprint gate", () => {
       const server = new FakeServer();
       const store = new RecordingCheckpointStore();
       const source = await seedFailedRun(server, store);
-      expect(unitCount(store, source)).toBe(1);
+      expect(pieceCount(store, source)).toBe(1);
 
       const { ingester: ingester2, llm: llm2 } = buildIngester(
         server,
@@ -520,7 +520,7 @@ describe("fingerprint gate", () => {
     const server = new FakeServer();
     const store = new RecordingCheckpointStore();
     const source = await seedFailedRun(server, store);
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
 
     const llm = new ToolCallingFakeChatModel({
       toolCallArgs: [JSON.parse(CHUNK1_ANSWER), JSON.parse(CHUNK2_CORRECTED_ANSWER)],
@@ -546,7 +546,7 @@ describe("fingerprint gate", () => {
 // -- semantics interlocks -------------------------------------------------------
 
 it("a reused chunk still participates in cross-chunk correction", async () => {
-  // The money test: a checkpointed unit's STORED user/answer, not a
+  // The money test: a checkpointed piece's STORED user/answer, not a
   // recomputed one, is what Stage 2 replays — proving ChunkRecord
   // reconstruction from a checkpoint is faithful enough for cross-chunk
   // correction to work exactly like it does on a freshly-extracted chunk.
@@ -556,7 +556,7 @@ it("a reused chunk still participates in cross-chunk correction", async () => {
   // Both chunks pass Stage 1, but chunk 1's alias shadows chunk 0's object
   // — Stage 2 flags chunk 1, and even its ONE corrective turn still
   // shadows, so the bounded re-check fails the whole document. Both
-  // Stage-1-valid units are still checkpointed: checkpointing happens in
+  // Stage-1-valid pieces are still checkpointed: checkpointing happens in
   // the Stage 1 loop, never touched by Stage 2's outcome.
   const { ingester: ingester1 } = buildIngester(
     server,
@@ -564,7 +564,7 @@ it("a reused chunk still participates in cross-chunk correction", async () => {
     { checkpoint_store: store, chunk_bytes: CROSS_CHUNK_BYTES },
   );
   await expect(ingester1.ingestText(DOC_TEXT, { source })).rejects.toThrow(/cross-chunk/);
-  expect(unitCount(store, source)).toBe(2);
+  expect(pieceCount(store, source)).toBe(2);
 
   // Rerun: BOTH chunks are satisfied from checkpoint (zero Stage 1 calls),
   // and Stage 2 still correctly rebuilds chunk 1's conversation from its
@@ -590,7 +590,7 @@ it("a reused chunk still participates in cross-chunk correction", async () => {
   expect(aiContents.some((c) => String(c).includes(CHUNK2_SHADOWING_ANSWER))).toBe(true);
 
   expect(server.imported.length).toBe(1);
-  expect(unitCount(store, source)).toBe(0);
+  expect(pieceCount(store, source)).toBe(0);
 });
 
 describe("checkpoints survive terminal failures", () => {
@@ -609,7 +609,7 @@ describe("checkpoints survive terminal failures", () => {
     await expect(ingester.ingestText(DOC_TEXT, { source })).rejects.toThrow(
       /policy refusal is terminal/,
     );
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
   });
 
   it("survives an empty terminal failure", async () => {
@@ -621,7 +621,7 @@ describe("checkpoints survive terminal failures", () => {
       checkpoint_store: store,
     });
     await expect(ingester.ingestText(DOC_TEXT, { source })).rejects.toThrow();
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
   });
 
   it("survives a Stage 2 residual issue", async () => {
@@ -634,7 +634,7 @@ describe("checkpoints survive terminal failures", () => {
       { chunk_bytes: CROSS_CHUNK_BYTES, checkpoint_store: store },
     );
     await expect(ingester.ingestText(DOC_TEXT, { source })).rejects.toThrow(/cross-chunk/);
-    expect(unitCount(store, source)).toBe(2);
+    expect(pieceCount(store, source)).toBe(2);
   });
 
   it("survives an import failure", async () => {
@@ -647,7 +647,7 @@ describe("checkpoints survive terminal failures", () => {
       checkpoint_store: store,
     });
     await expect(ingester.ingestText(DOC_TEXT, { source })).rejects.toThrow();
-    expect(unitCount(store, source)).toBe(2);
+    expect(pieceCount(store, source)).toBe(2);
     expect(server.imported).toEqual([]);
     expect(store.log).not.toContainEqual(["delete", source]);
   });
@@ -677,7 +677,7 @@ it("checkpoint deletion happens before embeddings refresh and a warning does not
   expect(store.state.size).toBe(0);
 });
 
-it("a checkpoint save failure warns but the unit still counts this run", async () => {
+it("a checkpoint save failure warns but the piece still counts this run", async () => {
   const server = new FakeServer();
   const store = new FailingSaveStore();
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -764,7 +764,7 @@ describe("model identity fail-fast", () => {
       checkpoint_store: store,
     }); // must not raise — model identity derived from llm.model
     await expect(ingester1.ingestText(DOC_TEXT, { source })).rejects.toThrow();
-    expect(unitCount(store, source)).toBe(1);
+    expect(pieceCount(store, source)).toBe(1);
 
     const llm2 = new NamedFakeChatModel({ responses: [new AIMessage(CHUNK2_CORRECTED_ANSWER)] });
     const ingester2 = new TaguruIngester({
@@ -838,10 +838,10 @@ it("a corrupt checkpoint file on disk silently degrades to empty", async () => {
     // unreadable file.
     expect(llm.seenPrompts.length).toBe(3);
 
-    // The file now holds valid, parseable state with the one unit this run
+    // The file now holds valid, parseable state with the one piece this run
     // actually completed.
     const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    expect(Object.keys(parsed.units).length).toBe(1);
+    expect(Object.keys(parsed.pieces).length).toBe(1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

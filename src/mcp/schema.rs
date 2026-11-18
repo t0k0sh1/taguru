@@ -776,12 +776,12 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "audit_consolidation",
-            "Consolidation candidates (ADR 0012), sections chosen by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
+            "Consolidation candidates (ADR 0012), one result per check named by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
             object_schema(
                 json!({
                     "context_id": context,
-                    "checks": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each section is a full-graph pass" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "per-section candidate ceiling (default 100, capped at 1000); totals stay exact" },
+                    "checks": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each check is a full-graph pass" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "per-check candidate ceiling (default 100, capped at 1000); totals stay exact" },
                     "evidence_cap": { "type": "integer", "minimum": 0, "description": "per-list merge evidence ceiling (default 20)" },
                     "dice_floor": { "type": "number", "description": "merge: lexical floor (default 0.6)" },
                     "cosine_floor": { "type": "number", "description": "merge: semantic floor (default 0.6)" },
@@ -841,7 +841,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "audit_schema",
-            "ADR 0009 schema audit: judges every live association against the installed schema document, surfacing what a `strict` flip would refuse without waiting for one — the pre-existing violations `strict` itself can never show (it only judges a write as it happens). Four candidates-not-verdicts sections in one call: violations (domain/range mismatches, paginated, worst-first), untyped_concepts (asserted no schema:type of their own), undeclared_types (asserted type names absent from `types`, always reported), unknown_labels (relation labels absent from `relations`, only when closed_labels is set), and reserved_alias_conflicts (a persisted label alias resolving to the reserved schema:type label). Never auto-applies a fix. 404 if the `context` has no installed schema.",
+            "ADR 0009 schema audit: judges every live association against the installed schema document, surfacing what a `strict` flip would refuse without waiting for one — the pre-existing violations `strict` itself can never show (it only judges a write as it happens). Five candidates-not-verdicts lists in one call: violations (domain/range mismatches, paginated, worst-first), untyped_concepts (asserted no schema:type of their own), undeclared_types (asserted type names absent from `types`, always reported), unknown_labels (relation labels absent from `relations`, only when closed_labels is set), and reserved_alias_conflicts (a persisted label alias resolving to the reserved schema:type label). Never auto-applies a fix. 404 if the `context` has no installed schema.",
             object_schema(
                 json!({
                     "context_id": context,

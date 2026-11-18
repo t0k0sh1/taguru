@@ -47,7 +47,7 @@ re-import) and the operator applies it through the ordinary write
 APIs. --dry-run reports what would be judged without calling the LLM
 or writing anything.
 
---checks LIST     comma-separated sections (default: merge,contradiction,staleness)
+--checks LIST     comma-separated checks (default: merge,contradiction,staleness)
 --into ID         the judgment context's id (default: derived from --context's id)
 
 The LLM rides the extract provider: TAGURU_EXTRACT_URL,

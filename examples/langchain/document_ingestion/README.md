@@ -32,7 +32,7 @@ real server is spawned; no `OPENAI_API_KEY` → a deterministic fake model.)
 
 ## Why source ids matter
 
-The source id is the idempotency unit: re-running an ingest replaces that
+The source id is what retract-then-apply replaces: re-running an ingest replaces that
 document's contribution. That is why `TaguruIngester` refuses documents
 without a `source` in metadata instead of hashing content — a hash would
 mint a new source on every edit, orphaning the old contribution forever.

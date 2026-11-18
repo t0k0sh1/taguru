@@ -1632,7 +1632,7 @@ class AsyncContext:
     ) -> dict[str, Any]:
         """Merge / contradiction / staleness candidates (ADR 0012).
 
-        Sections chosen by ``checks`` (required, non-empty); every
+        ``checks`` (required, non-empty) selects which checks run; every
         candidate carries a ``fingerprint`` over its own evidence —
         judge once per fingerprint, reuse the judgment until it moves.
         Candidates, never verdicts: apply through ordinary writes.
