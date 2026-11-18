@@ -5,11 +5,11 @@
   "response": {
     "tools": [
       {
-        "description": "Consolidation candidates (ADR 0012), sections chosen by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
+        "description": "Consolidation candidates (ADR 0012), one result per check named by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
         "inputSchema": {
           "properties": {
             "checks": {
-              "description": "required, non-empty: each section is a full-graph pass",
+              "description": "required, non-empty: each check is a full-graph pass",
               "items": {
                 "enum": [
                   "merge",
@@ -44,7 +44,7 @@
               "type": "integer"
             },
             "limit": {
-              "description": "per-section candidate ceiling (default 100, capped at 1000); totals stay exact",
+              "description": "per-check candidate ceiling (default 100, capped at 1000); totals stay exact",
               "minimum": 0,
               "type": "integer"
             }

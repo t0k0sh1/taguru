@@ -166,7 +166,7 @@ use chat_client::{
 };
 #[cfg(test)]
 use checkpoint::stale_checkpoint_notice;
-use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
+use checkpoint::{CheckpointFingerprint, CheckpointPiece, CheckpointStore};
 use chunk_briefing::{
     BLOCK_PREAMBLE_OPENING, BriefingBlock, CAST_PREFIX, CHUNK_BRIEFING_MODES, ChunkBriefingMode,
     KNOWN_PREFIX, Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkBriefing, TraceOverview,

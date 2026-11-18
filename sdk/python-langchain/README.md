@@ -259,7 +259,7 @@ outcome = ingest_connector_document(ingester, document)
 No OCR engine ships in this package, or in any connector (ADR 0007 §10).
 `OcrAdapter` (issue #352) is the external boundary a connector calls out to
 when one is configured — given the raw document bytes and the locators
-naming which pages/units are unusable, an adapter returns whatever text it
+naming which pages are unusable, an adapter returns whatever text it
 could recover for them, each still tagged with the same locator it was
 asked about; `PdfConnector` is the one connector wired to call one today
 (`ocr_adapter=`), offering it exactly the pages its own
@@ -269,18 +269,18 @@ a page — leaves that page exactly `ocr_required`, as if no adapter had
 been configured at all:
 
 ```python
-from taguru_langchain.ingest_connectors import OcrRecoveredUnit, OcrRequest, OcrResult
+from taguru_langchain.ingest_connectors import OcrRecoveredText, OcrRequest, OcrResult
 
 class MyOcrAdapter:
     name = "my-ocr-engine"
     version = "1.0"
 
     def recognize(self, request: OcrRequest) -> OcrResult:
-        units = tuple(
-            OcrRecoveredUnit(locator=locator, text=my_engine.recognize(request.content, locator))
+        texts = tuple(
+            OcrRecoveredText(locator=locator, text=my_engine.recognize(request.content, locator))
             for locator in request.locators
         )
-        return OcrResult(units=units)
+        return OcrResult(texts=texts)
 
 document = PdfConnector(ocr_adapter=MyOcrAdapter()).read("docs/scanned.pdf")
 ```

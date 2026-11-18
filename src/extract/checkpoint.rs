@@ -1,11 +1,11 @@
 //! Per-chunk checkpointing: resuming an interrupted segment without
-//! re-asking the model for units already answered.
+//! re-asking the model for pieces already answered.
 
 use super::*;
 
 /// The same compatibility inputs [`ManifestEntry`]/[`Manifest::matches`]
 /// already check, minus `output` — the per-segment gate deciding
-/// whether a checkpoint file's cached units are even consulted. Any
+/// whether a checkpoint file's cached pieces are even consulted. Any
 /// field mismatch (content edited, model/prompt/`--questions`/
 /// `--fact-budget`/`--structured-output`/`--max-output-tokens`/`--lossy`
 /// changed) treats the whole file as absent, so a settings change can
@@ -40,14 +40,14 @@ pub(super) struct CheckpointFingerprint {
     pub(super) runaway_ratio: String,
     /// `--chunk-bytes` as [`chunk_bytes_manifest_value`] encodes it
     /// (`""` = default) — ADR 0020. A different cap re-cuts every
-    /// chunk, and each cached unit is keyed by its chunk's content
+    /// chunk, and each cached piece is keyed by its own content
     /// hash anyway; the field makes the mismatch explicit rather than
     /// relying on every hash missing.
     #[serde(default)]
     pub(super) chunk_bytes: String,
     /// `--chunk-briefing` as [`ChunkBriefingMode::manifest_value`]
     /// encodes it (`""` = off) — ADR 0033. Same `default` reasoning as
-    /// `chunk_bytes`: a unit's prompt changes with the mode, so a
+    /// `chunk_bytes`: a piece's prompt changes with the mode, so a
     /// checkpoint written under another mode is not consulted.
     #[serde(default)]
     pub(super) chunk_briefing: String,
@@ -76,36 +76,36 @@ pub(super) struct CheckpointFingerprint {
     pub(super) vocabulary_digest: String,
 }
 
-/// One durable unit of extraction work: a top-level chunk, or (issue
+/// One durable piece of extraction work: a top-level chunk, or (issue
 /// #179's amendment to ADR 0001 §7's split rung) one of the smaller
 /// sub-pieces a length-limited chunk was split into. Keyed by the
-/// unit's OWN content hash rather than `chunk_index` alone, so a
+/// piece's OWN content hash rather than `chunk_index` alone, so a
 /// resumed run that splits differently than a prior one never
 /// misattributes a sub-piece's output to the wrong text — see
 /// `extract_piece`'s reuse guard.
 #[derive(Clone, serde::Serialize, Deserialize)]
-pub(super) struct CheckpointUnit {
+pub(super) struct CheckpointPiece {
     /// The ORIGINAL chunk's coordinates, kept only for the same "chunk
     /// i/n" reporting `ChunkOutput::chunk_index` already carries.
     pub(super) chunk_index: usize,
-    /// ADR 0023 §3.5: the completion that produced this unit, so a
-    /// reused unit still names its origin. `default` because a
+    /// ADR 0023 §3.5: the completion that produced this piece, so a
+    /// reused piece still names its origin. `default` because a
     /// pre-0023 checkpoint has none to name — the trace then says
     /// `null`, never a guess.
     #[serde(default)]
     pub(super) attempt: Option<AttemptRef>,
     pub(super) output: ModelOutput,
     /// The exact user turn and the model's own final answer text for
-    /// this unit — needed so a reused unit can still participate in
+    /// this piece — needed so a reused piece can still participate in
     /// Stage 2 cross-chunk correction exactly like a freshly-extracted
     /// one (`correct_cross_output_issues` rebuilds a chunk's own
     /// conversation from these).
     pub(super) user: String,
     pub(super) answer: String,
-    /// ADR 0013's mechanical-removal records for this unit, so a
-    /// resumed segment still reports every removal its reused units
+    /// ADR 0013's mechanical-removal records for this piece, so a
+    /// resumed segment still reports every removal its reused pieces
     /// carried. `default` because a pre-0013 checkpoint file simply
-    /// had no removals to record — its units validated fully.
+    /// had no removals to record — its pieces validated fully.
     #[serde(default)]
     pub(super) removed: Vec<Removal>,
     /// ADR 0024 §3.6: lossy mode's parse-time drops; `default` for
@@ -115,9 +115,9 @@ pub(super) struct CheckpointUnit {
 }
 
 /// One segment's durable checkpoint state: the settings it was
-/// extracted under, and every unit completed so far, keyed by content
+/// extracted under, and every piece completed so far, keyed by content
 /// hash. Persisted as one small JSON file, rewritten atomically
-/// (`storage::write_atomic`) after every new unit lands — small enough
+/// (`storage::write_atomic`) after every new piece lands — small enough
 /// that a read-modify-write-whole-file is simpler and just as durable
 /// as an append-only log, the same shape `Manifest` itself already
 /// uses for a much larger (per-run, not per-segment) equivalent.
@@ -125,7 +125,7 @@ pub(super) struct CheckpointUnit {
 pub(super) struct SegmentCheckpoints {
     pub(super) fingerprint: CheckpointFingerprint,
     #[serde(default)]
-    pub(super) units: BTreeMap<String, CheckpointUnit>,
+    pub(super) pieces: BTreeMap<String, CheckpointPiece>,
     /// ADR 0033 §3.5: the overview pass's answer per chunk (by
     /// `chunk_sha256`), so a resumed segment reuses the pass without
     /// a call — an EMPTY answer for a chunk whose ask failed (ADR 0034
@@ -133,8 +133,8 @@ pub(super) struct SegmentCheckpoints {
     /// below `--chunk-briefing overview`.
     #[serde(default)]
     pub(super) overview: BTreeMap<String, OverviewAnswer>,
-    /// The digest of the merged overview the cached `units` were
-    /// extracted under: every block depends on it, so a unit is only
+    /// The digest of the merged overview the cached `pieces` were
+    /// extracted under: every block depends on it, so a piece is only
     /// reused when the overview it saw is the one in force
     /// (`CheckpointStore::bind_overview`). `""` below `overview`.
     #[serde(default)]
@@ -142,14 +142,14 @@ pub(super) struct SegmentCheckpoints {
 }
 
 /// ADR 0037 §3.4: the line for a checkpoint whose fingerprint is not
-/// this run's — only when it holds units, since discarding nothing
+/// this run's — only when it holds pieces, since discarding nothing
 /// costs nothing (an overview-only or empty file changes settings
 /// silently, as a first run would).
-pub(super) fn stale_checkpoint_notice(path: &Path, units: usize) -> Option<String> {
-    (units > 0).then(|| {
+pub(super) fn stale_checkpoint_notice(path: &Path, pieces: usize) -> Option<String> {
+    (pieces > 0).then(|| {
         format!(
             "taguru: extract: checkpoint at {} was written under different settings — \
-             {units} unit(s) re-extract",
+             {pieces} piece(s) re-extract",
             path.display()
         )
     })
@@ -164,14 +164,14 @@ impl SegmentCheckpoints {
         // ADR 0037 §3.4 (#850): each of the three ways to "nothing
         // cached" is told apart on stderr where it costs something —
         // a damaged file and a settings change both re-bill every
-        // unit of the segment, and were indistinguishable from a
+        // piece of the segment, and were indistinguishable from a
         // first run. A missing file IS the first run, and stays quiet.
         let loaded: Option<Self> = match fs::read(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 eprintln!(
                     "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
-                     every unit of this segment re-extracts",
+                     every piece of this segment re-extracts",
                     path.display()
                 );
                 None
@@ -181,7 +181,7 @@ impl SegmentCheckpoints {
                 Err(error) => {
                     eprintln!(
                         "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
-                         every unit of this segment re-extracts",
+                         every piece of this segment re-extracts",
                         path.display()
                     );
                     None
@@ -191,7 +191,7 @@ impl SegmentCheckpoints {
         match loaded {
             Some(checkpoints) if checkpoints.fingerprint == *fingerprint => checkpoints,
             Some(stale) => {
-                if let Some(line) = stale_checkpoint_notice(path, stale.units.len()) {
+                if let Some(line) = stale_checkpoint_notice(path, stale.pieces.len()) {
                     eprintln!("{line}");
                 }
                 Self::fresh(fingerprint)
@@ -203,7 +203,7 @@ impl SegmentCheckpoints {
     fn fresh(fingerprint: &CheckpointFingerprint) -> Self {
         Self {
             fingerprint: fingerprint.clone(),
-            units: BTreeMap::new(),
+            pieces: BTreeMap::new(),
             overview: BTreeMap::new(),
             overview_digest: String::new(),
         }
@@ -241,47 +241,47 @@ impl CheckpointStore {
     /// `--force`'s "start this segment over" extended one level
     /// deeper: an empty store regardless of what a prior run's file
     /// holds, so a forced re-extraction never silently reuses cached
-    /// units it was explicitly told to redo.
+    /// pieces it was explicitly told to redo.
     pub(super) fn empty(path: PathBuf, fingerprint: CheckpointFingerprint) -> Self {
         Self {
             path,
             state: Mutex::new(SegmentCheckpoints {
                 fingerprint,
-                units: BTreeMap::new(),
+                pieces: BTreeMap::new(),
                 overview: BTreeMap::new(),
                 overview_digest: String::new(),
             }),
         }
     }
 
-    /// Look up a unit by its own content hash — the answer to issue
+    /// Look up a piece by its own content hash — the answer to issue
     /// #179's amendment: a split sub-piece's hash differs from its
     /// parent's, so this is a correct cache key regardless of how many
     /// times (or how) a piece has been split. Returns an owned clone so
     /// the lock is never held across the caller's own work.
-    pub(super) fn lookup(&self, unit_hash: &str) -> Option<CheckpointUnit> {
+    pub(super) fn lookup(&self, piece_id: &str) -> Option<CheckpointPiece> {
         let state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.units.get(unit_hash).cloned()
+        state.pieces.get(piece_id).cloned()
     }
 
-    /// Records one freshly-extracted unit and durably persists the
+    /// Records one freshly-extracted piece and durably persists the
     /// whole (small) file before returning, so a kill immediately after
-    /// this call still finds the unit on the next run. A save failure
-    /// only warns — the unit still counts for THIS run; a resume that
+    /// this call still finds the piece on the next run. A save failure
+    /// only warns — the piece still counts for THIS run; a resume that
     /// hits the same failure again would simply re-extract it, the same
     /// "the next run re-extracts" posture a failed manifest save takes.
-    pub(super) fn record(&self, source: &str, unit_hash: String, unit: CheckpointUnit) {
+    pub(super) fn record(&self, source: &str, piece_id: String, piece: CheckpointPiece) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.units.insert(unit_hash, unit);
+        state.pieces.insert(piece_id, piece);
         if let Err(error) = state.save(&self.path) {
             eprintln!(
-                "taguru: extract: {source}: saving checkpoint {}: {error} — the unit still \
+                "taguru: extract: {source}: saving checkpoint {}: {error} — the piece still \
                  counts this run; a resume may repeat it",
                 self.path.display()
             );
@@ -319,8 +319,8 @@ impl CheckpointStore {
         }
     }
 
-    /// Binds the cached extraction units to the overview in force:
-    /// units extracted under a different overview digest saw
+    /// Binds the cached extraction pieces to the overview in force:
+    /// pieces extracted under a different overview digest saw
     /// different blocks and are discarded (never reused against a
     /// prompt they did not answer). Returns how many were discarded.
     pub(super) fn bind_overview(&self, source: &str, digest: &str) -> usize {
@@ -331,8 +331,8 @@ impl CheckpointStore {
         if state.overview_digest == digest {
             return 0;
         }
-        let discarded = state.units.len();
-        state.units.clear();
+        let discarded = state.pieces.len();
+        state.pieces.clear();
         state.overview_digest = digest.to_string();
         if let Err(error) = state.save(&self.path) {
             eprintln!(
@@ -343,13 +343,13 @@ impl CheckpointStore {
         discarded
     }
 
-    /// How many extracted units the store holds — what a failure
+    /// How many extracted pieces the store holds — what a failure
     /// line tells the operator a plain rerun resumes from (#763).
-    pub(super) fn unit_count(&self) -> usize {
+    pub(super) fn piece_count(&self) -> usize {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .units
+            .pieces
             .len()
     }
 

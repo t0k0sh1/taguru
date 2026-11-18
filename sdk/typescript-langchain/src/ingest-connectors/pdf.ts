@@ -317,18 +317,18 @@ async function recoverWithOcr(
 
   const requested = new Set(emptyPages);
   const recovered = new Map<number, string>();
-  for (const unit of result.units) {
-    if (unit.locator.kind !== "page") {
+  for (const recoveredText of result.texts) {
+    if (recoveredText.locator.kind !== "page") {
       continue;
     }
-    const pageNumber = parseIntStrict(unit.locator.value);
+    const pageNumber = parseIntStrict(recoveredText.locator.value);
     if (pageNumber === null || !requested.has(pageNumber) || recovered.has(pageNumber)) {
       continue;
     }
-    if (pageCharCount(unit.text) < minCharsPerPage) {
+    if (pageCharCount(recoveredText.text) < minCharsPerPage) {
       continue;
     }
-    recovered.set(pageNumber, unit.text);
+    recovered.set(pageNumber, recoveredText.text);
   }
 
   if (recovered.size === 0) {

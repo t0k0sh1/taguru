@@ -129,7 +129,7 @@ def test_namespace_prevents_collision_with_taguru_ingesters_own_checkpoint(
     # TaguruIngester's own checkpoint machinery would call store.save
     # directly with the bare source id — simulate that here without
     # constructing a full ingester.
-    store.save("shared-source.md", b'{"fingerprint": {}, "units": {}}')
+    store.save("shared-source.md", b'{"fingerprint": {}}\n')
 
     # The connector's own entry is untouched by the ingester writing under
     # the bare (unprefixed) key.

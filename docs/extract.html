@@ -88,7 +88,7 @@
 
   <section id="terms">
     <h2>Terms: document, segment, chunk, piece, paragraph</h2>
-    <p class="section-sub">The five units this page talks about, largest first. Each one contains the next — except a paragraph longer than the chunk cap, whose slices can land in different chunks and pieces (below).</p>
+    <p class="section-sub">The five levels this page talks about, largest first. Each one contains the next — except a paragraph longer than the chunk cap, whose slices can land in different chunks and pieces (below).</p>
     <div class="tbl">
       <table>
         <thead><tr><th>Term</th><th>What it is</th><th>Who decides it</th><th>Where you see it</th></tr></thead>
@@ -115,7 +115,7 @@
             <td>piece</td>
             <td>the text actually sent to the model as one conversation. An unsplit chunk is one piece, with the same text and the same id (the text's sha256). When the <a href="#structured-output">escalation ladder</a> splits a length-limited or timed-out piece, each half is a new piece</td>
             <td><code>extract</code>, at run time</td>
-            <td><code>piece &lt;id&gt;</code> in failure lines; <code>inspect --piece ID</code>; <code>piece_id</code> in trace and attempts records; a <a href="#checkpoints">checkpoint</a> unit is one piece's output</td>
+            <td><code>piece &lt;id&gt;</code> in failure lines; <code>inspect --piece ID</code>; <code>piece_id</code> in trace and attempts records; a <a href="#checkpoints">checkpoint</a> holds one entry per piece's output</td>
           </tr>
           <tr>
             <td>paragraph</td>
@@ -140,6 +140,14 @@
       the one <code>context</code> that <code>--context ID</code> names. A failure stays inside
       its segment: the run counts it, writes nothing for it, and moves on to the next segment
       file — the other segments of the same run are untouched.
+    </p>
+    <p>
+      Two more words have one meaning each on this page. A <b>unit</b> is a structural unit —
+      a heading, a statute article, a speaker block — that <a href="#chunk-briefing">chunk
+      briefing</a> detects in a segment. A <b>section</b> is the heading a source file's
+      <code>{"paragraph", "section"}</code> line attaches to a paragraph and every paragraph after
+      it up to the next such line (<a href="import.html#section-lines">import</a>); it is what a
+      citation reports as <code>section</code>.
     </p>
   </section>
 
@@ -964,14 +972,14 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       (cut off even at ADR 0019's one escalated resend, refused, empty, or not JSON) is reported
       once on stderr and that chunk contributes no synopsis or cast, never a failed segment —
       and is recorded in the checkpoint as an empty answer, so a resumed segment neither re-asks
-      it nor (a different answer changing the overview) re-binds its extraction units;
+      it nor (a different answer changing the overview) re-binds its extracted pieces;
       <code>--force</code> starts over (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0034-overview-per-chunk.md">ADR
       0034</a>, which also fixes the unit of one ask as the chunk, not the structural unit).
       Each completion is an attempts-log record with <code>stage: "overview"</code>, so its cost
       is priced apart; the trace carries one <code>overview</code> record per answered chunk. The
       answers are cached in the segment's checkpoint by chunk hash and reused on a resume; the
-      extraction units are bound to the merged overview's digest, so a changed overview discards
+      extracted pieces are bound to the merged overview's digest, so a changed overview discards
       them (they would have been extracted against a different block) and says so. Under the
       <code>json_schema</code> rung the pass sends <code>json_object</code> — the extraction
       schema is the wrong shape for this answer.
@@ -1095,9 +1103,9 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       the last one lands, an interruption (Ctrl+C, a preemptible instance reclaimed, a later
       segment's panic) threw away every chunk already extracted for it. <code>--out</code> also
       carries a <code>.extract-checkpoints/</code> directory, one JSON file per segment, holding
-      every chunk unit successfully extracted so far. A rerun over the same <code>--out</code>
+      every piece successfully extracted so far. A rerun over the same <code>--out</code>
       picks up mid-segment: chunks already checkpointed are never re-sent to the model. Each
-      checkpointed unit is already, in effect, one piece's <a href="#pipeline"><code>prompt</code></a>,
+      checkpointed piece is already, in effect, one piece's <a href="#pipeline"><code>prompt</code></a>,
       <a href="#pipeline"><code>call</code></a>, <a href="#pipeline"><code>parse</code></a>, and
       <a href="#pipeline"><code>validate</code></a> output, keyed by the piece's own text hash —
       an unnamed precedent for the per-step storage <a
@@ -1109,7 +1117,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       holder; <code>--dry-run</code> takes none.
     </p>
     <p>
-      Each checkpointed unit is keyed by the <b>hash of its own text</b>, not by chunk index. This
+      Each checkpointed piece is keyed by the <b>hash of its own text</b>, not by chunk index. This
       matters because the <a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0001-structured-extraction-reliability.md">ADR
       0001 §7</a> length ladder can split an oversized chunk into smaller sub-pieces on its own
@@ -1117,10 +1125,10 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       prior run's. Keying on content hash instead of position means a completed sub-piece is
       recognized as done regardless of how either run divided the chunk around it, and a
       not-yet-completed sub-piece is correctly treated as new work. That same hash is the
-      unit's <code>piece_id</code> in the <a href="#trace">trace</a>, and since 0.9.5 each
-      unit also records the completion that produced it (<code>attempt</code>:
+      piece's <code>piece_id</code> in the <a href="#trace">trace</a>, and since 0.9.5 each
+      checkpointed piece also records the completion that produced it (<code>attempt</code>:
       <code>{run_id, attempt_seq}</code>), so a resumed segment's trace still names the
-      original run for every reused unit.
+      original run for every reused piece.
     </p>
     <p>
       A checkpoint file also carries the same compute-input fingerprint the manifest checks
@@ -1132,7 +1140,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       than bypassing the manifest skip. A segment that finishes successfully has its
       checkpoint file deleted; a segment that ultimately fails (Stage 2 correction, merge,
       self-validation) keeps it — the chunks it did complete are still good work worth keeping for
-      the next attempt, and the failure line says how many units are checkpointed and that a
+      the next attempt, and the failure line says how many pieces are checkpointed and that a
       rerun <i>without</i> <code>--force</code> resumes from them, re-asking only what failed.
       There is deliberately no "write what succeeded" mode: a source file is the source's
       complete, valid truth or nothing (ADR 0001 §8), and the checkpoints already make the
@@ -1163,7 +1171,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       finished segments, checkpoints skip finished chunks within the segment that was
       in flight, and nothing already paid for is ever paid for twice. Composing this with
       <code>taguru import</code>'s own atomicity into a full run/interrupt/resume operating
-      picture — bounded windows, work-unit enumeration, failure/re-submission — is the
+      picture — bounded windows, work-item enumeration, failure/re-submission — is the
       <a href="long-running.html">long-running ingestion guide</a>.
     </p>
   </section>
@@ -1319,12 +1327,12 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       loop kept —
       a chunk, or each sub-piece the split rung made of one, so several pieces can share a
       <code>chunk_index</code> — with <code>piece_id</code> (sha256 of the piece text as sent;
-      the checkpoint unit's key, so an unsplit chunk's <code>piece_id</code> equals its
+      the checkpoint's key for the piece, so an unsplit chunk's <code>piece_id</code> equals its
       <code>chunk_sha256</code>), <code>chunk_sha256</code>, <code>piece_bytes</code>, its own
       paragraph range, <code>reused</code> (the answer came from a checkpoint rather than a
       completion of this run), and <code>attempt</code> — <code>{run_id, attempt_seq}</code> of
       the completion whose answer this piece's output <i>is</i>: the accepted Stage 1 answer,
-      or the Stage 2 corrective answer when one replaced it; for a reused unit, the completion
+      or the Stage 2 corrective answer when one replaced it; for a reused piece, the completion
       of the run that produced it, which the checkpoint now records (<code>null</code> only for
       a checkpoint written before 0.9.5). Then one <code>item</code> per source-file line,
       in file order (<code>item</code>: <code>association</code> | <code>concept</code> |
@@ -1421,7 +1429,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
     <h3 id="attempts">The attempts log: every prompt and every answer, in full</h3>
     <p>
       <b>A failed segment's line names the piece and points here.</b> Under the ladder a
-      chunk can be split, so <code>chunk K/N:</code> alone points at the unit <i>before</i> the
+      chunk can be split, so <code>chunk K/N:</code> alone points at the text <i>before</i> the
       split; the failure line now continues with <code>piece &lt;12 hex&gt; (paragraphs a–b,
       N B):</code> — the innermost piece the ladder was working on, its <code>[N]</code> label
       range, its bytes — before the message, and ends with <code>— records: &lt;attempts
@@ -1431,9 +1439,9 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       file exists: with the attempts log off the sidecar's path still shows. Paste that command
       to read the piece. A checkpoint file that cannot be read, or one written under other
       settings, is said on stderr too (<code>ignoring an unreadable checkpoint at &lt;path&gt;:
-      &lt;error&gt; — every unit of this segment re-extracts</code> — an unparseable file has
-      no unit count to give — / <code>checkpoint at &lt;path&gt; was written under different
-      settings — N unit(s) re-extract</code>) instead of silently re-asking the model for the
+      &lt;error&gt; — every piece of this segment re-extracts</code> — an unparseable file has
+      no piece count to give — / <code>checkpoint at &lt;path&gt; was written under different
+      settings — N piece(s) re-extract</code>) instead of silently re-asking the model for the
       whole segment.
     </p>
     <p>
@@ -1498,7 +1506,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
       <code>{run_id, attempt_seq}</code> of the attempt whose answer it replays and asks to fix
       (Stage 1: the same piece's previous attempt; Stage 2: the accepted attempt whose output is
       being corrected; absent exactly when that attempt has no recorded identity — a Stage 2
-      correction of a unit reused from a pre-0.9.5 checkpoint, written before attempts had ids)
+      correction of a piece reused from a pre-0.9.5 checkpoint, written before attempts had ids)
       — so the correction tuple "what was flagged → what was asked → what came
       back → what was adopted" is a join over records already on disk
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0028-correction-tuples.md">ADR
@@ -1606,7 +1614,7 @@ taguru extract --context cef2e28b-43f0-4b6c-8201-abab0785399f --out sources/ --r
     <p>
       Replay bypasses <a href="#manifest">the manifest skip</a> (a replayed completion is free
       either way, so the skip's reason to exist is gone) and reads neither the manifest nor
-      <a href="#checkpoints">the checkpoint store</a> — a checkpoint's cached unit was parsed and
+      <a href="#checkpoints">the checkpoint store</a> — a checkpoint's cached piece was parsed and
       mechanically validated under whichever code ran the original extraction, which for "replay
       after changing the validation rule" is exactly the answer replay must not silently reuse.
       Replaying is never a manifest or checkpoint computation input either: a replayed completion
@@ -1752,7 +1760,7 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             corrective ask an <code>attempt</code> record carries, and <code>--lossy</code>'s
             parse-time drops appear as trace <code>loss</code> (<code>reason: "dropped"</code>).
             An <em>accepted</em> piece's parsed output is, however, held in its
-            <a href="#checkpoints">checkpoint unit</a> until the source file lands and reused on
+            <a href="#checkpoints">checkpoint</a> until the source file lands and reused on
             resume — not a first-class step record of its own, but not entirely absent
             either.</td></tr>
         <tr><td><code>validate</code></td>

@@ -1677,8 +1677,8 @@ export class Context {
   }
 
   /**
-   * Merge / contradiction / staleness candidates (ADR 0012). Sections
-   * chosen by `checks` (required, non-empty); every candidate carries a
+   * Merge / contradiction / staleness candidates (ADR 0012). `checks`
+   * (required, non-empty) selects which checks run; every candidate carries a
    * `fingerprint` over its own evidence — judge once per fingerprint,
    * reuse the judgment until it moves. Candidates, never verdicts:
    * apply through ordinary writes. Served as parsed JSON in the

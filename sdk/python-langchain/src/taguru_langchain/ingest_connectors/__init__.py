@@ -114,7 +114,7 @@ from .observability import (
     SourceEvent,
     SourceEventSink,
 )
-from .ocr import OcrAdapter, OcrRecoveredUnit, OcrRequest, OcrResult
+from .ocr import OcrAdapter, OcrRecoveredText, OcrRequest, OcrResult
 from .pdf import PdfConnector
 from .pptx import PptxConnector
 from .protocol import Connector
@@ -163,7 +163,7 @@ __all__ = [
     "ObjectNotFoundError",
     "ObjectStore",
     "OcrAdapter",
-    "OcrRecoveredUnit",
+    "OcrRecoveredText",
     "OcrRequest",
     "OcrResult",
     "PdfConnector",

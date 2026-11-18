@@ -561,7 +561,7 @@ class SchemaDocument:
 
 @dataclass(slots=True, frozen=True)
 class AuditNames:
-    """One of :class:`SchemaAudit`'s name-list sections: the true count of
+    """One of :class:`SchemaAudit`'s name lists: the true count of
     names the check surfaced, and a name-ordered prefix capped
     server-side (at 100)."""
 
@@ -593,7 +593,7 @@ class SchemaAudit:
     the live graph in one response — candidates for review, not verdicts.
 
     Only ``violations`` pages (``total`` stays constant across pages,
-    like every other match list); the other four sections each carry
+    like every other match list); the other four lists each carry
     their own true count with a capped prefix.
     """
 

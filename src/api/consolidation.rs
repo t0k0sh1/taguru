@@ -1,5 +1,5 @@
 //! `POST /contexts/{id}/consolidation/audit` (ADR 0012): merge,
-//! contradiction, and staleness candidates in one response, sections
+//! contradiction, and staleness candidates in one response, checks
 //! selected by the caller's `checks` — every candidate carrying a
 //! content fingerprint over its own evidence, because the fingerprint
 //! stands in for the judgment artifact's identity and doubles as its
@@ -93,8 +93,8 @@ fn injected_staleness_attribution_loop_expiry() -> bool {
 
 #[derive(Debug, Deserialize)]
 pub struct ConsolidationAuditRequest {
-    /// Which sections to compute — required and non-empty: every
-    /// section is O(edges) or worse, so the caller names what it pays
+    /// Which checks to compute — required and non-empty: every
+    /// check is O(edges) or worse, so the caller names what it pays
     /// for (ADR 0012 §4).
     pub checks: Vec<String>,
     /// Per-section candidate ceiling. Omitted means 100, capped at
@@ -247,7 +247,7 @@ pub async fn audit_consolidation(
         return error(
             ErrorCode::InvalidArgument,
             "'checks' must name at least one of merge, contradiction, staleness — \
-             every section is a full-graph pass, so the caller names what it pays for",
+             every check is a full-graph pass, so the caller names what it pays for",
             started_at,
         );
     }

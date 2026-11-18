@@ -3,7 +3,7 @@
 
 The SDK owns every correctness-critical piece of checkpoint/resume — the
 fingerprint gate that invalidates a whole document's cache on any
-output-shaping settings change, the unit-content-hash keying that survives
+output-shaping settings change, the piece-content-hash keying that survives
 a differently-chunked resume, and the JSON schema on disk. A
 :class:`CheckpointStore` is only durable blob storage keyed by source id;
 implementing one for object storage or a database is three small methods,
@@ -96,7 +96,7 @@ class _AppendCapableCheckpointStore(Protocol):
 
     def append(self, source: str, record: bytes) -> None:
         """Append one already-serialized record — produced by
-        :meth:`_DocumentCheckpoints.unit_bytes` — to whatever ``save`` last
+        :meth:`_DocumentCheckpoints.piece_bytes` — to whatever ``save`` last
         wrote for ``source``. Never called before at least one ``save`` has
         established the file this run."""
         ...
@@ -406,15 +406,15 @@ class _CheckpointFingerprint:
 
 
 @dataclass
-class _CheckpointUnit:
-    """One durable unit of extraction work — a top-level chunk (Python has
-    no length-ladder split rung yet, but the schema and the unit-hash
+class _CheckpointPiece:
+    """One durable piece of extraction work — a top-level chunk (Python has
+    no length-ladder split rung yet, but the schema and the piece-hash
     keying already anticipate one, exactly like extract.rs's
-    ``CheckpointUnit`` anticipated issue #179's amendment before #210
-    implemented it). Keyed by the unit's OWN content hash rather than
+    ``CheckpointPiece`` anticipated issue #179's amendment before #210
+    implemented it). Keyed by the piece's OWN content hash rather than
     ``chunk_index`` alone, so a resumed run whose chunking differs from a
     prior one never misattributes a piece's output to the wrong text.
-    ``user``/``answer`` are stored (not just ``output``) so a reused unit
+    ``user``/``answer`` are stored (not just ``output``) so a reused piece
     can still participate in Stage 2 cross-chunk correction exactly like a
     freshly-extracted one — ``_correct_cross_chunk_issues`` rebuilds a
     chunk's own conversation from these."""
@@ -438,7 +438,7 @@ class _CheckpointUnit:
         }
 
     @classmethod
-    def from_dict(cls, data: object) -> _CheckpointUnit | None:
+    def from_dict(cls, data: object) -> _CheckpointPiece | None:
         if not isinstance(data, dict):
             return None
         try:
@@ -455,30 +455,27 @@ class _CheckpointUnit:
 @dataclass
 class _DocumentCheckpoints:
     """One document's durable checkpoint state: the settings it was
-    extracted under, and every unit completed so far, keyed by content
+    extracted under, and every piece completed so far, keyed by content
     hash.
 
     Serialized as JSON Lines: one header line (``{"fingerprint": {...}}``),
-    then one line per unit (``{"unit": "<hash>", ...unit fields}``) —
+    then one line per piece (``{"piece": "<hash>", ...piece fields}``) —
     issue #<O(N^2) checkpoint saves>. This is what lets
-    :meth:`unit_bytes`'s single new line be handed to an append-capable
+    :meth:`piece_bytes`'s single new line be handed to an append-capable
     store instead of ``to_bytes()``'s full rewrite: an N-chunk document
-    then costs O(document size) total on disk, not O(N * document size).
-    A pre-migration checkpoint (one JSON object with a top-level ``units``
-    key) is still accepted on load — see :meth:`_parse` — so an in-flight
-    old-format checkpoint keeps resuming across the migration."""
+    then costs O(document size) total on disk, not O(N * document size)."""
 
     fingerprint: _CheckpointFingerprint
-    units: dict[str, _CheckpointUnit] = field(default_factory=dict)
+    pieces: dict[str, _CheckpointPiece] = field(default_factory=dict)
     established_on_disk: bool = field(default=False, compare=False, repr=False)
     """True once THIS RUN has written the file at least once via a full
-    ``save()`` — only after that may later units in the same run be
+    ``save()`` — only after that may later pieces in the same run be
     streamed with ``append()`` instead of repeating the full rewrite.
     Always starts ``False`` on a freshly loaded/empty instance, even when
-    ``units`` is already non-empty from a resumed run: the very first NEW
-    unit recorded this run still needs a full, format-establishing
-    ``save()`` (the on-disk file may predate the JSONL migration, or may
-    not exist at all yet)."""
+    ``pieces`` is already non-empty from a resumed run: the very first NEW
+    piece recorded this run still needs a full, format-establishing
+    ``save()`` (the on-disk file may hold a stale or corrupt checkpoint,
+    or may not exist at all yet)."""
     locked_out: bool = field(default=False, compare=False, repr=False)
     """True once a write for this document reported
     :class:`CheckpointLockedError` — another run already holds this
@@ -489,7 +486,7 @@ class _DocumentCheckpoints:
 
     @classmethod
     def empty(cls, fingerprint: _CheckpointFingerprint) -> _DocumentCheckpoints:
-        return cls(fingerprint=fingerprint, units={})
+        return cls(fingerprint=fingerprint, pieces={})
 
     @classmethod
     def from_bytes(
@@ -498,72 +495,27 @@ class _DocumentCheckpoints:
         """Missing, unreadable, corrupt, or fingerprint-mismatched
         checkpoints all degrade to "nothing cached" — never an error, and
         never a false reuse of an incompatible output. A single parse
-        failure anywhere in the file (including one corrupted unit)
-        invalidates the WHOLE file rather than salvaging the units that
+        failure anywhere in the file (including one corrupted piece)
+        invalidates the WHOLE file rather than salvaging the pieces that
         happen to still parse, mirroring Rust's single-``serde_json``-parse
         posture: a partially-trustworthy checkpoint file is treated
         exactly like an absent one. The one deliberate exception is a torn
-        FINAL line with no unit lines after it (a crash mid-``append``) —
+        FINAL line with no piece lines after it (a crash mid-``append``) —
         see :meth:`_parse_jsonl` — which is discarded rather than
         invalidating everything already durably appended before it."""
-        parsed = cls._parse(data, fingerprint)
+        parsed = None if data is None else cls._parse_jsonl(data, fingerprint)
         return parsed if parsed is not None else cls.empty(fingerprint)
-
-    @classmethod
-    def _parse(
-        cls, data: bytes | None, fingerprint: _CheckpointFingerprint
-    ) -> _DocumentCheckpoints | None:
-        if data is None:
-            return None
-        legacy = cls._sniff_legacy_object(data)
-        if legacy is not None:
-            return cls._parse_legacy(legacy, fingerprint)
-        return cls._parse_jsonl(data, fingerprint)
-
-    @staticmethod
-    def _sniff_legacy_object(data: bytes) -> dict[str, object] | None:
-        """The pre-migration format was one JSON object with a top-level
-        ``units`` key; JSONL's own header line is ALSO a bare ``{...}``
-        object (just ``{"fingerprint": ...}``, no ``units`` key), so the
-        two can only be told apart by attempting a whole-document parse
-        and checking for that key — never by a cheaper prefix check."""
-        stripped = data.lstrip()
-        if not stripped.startswith(b"{"):
-            return None
-        try:
-            raw = json.loads(data)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
-        return raw if isinstance(raw, dict) and "units" in raw else None
-
-    @classmethod
-    def _parse_legacy(
-        cls, raw: dict[str, object], fingerprint: _CheckpointFingerprint
-    ) -> _DocumentCheckpoints | None:
-        loaded_fingerprint = _CheckpointFingerprint.from_dict(raw.get("fingerprint"))
-        if loaded_fingerprint != fingerprint:
-            return None
-        raw_units = raw.get("units", {})
-        if not isinstance(raw_units, dict):
-            return None
-        units: dict[str, _CheckpointUnit] = {}
-        for key, value in raw_units.items():
-            unit = _CheckpointUnit.from_dict(value)
-            if unit is None:
-                return None
-            units[key] = unit
-        return cls(fingerprint=fingerprint, units=units)
 
     @classmethod
     def _parse_jsonl(
         cls, data: bytes, fingerprint: _CheckpointFingerprint
     ) -> _DocumentCheckpoints | None:
-        # A well-formed file (even with zero units) always ends in "\n" —
+        # A well-formed file (even with zero pieces) always ends in "\n" —
         # every line this class itself ever writes carries one. A file
         # NOT ending in "\n" was torn mid-write (a crash mid-`append`,
         # mid-`save`, or even mid-header); its incomplete last line is
         # discarded rather than treated as a corruption that invalidates
-        # every unit durably written before it.
+        # every piece durably written before it.
         raw_lines = data.split(b"\n")
         if raw_lines:
             # Well-formed data: this is the trailing empty string left by
@@ -584,7 +536,7 @@ class _DocumentCheckpoints:
         loaded_fingerprint = _CheckpointFingerprint.from_dict(header.get("fingerprint"))
         if loaded_fingerprint != fingerprint:
             return None
-        units: dict[str, _CheckpointUnit] = {}
+        pieces: dict[str, _CheckpointPiece] = {}
         for line in raw_lines[1:]:
             try:
                 record = json.loads(line)
@@ -593,39 +545,39 @@ class _DocumentCheckpoints:
                 # off before this loop even starts) — a corrupt line
                 # anywhere else still invalidates the whole file.
                 return None
-            if not isinstance(record, dict) or "unit" not in record:
+            if not isinstance(record, dict) or "piece" not in record:
                 return None
-            unit = _CheckpointUnit.from_dict(record)
-            if unit is None:
+            piece = _CheckpointPiece.from_dict(record)
+            if piece is None:
                 return None
-            units[str(record["unit"])] = unit  # duplicate unit lines: last one wins
-        return cls(fingerprint=fingerprint, units=units)
+            pieces[str(record["piece"])] = piece  # duplicate piece lines: last one wins
+        return cls(fingerprint=fingerprint, pieces=pieces)
 
     @staticmethod
     def _header_line(fingerprint: _CheckpointFingerprint) -> bytes:
         return (json.dumps({"fingerprint": fingerprint.to_dict()}) + "\n").encode("utf-8")
 
     @staticmethod
-    def _unit_line(unit_hash: str, unit: _CheckpointUnit) -> bytes:
-        payload: dict[str, object] = {"unit": unit_hash, **unit.to_dict()}
+    def _piece_line(piece_hash: str, piece: _CheckpointPiece) -> bytes:
+        payload: dict[str, object] = {"piece": piece_hash, **piece.to_dict()}
         return (json.dumps(payload) + "\n").encode("utf-8")
 
     def to_bytes(self) -> bytes:
         """Full JSONL rewrite: the header line plus every accumulated
-        unit's own line — what a first write (or a store with no
+        piece's own line — what a first write (or a store with no
         ``append``) always persists."""
         lines = [self._header_line(self.fingerprint)]
-        lines.extend(self._unit_line(key, unit) for key, unit in self.units.items())
+        lines.extend(self._piece_line(key, piece) for key, piece in self.pieces.items())
         return b"".join(lines)
 
-    def unit_bytes(self, unit_hash: str) -> bytes:
-        """The single JSONL line for one already-``record``ed unit — what
+    def piece_bytes(self, piece_hash: str) -> bytes:
+        """The single JSONL line for one already-``record``ed piece — what
         an append-capable store persists instead of ``to_bytes()``'s full
         rewrite."""
-        return self._unit_line(unit_hash, self.units[unit_hash])
+        return self._piece_line(piece_hash, self.pieces[piece_hash])
 
-    def lookup(self, unit_hash: str) -> _CheckpointUnit | None:
-        return self.units.get(unit_hash)
+    def lookup(self, piece_hash: str) -> _CheckpointPiece | None:
+        return self.pieces.get(piece_hash)
 
-    def record(self, unit_hash: str, unit: _CheckpointUnit) -> None:
-        self.units[unit_hash] = unit
+    def record(self, piece_hash: str, piece: _CheckpointPiece) -> None:
+        self.pieces[piece_hash] = piece

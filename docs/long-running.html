@@ -95,7 +95,7 @@
       <div class="arch-layer">
         <div class="arch-label">enumerate</div>
         <div class="arch-row">
-          <div class="arch-box dim"><b>112 work units</b><span>the whole corpus listed before any model call — <code>taguru extract --dry-run --out sources/ docs/</code></span></div>
+          <div class="arch-box dim"><b>112 work items</b><span>the whole corpus listed before any model call — <code>taguru extract --dry-run --out sources/ docs/</code></span></div>
         </div>
       </div>
       <div class="arch-down">↓</div>
@@ -132,10 +132,10 @@
       </div>
     </div>
     <p>
-      Three properties make this converge instead of just retrying forever: every work unit is
+      Three properties make this converge instead of just retrying forever: every work item is
       enumerated <b>before</b> the first model call, so "pending" always has a concrete count; a
       success is committed the moment it lands, never batched up and lost together on the next
-      failure; and a failure marks exactly the one unit that failed, so a rerun's cost is
+      failure; and a failure marks exactly the one item that failed, so a rerun's cost is
       proportional to what's left, not to what already happened. None of this requires Taguru to
       know about "runs" or "jobs" at all — <code>taguru extract</code>'s manifest and
       <a href="extract.html#checkpoints">chunk checkpoints</a>, plus
@@ -154,7 +154,7 @@
       <table>
         <thead><tr><th>Taguru provides</th><th>Your runner provides</th></tr></thead>
         <tbody>
-          <tr><td>Durable writes, source attribution, atomic per-source import (<a href="import.html#one-file-one-source">retract-then-apply</a>, nothing partial ever visible)</td><td>Splitting a corpus into work units (documents, or PDF sections) and a queue to drive them</td></tr>
+          <tr><td>Durable writes, source attribution, atomic per-source import (<a href="import.html#one-file-one-source">retract-then-apply</a>, nothing partial ever visible)</td><td>Splitting a corpus into work items (documents, or PDF sections) and a queue to drive them</td></tr>
           <tr><td>The extract manifest and chunk checkpoints — free re-run of what's already done</td><td>A time or item bound on one process invocation</td></tr>
           <tr><td>Source listing / <code>--dry-run</code> as the completion test</td><td>Signal handling and the decision of when a kill is "safe" vs "now"</td></tr>
           <tr><td>Validation errors, the per-source header line for torn imports</td><td>Progress UI/log, a failure summary, and the policy for what gets retried</td></tr>
@@ -173,23 +173,23 @@
     </p>
   </section>
 
-  <section id="units">
-    <h2>Work units, checkpoint keys, and deciding what is done</h2>
+  <section id="work-items">
+    <h2>Work items, checkpoint keys, and deciding what is done</h2>
     <p>
-      The default unit is <b>one segment</b>. One file under <code>taguru extract</code>'s input
+      The default work item is <b>one segment</b>. One file under <code>taguru extract</code>'s input
       directory becomes one source file, whose header names its own source id, which becomes one
       row in <code>--out</code>'s manifest. The same one-segment, one-source-id granularity holds
       for the standard <a href="connectors.html">ingest connectors</a>: one PDF, DOCX, PPTX file,
-      or S3 object becomes one <code>ConnectorDocument</code>, one retract-then-apply unit — page,
+      or S3 object becomes one <code>ConnectorDocument</code>, one source to retract and re-apply — page,
       slide, and table boundaries surface as <a href="connectors.html#locators">citation
-      locators</a> within that one segment, not as separate source ids or separate work units.
+      locators</a> within that one segment, not as separate source ids or separate work items.
       For a corpus of a few large PDFs where that granularity is too coarse (per-section retries,
-      per-section deletion), the natural unit shrinks to <b>one section</b>: split each PDF by
+      per-section deletion), the natural work item shrinks to <b>one section</b>: split each PDF by
       heading yourself and feed each section through as its own segment with a source id that
       names its parent, e.g. <code>manual.pdf#installation</code> — a runner's choice to make when
       it wants finer granularity than a connector gives by default, not something Taguru requires.
-      Each section is then an independent source file, its own manifest row, its own retract-then-apply
-      unit — a failure in one section never touches another's.
+      Each section is then an independent source file, its own manifest row, its own source to
+      retract and re-apply — a failure in one section never touches another's.
     </p>
     <p>
       Two <b>distinct</b> completion tests exist, one per stage — do not conflate them:
@@ -200,7 +200,7 @@
     </ul>
     <p>
       Below segment granularity, <a href="extract.html#checkpoints">chunk checkpoints</a> key
-      each unit by the <b>hash of its own text</b>, not chunk index — so a resumed run's chunk
+      each piece by the <b>hash of its own text</b>, not chunk index — so a resumed run's chunk
       splits don't have to line up with a prior run's for reuse to be recognized. Combined with
       the manifest above, a rerun only ever pays for chunks whose content, model, or
       output-shaping settings actually changed. A connector-driven run gets the same property from
@@ -258,7 +258,7 @@ taguru import sources/            <span class="c"># apply whatever this window f
 #           (the manifest records only successes, so a plain rerun already does this)
 #      0   nothing left to extract → converged, the job is done</span>
 case "$rc" in
-  130) echo "window expired, $(taguru extract --dry-run --out sources/ docs/ | grep -c 'would extract') unit(s) still not extracted" ;;
+  130) echo "window expired, $(taguru extract --dry-run --out sources/ docs/ | grep -c 'would extract') segment(s) still not extracted" ;;
   1)   echo "some segments failed — see stderr above; rerun to retry them" ;;
   0)   echo "converged" ;;
 esac</code></pre>
@@ -293,7 +293,7 @@ esac</code></pre>
   <section id="custom-runner">
     <h2>Path two: a custom runner on the LangChain SDK</h2>
     <p class="section-sub">
-      When the work unit is finer than "one segment" (e.g. sections split from a handful of
+      When the work item is finer than "one segment" (e.g. sections split from a handful of
       PDFs) or the deployment needs its own progress UI, a small runner around
       <code>TaguruIngester</code> gets the same properties. The flags below are this sample's
       own — nothing here is a Taguru API.

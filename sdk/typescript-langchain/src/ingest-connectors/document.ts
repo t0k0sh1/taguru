@@ -104,7 +104,7 @@ function checkNonemptySize(fieldName: string, value: string, maxBytes: number): 
 
 /**
  * Parses a JSON array field where a single unparseable element
- * invalidates the whole list — the same "one bad unit invalidates the
+ * invalidates the whole list — the same "one bad piece invalidates the
  * file" posture the checkpoint parser in checkpoints.ts already takes,
  * applied per-field instead of per-file.
  */

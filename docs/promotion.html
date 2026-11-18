@@ -154,7 +154,7 @@
         retract-then-apply per source makes re-promoting the same session idempotent.</li>
       <li><b>Audit the landing zone</b>: <code>taguru consolidation --context ID</code>
         (or the <code>audit_consolidation</code> MCP tool) — <code>--checks LIST</code>
-        narrows the sections (comma-separated <code>merge,contradiction,staleness</code>;
+        narrows the checks (comma-separated <code>merge,contradiction,staleness</code>;
         default all three), <code>--into ID</code> aims the judgment <code>context</code> at a chosen id (default: derived
         from the audited <code>context</code>'s id, named <code>NAME::consolidation</code>), <code>--dry-run</code> previews. Promotion is exactly when merge
         twins and contradictions appear; judgments are proposals keyed by evidence

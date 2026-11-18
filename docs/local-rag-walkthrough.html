@@ -234,7 +234,7 @@ print(taguru.__version__, tl.__version__)"</span></code></pre>
       numbered sections by hand — plain <code>pypdf</code>, no LangChain document loader needed
       for this much — because it wants one source id <b>per section</b>
       (<code>paper.pdf#3</code>-shaped), finer than a connector's one-document-per-file default; see
-      <a href="long-running.html#units">work units</a> for when that finer split earns its keep.
+      <a href="long-running.html#work-items">work items</a> for when that finer split earns its keep.
       If you would rather stay on the CLI path after this step, write each section out
       as its own <code>.md</code> file and hand the directory to <code>taguru extract</code> +
       <a href="import.html"><code>taguru import</code></a> instead of the SDK path below —
@@ -344,7 +344,7 @@ tanaka2024 = ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class
                           [ids_by_name[name] <span class="k">for</span> name <span class="k">in</span> section_contexts])
 <span class="c"># ... and sato2023 = ensure_group("paper/sato2023", ...) the same way</span></code></pre>
     <p>
-      <code>metadata["source"]</code> is the retract-then-apply idempotency unit —
+      <code>metadata["source"]</code> is the source retract-then-apply replaces —
       <code>tanaka2024/3</code> here — chosen by this pipeline, not handed out by the server.
       There is no separate "internal source ID" API to look up: whatever string goes in at
       ingest is the same string every later read (search hits, <code>cite_passage</code>) comes

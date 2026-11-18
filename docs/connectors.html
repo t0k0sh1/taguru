@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ingest connectors — Taguru</title>
-  <meta name="description" content="The reference for taguru_langchain.ingest_connectors: PDF, HTML, DOCX, PPTX, and S3 into the source-file contract. The Python shape, the credential boundary, what a connector produces, work units and checkpoints, observability, and OCR as a boundary.">
+  <meta name="description" content="The reference for taguru_langchain.ingest_connectors: PDF, HTML, DOCX, PPTX, and S3 into the source-file contract. The Python shape, the credential boundary, what a connector produces, work items and checkpoints, observability, and OCR as a boundary.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -308,12 +308,12 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
     </p>
   </section>
 
-  <section id="units">
-    <h2>Work units and size limits</h2>
+  <section id="work-items">
+    <h2>Work items and size limits</h2>
     <p>
-      The work unit is <b>one file or one object</b> — one <code>ConnectorDocument</code>, one
-      source id, one retract-then-apply unit — the same granularity as
-      <a href="long-running.html#units"><code>taguru extract</code>'s own work units</a>. A
+      The work item is <b>one file or one object</b> — one <code>ConnectorDocument</code>, one
+      source id, one source to retract and re-apply — the same granularity as
+      <a href="long-running.html#work-items"><code>taguru extract</code>'s own work items</a>. A
       connector does not split a PDF into per-page or per-section documents on its own; page/slide
       boundaries surface as <a href="#locators">locators</a> within one document, not as separate
       source ids. <code>sub_source_id()</code> exposes a grammar for a finer-grained id
@@ -470,8 +470,8 @@ cached = checkpoint.load(source, fresh_fingerprint)  <span class="c"># None on a
     <p>
       No OCR engine ships in this package or in any connector (ADR 0007 §10). <code>OcrAdapter</code>
       is the external boundary a connector calls out to when one is configured — given the raw
-      document bytes and the locators naming which pages/units are unusable, an adapter returns
-      whatever text it could recover, each unit still tagged with the locator it was asked about.
+      document bytes and the locators naming which pages/slides are unusable, an adapter returns
+      whatever text it could recover, each text still tagged with the locator it was asked about.
       <code>PdfConnector</code> is the one connector wired to call an adapter today
       (<code>ocr_adapter=</code>), and only for the exact pages its own <code>min_chars_per_page</code>
       threshold found unusable — never the whole document. An adapter's own failure (an exception,
@@ -492,7 +492,7 @@ document = PdfConnector(ocr_adapter=MyOcrAdapter()).read(<span class="s">"docs/s
       </a>
       <a class="nav-card" href="long-running.html" style="flex:1 1 16rem">
         <span class="nc-title">Long-running ingestion</span>
-        <p>Interrupt, checkpoint, resume — the same guarantees, now including connector work units.</p>
+        <p>Interrupt, checkpoint, resume — the same guarantees, now including connector work items.</p>
       </a>
       <a class="nav-card" href="local-rag-walkthrough.html" style="flex:1 1 16rem">
         <span class="nc-title">Local RAG walkthrough</span>

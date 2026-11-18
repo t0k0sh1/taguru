@@ -19,7 +19,7 @@ import {
   DocumentCheckpoints,
   FilesystemCheckpointStore,
   type CheckpointFingerprint,
-  type CheckpointUnit,
+  type CheckpointPiece,
 } from "../../src/checkpoints.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -45,7 +45,7 @@ const fingerprint = (overrides: Partial<CheckpointFingerprint> = {}): Checkpoint
   ...overrides,
 });
 
-const unit = (overrides: Partial<CheckpointUnit> = {}): CheckpointUnit => ({
+const piece = (overrides: Partial<CheckpointPiece> = {}): CheckpointPiece => ({
   chunk_index: 0,
   output: { associations: [], aliases: [], questions: [] },
   user: "u",
@@ -53,10 +53,10 @@ const unit = (overrides: Partial<CheckpointUnit> = {}): CheckpointUnit => ({
   ...overrides,
 });
 
-/** Reads the (private) unit map back out through the only public surface
+/** Reads the (private) piece map back out through the only public surface
  * DocumentCheckpoints exposes for it: its own serialization. */
-const unitKeys = (checkpoints: DocumentCheckpoints): string[] =>
-  Object.keys(JSON.parse(decode(checkpoints.toBytes())).units as Record<string, unknown>);
+const pieceKeys = (checkpoints: DocumentCheckpoints): string[] =>
+  Object.keys(JSON.parse(decode(checkpoints.toBytes())).pieces as Record<string, unknown>);
 
 describe("FilesystemCheckpointStore", () => {
   let dir: string;
@@ -69,14 +69,14 @@ describe("FilesystemCheckpointStore", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("round-trips units through save and load", async () => {
+  it("round-trips pieces through save and load", async () => {
     const store = new FilesystemCheckpointStore(dir);
     expect(await store.load("docs/aomine.md")).toBeNull();
-    await store.save("docs/aomine.md", encode('{"fingerprint": {}, "units": {}}'));
-    expect(decode((await store.load("docs/aomine.md"))!)).toBe('{"fingerprint": {}, "units": {}}');
-    await store.save("docs/aomine.md", encode('{"fingerprint": {}, "units": {"x": 1}}'));
+    await store.save("docs/aomine.md", encode('{"fingerprint": {}, "pieces": {}}'));
+    expect(decode((await store.load("docs/aomine.md"))!)).toBe('{"fingerprint": {}, "pieces": {}}');
+    await store.save("docs/aomine.md", encode('{"fingerprint": {}, "pieces": {"x": 1}}'));
     expect(decode((await store.load("docs/aomine.md"))!)).toBe(
-      '{"fingerprint": {}, "units": {"x": 1}}',
+      '{"fingerprint": {}, "pieces": {"x": 1}}',
     );
   });
 
@@ -264,52 +264,52 @@ describe("deriveModelIdentity", () => {
 describe("DocumentCheckpoints", () => {
   it("round-trips through bytes", () => {
     const fp = fingerprint();
-    const u = unit();
+    const p = piece();
     const checkpoints = DocumentCheckpoints.empty(fp);
-    checkpoints.record("hash1", u);
+    checkpoints.record("hash1", p);
     const restored = DocumentCheckpoints.fromBytes(checkpoints.toBytes(), fp);
-    expect(restored.lookup("hash1")).toEqual(u);
+    expect(restored.lookup("hash1")).toEqual(p);
   });
 
   it("degrades to empty on fingerprint mismatch", () => {
     const fp = fingerprint();
     const checkpoints = DocumentCheckpoints.empty(fp);
-    checkpoints.record("hash1", unit());
+    checkpoints.record("hash1", piece());
     const other = fingerprint({ model: "a-different-model" });
     const restored = DocumentCheckpoints.fromBytes(checkpoints.toBytes(), other);
-    expect(unitKeys(restored)).toEqual([]);
+    expect(pieceKeys(restored)).toEqual([]);
     expect(restored.fingerprint).toEqual(other);
   });
 
   it("degrades to empty on missing data", () => {
     const fp = fingerprint();
-    expect(unitKeys(DocumentCheckpoints.fromBytes(null, fp))).toEqual([]);
+    expect(pieceKeys(DocumentCheckpoints.fromBytes(null, fp))).toEqual([]);
   });
 
   it.each([
     ["invalid_json", "not json at all"],
     ["wrong_top_level_type", "[1, 2, 3]"],
-    ["missing_fingerprint", '{"units": {}}'],
-    ["units_wrong_type", '{"fingerprint": {}, "units": "nope"}'],
+    ["missing_fingerprint", '{"pieces": {}}'],
+    ["pieces_wrong_type", `{"fingerprint": ${JSON.stringify(fingerprint())}, "pieces": "nope"}`],
   ])("degrades to empty on malformed bytes (%s)", (_label, data) => {
     const fp = fingerprint();
-    expect(unitKeys(DocumentCheckpoints.fromBytes(encode(data), fp))).toEqual([]);
+    expect(pieceKeys(DocumentCheckpoints.fromBytes(encode(data), fp))).toEqual([]);
   });
 
-  it("a single corrupt unit invalidates the whole file", () => {
+  it("a single corrupt piece invalidates the whole file", () => {
     const fp = fingerprint();
-    const goodUnit = unit();
+    const goodPiece = piece();
     const payload = {
       fingerprint: fp,
-      units: {
-        good: { chunk_index: goodUnit.chunk_index, output: goodUnit.output, user: goodUnit.user, answer: goodUnit.answer },
+      pieces: {
+        good: { chunk_index: goodPiece.chunk_index, output: goodPiece.output, user: goodPiece.user, answer: goodPiece.answer },
         bad: { chunk_index: 0 }, // missing output/user/answer
       },
     };
     const data = encode(JSON.stringify(payload));
     const restored = DocumentCheckpoints.fromBytes(data, fp);
-    // The whole file degrades to empty — the still-good "good" unit is NOT
+    // The whole file degrades to empty — the still-good "good" piece is NOT
     // salvaged, matching the Rust/Python twins' single-parse posture.
-    expect(unitKeys(restored)).toEqual([]);
+    expect(pieceKeys(restored)).toEqual([]);
   });
 });

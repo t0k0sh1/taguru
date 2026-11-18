@@ -9,7 +9,7 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
-- **One place that defines extraction's units** (#1060, #851).
+- **One place that defines extraction's levels** (#1060, #851).
   `docs/extract.html` opens with a Terms section: document, segment,
   chunk, piece and paragraph, what each is, who decides it, where it
   shows up, and how they nest — including that a piece is the text one
@@ -32,6 +32,33 @@ Entries that change an on-disk format or a response shape say so.
   record` for an attempts log without its `segment` record. Wording only.
 
 ### Changed
+
+- **Breaking (on-disk keys, SDK, CLI output) — a checkpoint holds
+  pieces, and an OCR result holds texts** (#1069, #851). "unit" now
+  means only a structural unit (a heading, an article, a speaker block)
+  of chunk briefing. The extract checkpoint's `units` map is `pieces`,
+  and its stderr lines say `N piece(s) re-extract`, `every piece of this
+  segment re-extracts` and `N extracted piece(s) are checkpointed`. The
+  LangChain SDKs' checkpoint stores follow: each Python JSONL line is
+  keyed `piece` (was `unit`), the TypeScript file's map is `pieces`, and
+  the pre-JSONL Python format is no longer read. No checkpoint written by
+  a released version could resume under `PROMPT_VERSION` 8 anyway — the
+  fingerprint holds it — so no run loses work it would otherwise keep.
+  `OcrRecoveredUnit` is `OcrRecoveredText` and `OcrResult.units` is
+  `OcrResult.texts` (Python and TypeScript). No aliases.
+- **Wording — one meaning each for "section" and "unit"** (#1069,
+  #851). `section` keeps its one meaning, the heading a source file's
+  `{"paragraph", "section"}` line attaches to the paragraphs after it —
+  no wire name changes; `docs/extract.html#terms` and the import
+  reference define it. Consolidation's `--checks` and the MCP
+  `audit_consolidation` description call the merge/contradiction/
+  staleness results "checks" (was "sections"); the `audit_schema`
+  description calls its result lists "lists" and now counts five of
+  them (it said four). `import --url`'s refusal and lost-connection
+  lines say `this request carried 1 record: …` (was `1 unit`). The
+  long-running and connectors guides say "work item" (anchors
+  `#work-items`, were `#units`), and the docs and SDK error text call
+  the retract-then-apply boundary the source.
 
 - **Breaking (CLI, configuration, on-disk keys, re-extraction) —
   "chunk context" is "chunk briefing"** (#851). `context` now names

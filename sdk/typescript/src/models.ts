@@ -573,7 +573,7 @@ export interface SchemaDocument {
 }
 
 /**
- * One of `SchemaAudit`'s name-list sections: the true count of names the
+ * One of `SchemaAudit`'s name lists: the true count of names the
  * check surfaced, and a name-ordered prefix capped server-side (at 100).
  */
 export interface AuditNames {
@@ -603,7 +603,7 @@ export interface SchemaViolation {
  * ADR 0009 §10's schema audit: five independent read-only checks over the
  * live graph in one response — candidates for review, not verdicts. Only
  * `violations` pages (`total` stays constant across pages, like every
- * other match list); the other four sections each carry their own true
+ * other match list); the other four lists each carry their own true
  * count with a capped prefix.
  */
 export interface SchemaAudit {

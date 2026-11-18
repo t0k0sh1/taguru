@@ -28,10 +28,10 @@ pub(super) struct ChunkOutput {
     /// `ChunkOutput`s can share one `chunk_index` after a split.
     pub(super) chunk_index: usize,
     /// ADR 0023: sha256 of the piece text this output answers — the
-    /// checkpoint unit's key, and the id the trace file joins items to.
+    /// checkpoint's key for the piece, and the id the trace file joins items to.
     pub(super) piece_id: String,
     /// ADR 0023: the completion whose answer `answer` is. `None` only
-    /// for a unit reused from a checkpoint written before ADR 0023.
+    /// for a piece reused from a checkpoint written before ADR 0023.
     pub(super) attempt: Option<AttemptRef>,
     pub(super) user: String,
     pub(super) answer: String,
@@ -39,7 +39,7 @@ pub(super) struct ChunkOutput {
     /// mechanical pass's, and (#786) the Stage 2 prunes', each with the
     /// item the model wrote — carried here (and through the checkpoint)
     /// so the segment-level report can account for the removals of
-    /// reused units too, and the trace can show each loss in the
+    /// reused pieces too, and the trace can show each loss in the
     /// original.
     pub(super) removed: Vec<Removal>,
     /// ADR 0024 §3.6: under `--lossy`, the array elements that were not
@@ -322,12 +322,15 @@ pub(super) fn extract_chunk(
 
 /// Issue #179's reuse guard, shared by both the legacy path
 /// (`extract_chunk_or_ladder`'s `None` branch) and every level of
-/// `extract_piece`'s split recursion: a unit is identified by its OWN
+/// `extract_piece`'s split recursion: a piece is identified by its OWN
 /// text's content hash, never `chunk_index` alone, so a split
 /// sub-piece (ADR 0001 §7's Option D, which can change a segment's
-/// unit boundaries mid-run) is a correct, distinct cache key regardless
+/// piece boundaries mid-run) is a correct, distinct cache key regardless
 /// of how it came to exist.
-pub(super) fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> Option<ChunkOutput> {
+pub(super) fn checkpointed_piece(
+    checkpoints: &CheckpointStore,
+    piece: &str,
+) -> Option<ChunkOutput> {
     let unit_hash = sha256_hex(piece.as_bytes());
     checkpoints.lookup(&unit_hash).map(|unit| ChunkOutput {
         output: unit.output,
@@ -353,7 +356,7 @@ pub(super) fn record_checkpoint(
     checkpoints.record(
         source,
         unit_hash,
-        CheckpointUnit {
+        CheckpointPiece {
             chunk_index: output.chunk_index,
             attempt: output.attempt.clone(),
             output: output.output.clone(),
@@ -389,7 +392,7 @@ pub(super) fn extract_chunk_or_ladder(
 ) -> Result<Vec<ChunkOutput>, String> {
     match ladder {
         None => {
-            if let Some(cached) = checkpointed_unit(checkpoints, piece) {
+            if let Some(cached) = checkpointed_piece(checkpoints, piece) {
                 return Ok(vec![cached]);
             }
             let user = user_message(source, chunk_index, chunk_total, piece, briefing_block);
@@ -508,7 +511,7 @@ pub(super) fn extract_piece(
     context: &PieceContext,
     piece: &str,
 ) -> Result<Vec<ChunkOutput>, String> {
-    if let Some(cached) = checkpointed_unit(context.checkpoints, piece) {
+    if let Some(cached) = checkpointed_piece(context.checkpoints, piece) {
         return Ok(vec![cached]);
     }
     let user = user_message(

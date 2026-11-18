@@ -20,7 +20,7 @@ pytest.importorskip("pypdf")
 from taguru_langchain.ingest_connectors import PdfConnector  # noqa: E402
 from taguru_langchain.ingest_connectors.document import Diagnostic  # noqa: E402
 from taguru_langchain.ingest_connectors.ocr import (  # noqa: E402
-    OcrRecoveredUnit,
+    OcrRecoveredText,
     OcrRequest,
     OcrResult,
 )
@@ -55,12 +55,12 @@ class FakeOcrAdapter:
             raise self.raise_error
         if self.fixed_result is not None:
             return self.fixed_result
-        units = tuple(
-            OcrRecoveredUnit(locator=locator, text=self.recovered[locator.value])
+        texts = tuple(
+            OcrRecoveredText(locator=locator, text=self.recovered[locator.value])
             for locator in request.locators
             if locator.value in self.recovered
         )
-        return OcrResult(units=units, diagnostics=self.diagnostics)
+        return OcrResult(texts=texts, diagnostics=self.diagnostics)
 
 
 def _write(tmp_path: Path, name: str, data: bytes) -> Path:
@@ -237,12 +237,12 @@ def test_adapter_returning_an_unrequested_or_too_thin_unit_is_discarded(
     same `min_chars_per_page` bar every other page's text must clear, are
     both silently dropped rather than spliced in."""
     fixed = OcrResult(
-        units=(
-            OcrRecoveredUnit(
+        texts=(
+            OcrRecoveredText(
                 locator=Locator(kind="page", value="99"),
                 text="Text for a page nobody asked about, plenty long enough.",
             ),
-            OcrRecoveredUnit(locator=Locator(kind="page", value="1"), text="x"),
+            OcrRecoveredText(locator=Locator(kind="page", value="1"), text="x"),
         )
     )
     adapter = FakeOcrAdapter(fixed_result=fixed)
