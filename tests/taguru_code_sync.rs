@@ -450,6 +450,46 @@ fn a_synced_file_that_stops_being_text_retracts_its_old_facts() {
     assert!(out.contains("up to date"), "{out}");
 }
 
+/// A sync that applied its imports but never saved its state (killed
+/// mid-run, or ended with a failure) leaves facts in the map that the
+/// state file's fingerprints do not name. Gating the unimportable-file
+/// retraction on the fingerprints alone kept those facts forever once
+/// the file stopped being importable; the map's own holdings decide.
+#[cfg(unix)]
+#[test]
+fn facts_persisted_by_an_unsaved_sync_still_retract_when_unreadable() {
+    let repo = Repo::new();
+    repo.write("src/keep.rs", "pub fn anchor_survivor() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let state_path = repo.dir.join(".taguru/code-sync.json");
+    let checkpoint = fs::read(&state_path).unwrap();
+
+    repo.write("src/late.rs", "pub fn imported_then_interrupted() {}\n");
+    repo.commit("add late");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "imported_then_interrupted"]);
+    assert_eq!(code, 0, "{out}");
+    // The interruption: facts persisted, checkpoint still the one
+    // from before — its fingerprints never name src/late.rs.
+    fs::write(&state_path, checkpoint).unwrap();
+
+    fs::remove_file(repo.dir.join("src/late.rs")).unwrap();
+    std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/late.rs")).unwrap();
+    repo.commit("late becomes a dangling symlink");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "imported_then_interrupted"]);
+    assert_eq!(
+        code, 1,
+        "facts the map holds must retract even without a fingerprint: {out}"
+    );
+    let (code, out) = repo.run(&["find", "anchor_survivor"]);
+    assert_eq!(code, 0, "{out}");
+}
+
 /// A full re-sync (unusable anchor, or no state file at all) used to
 /// list only the universe plus the dirty sets — a file deleted
 /// between the anchor and HEAD is in neither, so its facts stayed in

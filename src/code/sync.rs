@@ -204,10 +204,13 @@ pub(crate) fn resolve_data_dir(data_dir: Option<PathBuf>, root: &Path) -> PathBu
 /// another disk shows up in git's listing as `.taguru`, never as the
 /// link's target, so only the unresolved leaf can match it. Ancestors
 /// that do not exist yet (the first sync creates the directory, and
-/// `watch` resolves before that sync runs) are appended lexically
-/// below the deepest one that does — with no symlink possible there,
-/// lexical `..` is the truth. Unresolvable altogether (no ancestor
-/// canonicalizes), the path stays as given.
+/// `watch` resolves before that sync runs) are replayed below the
+/// deepest one that does: a missing component is appended lexically
+/// — with no symlink possible there, lexical `..` is the truth — and
+/// wherever the replay lands on an existing entry again (`missing/..`
+/// back into a symlinked directory), that prefix is canonicalized
+/// anew, or the symlink would survive into the result. Unresolvable
+/// altogether (no ancestor canonicalizes), the path stays as given.
 fn settle(path: &Path) -> PathBuf {
     use std::path::Component;
     let (Some(parent), Some(leaf @ Component::Normal(_))) =
@@ -231,13 +234,21 @@ fn settle(path: &Path) -> PathBuf {
             _ => return path.to_path_buf(),
         }
     };
+    // Invariant through the replay: `settled` is canonical up to its
+    // deepest existing entry, and everything below that is missing —
+    // so popping for `..` is exact either way.
     for component in missing.into_iter().rev() {
         match component {
             Component::ParentDir => {
                 settled.pop();
             }
             Component::CurDir => {}
-            other => settled.push(other),
+            other => {
+                settled.push(other);
+                if let Ok(canonical) = settled.canonicalize() {
+                    settled = canonical;
+                }
+            }
         }
     }
     settled.push(leaf);
@@ -323,7 +334,7 @@ fn save_state(data_dir: &Path, state: &SyncState) -> Result<(), String> {
     // Atomic: a crash mid-write must leave the previous state, never
     // a torn file — a torn one reads as "no state" and costs the next
     // run a full re-sync plus a whole-map read to recover what the
-    // fingerprints would have said (see `previously_synced` in `sync`).
+    // fingerprints would have said (see `map_holds` in `sync`).
     crate::storage::write_atomic(&data_dir.join(STATE_FILE), format!("{value}\n").as_bytes())
         .map_err(|error| format!("writing {STATE_FILE}: {error}"))
 }
@@ -377,12 +388,12 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // universe, however it became a candidate).
     let universe: std::collections::BTreeSet<String> = walk.full_listing()?.into_iter().collect();
     // What the map holds facts for right now: every path an earlier
-    // sync imported. The state file's fingerprints are that record
-    // (inserted on each successful import, dropped on each
-    // retraction); without a state file — lost, corrupt — the stored
-    // map itself is read back instead, or a full re-sync could never
-    // retract the files deleted while the record was missing. Two
-    // things need it: a full re-sync must make every such path a
+    // sync imported. The state file's fingerprints are the cheap
+    // record of that (inserted on each successful import, dropped on
+    // each retraction); without a state file — lost, corrupt — the
+    // stored map itself is read back instead, or a full re-sync could
+    // never retract the files deleted while the record was missing.
+    // Two things need it: a full re-sync must make every such path a
     // candidate (the universe lists only survivors, so a file deleted
     // between the anchor and HEAD is in neither the universe nor any
     // dirty set — only this record still names it), and a candidate
@@ -392,8 +403,21 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         None => crate::code::query::stored_sources(&data_dir, &args.context),
         Some(_) => std::collections::BTreeSet::new(),
     };
-    let previously_synced = |path: &str| match &previous {
-        Some(state) => state.fingerprints.contains_key(path),
+    // The fingerprints are a lower bound, not the truth: a sync that
+    // applied its writes but never saved its state (interrupted, or
+    // ended with a failure and left the sync point unadvanced) put
+    // facts in the map that no fingerprint names. So a path the
+    // fingerprints miss is checked against the map itself — read back
+    // at most once per run, and only when an unimportable candidate
+    // asks, which keeps the common run free of a whole-map read.
+    let read_back = std::cell::OnceCell::new();
+    let map_holds = |path: &str| match &previous {
+        Some(state) => {
+            state.fingerprints.contains_key(path)
+                || read_back
+                    .get_or_init(|| crate::code::query::stored_sources(&data_dir, &args.context))
+                    .contains(path)
+        }
         None => recovered.contains(path),
     };
     // Candidates: every path whose truth may have moved since the
@@ -547,10 +571,11 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             // a Latin-1 re-save, an unreadable mode. Its current truth
             // is "no facts": a `.rs` that WAS synced and then got
             // swapped for any of these must not keep serving the old
-            // version's symbols (and fingerprint) forever. One never
-            // synced has nothing to withdraw, so it costs no boot.
+            // version's symbols (and fingerprint) forever. One the map
+            // holds nothing for has nothing to withdraw, so it costs
+            // no boot.
             binaries += 1;
-            if previously_synced(path.as_str()) {
+            if map_holds(path.as_str()) {
                 retractions.push(path.clone());
             }
             continue;
@@ -593,7 +618,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
                     "taguru-code: sync: {path}: rendered source file refused, skipped: {message}"
                 );
                 refused += 1;
-                if previously_synced(path.as_str()) {
+                if map_holds(path.as_str()) {
                     retractions.push(path.clone());
                 }
             }
@@ -876,6 +901,16 @@ mod tests {
             std::os::unix::fs::symlink(&target, repo.join(".linked")).unwrap();
             let linked = resolve_data_dir(Some(repo.join(".linked")), &root);
             assert!(under_data_dir(".linked", &root, &linked));
+
+            // A missing component followed by `..` lands back on an
+            // existing symlinked directory: git lists what lives
+            // there under the TARGET's path, so that ancestor must be
+            // resolved too — only the leaf stays as named.
+            std::fs::create_dir_all(repo.join("real")).unwrap();
+            std::os::unix::fs::symlink(repo.join("real"), repo.join("alias")).unwrap();
+            let through = resolve_data_dir(Some(repo.join("gone/../alias/.map")), &root);
+            assert_eq!(through, root.join("real/.map"));
+            assert!(under_data_dir("real/.map/x.bin", &root, &through));
         }
     }
 }
