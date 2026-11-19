@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from taguru import (
+    CompactOutcome,
     DirectoryEntry,
     GroupImportOutcome,
     Issue,
@@ -17,6 +18,7 @@ from taguru import (
     ServerError,
     TaguruError,
     TransportError,
+    Unreached,
 )
 from taguru._shared import (
     ContractState,
@@ -24,6 +26,7 @@ from taguru._shared import (
     raise_for_response,
     run_contract_probe,
     unwrap_envelope_full,
+    unwrap_envelope_partial,
 )
 
 from .conftest import async_client, err_response, ok_response, sync_client
@@ -691,3 +694,104 @@ async def test_contract_probe_clears_its_task_slot_for_the_next_caller() -> None
     await run_contract_probe(state, probe)
     assert calls == 2
     assert state.task is None
+
+
+UNREACHED = [
+    {
+        "shard": "http://shard-b:8248",
+        "context_ids": ["00000000-0000-4000-8000-00000000000b"],
+        "error": "connection refused",
+    }
+]
+
+
+def partial_response(result: object) -> httpx.Response:
+    """A ``taguru router`` envelope: ``unreached`` rides BESIDE ``result``."""
+    return httpx.Response(
+        200,
+        json={"result": result, "status": "ok", "time": 0.001, "unreached": UNREACHED},
+    )
+
+
+def test_a_routers_unreached_shards_surface_on_every_fan_out_read() -> None:
+    """The router labels a partial fan-out with a top-level ``unreached``;
+    dropping it made a page missing a dead shard's rows look complete."""
+    expected = [
+        Unreached(
+            shard="http://shard-b:8248",
+            context_ids=["00000000-0000-4000-8000-00000000000b"],
+            error="connection refused",
+        )
+    ]
+    plan = {"contexts": []}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/contexts":
+            return partial_response({"total": 1, "contexts": [DIRECTORY_ROW]})
+        if req.url.path == "/sources/search":
+            return partial_response({"plan": plan, "hits": []})
+        return partial_response({"total": 0, "matches": []})
+
+    client = sync_client(handler)
+    page = client.contexts.list()
+    assert [row.name for row in page.contexts] == ["sake"]
+    assert page.unreached == expected
+    assert client.recall("cue", group_ids=["g"]).unreached == expected
+    assert client.query(group_ids=["g"], label="l").unreached == expected
+    assert client.search_passages("q", group_ids=["g"]).unreached == expected
+
+
+async def test_async_fan_out_reads_surface_unreached_too() -> None:
+    client = async_client(lambda _req: partial_response({"total": 0, "contexts": []}))
+    page = await client.contexts.list()
+    assert [entry.shard for entry in page.unreached] == ["http://shard-b:8248"]
+
+
+def test_a_complete_fan_out_carries_an_empty_unreached() -> None:
+    """Absent ``unreached`` (every shard answered, or no router at all)
+    decodes to empty — and a result that is not an object passes through
+    untouched rather than gaining a key."""
+    client = sync_client(lambda _req: ok_response({"total": 0, "contexts": []}))
+    assert client.contexts.list().unreached == []
+    assert unwrap_envelope_partial(partial_response([1, 2])) == [1, 2]
+
+
+def test_compact_outcome_carries_image_persisted_and_passages_compacted() -> None:
+    """``image_persisted: false`` is the server saying the rebuilt image the
+    numbers describe was NOT durably published — the decoder must keep it,
+    or a full-disk compaction reads as a success."""
+    outcome = {
+        "bytes_before": 4096,
+        "bytes_after": 1024,
+        "dead_edges": 3,
+        "aliases_dropped": 1,
+        "passages_compacted": True,
+        "image_persisted": False,
+    }
+    client = sync_client(lambda _req: ok_response(outcome))
+    decoded = client.context("sake").compact()
+    assert decoded == CompactOutcome(
+        bytes_before=4096,
+        bytes_after=1024,
+        dead_edges=3,
+        aliases_dropped=1,
+        passages_compacted=True,
+        image_persisted=False,
+    )
+
+
+def test_compact_outcome_from_an_older_server_defaults_like_the_servers_own_decoder() -> None:
+    """A server predating the fields never reported a publish failure apart
+    from the call's own error, so silence is ``image_persisted=True`` — not
+    a false alarm on every old response."""
+    legacy = {"bytes_before": 10, "bytes_after": 5, "dead_edges": 0, "aliases_dropped": 0}
+    decoded = sync_client(lambda _req: ok_response(legacy)).context("sake").compact()
+    assert (decoded.image_persisted, decoded.passages_compacted) == (True, False)
+
+
+def test_directory_row_carries_schema_mode() -> None:
+    client = sync_client(lambda _req: ok_response({**DIRECTORY_ROW, "schema_mode": "strict"}))
+    assert client.contexts.get("sake").schema_mode == "strict"
+    # A context that never installed a schema answers null; an older server omits it.
+    legacy = sync_client(lambda _req: ok_response(DIRECTORY_ROW))
+    assert legacy.contexts.get("x").schema_mode is None

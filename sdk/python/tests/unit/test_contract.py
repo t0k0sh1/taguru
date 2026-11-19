@@ -116,6 +116,40 @@ async def test_concurrent_first_calls_share_one_probe_and_all_see_incompatibilit
     assert paths == ["/version"], "only one probe, and no real request ever ran"
 
 
+async def test_one_cancelled_caller_does_not_cancel_the_shared_probe_for_the_rest() -> None:
+    """The in-flight probe is ONE shared ``Task``: a caller cancelled while
+    awaiting it (an ``asyncio.wait_for`` timeout) must not cancel it out
+    from under every other awaiter — they would all fail with a
+    ``CancelledError`` nobody asked for — nor free the slot so the next
+    caller starts a second probe beside the one still running."""
+    paths: list[str] = []
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        paths.append(req.url.path)
+        if req.url.path == "/version":
+            probe_started.set()
+            await release_probe.wait()
+            return version_response(compatible_version())
+        return ok_response(EMPTY_MATCHES)
+
+    client = async_client(handler, check_contract=True)  # type: ignore[arg-type]
+    survivor = asyncio.ensure_future(client.context("sake").recall("cue"))
+    doomed = asyncio.ensure_future(client.context("tea").recall("cue"))
+    await probe_started.wait()
+    doomed.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await doomed
+    late = asyncio.ensure_future(client.context("mugi").recall("cue"))
+    await asyncio.sleep(0)
+    release_probe.set()
+
+    assert (await survivor).total == 0
+    assert (await late).total == 0
+    assert paths.count("/version") == 1, "the late caller joined the running probe"
+
+
 def test_incompatible_newer_server_raises_with_upgrade_sdk_remedy() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/version":

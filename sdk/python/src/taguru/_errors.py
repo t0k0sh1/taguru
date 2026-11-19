@@ -26,6 +26,7 @@ __all__ = [
     "ServiceUnavailableError",
     "StorageFullError",
     "EmbeddingUnavailableError",
+    "ShardUnreachableError",
     "TransportError",
     "UnexpectedStatusError",
     "IncompatibleServerError",
@@ -149,7 +150,9 @@ class EmbeddingUnavailableError(ServerError):
     ``reason`` is ``"not_configured"`` for 501 and ``"provider_error"`` for 502.
     Unlike the single-status sibling errors, this class covers two statuses,
     so neither has a safe implicit default — ``status`` must be passed as
-    501 or 502 explicitly.
+    501 or 502 explicitly. A 502 whose ``code`` is ``"shard_unreachable"``
+    is a :class:`ShardUnreachableError` instead — no embedding provider
+    was involved.
     """
 
     def __init__(
@@ -167,6 +170,35 @@ class EmbeddingUnavailableError(ServerError):
             )
         super().__init__(message, status=status, code=code, time=time, body=body)
         self.reason = "not_configured" if status == 501 else "provider_error"
+
+
+class ShardUnreachableError(ServerError):
+    """A ``taguru router`` could not reach a shard this request needs —
+    ``code`` is always ``"shard_unreachable"``.
+
+    Two shapes. From a response: the router's 502 refusal of a routed
+    verb (or of a fan-out read no shard answered), retryable once the
+    shard or its load balancer answers again. Retry policy stays the
+    status's own — 502 retries on SAFE routes only, because "unreachable"
+    includes a connection lost mid-body, after a write may have reached
+    the shard; that is why this is not a :class:`ServiceUnavailableError`
+    (whose 503 means "never executed"). Raised by a caller instead: a
+    fan-out read that answered 200 with a non-empty ``unreached`` (e.g.
+    the LangChain ingester's name lookup, which must not read a partial
+    directory as "absent" or "unique") — ``status`` is then that 200 and
+    ``body`` the ``unreached`` entries as plain dicts.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = 502,
+        code: str | None = "shard_unreachable",
+        time: float | None = None,
+        body: object = None,
+    ) -> None:
+        super().__init__(message, status=status, code=code, time=time, body=body)
 
 
 class TransportError(TaguruError):
@@ -261,6 +293,8 @@ def error_for_status(
         )
     if status == 507:
         return StorageFullError(message, status=status, code=code, time=time, body=body)
+    if status == 502 and code == "shard_unreachable":
+        return ShardUnreachableError(message, status=status, code=code, time=time, body=body)
     if status in (501, 502):
         return EmbeddingUnavailableError(message, status=status, code=code, time=time, body=body)
     if 500 <= status < 600:

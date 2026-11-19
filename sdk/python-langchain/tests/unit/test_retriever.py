@@ -161,12 +161,16 @@ async def test_groups_resolve_to_members_nested_children_included(
 
     # parent reaches sake directly and tea through its child group — walked
     # one get per group reached (#1024), each group once, never the whole
-    # directory listing.
+    # directory listing — for the per-context graph lane. The text lane
+    # names the groups themselves and the server expands them: a group may
+    # reach more contexts than one request's `context_ids` cap allows.
     fetched = [path for path, _ in fake_server.calls if path.startswith("/groups")]
     assert sorted(fetched) == ["/groups/gid-childg", "/groups/gid-parent"]
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
-        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+        {"group_ids": ["gid-parent", "gid-childg"], "query": "青嶺酒造", "limit": 5}
     ]
     assert {d.metadata["context"] for d in documents} == {"id-sake", "id-tea"}
 
@@ -190,10 +194,13 @@ def test_a_group_id_names_one_group_and_a_name_names_none(
     by_id.invoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
-        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+        {"context_ids": ["id-sake"], "group_ids": ["gid-childg"], "query": "青嶺酒造", "limit": 5}
     ]
-    # A display name in group_ids is not an id (#997): it resolves nothing,
-    # and the direct target stands alone.
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
+    # A display name in group_ids is not an id (#997): it resolves nothing
+    # (404), so it drops out of the text lane too — sent on, it would refuse
+    # the whole search — and the direct target stands alone.
     fake_server.calls.clear()
     by_name = TaguruRetriever(
         context_ids=["id-sake"], group_ids=["childg"], client=sync_client, async_client=async_client
@@ -259,7 +266,8 @@ async def test_a_walk_failing_partway_keeps_the_members_reached_beside_direct_ta
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
 ) -> None:
     # gid-parent reads; its child gid-childg fails. The members already
-    # reached (sake) still resolve, beside the direct target.
+    # reached (sake) still get a graph lane beside the direct target, and
+    # the text lane hands the group itself to the server to expand.
     fake_server.fail_groups = {"gid-childg"}
     retriever = TaguruRetriever(
         context_ids=["id-tea"],
@@ -273,8 +281,10 @@ async def test_a_walk_failing_partway_keeps_the_members_reached_beside_direct_ta
         await retriever.ainvoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
-        {"context_ids": ["id-tea", "id-sake"], "query": "青嶺酒造", "limit": 5}
+        {"context_ids": ["id-tea"], "group_ids": ["gid-parent"], "query": "青嶺酒造", "limit": 5}
     ]
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
 
 
 @pytest.mark.parametrize("lane", ["sync", "async"])
@@ -282,7 +292,7 @@ async def test_a_failed_group_keeps_its_siblings_members_in_the_same_storey(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
 ) -> None:
     # gid-brewery fails and is named first; its sibling gid-parent still
-    # reads, and its member (sake) stands beside the direct target.
+    # reads, and its member (sake) gets a graph lane beside the direct target.
     fake_server.fail_groups = {"gid-brewery"}
     retriever = TaguruRetriever(
         context_ids=["id-tea"],
@@ -296,8 +306,15 @@ async def test_a_failed_group_keeps_its_siblings_members_in_the_same_storey(
         await retriever.ainvoke("青嶺酒造")
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
-        {"context_ids": ["id-tea", "id-sake"], "query": "青嶺酒造", "limit": 5}
+        {
+            "context_ids": ["id-tea"],
+            "group_ids": ["gid-brewery", "gid-parent"],
+            "query": "青嶺酒造",
+            "limit": 5,
+        }
     ]
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
 
 
 # ``context_id`` combined with the cross fields: it leads the target list —
@@ -342,7 +359,7 @@ async def test_context_id_is_searched_beside_a_groups_members(
     assert sorted(resolves) == ["/contexts/id-sake/resolve", "/contexts/id-tea/resolve"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
     assert cross_searches == [
-        {"context_ids": ["id-sake", "id-tea"], "query": "青嶺酒造", "limit": 5}
+        {"context_ids": ["id-sake"], "group_ids": ["gid-childg"], "query": "青嶺酒造", "limit": 5}
     ]
 
 
@@ -361,8 +378,12 @@ async def test_context_id_is_the_fallback_when_the_group_fails_to_read(
         retriever.invoke("青嶺酒造")
     else:
         await retriever.ainvoke("青嶺酒造")
+    resolves = [path for path, _ in fake_server.calls if path.endswith("/resolve")]
+    assert resolves == ["/contexts/id-sake/resolve"]
     cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
-    assert cross_searches == [{"context_ids": ["id-sake"], "query": "青嶺酒造", "limit": 5}]
+    assert cross_searches == [
+        {"context_ids": ["id-sake"], "group_ids": ["gid-brewery"], "query": "青嶺酒造", "limit": 5}
+    ]
 
 
 def test_keeps_a_healthy_targets_graph_docs_when_another_targets_graph_lane_errors(
@@ -524,6 +545,76 @@ async def test_async_bare_context_sole_text_lane_failing_raises(
 
     with pytest.raises(Exception, match="simulated failure"):
         await retriever.ainvoke("青嶺酒造")
+
+
+# -- multi-target: the same "every lane failed" rule ----------------------------
+# Per-target isolation keeps one failing target from blanking the rest; it
+# is not a licence to answer [] when NOTHING answered.
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_multi_target_every_lane_failing_raises_instead_of_returning_nothing(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    fake_server.fail_contexts.update({"id-sake", "id-tea"})
+    fake_server.fail_text_search = True
+    retriever = TaguruRetriever(
+        context_ids=["id-sake", "id-tea"], client=sync_client, async_client=async_client
+    )
+    with pytest.raises(TaguruError, match="simulated failure"):
+        if lane == "sync":
+            retriever.invoke("青嶺酒造")
+        else:
+            await retriever.ainvoke("青嶺酒造")
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_multi_target_sole_text_lane_failing_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    fake_server.fail_text_search = True
+    retriever = TaguruRetriever(
+        group_ids=["gid-brewery"],
+        include_graph=False,
+        client=sync_client,
+        async_client=async_client,
+    )
+    with pytest.raises(TaguruError, match="simulated failure"):
+        if lane == "sync":
+            retriever.invoke("青嶺酒造")
+        else:
+            await retriever.ainvoke("青嶺酒造")
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_a_group_past_the_context_ids_cap_still_feeds_the_text_lane(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+) -> None:
+    """A group may reach more contexts than one request may list (the
+    server's 1000-item cap): expanded client-side into `context_ids`, the
+    search was a 400 and the text lane came back silently empty. Named as
+    a group, the server expands it."""
+    members = [f"id-m{index:04}" for index in range(1001)]
+    huge = {"id": "gid-huge", "name": "huge", "description": "", "group_ids": []}
+    monkeypatch.setitem(GROUP_ROWS, "gid-huge", {**huge, "context_ids": members})
+    retriever = TaguruRetriever(
+        group_ids=["gid-huge"],
+        include_graph=False,
+        k=2000,
+        client=sync_client,
+        async_client=async_client,
+    )
+    if lane == "sync":
+        documents = retriever.invoke("青嶺酒造")
+    else:
+        documents = await retriever.ainvoke("青嶺酒造")
+    cross_searches = [body for path, body in fake_server.calls if path == "/sources/search"]
+    assert cross_searches == [{"group_ids": ["gid-huge"], "query": "青嶺酒造", "limit": 5}]
+    assert len(documents) == 1001
 
 
 # -- async citation fetches run concurrently, not sequentially ------------------

@@ -131,6 +131,37 @@ def test_ambiguous_failure_never_retries_delete() -> None:
     assert handler.calls == 1
 
 
+def test_ambiguous_failure_never_retries_a_retraction() -> None:
+    """A phantom retry of an applied retraction answers "nothing changed"
+    (``retracted=False`` / ``associations_touched=0``) — the same
+    misreport a repeat delete's 404 is, so neither retraction retries an
+    ambiguous failure."""
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.context("sake").retract_association("s", "l", "o")
+    assert handler.calls == 1
+
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.context("sake").retract_source("doc")
+    assert handler.calls == 1
+
+
+def test_a_dry_run_retraction_retries_an_ambiguous_failure() -> None:
+    """A dry run writes nothing, so its repeat reports the same preview."""
+    handler = FlakyHandler(
+        1,
+        lambda: httpx.ReadTimeout("mid-flight"),
+        success={"associations_touched": 3, "passage_removed": True},
+    )
+    client = sync_client(handler)
+    outcome = client.context("sake").retract_source("doc", dry_run=True)
+    assert outcome.associations_touched == 3
+    assert handler.calls == 2
+
+
 def test_retries_zero_disables_retry() -> None:
     handler = FlakyHandler(1, lambda: err_response(429, "budget", {"retry-after": "0"}))
     client = sync_client(handler, retries=0)

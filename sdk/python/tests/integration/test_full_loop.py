@@ -426,6 +426,8 @@ def test_compact_reports_shed_bytes(client: Taguru, fresh_name: str) -> None:
     ctx.retract_source("docs/aomine.md")
     outcome = ctx.compact()
     assert outcome.bytes_after <= outcome.bytes_before
+    # A healthy disk publishes the rebuilt image durably.
+    assert outcome.image_persisted is True
     client.contexts.delete(context_id)
 
 

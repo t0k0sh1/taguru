@@ -15,7 +15,13 @@ from langchain_core.language_models.fake_chat_models import (
 )
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from taguru import AsyncTaguru, NotFoundError, PermissionDeniedError, Taguru
+from taguru import (
+    AsyncTaguru,
+    NotFoundError,
+    PermissionDeniedError,
+    ShardUnreachableError,
+    Taguru,
+)
 
 from taguru_langchain import TaguruIngester
 from taguru_langchain._extract import MAX_PASSAGE_BYTES
@@ -456,7 +462,7 @@ def test_a_failed_directory_listing_does_not_mint_a_duplicate_on_a_real_import(
     def broken(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("directory unavailable")
 
-    monkeypatch.setattr(type(sync_client.contexts), "iter", broken)
+    monkeypatch.setattr(type(sync_client.contexts), "list", broken)
     ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
     dry = ingester.ingest_text(DOC_TEXT, source="docs/a.md", dry_run=True)
     assert dry.ok
@@ -581,6 +587,25 @@ def test_embeddings_501_is_silently_ignored(sync_client: Taguru, async_client: A
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok
     assert outcome.embeddings_refresh_warning is None
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_a_shard_outage_on_refresh_is_not_recorded_as_an_embedding_warning(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    """A router's 502 ``shard_unreachable`` used to arrive as
+    ``EmbeddingUnavailableError(provider_error)`` and be filed as an
+    embedding warning on an otherwise-clean outcome; the shard outage is
+    the caller's to hear, like any other refresh failure that is not the
+    provider's."""
+    fake_server.embeddings_refresh_status = 502
+    fake_server.embeddings_refresh_code = "shard_unreachable"
+    ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    with pytest.raises(ShardUnreachableError):
+        if lane == "sync":
+            ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+        else:
+            await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
 
 
 async def test_async_ingest_matches_sync(
@@ -1233,6 +1258,54 @@ async def test_context_id_propagates_a_listing_failure_that_is_not_absence(
             ingester.context_id()
         else:
             await ingester.acontext_id()
+
+
+PARTIAL = [{"shard": "http://shard-b:8248", "context_ids": [], "error": "connection refused"}]
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_context_id_refuses_a_routers_partial_listing(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    """A ``taguru router`` that could not reach a shard answers 200 with
+    ``unreached``: the missing shard may hold the context (so ``None`` is
+    unproven) or a second one sharing the name (so one match is not proven
+    unique). Either reading would mislead — the S3 sweep's "does not
+    resolve", or a header minting a duplicate."""
+    fake_server.contexts_unreached = PARTIAL
+    present, _llm = make_ingester(sync_client, async_client, [])
+    absent = TaguruIngester(
+        context="no-such-context", llm=present.llm, client=sync_client, async_client=async_client
+    )
+    for ingester in (present, absent):
+        with pytest.raises(ShardUnreachableError) as excinfo:
+            if lane == "sync":
+                ingester.context_id()
+            else:
+                await ingester.acontext_id()
+        assert excinfo.value.code == "shard_unreachable"
+        assert excinfo.value.status == 200
+        assert excinfo.value.body == PARTIAL
+        assert "http://shard-b:8248" in excinfo.value.message
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_a_partial_listing_never_mints_a_header_id_on_a_real_import(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, lane: str
+) -> None:
+    """A dry run only renders NDJSON, so it keeps working; a real import
+    refuses rather than guess an id the unreached shard may already own."""
+    fake_server.contexts_unreached = PARTIAL
+    ingester = _new_context_ingester(sync_client, async_client, [MODEL_ANSWER, MODEL_ANSWER])
+    if lane == "sync":
+        assert ingester.ingest_text(DOC_TEXT, source="docs/a.md", dry_run=True).ok
+        with pytest.raises(ShardUnreachableError):
+            ingester.ingest_text(DOC_TEXT, source="docs/a.md")
+    else:
+        assert (await ingester.aingest_text(DOC_TEXT, source="docs/a.md", dry_run=True)).ok
+        with pytest.raises(ShardUnreachableError):
+            await ingester.aingest_text(DOC_TEXT, source="docs/a.md")
+    assert fake_server.imported == []
 
 
 @pytest.mark.parametrize("lane", ["sync", "async"])

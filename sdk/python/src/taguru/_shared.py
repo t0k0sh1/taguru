@@ -128,6 +128,33 @@ def unwrap_envelope_full(response: httpx.Response) -> tuple[Any, list[Issue], in
     empty/zero on every other response (and on servers predating the
     fields), so result-only callers go through ``unwrap_envelope``.
     """
+    data = _envelope(response)
+    raw_issues = data.get("issues")
+    issues = [decode(Issue, issue) for issue in raw_issues] if isinstance(raw_issues, list) else []
+    raw_violations = data.get("schema_violations")
+    violations = raw_violations if isinstance(raw_violations, int) else 0
+    return data["result"], issues, violations
+
+
+def unwrap_envelope_partial(response: httpx.Response) -> Any:
+    """``unwrap_envelope`` for the fan-out reads a ``taguru router`` may
+    answer partially (``GET /contexts``, ``/recall``, ``/query``,
+    ``/sources/search``): the envelope's top-level ``unreached`` — which
+    rides BESIDE ``result``, absent whenever every shard answered — is
+    folded into the returned result object as its ``unreached`` key, so
+    the decoded page carries it. Dropping it would make a page missing a
+    dead shard's rows indistinguishable from a complete one."""
+    data = _envelope(response)
+    result = data["result"]
+    unreached = data.get("unreached")
+    if isinstance(result, dict) and isinstance(unreached, list):
+        return {**result, "unreached": unreached}
+    return result
+
+
+def _envelope(response: httpx.Response) -> dict[str, Any]:
+    """The parsed ``{"result", "status": "ok", "time", ...}`` envelope,
+    or the error naming why the body is not one."""
     try:
         data = response.json()
     except ValueError as exc:
@@ -137,13 +164,7 @@ def unwrap_envelope_full(response: httpx.Response) -> tuple[Any, list[Issue], in
             body=response.text,
         ) from exc
     if isinstance(data, dict) and data.get("status") == "ok" and "result" in data:
-        raw_issues = data.get("issues")
-        issues = (
-            [decode(Issue, issue) for issue in raw_issues] if isinstance(raw_issues, list) else []
-        )
-        raw_violations = data.get("schema_violations")
-        violations = raw_violations if isinstance(raw_violations, int) else 0
-        return data["result"], issues, violations
+        return data
     raise TaguruError(
         "response is not the taguru envelope shape",
         status=response.status_code,
@@ -230,6 +251,15 @@ async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable
     of all. Wrapping the probe in a ``Task`` lets every awaiter share the
     same pending result.
 
+    Each awaiter waits through ``asyncio.shield``: the ``Task`` is shared,
+    so a bare ``await`` would let ONE cancelled caller (an
+    ``asyncio.wait_for`` timeout, say) cancel the probe out from under
+    every other awaiter, failing them with a ``CancelledError`` nobody
+    asked for. For the same reason the slot is cleared by the ``Task``'s
+    own completion, not by whichever awaiter leaves first: a cancelled
+    awaiter leaving early must not let the next caller start a second
+    probe beside the one still running.
+
     ``generate_sync.py`` rewrites this call to ``run_contract_probe_once``
     for the sync client, which has no concurrent callers to share a probe
     with, so it just calls ``probe()`` once, synchronously, in-line.
@@ -238,12 +268,20 @@ async def run_contract_probe(state: ContractState, probe: Callable[[], Awaitable
         if state.error is not None:
             raise state.error
         return
-    if state.task is None:
-        state.task = asyncio.ensure_future(probe())
-    try:
-        await state.task
-    finally:
-        state.task = None
+    task = state.task
+    if task is None:
+        task = asyncio.ensure_future(probe())
+        state.task = task
+
+        def release(_: asyncio.Future[None]) -> None:
+            state.task = None
+
+        # Registered before any awaiter's own wake-up, so the slot is
+        # already clear when they resume — a TransportError-ended probe
+        # (``checked`` still False) is re-run by the next call. Nothing
+        # can replace the slot while it is set, so this clears its own.
+        task.add_done_callback(release)
+    await asyncio.shield(task)
 
 
 def run_contract_probe_once(state: ContractState, probe: Callable[[], None]) -> None:

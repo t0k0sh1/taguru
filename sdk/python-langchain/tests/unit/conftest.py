@@ -87,6 +87,9 @@ class FakeServer:
         # 502 = the provider itself failed. The 501/502 pair both map to
         # EmbeddingUnavailableError, distinguished by its `reason`.
         self.embeddings_refresh_status = 501
+        # The refresh error body's `code`, when set — a router's 502
+        # `shard_unreachable` is a shard outage, not a provider failure.
+        self.embeddings_refresh_code: str | None = None
         self.embeddings_refresh_result: dict[str, Any] = {"embedded": 0, "total": 0}
         # When set, /import fails with a 500 — exercises the "checkpoints
         # survive an import failure" case (issue #211).
@@ -113,6 +116,10 @@ class FakeServer:
         # exercise the ingester's id lookup telling "no such context"
         # apart from a listing that failed for another reason.
         self.contexts_listing_status: int | None = None
+        # When set, every GET /contexts page carries this as the envelope's
+        # top-level `unreached` — a `taguru router` that could not reach a
+        # shard, answering a partial directory.
+        self.contexts_unreached: list[dict[str, Any]] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -177,7 +184,18 @@ class FakeServer:
                 }
 
             rows = [] if request.url.params.get("after") else [row("sake"), row("tea")]
-            return ok({"total": 2, "contexts": rows})
+            listing = ok({"total": 2, "contexts": rows})
+            if self.contexts_unreached is not None:
+                listing = httpx.Response(
+                    200,
+                    json={
+                        "result": {"total": 2, "contexts": rows},
+                        "status": "ok",
+                        "time": 0.001,
+                        "unreached": self.contexts_unreached,
+                    },
+                )
+            return listing
         body: Any = None
         if request.content:
             try:
@@ -235,9 +253,41 @@ class FakeServer:
                         "time": 0.001,
                     },
                 )
-            # The cross-context search: one tagged hit per named context,
-            # already rank-interleaved the way the server merges, the
-            # plan listing every target (#151).
+            # The cross-context search: one tagged hit per target, already
+            # rank-interleaved the way the server merges, the plan listing
+            # every target (#151). Targets resolve as the server's own
+            # `cross_targets` does: direct ids first, then every `group`'s
+            # transitive members in id order, deduped; an unknown `group`
+            # refuses the whole request.
+            if len(body.get("context_ids", [])) > 1000:
+                # The server's input-items cap on a cross search's list.
+                return httpx.Response(
+                    400,
+                    json={
+                        "status": "error",
+                        "code": "over_limit",
+                        "error": "'context_ids' lists more than 1000 items",
+                        "time": 0.001,
+                    },
+                )
+            targets = list(dict.fromkeys(body.get("context_ids", [])))
+            members: set[str] = set()
+            pending = list(body.get("group_ids", []))
+            while pending:
+                group = GROUP_ROWS.get(pending.pop())
+                if group is None:
+                    return httpx.Response(
+                        404,
+                        json={
+                            "status": "error",
+                            "code": "no_group",
+                            "error": "group not found",
+                            "time": 0.001,
+                        },
+                    )
+                members.update(group["context_ids"])
+                pending.extend(group["group_ids"])
+            targets.extend(sorted(members - set(targets)))
             return ok(
                 {
                     "plan": {
@@ -253,7 +303,7 @@ class FakeServer:
                                     },
                                 },
                             }
-                            for context_id in body["context_ids"]
+                            for context_id in targets
                         ]
                     },
                     "hits": [
@@ -266,7 +316,7 @@ class FakeServer:
                             "text": f"{context_id.removeprefix('id-')} の段落。",
                             "lanes": {"bm25": {"rank": 0, "score": 2.0}},
                         }
-                        for context_id in body["context_ids"]
+                        for context_id in targets
                     ],
                 }
             )
@@ -416,10 +466,10 @@ class FakeServer:
             if self.embeddings_refresh_status == 200:
                 return ok(self.embeddings_refresh_result)
             message = "no provider" if self.embeddings_refresh_status == 501 else "provider failed"
-            return httpx.Response(
-                self.embeddings_refresh_status,
-                json={"status": "error", "error": message, "time": 0.001},
-            )
+            refusal: dict[str, Any] = {"status": "error", "error": message, "time": 0.001}
+            if self.embeddings_refresh_code is not None:
+                refusal["code"] = self.embeddings_refresh_code
+            return httpx.Response(self.embeddings_refresh_status, json=refusal)
         raise AssertionError(f"unrouted path: {path}")
 
 
