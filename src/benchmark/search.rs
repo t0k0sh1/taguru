@@ -977,8 +977,11 @@ impl ExpectedItem {
                 &hit.source_id == path
                     && (paragraphs.is_empty() || paragraphs.contains(&hit.paragraph))
             }
+            // An empty normalized term is a substring of every text, so
+            // it would "match" every hit; an expectation that names
+            // nothing must never count as found.
             ExpectedItem::Concept { normalized } => {
-                normalized_hit_text.contains(normalized.as_str())
+                !normalized.is_empty() && normalized_hit_text.contains(normalized.as_str())
             }
         }
     }
@@ -1008,7 +1011,7 @@ fn resolve_expected_source_path(
     }
     let matches: Vec<&str> = segments
         .iter()
-        .filter(|doc| doc.path.ends_with(expected))
+        .filter(|doc| path_ends_with_components(&doc.path, expected))
         .map(|doc| doc.path.as_str())
         .collect();
     match matches.as_slice() {
@@ -1030,6 +1033,15 @@ fn resolve_expected_source_path(
             )),
         ),
     }
+}
+
+/// Whether `expected` is a whole-component suffix of `path`: the
+/// character before the suffix must be a separator (`/` or `\`, since
+/// manifests can carry either), so `brewery.md` matches
+/// `corpus/brewery.md` but not `corpus/microbrewery.md`.
+fn path_ends_with_components(path: &str, expected: &str) -> bool {
+    path.strip_suffix(expected)
+        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\'))
 }
 
 /// Resolves a case's `expected_sources`/`expected_concepts` into one

@@ -411,6 +411,25 @@ fn resolve_expected_source_path_warns_on_an_ambiguous_suffix() {
     assert!(warning.unwrap().contains("ambiguous"));
 }
 
+#[test]
+fn resolve_expected_source_path_suffix_match_respects_path_components() {
+    let docs = [
+        doc("d1", "corpus/microbrewery.md"),
+        doc("d2", "corpus\\brewery.md"),
+    ];
+    let (resolved, warning) = resolve_expected_source_path("brewery.md", &docs);
+    assert_eq!(resolved, "corpus\\brewery.md");
+    assert!(warning.is_none());
+}
+
+#[test]
+fn resolve_expected_source_path_rejects_a_mid_component_suffix() {
+    let docs = [doc("d1", "corpus/microbrewery.md")];
+    let (resolved, warning) = resolve_expected_source_path("brewery.md", &docs);
+    assert_eq!(resolved, "brewery.md");
+    assert!(warning.unwrap().contains("matches no segment"));
+}
+
 // ============================== recall@k / MRR ==============================
 
 #[test]
@@ -481,6 +500,15 @@ fn compute_recall_matches_a_concept_by_folded_substring_in_hit_text() {
     );
     assert_eq!(result.matched, 1);
     assert_eq!(result.recall_at_k, 1.0);
+}
+
+#[test]
+fn compute_recall_never_matches_an_empty_normalized_concept() {
+    let matching = identity::Matching::default();
+    let docs: [SegmentInfo; 0] = [];
+    let hits = [hit("corpus/a.md", 0, "any text at all")];
+    let (result, _) = compute_recall(&matching, "c1", &[], &[String::new()], &docs, &hits);
+    assert_eq!(result.matched, 0);
 }
 
 #[test]
