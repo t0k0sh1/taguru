@@ -587,6 +587,31 @@ async def test_multi_target_sole_text_lane_failing_raises(
 
 
 @pytest.mark.parametrize("lane", ["sync", "async"])
+async def test_an_empty_group_does_not_mask_a_text_lane_failure(
+    sync_client: Taguru,
+    async_client: AsyncTaguru,
+    fake_server: FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+) -> None:
+    """No member means no graph request ran: the graph lane did nothing
+    and must not count as healthy beside the one search that failed."""
+    empty = {"id": "gid-empty", "name": "empty", "description": ""}
+    monkeypatch.setitem(GROUP_ROWS, "gid-empty", {**empty, "context_ids": [], "group_ids": []})
+    fake_server.fail_text_search = True
+    retriever = TaguruRetriever(
+        group_ids=["gid-empty"],
+        client=sync_client,
+        async_client=async_client,
+    )
+    with pytest.raises(TaguruError, match="simulated failure"):
+        if lane == "sync":
+            retriever.invoke("青嶺酒造")
+        else:
+            await retriever.ainvoke("青嶺酒造")
+
+
+@pytest.mark.parametrize("lane", ["sync", "async"])
 async def test_a_group_past_the_context_ids_cap_still_feeds_the_text_lane(
     sync_client: Taguru,
     async_client: AsyncTaguru,

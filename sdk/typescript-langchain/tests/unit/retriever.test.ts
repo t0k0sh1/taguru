@@ -427,6 +427,29 @@ describe("TaguruRetriever cross-context", () => {
     expect(documents.length).toBeGreaterThan(0);
     expect(documents.every((d) => d.metadata["lane"] === "text")).toBe(true);
   });
+
+  it("raises a text-lane failure when only an empty group was named", async () => {
+    // No member means no graph request ran: the graph lane did nothing,
+    // so it cannot count as healthy and mask the one search that failed.
+    GROUP_ROWS["gid-empty"] = {
+      id: "gid-empty",
+      name: "empty",
+      description: "",
+      context_ids: [],
+      group_ids: [],
+    };
+    try {
+      const server = new FakeServer();
+      server.failTextSearch = true;
+      const retriever = new TaguruRetriever({
+        group_ids: ["gid-empty"],
+        client: server.client(),
+      });
+      await expect(retriever.invoke("青嶺酒造")).rejects.toBeInstanceOf(TaguruError);
+    } finally {
+      delete GROUP_ROWS["gid-empty"];
+    }
+  });
 });
 
 describe("interleave (issue #737)", () => {

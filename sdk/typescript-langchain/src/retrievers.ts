@@ -354,6 +354,10 @@ export class TaguruRetriever extends BaseRetriever {
     const { targets, direct, groups } = await this.resolveTargets();
     let graphDocs: Document[] = [];
     let graphFailed = false;
+    // Healthy means a graph request actually ran and answered: with no
+    // target (only empty groups named) the lane did nothing, and must
+    // not mask a text-lane failure as "nothing found".
+    let graphAnswered = false;
     let graphError: unknown;
     if (this.include_graph) {
       // Each target's lane is an independent chain of round trips, and
@@ -370,7 +374,8 @@ export class TaguruRetriever extends BaseRetriever {
       // The lane failed only when EVERY target did: one healthy target
       // means its emptiness elsewhere is real.
       const rejected = settled.filter((outcome) => outcome.status === "rejected");
-      if (targets.length > 0 && rejected.length === targets.length) {
+      graphAnswered = rejected.length < targets.length;
+      if (targets.length > 0 && !graphAnswered) {
         graphFailed = true;
         graphError = rejected[0]!.reason;
       }
@@ -402,7 +407,7 @@ export class TaguruRetriever extends BaseRetriever {
     // The single-target branch's rule, across targets: when every ENABLED
     // lane failed, raise — an empty result would read as "nothing found"
     // instead of "retrieval is broken."
-    const graphHealthy = this.include_graph && !graphFailed;
+    const graphHealthy = graphAnswered;
     const textHealthy = this.include_text && !textFailed;
     if ((graphFailed || textFailed) && !graphHealthy && !textHealthy) {
       throw graphFailed ? graphError : textError;
