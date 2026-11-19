@@ -7,6 +7,18 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-19
+
+A vocabulary and hardening release. Extraction's terms get one meaning
+each — segment, chunk, piece, paragraph (#1057, #1059, #851, #1069) —
+which renames on-disk checkpoint keys, CLI output and SDK fields
+(see **Changed**, the entries marked Breaking). Three review sweeps
+(#1072, #1073, #1074) fix proxy path traversal, redaction leaks,
+deletion resurrection, WAL and compaction durability, grant leaks,
+`/health` latching, metric label collisions and SDK contract drift.
+Re-extraction: `--redact` documents re-extract once (`redact4`), and
+code maps rebuild on the next `taguru-code sync` (`FACTS_VERSION` 2).
+
 ### Added
 
 - **One place that defines extraction's levels** (#1060, #851).
@@ -76,8 +88,8 @@ Entries that change an on-disk format or a response shape say so.
   disabled the version probe), an abandoned `exportStream` releases its
   connection, and `EHOSTUNREACH`/`ENETUNREACH`/`ETIMEDOUT` on `connect`
   count as pre-connect. Both LangChain packages now require taguru
-  `>=0.10.1` (Python) / `^0.10.1` (npm): they use `ShardUnreachableError`,
-  which 0.10.0 does not have — every package moves to 0.10.1 in lockstep.
+  `>=0.11.0` (Python) / `^0.11.0` (npm): they use `ShardUnreachableError`,
+  which 0.10.0 does not have — every package moves to 0.11.0 in lockstep.
 - **The router refuses `..` segments delimited by `\`.** The proxy's
   dot-segment check split paths on `/` only, while the outbound URL
   parser reads `\` as `/`: `POST /contexts/<id>/..\..\import` reached a
@@ -5335,7 +5347,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/t0k0sh1/taguru/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/t0k0sh1/taguru/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/t0k0sh1/taguru/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/t0k0sh1/taguru/compare/v0.9.5...v0.9.6
