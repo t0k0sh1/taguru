@@ -824,10 +824,11 @@ pub(crate) fn build_missed(
 /// #308 (ADR 0006 §14): builds the passage lane's `PassageOutcome`
 /// (what every scoring function below reads) plus the two mode-
 /// specific diagnostics — `EvidenceOutcome` (`assembly` only) and
-/// `BudgetAccounting` (either mode, once a budget flag was given).
-/// `assembly` mode always sends `run_config.limits` to
-/// `POST /contexts/{id}/evidence` (that endpoint has no unbudgeted
-/// mode, ADR 0006 §8); `baseline` mode only truncates — and only then
+/// `BudgetAccounting` (every assembled `assembly` case; a `baseline`
+/// case only once a budget flag was given). `assembly` mode always
+/// sends `run_config.limits` to `POST /contexts/{id}/evidence` (that
+/// endpoint has no unbudgeted mode, ADR 0006 §8), so it always has
+/// usage to report; `baseline` mode only truncates — and only then
 /// carries a `budget` block at all — when `run_config.budget_given`.
 fn run_passage_or_evidence_lane(
     api: &Api,

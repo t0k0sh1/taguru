@@ -665,8 +665,12 @@ fn print_human(report: &Report) {
 fn parse_probes(text: &str) -> Result<Vec<Probe>, String> {
     let mut probes = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        // Blank/comment detection reads the trimmed line, but the split
+        // runs on the raw one: trimming first would strip a leading or
+        // trailing TAB, so `"\texpected"`/`"cue\t"` would report "no
+        // TAB" instead of the empty cue/expected they actually are.
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let Some((cue, expected)) = line.split_once('\t') else {

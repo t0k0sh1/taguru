@@ -642,6 +642,48 @@ fn hits_from_evidence_items_never_exceeds_the_case_limit() {
     assert_eq!(hits[2].paragraph, 2);
 }
 
+/// Regression: the same `(source, paragraph)` reaching the projection
+/// twice — once as a passage item's own locator, again as a later
+/// association's attribution — used to occupy two `hits` slots, so
+/// the `limit` cap admitted fewer distinct paragraphs than the
+/// baseline's never-repeating `hits` would and every later rank
+/// shifted. First occurrence wins; the freed slot goes to the next
+/// distinct paragraph.
+#[test]
+fn hits_from_evidence_items_counts_a_repeated_paragraph_once() {
+    let mut association = passage_evidence_item("unused", 0, 2);
+    association.kind = "association".to_string();
+    association.passage = None;
+    association.citation_refs = vec![
+        CitationRef {
+            source_id: "corpus/a.md".to_string(),
+            paragraph: 0,
+        },
+        CitationRef {
+            source_id: "corpus/a.md".to_string(),
+            paragraph: 0,
+        },
+        CitationRef {
+            source_id: "corpus/b.md".to_string(),
+            paragraph: 4,
+        },
+    ];
+    let items = vec![
+        passage_evidence_item("corpus/a.md", 0, 1),
+        association,
+        passage_evidence_item("corpus/c.md", 9, 3),
+    ];
+    let hits = hits_from_evidence_items(&items, 3);
+    let locators: Vec<(&str, u32)> = hits
+        .iter()
+        .map(|hit| (hit.source.as_str(), hit.paragraph))
+        .collect();
+    assert_eq!(
+        locators,
+        vec![("corpus/a.md", 0), ("corpus/b.md", 4), ("corpus/c.md", 9)]
+    );
+}
+
 /// The diagnostic `EvidenceOutcome.items` projection keeps one locator
 /// per admitted item, carrying its id, kind, fused rank and payload
 /// locator.
@@ -2217,7 +2259,7 @@ fn validate_limits_names_the_line_of_the_offending_case() {
     let mut case = base_case("big");
     case.line = 7;
     case.options.limit = Some(MAX_SEARCH_LIMIT + 1);
-    let message = validate_limits(&[base_case("fine"), case]).unwrap_err();
+    let message = validate_limits(&[base_case("fine"), case], false).unwrap_err();
     assert_eq!(
         message,
         format!(
@@ -2229,11 +2271,38 @@ fn validate_limits_names_the_line_of_the_offending_case() {
     zero.line = 2;
     zero.options.limit = Some(0);
     assert!(
-        validate_limits(&[zero])
+        validate_limits(&[zero], false)
             .unwrap_err()
             .starts_with("line 2: case 'zero'")
     );
-    assert!(validate_limits(&[base_case("unset")]).is_ok());
+    assert!(validate_limits(&[base_case("unset")], false).is_ok());
+}
+
+/// Regression: `POST /contexts/{id}/evidence` silently clamps
+/// `search_limit` to `MAX_EVIDENCE_SEARCH_LIMIT`, so under `--assembly`
+/// a case's `options.limit` above it used to run at the ceiling while
+/// the artifact recorded (and scored `hits` against) the requested
+/// value. It is refused at load instead; the baseline ceiling is
+/// unchanged.
+#[test]
+fn validate_limits_refuses_a_limit_the_evidence_endpoint_would_clamp() {
+    let mut over = base_case("over");
+    over.line = 3;
+    over.options.limit = Some(MAX_EVIDENCE_SEARCH_LIMIT + 1);
+    assert_eq!(
+        validate_limits(std::slice::from_ref(&over), true).unwrap_err(),
+        format!(
+            "line 3: case 'over': options.limit: must be 1..={MAX_EVIDENCE_SEARCH_LIMIT} under \
+             --assembly, got {}",
+            MAX_EVIDENCE_SEARCH_LIMIT + 1
+        )
+    );
+    assert!(validate_limits(std::slice::from_ref(&over), false).is_ok());
+
+    let mut at_ceiling = base_case("at-ceiling");
+    at_ceiling.options.limit = Some(MAX_EVIDENCE_SEARCH_LIMIT);
+    assert!(validate_limits(&[at_ceiling], true).is_ok());
+    assert!(validate_limits(&[base_case("unset")], true).is_ok());
 }
 
 /// The loader records each case's line — the header line the case

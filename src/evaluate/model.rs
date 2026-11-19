@@ -168,8 +168,9 @@ pub(crate) struct CaseBlock {
     pub(crate) citations: Option<CitationsBlock>,
     /// Unmet expectations (ADR 0004 §11): sources, then concepts, then
     /// labels, then associations, then citations, capped at 3 entries.
-    /// Silent (empty) when the passage lane failed outright — see
-    /// [`build_missed`].
+    /// When the passage lane failed outright only the `expected_sources`
+    /// entries are silenced (its `Failed` outcome already says so); the
+    /// other expectations are still listed — see [`build_missed`].
     pub(crate) missed: Vec<String>,
     pub(crate) missed_truncated: usize,
     /// #308 (ADR 0006 §14): the assembly lane's own diagnostic detail
@@ -181,9 +182,14 @@ pub(crate) struct CaseBlock {
     /// projection cannot carry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evidence: Option<EvidenceOutcome>,
-    /// #308's equal-budget accounting — `Some` in both modes when a
-    /// budget flag was given, `None` when none was (both modes then
-    /// run untruncated, matching every run before this flag existed).
+    /// #308's equal-budget accounting. `assembly` mode: `Some` whenever
+    /// the package assembled, flag or no flag — the evidence endpoint
+    /// has no unbudgeted mode (ADR 0006 §8), so without `--max-*` this
+    /// reports usage against the server's default limits; `None` only
+    /// when the evidence lane failed. `baseline` mode: `Some` only when
+    /// a budget flag was given (and the passage lane succeeded); without
+    /// one it runs untruncated, matching every run before this flag
+    /// existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) budget: Option<BudgetAccounting>,
     /// #308's `diversity.sources` metric input (ADR 0006 §14's own new
@@ -426,7 +432,16 @@ pub(crate) fn evidence_locators(items: &[EvidenceItem]) -> Vec<EvidenceLocator> 
 /// `lane_cross.passage_hit` classification, ADR 0004 §8) differently
 /// from the identical-`limit` baseline case it exists to compare
 /// against.
+///
+/// Deduplicated on `(source, paragraph)` before `limit` applies, first
+/// occurrence wins: the same paragraph can arrive both as a passage
+/// item's own locator and as an association's attribution, and the
+/// baseline's `hits` never repeat a paragraph — counted twice it would
+/// spend two of the `limit` slots and shift every later rank, so `k`
+/// would stop meaning "the first `limit` distinct paragraphs" the way
+/// it does for the baseline.
 pub(crate) fn hits_from_evidence_items(items: &[EvidenceItem], limit: usize) -> Vec<HitLocator> {
+    let mut seen = BTreeSet::new();
     items
         .iter()
         .flat_map(|item| {
@@ -437,6 +452,7 @@ pub(crate) fn hits_from_evidence_items(items: &[EvidenceItem], limit: usize) -> 
                 .map(|reference| (reference.source_id.clone(), reference.paragraph));
             own.chain(attributed)
         })
+        .filter(|locator| seen.insert(locator.clone()))
         .take(limit)
         .map(|(source, paragraph)| HitLocator {
             source,

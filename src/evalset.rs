@@ -296,10 +296,6 @@ fn interpret_field<T: DeserializeOwned + Default>(
     }
 }
 
-/// Types and validates one wire case's #215-only extension fields
-/// under [`Extensions::Interpret`] (ADR 0004 §6/§7/§8). A malformed or
-/// out-of-range value is a reported parse error, matching every other
-/// field this loader validates.
 /// The typed result of interpreting one wire case's #215-only extension
 /// fields — [`interpret_case`]'s return value, named rather than a
 /// four-tuple so the call site reads by field, not position.
@@ -310,6 +306,10 @@ struct InterpretedExtensions {
     options: EvalOptions,
 }
 
+/// Types and validates one wire case's #215-only extension fields
+/// under [`Extensions::Interpret`] (ADR 0004 §6/§7/§8). A malformed or
+/// out-of-range value is a reported parse error, matching every other
+/// field this loader validates.
 fn interpret_case(
     wire: WireCase,
     label: &str,
@@ -473,6 +473,22 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
                     wire.case_id, expected.relevance
                 ));
             }
+        }
+        // Same refusal as every other expectation list: a blank concept
+        // normalizes to "", which `benchmark` matches against EVERY hit
+        // (`contains("")`) while `evaluate` matches it against nothing —
+        // a typo would silently inflate one tool's score and zero the
+        // other's, so it must fail at load instead.
+        if wire
+            .expected_concepts
+            .iter()
+            .any(|name| name.trim().is_empty())
+        {
+            return Err(format!(
+                "{label}: line {number}: case '{}': expected_concepts: entries must not be \
+                 empty",
+                wire.case_id
+            ));
         }
         saw_215_extension |= wire.carries_215_extension();
 
@@ -876,6 +892,33 @@ mod tests {
         let error = load_eval_file(&path, Extensions::Interpret).unwrap_err();
         assert!(error.contains("query must not be empty"), "{error}");
         let _ = fs::remove_file(&path);
+    }
+
+    /// Regression: a blank `expected_concepts` entry loaded fine, then
+    /// matched every hit in `benchmark search` (`contains("")`) and
+    /// nothing in `evaluate`. Refused at load under both modes — the
+    /// check runs before the mode split, since `benchmark` loads with
+    /// carry-through.
+    #[test]
+    fn a_blank_expected_concept_is_refused_under_both_modes() {
+        for (name, concept) in [("empty-concept", ""), ("blank-concept", "  ")] {
+            let path = write_temp(
+                name,
+                &format!(
+                    "{HEADER}\n\
+                     {{\"case_id\":\"c1\",\"query\":\"q\",\
+                     \"expected_concepts\":[\"琥珀\",\"{concept}\"]}}\n"
+                ),
+            );
+            for mode in [Extensions::Interpret, carry_through()] {
+                let error = load_eval_file(&path, mode).unwrap_err();
+                assert!(
+                    error.contains("case 'c1': expected_concepts: entries must not be empty"),
+                    "{error}"
+                );
+            }
+            let _ = fs::remove_file(&path);
+        }
     }
 
     #[test]

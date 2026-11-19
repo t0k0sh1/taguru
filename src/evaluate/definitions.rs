@@ -381,6 +381,13 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
             Some("empty in baseline mode"),
         ),
     );
+    // `assembly` mode always budgets — POST /contexts/{id}/evidence has
+    // no unbudgeted mode (ADR 0006 §8) — so its `budget` block, and these
+    // four metrics, are filled whether or not a --max-* flag was given;
+    // only `baseline` mode leaves them empty without one.
+    const BUDGET_CAVEAT: &str = "empty in baseline mode when no \
+         --max-items/--max-bytes/--max-tokens flag was given; always filled in \
+         assembly mode (against the default 40/65536/4000 ceilings without a flag)";
     d.insert(
         "budget.items_used".to_string(),
         def(
@@ -392,7 +399,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              assembly's server-returned BudgetUsage, computed with the \
              identical ADR 0006 §8 formula either way.",
             "crate::api::evidence::budget",
-            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+            Some(BUDGET_CAVEAT),
         ),
     );
     d.insert(
@@ -406,7 +413,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              the citations array's, excluding each item's own bytes/ \
              estimated_tokens fields).",
             "crate::api::evidence::budget",
-            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+            Some(BUDGET_CAVEAT),
         ),
     );
     d.insert(
@@ -420,7 +427,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              Basic Latin scalar, 1.0 otherwise), never a real tokenizer \
              count.",
             "crate::api::evidence::budget",
-            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+            Some(BUDGET_CAVEAT),
         ),
     );
     d.insert(
@@ -434,7 +441,7 @@ pub(crate) fn build_definitions() -> BTreeMap<String, MetricDef> {
              dropped — the equal-budget \"how much got left out\" \
              counterpart to items_used/bytes_used/tokens_used.",
             "crate::api::evidence::budget, POST /contexts/{id}/evidence",
-            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+            Some(BUDGET_CAVEAT),
         ),
     );
     d.insert(

@@ -47,6 +47,7 @@ use serde_json::Value;
 use taguru::context::normalize_entry;
 
 use crate::api::MatchPage;
+use crate::api::evidence::assemble::MAX_EVIDENCE_SEARCH_LIMIT;
 use crate::api::evidence::budget::{BudgetLimits, BudgetUsage};
 use crate::api::evidence::rerank::{REASON_EMPTY_POOL, RerankerPlan};
 use crate::api::evidence::select::{CitationRef, EvidenceItem, SelectionPlan, budget_only_omitted};
@@ -63,6 +64,11 @@ use thresholds::{ThresholdReport, load_thresholds};
 /// `options.limit` unspecified — matches `benchmark search`'s own
 /// `DEFAULT_LIMIT` (`search.rs:78`).
 const DEFAULT_LIMIT: usize = 10;
+// An unset `options.limit` runs at `DEFAULT_LIMIT` in both modes, so it
+// must fit under the ceiling `validate_limits` enforces for
+// `--assembly` too — otherwise the evidence endpoint would clamp the
+// default silently, the very mismatch that check refuses.
+const _: () = assert!(DEFAULT_LIMIT <= MAX_EVIDENCE_SEARCH_LIMIT);
 /// ADR 0004 §7 step 1: omitting `limit` on `/resolve`/`/resolve_label`
 /// means "the ceiling itself" (up to 1000 candidates,
 /// `resolve.rs:26-31`) — no eval case needs that, so evaluate always
@@ -121,8 +127,12 @@ validity, corpus revision bracketing, and run metadata.
                         run (truncated client-side with the identical
                         accounting `crate::api::evidence::budget` uses
                         server-side). Any one given truncates every
-                        case; none given leaves both modes untruncated,
-                        matching every run before this flag existed.
+                        case; none given leaves a baseline run
+                        untruncated, matching every run before this
+                        flag existed, while an --assembly run is still
+                        budgeted at the endpoint's defaults (40 items,
+                        65536 bytes, 4000 tokens — it has no
+                        unbudgeted mode).
   --rerank MODEL         opts an --assembly run into a configured
                         reranker (ADR 0006 §12); usage error without
                         --assembly. No provider configured, or a model
@@ -183,7 +193,7 @@ fn run_evaluate(args: &[String]) -> i32 {
     for warning in &loaded.warnings {
         eprintln!("taguru: evaluate: {warning}");
     }
-    if let Err(message) = validate_limits(&loaded.cases) {
+    if let Err(message) = validate_limits(&loaded.cases, eval_args.assembly) {
         // The evalset loader's own shape — `<file>: line N: case 'x':
         // <field>: …` — so a limit refused after loading is as
         // addressable as one refused during it (#865).
@@ -344,10 +354,10 @@ fn run_evaluate(args: &[String]) -> i32 {
     // Always resolved (defaulted 40/65536/4000 when no --max-* flag
     // was given) — an --assembly run always sends this to
     // POST /contexts/{id}/evidence, since that endpoint has no
-    // unbudgeted mode (ADR 0006 §8). `budget_given` below is what
-    // decides whether `baseline` mode additionally truncates to the
-    // same ceilings, and whether either mode's artifact carries a
-    // `budget` block at all.
+    // unbudgeted mode (ADR 0006 §8), so every assembled case carries a
+    // `budget` block either way. `budget_given` below only decides
+    // whether `baseline` mode additionally truncates to the same
+    // ceilings — and so whether a baseline case carries one at all.
     let budget_given = eval_args.budget.is_some();
     let limits: BudgetLimits = match &eval_args.budget {
         Some(budget) => budget.resolve(),
@@ -654,13 +664,26 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
     })
 }
 
-fn validate_limits(cases: &[EvalCase]) -> Result<(), String> {
+/// Refuses an `options.limit` the run could not honor as written:
+/// outside `1..=MAX_SEARCH_LIMIT` in either mode, and above
+/// [`MAX_EVIDENCE_SEARCH_LIMIT`] under `--assembly` — the evidence
+/// endpoint clamps `search_limit` to that ceiling without saying so,
+/// so a case asking for more would record its requested `limit` (and
+/// score `hits` against it) while the server ran a smaller one, making
+/// a baseline/assembly comparison on the same dataset silently unequal.
+fn validate_limits(cases: &[EvalCase], assembly: bool) -> Result<(), String> {
+    let ceiling = if assembly {
+        MAX_EVIDENCE_SEARCH_LIMIT
+    } else {
+        MAX_SEARCH_LIMIT
+    };
     for case in cases {
         if let Some(limit) = case.options.limit
-            && !(1..=MAX_SEARCH_LIMIT).contains(&limit)
+            && !(1..=ceiling).contains(&limit)
         {
+            let mode = if assembly { " under --assembly" } else { "" };
             return Err(format!(
-                "line {}: case '{}': options.limit: must be 1..={MAX_SEARCH_LIMIT}, got {limit}",
+                "line {}: case '{}': options.limit: must be 1..={ceiling}{mode}, got {limit}",
                 case.line, case.case_id
             ));
         }
