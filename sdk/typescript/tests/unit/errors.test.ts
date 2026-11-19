@@ -12,6 +12,7 @@ import {
   RequestTimeoutError,
   ServerError,
   ServiceUnavailableError,
+  ShardUnreachableError,
   StorageFullError,
   TaguruError,
   UnexpectedStatusError,
@@ -129,6 +130,27 @@ describe("status → error class table", () => {
       .refreshEmbeddings()
       .catch((caught: unknown) => caught);
     expect((providerError as EmbeddingUnavailableError).reason).toBe("provider_error");
+  });
+
+  it("splits a router's 502 shard_unreachable off the embedding failure", async () => {
+    // The same status, a different cause: the code decides the class, so a
+    // dead shard never reads as "the embedding provider failed".
+    const client = stubClient(
+      () => errBody(502, "shard unreachable", undefined, "shard_unreachable"),
+      { retries: 0 },
+    );
+    const error = await client
+      .context("sake")
+      .recall("cue")
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ShardUnreachableError);
+    expect(error).toBeInstanceOf(ServerError);
+    expect(error).not.toBeInstanceOf(EmbeddingUnavailableError);
+    expect((error as ShardUnreachableError).code).toBe("shard_unreachable");
+    // Any other 502 code stays the embedding failure.
+    expect(errorForStatus(502, "boom", { code: "embeddings_failed" })).toBeInstanceOf(
+      EmbeddingUnavailableError,
+    );
   });
 
   it("errorForStatus never returns IncompatibleServerError for any mapped status", () => {

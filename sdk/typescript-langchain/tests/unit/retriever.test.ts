@@ -159,7 +159,10 @@ describe("TaguruRetriever cross-context", () => {
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
+    // The text lane names the groups and lets the server expand them.
+    expect(crossSearches).toEqual([
+      { group_ids: ["gid-parent", "gid-childg"], query: "青嶺酒造", limit: 5 },
+    ]);
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
   });
 
@@ -184,7 +187,7 @@ describe("TaguruRetriever cross-context", () => {
       });
       await byId.invoke("青嶺酒造");
       expect(crossSearches()).toEqual([
-        { context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 },
+        { context_ids: ["id-sake"], group_ids: ["gid-childg"], query: "青嶺酒造", limit: 5 },
       ]);
       // A display name in group_ids is not an id (#997): it resolves
       // nothing, and the direct target stands alone.
@@ -237,10 +240,15 @@ describe("TaguruRetriever cross-context", () => {
       client: server.client(),
     });
     await retriever.invoke("青嶺酒造");
+    // The graph lane runs on every member the walk reached.
+    const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
+    expect(resolves).toEqual(["/contexts/id-tea/resolve", "/contexts/id-sake/resolve"]);
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+    expect(crossSearches).toEqual([
+      { context_ids: ["id-tea"], group_ids: ["gid-parent"], query: "青嶺酒造", limit: 5 },
+    ]);
   });
 
   it("keeps a failed group's siblings' members in the same storey", async () => {
@@ -254,10 +262,16 @@ describe("TaguruRetriever cross-context", () => {
       client: server.client(),
     });
     await retriever.invoke("青嶺酒造");
+    const resolves = server.calls.filter(([path]) => path.endsWith("/resolve")).map(([p]) => p);
+    expect(resolves).toEqual(["/contexts/id-tea/resolve", "/contexts/id-sake/resolve"]);
+    // The unreadable group is left out of the text lane too: naming it
+    // could only 404 the whole search.
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ context_ids: ["id-tea", "id-sake"], query: "青嶺酒造", limit: 5 }]);
+    expect(crossSearches).toEqual([
+      { context_ids: ["id-tea"], group_ids: ["gid-parent"], query: "青嶺酒造", limit: 5 },
+    ]);
   });
 
   // context_id combined with the cross fields: it leads the target list —
@@ -291,7 +305,9 @@ describe("TaguruRetriever cross-context", () => {
     const crossSearches = server.calls
       .filter(([path]) => path === "/sources/search")
       .map(([, body]) => body);
-    expect(crossSearches).toEqual([{ context_ids: ["id-sake", "id-tea"], query: "青嶺酒造", limit: 5 }]);
+    expect(crossSearches).toEqual([
+      { context_ids: ["id-sake"], group_ids: ["gid-childg"], query: "青嶺酒造", limit: 5 },
+    ]);
   });
 
   it("falls back to context_id when the group fails to read", async () => {
@@ -344,6 +360,72 @@ describe("TaguruRetriever cross-context", () => {
     expect(documents.length).toBeGreaterThan(0);
     expect(documents.every((d) => String(d.metadata["lane"]).includes("graph"))).toBe(true);
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["id-sake", "id-tea"]));
+  });
+
+  it("searches a group past the 1000-id context_ids cap through group_ids", async () => {
+    // One group at the 1000-member cap plus one direct id: expanded into
+    // context_ids that is 1001 ids — a 400 over_limit that used to blank
+    // the text lane silently. group_ids has no member cap.
+    const members = Array.from({ length: 1000 }, (_, i) => `id-member${i}`);
+    GROUP_ROWS["gid-big"] = {
+      id: "gid-big",
+      name: "big",
+      description: "",
+      context_ids: members,
+      group_ids: [],
+    };
+    try {
+      const server = new FakeServer();
+      const retriever = new TaguruRetriever({
+        context_ids: ["id-sake"],
+        group_ids: ["gid-big"],
+        include_graph: false,
+        client: server.client(),
+      });
+      const documents = await retriever.invoke("青嶺酒造");
+      const crossSearches = server.calls
+        .filter(([path]) => path === "/sources/search")
+        .map(([, body]) => body);
+      expect(crossSearches).toEqual([
+        { context_ids: ["id-sake"], group_ids: ["gid-big"], query: "青嶺酒造", limit: 5 },
+      ]);
+      expect(documents.length).toBeGreaterThan(0);
+      expect(documents.every((d) => d.metadata["lane"] === "text")).toBe(true);
+    } finally {
+      delete GROUP_ROWS["gid-big"];
+    }
+  });
+
+  it.each([
+    ["both lanes", {}],
+    ["graph-only", { include_text: false }],
+    ["text-only", { include_graph: false }],
+  ] as const)("raises when every enabled cross-context lane fails (%s)", async (_kind, fields) => {
+    // The single-target rule across targets: a broken retrieval must
+    // surface, never an empty "nothing found".
+    const server = new FakeServer();
+    server.failContexts.add("id-sake");
+    server.failContexts.add("id-tea");
+    server.failTextSearch = true;
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-sake", "id-tea"],
+      client: server.client(),
+      ...fields,
+    });
+    await expect(retriever.invoke("青嶺酒造")).rejects.toBeInstanceOf(TaguruError);
+  });
+
+  it("keeps the text lane when every target's graph lane fails", async () => {
+    const server = new FakeServer();
+    server.failContexts.add("id-sake");
+    server.failContexts.add("id-tea");
+    const retriever = new TaguruRetriever({
+      context_ids: ["id-sake", "id-tea"],
+      client: server.client(),
+    });
+    const documents = await retriever.invoke("青嶺酒造");
+    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.every((d) => d.metadata["lane"] === "text")).toBe(true);
   });
 });
 

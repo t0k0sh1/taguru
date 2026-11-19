@@ -210,12 +210,36 @@ export interface DirectoryEntry {
   usage: ContextUsage;
   /** Absent only from a server that predates the field. */
   revision?: ContextRevision;
+  /**
+   * The installed schema's own `mode`, echoed read-only so a client can
+   * route without a second `getSchema` call; `null` when the `context`
+   * never installed a schema (never a bare `"off"` standing in for "no
+   * document"). Absent only from a server that predates the field.
+   */
+  schema_mode?: Open<"off" | "warn" | "strict"> | null;
 }
 
-/** One page of the `context` directory. `total` is the whole population. */
+/**
+ * One shard a `taguru router` fan-out could not REACH: its URL, the ids of
+ * the directly-named `contexts` that routed to it (`group` members it may
+ * also hold are not enumerable while it is down), and the transport error.
+ */
+export interface Unreached {
+  shard: string;
+  context_ids: string[];
+  error: string;
+}
+
+/**
+ * One page of the `context` directory. `total` is the whole population.
+ * A non-empty `unreached` (sharded deployments only) means the page is a
+ * partial view: the unreachable shards' rows are missing, so neither a
+ * row's absence nor a name's uniqueness is proven — retry for the full one.
+ */
 export interface ContextPage {
   total: number;
   contexts: DirectoryEntry[];
+  unreached: Unreached[];
 }
 
 // -- groups ---------------------------------------------------------------------
@@ -316,12 +340,15 @@ export interface CrossAssociation extends Association {
 /**
  * `MatchPage` across `contexts`: same truncation contract, every match tagged.
  * Weights share one scale (evidence mass), so the cut past `total` means the
- * same thing across `contexts`.
+ * same thing across `contexts`. A non-empty `unreached` (behind a `taguru
+ * router`) means the page is partial: the `contexts` on those shards were not
+ * searched.
  */
 export interface CrossMatchPage {
   total: number;
   matches: CrossAssociation[];
   plan?: MatchPlan;
+  unreached: Unreached[];
 }
 
 export interface Recollection {
@@ -759,10 +786,14 @@ export interface PassagePage {
   hits: PassageHit[];
 }
 
-/** `PassagePage` across `contexts`: the same wrap, every hit tagged. */
+/**
+ * `PassagePage` across `contexts`: the same wrap, every hit tagged, plus the
+ * router's `unreached` shards exactly as on `CrossMatchPage`.
+ */
 export interface CrossPassagePage {
   plan: SearchPlan;
   hits: CrossPassageHit[];
+  unreached: Unreached[];
 }
 
 /**
@@ -998,11 +1029,30 @@ export interface DriftAudit {
   twins: VocabularyAudit | null;
 }
 
+/**
+ * `compact`'s answer. `passages_compacted` says whether the passage log was
+ * rewritten too (dropping retracted sources' text); `false` when the
+ * `context` has no passage history or that rewrite failed — the graph
+ * compaction still succeeded either way.
+ *
+ * `image_persisted: false` means the rebuilt image was NOT durably
+ * published, and it has two meanings the response cannot tell apart:
+ * either the image never landed (e.g. a full disk) — the `context` keeps its
+ * previous image, the numbers describe a rebuild that was not applied, and
+ * the remedy is to compact again once the cause is fixed — or it landed but
+ * its directory fsync failed — the `context` already runs on the compacted
+ * image and the next flush re-publishes it durably. A server predating the
+ * fields omits both; they then read as `image_persisted: true` (such a server
+ * never reported a publish failure apart from the call's own error) and
+ * `passages_compacted: false`.
+ */
 export interface CompactOutcome {
   bytes_before: number;
   bytes_after: number;
   dead_edges: number;
   aliases_dropped: number;
+  passages_compacted: boolean;
+  image_persisted: boolean;
 }
 
 /**

@@ -4,7 +4,7 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
 import type { ChatResult } from "@langchain/core/outputs";
 import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing";
-import { NotFoundError, PermissionDeniedError } from "taguru";
+import { NotFoundError, PermissionDeniedError, ShardUnreachableError } from "taguru";
 import { describe, expect, it } from "vitest";
 
 import { MAX_PASSAGE_BYTES } from "../../src/extract.js";
@@ -319,7 +319,7 @@ describe("TaguruIngester", () => {
     // only renders NDJSON, still works.
     const server = new FakeServer();
     const client = server.client();
-    client.contexts.iter = () => {
+    client.contexts.list = async () => {
       throw new Error("directory unavailable");
     };
     const ingester = new TaguruIngester({
@@ -877,6 +877,46 @@ describe("TaguruIngester.contextId", () => {
     });
     await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toBeInstanceOf(
       PermissionDeniedError,
+    );
+    expect(server.imported).toHaveLength(1);
+  });
+
+  it("refuses a partial directory view behind a router", async () => {
+    // A shard the listing could not reach may hold the name: neither its
+    // absence nor its uniqueness is proven, so a real import must not mint
+    // a duplicate id — only the offline dry run renders on.
+    const server = new FakeServer();
+    server.contextsUnreached = [
+      { shard: "http://shard-b:8248", context_ids: [], error: "connection refused" },
+    ];
+    const ingester = make(server, [MODEL_ANSWER, MODEL_ANSWER], { context: "brand-new" });
+    const refusal = ingester.contextId();
+    await expect(refusal).rejects.toBeInstanceOf(ShardUnreachableError);
+    await expect(refusal).rejects.toMatchObject({
+      status: 200,
+      code: "shard_unreachable",
+      body: server.contextsUnreached,
+    });
+    // Even a name the reachable shards do show is not proven unique.
+    await expect(make(server, []).contextId()).rejects.toBeInstanceOf(ShardUnreachableError);
+    const dry = await ingester.ingestText(DOC_TEXT, { source: "docs/a.md", dry_run: true });
+    expect(dry.ok).toBe(true);
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/a.md" })).rejects.toBeInstanceOf(
+      ShardUnreachableError,
+    );
+    expect(server.imported).toHaveLength(0);
+  });
+
+  it("does not report a refresh's unreachable shard as an embedding warning", async () => {
+    // 502 shard_unreachable is a router's dead shard, not a provider
+    // failure: it propagates instead of landing in
+    // embeddings_refresh_warning.
+    const server = new FakeServer();
+    server.embeddingsRefreshStatus = 502;
+    server.embeddingsRefreshCode = "shard_unreachable";
+    const ingester = make(server, [MODEL_ANSWER], { refresh_embeddings: true });
+    await expect(ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" })).rejects.toBeInstanceOf(
+      ShardUnreachableError,
     );
     expect(server.imported).toHaveLength(1);
   });

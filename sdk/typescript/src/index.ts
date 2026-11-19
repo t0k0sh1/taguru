@@ -32,6 +32,7 @@ export {
   ServiceUnavailableError,
   StorageFullError,
   EmbeddingUnavailableError,
+  ShardUnreachableError,
   TransportError,
   UnexpectedStatusError,
   IncompatibleServerError,
@@ -153,6 +154,7 @@ export {
   type TwinPair,
   type TypeDef,
   type UnsourcedEdge,
+  type Unreached,
   type VectorExplain,
   type VocabularyAudit,
 } from "./models.js";
