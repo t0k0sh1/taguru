@@ -144,12 +144,21 @@ def unwrap_envelope_partial(response: httpx.Response) -> Any:
     folded into the returned result object as its ``unreached`` key, so
     the decoded page carries it. Dropping it would make a page missing a
     dead shard's rows indistinguishable from a complete one."""
-    data = _envelope(response)
-    result = data["result"]
-    unreached = data.get("unreached")
-    if isinstance(result, dict) and isinstance(unreached, list):
+    result, unreached = unwrap_envelope_unreached(response)
+    if isinstance(result, dict) and unreached:
         return {**result, "unreached": unreached}
     return result
+
+
+def unwrap_envelope_unreached(response: httpx.Response) -> tuple[Any, list[Any]]:
+    """``(result, unreached)`` — the envelope's ``result`` and its top-level
+    ``unreached`` entries (plain dicts), ``[]`` when every shard answered or
+    the server predates the field. ``unwrap_envelope_partial`` folds them
+    into a result object; ``flush`` (whose result is a bare list) raises on
+    them instead."""
+    data = _envelope(response)
+    unreached = data.get("unreached")
+    return data["result"], unreached if isinstance(unreached, list) else []
 
 
 def _envelope(response: httpx.Response) -> dict[str, Any]:

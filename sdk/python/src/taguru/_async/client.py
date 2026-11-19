@@ -26,7 +26,13 @@ import httpx
 from .. import _tracing
 from .._contract import VERSION_PATH, incompatibility, parse_version_body
 from .._decode import decode
-from .._errors import IncompatibleServerError, NotFoundError, TaguruError, TransportError
+from .._errors import (
+    IncompatibleServerError,
+    NotFoundError,
+    ShardUnreachableError,
+    TaguruError,
+    TransportError,
+)
 from .._models import (
     Activation,
     ActivationPage,
@@ -101,6 +107,7 @@ from .._shared import (
     unwrap_envelope,
     unwrap_envelope_full,
     unwrap_envelope_partial,
+    unwrap_envelope_unreached,
 )
 from .._types import (
     AssocOp,
@@ -350,8 +357,22 @@ class AsyncTaguru:
         return response.text
 
     async def flush(self) -> list[str]:
-        """Persist every dirty ``context`` now; returns their names (admin role)."""
-        result = await self._request_json("POST", "/flush")
+        """Persist every dirty ``context`` now; returns their names (admin role).
+
+        Raises :class:`ShardUnreachableError` when a ``taguru router``
+        answered 200 but could not reach some shards (the envelope's
+        ``unreached``): those shards' contexts were not flushed, so the
+        returned names would look like a complete flush. ``status`` is that
+        200 and ``body`` the ``unreached`` entries as plain dicts.
+        """
+        response = await self._send("POST", "/flush")
+        result, unreached = unwrap_envelope_unreached(response)
+        if unreached:
+            raise ShardUnreachableError(
+                f"flush reached only part of the cluster: {len(unreached)} shard(s) unreachable",
+                status=response.status_code,
+                body=unreached,
+            )
         return [str(name) for name in result]
 
     async def import_batches(self, data: str | bytes) -> ImportResult:

@@ -1040,9 +1040,9 @@ export interface DriftAudit {
  * either the image never landed (e.g. a full disk) — the `context` keeps its
  * previous image, the numbers describe a rebuild that was not applied, and
  * the remedy is to compact again once the cause is fixed — or it landed but
- * its directory fsync failed — the `context` already runs on the compacted
- * image and the next flush re-publishes it durably. A server predating the
- * fields omits both; they then read as `image_persisted: true` (such a server
+ * its directory fsync failed even after the server's one retry — the
+ * `context` already runs on the compacted image and refuses writes until the
+ * next flush re-publishes it durably. A server predating the fields omits both; they then read as `image_persisted: true` (such a server
  * never reported a publish failure apart from the call's own error) and
  * `passages_compacted: false`.
  */

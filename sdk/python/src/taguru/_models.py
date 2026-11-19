@@ -1056,8 +1056,9 @@ class CompactOutcome:
     never landed (most plausibly a full disk) — the ``context`` keeps its
     previous image, the numbers describe a rebuild that was NOT applied,
     and the remedy is to compact again once the cause is fixed — or it
-    landed but its directory fsync failed — the ``context`` already runs
-    on the compacted image and the next flush re-publishes it durably.
+    landed but its directory fsync failed even after the server's one
+    retry — the ``context`` already runs on the compacted image and
+    refuses writes until the next flush re-publishes it durably.
     Both default as the server's own decoder does for a response
     predating them: ``image_persisted`` to ``True`` (such a server never
     reported a publish failure apart from the call's own error),

@@ -16,6 +16,7 @@ from taguru import (
     Issue,
     RateLimitError,
     ServerError,
+    ShardUnreachableError,
     TaguruError,
     TransportError,
     Unreached,
@@ -27,6 +28,7 @@ from taguru._shared import (
     run_contract_probe,
     unwrap_envelope_full,
     unwrap_envelope_partial,
+    unwrap_envelope_unreached,
 )
 
 from .conftest import async_client, err_response, ok_response, sync_client
@@ -754,6 +756,46 @@ def test_a_complete_fan_out_carries_an_empty_unreached() -> None:
     client = sync_client(lambda _req: ok_response({"total": 0, "contexts": []}))
     assert client.contexts.list().unreached == []
     assert unwrap_envelope_partial(partial_response([1, 2])) == [1, 2]
+
+
+def test_a_partial_flush_raises_shard_unreachable_with_the_unreached_list() -> None:
+    """A router's 200 ``/flush`` naming unreached shards did not flush those
+    shards' contexts — returning just the names made it look complete."""
+    client = sync_client(lambda _req: partial_response(["sake"]))
+    with pytest.raises(ShardUnreachableError) as caught:
+        client.flush()
+    assert caught.value.status == 200
+    assert caught.value.code == "shard_unreachable"
+    assert caught.value.body == UNREACHED
+
+
+async def test_async_partial_flush_raises_shard_unreachable_too() -> None:
+    client = async_client(lambda _req: partial_response(["sake"]))
+    with pytest.raises(ShardUnreachableError) as caught:
+        await client.flush()
+    assert caught.value.body == UNREACHED
+
+
+def test_unwrap_envelope_unreached_reads_only_a_list_as_unreached() -> None:
+    assert unwrap_envelope_unreached(partial_response(["sake"])) == (["sake"], UNREACHED)
+    assert unwrap_envelope_unreached(ok_response(["sake"])) == (["sake"], [])
+    malformed = httpx.Response(
+        200, json={"result": ["sake"], "status": "ok", "time": 0.001, "unreached": "shard-b"}
+    )
+    assert unwrap_envelope_unreached(malformed) == (["sake"], [])
+
+
+def test_a_complete_flush_returns_the_flushed_names() -> None:
+    """No ``unreached`` (or an empty one) is a complete flush."""
+    assert sync_client(lambda _req: ok_response(["sake", "shochu"])).flush() == ["sake", "shochu"]
+    empty = httpx.Response(
+        200, json={"result": ["sake"], "status": "ok", "time": 0.001, "unreached": []}
+    )
+    assert sync_client(lambda _req: empty).flush() == ["sake"]
+    malformed = httpx.Response(
+        200, json={"result": ["sake"], "status": "ok", "time": 0.001, "unreached": "shard-b"}
+    )
+    assert sync_client(lambda _req: malformed).flush() == ["sake"]
 
 
 def test_compact_outcome_carries_image_persisted_and_passages_compacted() -> None:

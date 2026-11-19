@@ -6,7 +6,13 @@
  */
 
 import { incompatibility, parseVersionBody, VERSION_PATH } from "./contract.js";
-import { IncompatibleServerError, NotFoundError, TaguruError, TransportError } from "./errors.js";
+import {
+  IncompatibleServerError,
+  NotFoundError,
+  ShardUnreachableError,
+  TaguruError,
+  TransportError,
+} from "./errors.js";
 import type {
   Activation,
   ActivationPage,
@@ -413,9 +419,23 @@ export class Taguru {
     return (await this.send("GET", "/protocol")).text;
   }
 
-  /** Persist every dirty `context` now; returns their names (admin role). */
+  /**
+   * Persist every dirty `context` now; returns their names (admin role).
+   *
+   * Throws {@link ShardUnreachableError} when a `taguru router` answered 200
+   * but could not reach some shards (the envelope's `unreached`): their dirty
+   * `context`s were not flushed, so the returned names would look like a
+   * complete flush. `status` is that 200 and `body` the `unreached` entries.
+   */
   async flush(): Promise<string[]> {
-    const result = await this.requestJson("POST", "/flush");
+    const response = await this.send("POST", "/flush");
+    const { result, unreached } = unwrapEnvelopeFull(response.status, response.text);
+    if (unreached.length > 0) {
+      throw new ShardUnreachableError(
+        `flush reached only part of the cluster: ${unreached.length} shard(s) unreachable`,
+        { status: response.status, code: "shard_unreachable", body: unreached },
+      );
+    }
     return (result as unknown[]).map(String);
   }
 
