@@ -681,6 +681,7 @@ impl Entry {
                 // zeros) sitting beside the image it describes, so
                 // the published value starts equal to the live one.
                 published_graph_revision: revision.graph,
+                publish_unsynced: false,
                 config_revision: revision.config,
                 cache_identity: next_cache_identity(),
                 wal_bytes,
@@ -947,6 +948,14 @@ struct EntryInner {
     /// image publishes; with the WAL on the live value is persisted
     /// instead and this field is bookkeeping only.
     published_graph_revision: u64,
+    /// Set when a compaction published its image, its directory fsync
+    /// failed, and one synchronous retry failed too: memory runs on the
+    /// compacted image while a power loss could still drop the rename
+    /// and boot the old one. Until a publish lands durably — the next
+    /// successful flush or eviction save clears it — `logged_write`
+    /// refuses writes: one validated against the compacted graph could
+    /// replay against the old image to a different result.
+    publish_unsynced: bool,
     /// [`ContextRevision::config`]'s live value: metadata updates and
     /// embedding-refresh publications. Under the entry lock like its
     /// siblings so `update_meta` can bump-and-persist atomically (and
@@ -1340,8 +1349,9 @@ pub struct CompactOutcome {
     /// the very endpoint whose job is reclaiming space) — the `context`
     /// keeps its previous image and the numbers describe the rebuild
     /// that was not applied; compact again — or it landed but its
-    /// directory fsync failed — the `context` now runs on the compacted
-    /// image and the next flush re-publishes it durably.
+    /// directory fsync failed even after one retry — the `context` runs
+    /// on the compacted image and refuses writes until the next flush
+    /// re-publishes it durably (`EntryInner::publish_unsynced`).
     /// `#[serde(default = "default_image_persisted")]` reads an older
     /// server's response (which never lied about this — it simply
     /// never said) as the historically true case, not a false alarm.

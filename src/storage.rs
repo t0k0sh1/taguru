@@ -82,23 +82,31 @@ pub(crate) fn clear_persistence_fault() -> bool {
 
 #[cfg(test)]
 thread_local! {
-    static PUBLISH_SYNC_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// `(successes still to pass, failures still to inject)`.
+    static PUBLISH_SYNC_FAULT: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test-only: the calling thread's [`commit_staged`] fails its
 /// post-rename parent-directory fsync once, after `successes`
 /// publishes have synced normally — the rename itself still lands,
-/// exactly as a real fsync failure leaves it. Only `commit_staged`'s
-/// fsync counts (every [`write_atomic`] goes through it); the other
-/// [`fsync_dir`] callers stay outside, see
-/// [`fail_persistence_ops_after`].
+/// exactly as a real fsync failure leaves it. Only publish syncs count
+/// (`commit_staged`'s, which every [`write_atomic`] goes through, and
+/// [`resync_published`]'s retry); the other [`fsync_dir`] callers stay
+/// outside, see [`fail_persistence_ops_after`].
 #[cfg(test)]
 pub(crate) fn fail_publish_syncs_after(successes: u32) {
-    PUBLISH_SYNC_FAULT.with(|cell| cell.set(Some(successes)));
+    fail_publish_syncs(successes, 1);
+}
+
+/// [`fail_publish_syncs_after`] failing `times` consecutive publish
+/// syncs — a directory fsync that keeps failing, so a retry fails too.
+#[cfg(test)]
+pub(crate) fn fail_publish_syncs(successes: u32, times: u32) {
+    PUBLISH_SYNC_FAULT.with(|cell| cell.set((times > 0).then_some((successes, times))));
 }
 
 /// [`clear_persistence_fault`]'s twin for [`fail_publish_syncs_after`]:
-/// `false` means the armed publish sync was reached and failed.
+/// `false` means every armed publish-sync failure was reached.
 #[cfg(test)]
 pub(crate) fn clear_publish_sync_fault() -> bool {
     PUBLISH_SYNC_FAULT.with(|cell| cell.take().is_some())
@@ -107,14 +115,14 @@ pub(crate) fn clear_publish_sync_fault() -> bool {
 #[cfg(test)]
 fn injected_publish_sync_failure() -> Option<io::Error> {
     PUBLISH_SYNC_FAULT.with(|cell| match cell.get() {
-        Some(0) => {
-            cell.set(None);
+        Some((0, times)) => {
+            cell.set((times > 1).then_some((0, times - 1)));
             Some(io::Error::other(
                 "injected parent-directory fsync failure after a publish rename",
             ))
         }
-        Some(remaining) => {
-            cell.set(Some(remaining - 1));
+        Some((remaining, times)) => {
+            cell.set(Some((remaining - 1, times)));
             None
         }
         None => None,
@@ -372,6 +380,17 @@ pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
         None => fsync_parent_dir(path),
     };
     synced.map_err(|error| io::Error::new(error.kind(), PublishedUnsynced(error)))
+}
+
+/// Retries the parent-directory fsync of a file [`commit_staged`]
+/// already published (its error [`is_published_unsynced`]): `Ok` makes
+/// that publish durable after all. Same fault hook as the original
+/// sync, so tests can fail the retry too.
+pub(crate) fn resync_published(path: &Path) -> io::Result<()> {
+    match injected_publish_sync_failure() {
+        Some(error) => Err(error),
+        None => fsync_parent_dir(path),
+    }
 }
 
 /// The marker [`commit_staged`] wraps a post-rename fsync failure in.
