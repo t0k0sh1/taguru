@@ -139,15 +139,22 @@ impl AppState {
             Ok(staged) => staged,
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                entry.dirty.store(true, Ordering::Relaxed);
-                entry.flushing.store(false, Ordering::Relaxed);
                 // Recorded under the entry lock and only while the entry
                 // still exists: a delete that tombstoned it mid-stage has
                 // already cleared its id from the failing set (see
                 // `AppState::delete`), and must not see it re-added.
+                //
+                // `flushing` stays claimed until the failure is recorded,
+                // and `dirty` is re-set only then: released earlier, a
+                // second flush could claim `dirty`, publish, and record
+                // its success before this stale failure lands on top of
+                // it — with `dirty` already consumed, no later tick would
+                // flush again to clear `/health`.
                 if let Some(_guard) = entry.lock_unless_deleted() {
+                    entry.dirty.store(true, Ordering::Relaxed);
                     self.0.metrics.record_flush(&entry.id, false);
                 }
+                entry.flushing.store(false, Ordering::Relaxed);
                 return false;
             }
         };
@@ -2341,6 +2348,37 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+    }
+
+    /// A staging failure hands the entry back exactly as the next flush
+    /// needs it: `dirty` re-set, `flushing` released, the failure on
+    /// `/health` — all settled before the flush returns, so a later
+    /// flush both runs and heals the degradation.
+    #[test]
+    fn a_staging_failure_leaves_the_entry_ready_for_a_healing_flush() {
+        let dir = scratch_dir("flush-stage-fail");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        dirty_write(&state, &id, "高瀬");
+        let entry = state.lookup_id(&id).unwrap();
+
+        // The flush's first persistence op is the image stage.
+        crate::storage::fail_persistence_ops_after(0);
+        assert!(!state.flush_entry("sake", &entry));
+        assert!(
+            !crate::storage::clear_persistence_fault(),
+            "the stage must be what failed"
+        );
+        assert!(entry.dirty.load(Ordering::Relaxed), "the write stays owed");
+        assert!(
+            !entry.flushing.load(Ordering::Relaxed),
+            "the claim is released"
+        );
+        assert!(!state.metrics().flush_is_healthy());
+
+        assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+        assert!(state.metrics().flush_is_healthy());
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// The post-write recovery flush and the periodic flusher must key
