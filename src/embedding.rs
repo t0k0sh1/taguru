@@ -1288,15 +1288,30 @@ impl PassageVectorStore {
         pool < self.len() && self.len() >= PASSAGE_ANN_THRESHOLD
     }
 
+    /// Fixed per-row bookkeeping [`Self::footprint`] charges on top of a
+    /// row's floats and source-name bytes: the `PassageKey` itself plus
+    /// its share of the `keys` Vec — a rough constant, not a measurement.
+    const KEY_OVERHEAD: usize = 48;
+
+    /// What one `dim`-wide row keyed by a `source_len`-byte source name
+    /// adds to [`Self::footprint`]. Pure arithmetic, so `estimate` can
+    /// project a store's footprint without allocating the rows it
+    /// projects; `footprint` is defined as the sum of this over every
+    /// row, so the two cannot drift. Saturating because `estimate` feeds
+    /// it an arbitrary user-supplied `dim` — a real store's rows are far
+    /// from the limit.
+    pub(crate) fn row_footprint(dim: usize, source_len: usize) -> usize {
+        dim.saturating_mul(4)
+            .saturating_add(source_len)
+            .saturating_add(Self::KEY_OVERHEAD)
+    }
+
     /// Rough resident bytes when held in memory, for the cache budget.
     pub fn footprint(&self) -> usize {
-        const KEY_OVERHEAD: usize = 48;
-        self.data.len() * 4
-            + self
-                .keys
-                .iter()
-                .map(|key| key.source.len() + KEY_OVERHEAD)
-                .sum::<usize>()
+        self.keys
+            .iter()
+            .map(|key| Self::row_footprint(self.dim, key.source.len()))
+            .sum()
     }
 
     /// Top `limit` rows by cosine against a unit query. Ties break by
@@ -2624,6 +2639,31 @@ mod tests {
         // data.len() = 6 (2 rows * dim 3) -> 6*4 = 24
         // keys: (5 + 48) + (10 + 48) = 111
         assert_eq!(store.footprint(), 24 + 111);
+    }
+
+    #[test]
+    fn passage_vector_store_footprint_is_the_sum_of_row_footprints() {
+        // `estimate` projects a store's size from `row_footprint` alone,
+        // never building the store — so the two must agree row for row.
+        let mut store = PassageVectorStore::new("test-model");
+        let sources = ["a", "docs/longer-source.md", ""];
+        for (index, source) in sources.iter().enumerate() {
+            store.push(
+                PassageKey {
+                    source: (*source).into(),
+                    index: index as u32,
+                    hash: index as u64,
+                    question_hash: None,
+                },
+                vec![0.0; 7],
+            );
+        }
+        let expected: usize = sources
+            .iter()
+            .map(|source| PassageVectorStore::row_footprint(7, source.len()))
+            .sum();
+        assert_eq!(store.footprint(), expected);
+        assert_eq!(PassageVectorStore::row_footprint(7, 1), 7 * 4 + 1 + 48);
     }
 
     #[test]

@@ -139,9 +139,22 @@ impl AppState {
             Ok(staged) => staged,
             Err(error) => {
                 tracing::warn!("flush of context '{name}' failed (will retry): {error}");
-                entry.dirty.store(true, Ordering::Relaxed);
+                // Recorded under the entry lock and only while the entry
+                // still exists: a delete that tombstoned it mid-stage has
+                // already cleared its id from the failing set (see
+                // `AppState::delete`), and must not see it re-added.
+                //
+                // `flushing` stays claimed until the failure is recorded,
+                // and `dirty` is re-set only then: released earlier, a
+                // second flush could claim `dirty`, publish, and record
+                // its success before this stale failure lands on top of
+                // it — with `dirty` already consumed, no later tick would
+                // flush again to clear `/health`.
+                if let Some(_guard) = entry.lock_unless_deleted() {
+                    entry.dirty.store(true, Ordering::Relaxed);
+                    self.0.metrics.record_flush(&entry.id, false);
+                }
                 entry.flushing.store(false, Ordering::Relaxed);
-                self.0.metrics.record_flush(name, false);
                 return false;
             }
         };
@@ -223,7 +236,7 @@ impl AppState {
                 // The staged capture, not the live value: these are
                 // the bytes that just became the image.
                 inner.published_graph_revision = staged_graph_revision;
-                self.0.metrics.record_flush(name, true);
+                self.0.metrics.record_flush(&entry.id, true);
                 // `dirty` stays as claimed: clear (nothing raced) means the
                 // image is current; a racing write re-set it and will
                 // re-flush. Truncation is sound only when the image covers
@@ -239,7 +252,7 @@ impl AppState {
                 let _ = remove_persisted_file(&staged);
                 entry.dirty.store(true, Ordering::Relaxed);
                 entry.usage_dirty.store(true, Ordering::Relaxed);
-                self.0.metrics.record_flush(name, false);
+                self.0.metrics.record_flush(&entry.id, false);
                 false
             }
         };
@@ -2310,6 +2323,131 @@ mod tests {
         assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
         assert!(state.metrics().flush_is_healthy());
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Makes `id`'s image un-publishable without touching any other
+    /// `context`: a non-empty directory where the image belongs makes
+    /// `commit_staged`'s rename fail for this family alone.
+    fn block_image(dir: &std::path::Path, id: &str) {
+        let image = image_path(dir, id);
+        let _ = fs::remove_file(&image);
+        fs::create_dir_all(image.join("blocker")).unwrap();
+    }
+
+    fn unblock_image(dir: &std::path::Path, id: &str) {
+        fs::remove_dir_all(image_path(dir, id)).unwrap();
+    }
+
+    fn dirty_write(state: &AppState, id: &str, object: &str) {
+        state
+            .add_associations(
+                id,
+                vec![assoc_op("青嶺酒造", "杜氏", object, 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A staging failure hands the entry back exactly as the next flush
+    /// needs it: `dirty` re-set, `flushing` released, the failure on
+    /// `/health` — all settled before the flush returns, so a later
+    /// flush both runs and heals the degradation.
+    #[test]
+    fn a_staging_failure_leaves_the_entry_ready_for_a_healing_flush() {
+        let dir = scratch_dir("flush-stage-fail");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        dirty_write(&state, &id, "高瀬");
+        let entry = state.lookup_id(&id).unwrap();
+
+        // The flush's first persistence op is the image stage.
+        crate::storage::fail_persistence_ops_after(0);
+        assert!(!state.flush_entry("sake", &entry));
+        assert!(
+            !crate::storage::clear_persistence_fault(),
+            "the stage must be what failed"
+        );
+        assert!(entry.dirty.load(Ordering::Relaxed), "the write stays owed");
+        assert!(
+            !entry.flushing.load(Ordering::Relaxed),
+            "the claim is released"
+        );
+        assert!(!state.metrics().flush_is_healthy());
+
+        assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+        assert!(state.metrics().flush_is_healthy());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The post-write recovery flush and the periodic flusher must key
+    /// the failing set the same way: a recovery-path failure (which
+    /// `logged_write` drives with the id as the name) used to land under
+    /// the id while the periodic success cleared the display name,
+    /// latching `/health` degraded forever.
+    #[test]
+    fn a_recovery_flush_failure_is_healed_by_a_later_periodic_success() {
+        let dir = scratch_dir("flush-heal-recovery");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        dirty_write(&state, &id, "高瀬");
+        block_image(&dir, &id);
+        let entry = state.lookup_id(&id).unwrap();
+        assert!(!state.flush_entry(&id, &entry));
+        assert!(!state.metrics().flush_is_healthy());
+
+        unblock_image(&dir, &id);
+        assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+        assert!(
+            state.metrics().flush_is_healthy(),
+            "the periodic success must heal the recovery-path failure"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A deleted `context` never flushes again, so its unhealed failure
+    /// must leave the set with it, or `/health` stays 503 forever.
+    #[test]
+    fn deleting_a_failing_context_clears_flush_degradation() {
+        let dir = scratch_dir("flush-heal-delete");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        dirty_write(&state, &id, "高瀬");
+        block_image(&dir, &id);
+        assert!(state.flush_dirty().is_empty());
+        assert!(!state.metrics().flush_is_healthy());
+
+        unblock_image(&dir, &id);
+        state.delete(&id).unwrap().unwrap();
+        assert!(
+            state.metrics().flush_is_healthy(),
+            "deleting the failing context must clear the degradation"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Names are not unique: one same-named `context`'s success must not
+    /// clear another's failure, which a name-keyed set did.
+    #[test]
+    fn a_same_named_contexts_success_does_not_hide_anothers_failure() {
+        let dir = scratch_dir("flush-heal-same-name");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let failing = state.create("sake", ContextMeta::default()).unwrap();
+        let healthy = state.create("sake", ContextMeta::default()).unwrap();
+        dirty_write(&state, &failing, "高瀬");
+        block_image(&dir, &failing);
+        let failing_entry = state.lookup_id(&failing).unwrap();
+        assert!(!state.flush_entry("sake", &failing_entry));
+
+        dirty_write(&state, &healthy, "高瀬");
+        let healthy_entry = state.lookup_id(&healthy).unwrap();
+        assert!(state.flush_entry("sake", &healthy_entry));
+        assert!(
+            !state.metrics().flush_is_healthy(),
+            "the other same-named context is still failing"
+        );
+        unblock_image(&dir, &failing);
         let _ = fs::remove_dir_all(dir);
     }
 

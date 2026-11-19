@@ -169,15 +169,28 @@ export class TaguruRetriever extends BaseRetriever {
    * `_direct_targets`/`_with_members` pair, so a `context_id` combined with
    * the cross fields is searched — and kept as the fallback when the group
    * walk fails — never dropped.
+   *
+   * `targets` feeds the graph lane, which runs per `context`. The text lane
+   * takes `direct` and `groups` instead and lets the server expand the
+   * groups: an expanded member list can exceed the server's 1000-id cap on
+   * `context_ids` (one full group plus one direct id is enough), and a
+   * refusal there would blank the lane, while `group_ids` resolution has no
+   * member cap. `groups` keeps only the named groups that answered: a
+   * deleted one would 404 the whole text search, and one whose read failed
+   * contributed no members to the graph lane either.
    */
-  private async resolveTargets(): Promise<string[]> {
-    const targets: string[] = [];
+  private async resolveTargets(): Promise<{
+    targets: string[];
+    direct: string[];
+    groups: string[];
+  }> {
+    const direct: string[] = [];
     if (this.context_id !== undefined) {
-      targets.push(this.context_id);
+      direct.push(this.context_id);
     }
     for (const id of this.context_ids ?? []) {
-      if (!targets.includes(id)) {
-        targets.push(id);
+      if (!direct.includes(id)) {
+        direct.push(id);
       }
     }
     // Walk down from the named `groups`, one `groups.get` per `group`
@@ -191,13 +204,16 @@ export class TaguruRetriever extends BaseRetriever {
     // the failure is the caller's to hear, never an empty search that
     // looks complete.
     const members = new Set<string>();
+    const groups: string[] = [];
     if ((this.group_ids?.length ?? 0) > 0) {
       let storey = [...new Set(this.group_ids)];
       const seen = new Set(storey);
+      let root = true;
       try {
         while (storey.length > 0) {
+          const fetching = storey;
           const settled = await Promise.allSettled(
-            storey.map(async (id) => {
+            fetching.map(async (id) => {
               try {
                 return await this.client.groups.get(id);
               } catch (error) {
@@ -210,30 +226,35 @@ export class TaguruRetriever extends BaseRetriever {
           );
           const entries: Array<GroupEntry | null> = [];
           let failure: { reason: unknown } | undefined;
-          for (const outcome of settled) {
+          settled.forEach((outcome, index) => {
             if (outcome.status === "fulfilled") {
               entries.push(outcome.value);
+              if (root && outcome.value !== null) {
+                groups.push(fetching[index]!);
+              }
             } else {
               failure ??= outcome;
             }
-          }
+          });
+          root = false;
           storey = nextStorey(entries, seen, members);
           if (failure !== undefined) {
             throw failure.reason;
           }
         }
       } catch (error) {
-        if (targets.length === 0) {
+        if (direct.length === 0) {
           throw error;
         }
       }
     }
+    const targets = [...direct];
     for (const id of [...members].sort()) {
       if (!targets.includes(id)) {
         targets.push(id);
       }
     }
-    return targets;
+    return { targets, direct, groups };
   }
 
   /** `target` is the context ID, which the Documents' metadata carries
@@ -330,8 +351,14 @@ export class TaguruRetriever extends BaseRetriever {
       return mergeLanes(graphDocs, textHits, this.k, target);
     }
 
-    const targets = await this.resolveTargets();
+    const { targets, direct, groups } = await this.resolveTargets();
     let graphDocs: Document[] = [];
+    let graphFailed = false;
+    // Healthy means a graph request actually ran and answered: with no
+    // target (only empty groups named) the lane did nothing, and must
+    // not mask a text-lane failure as "nothing found".
+    let graphAnswered = false;
+    let graphError: unknown;
     if (this.include_graph) {
       // Each target's lane is an independent chain of round trips, and
       // completion order is irrelevant (interleave sorts by rank, then
@@ -344,23 +371,46 @@ export class TaguruRetriever extends BaseRetriever {
       graphDocs = interleave(
         settled.map((outcome) => (outcome.status === "fulfilled" ? outcome.value : [])),
       );
+      // The lane failed only when EVERY target did: one healthy target
+      // means its emptiness elsewhere is real.
+      const rejected = settled.filter((outcome) => outcome.status === "rejected");
+      graphAnswered = rejected.length < targets.length;
+      if (targets.length > 0 && !graphAnswered) {
+        graphFailed = true;
+        graphError = rejected[0]!.reason;
+      }
     }
     let textHits: PassageHit[] = [];
-    if (this.include_text) {
+    let textFailed = false;
+    let textError: unknown;
+    // No direct id and no named group that answered leaves nothing for the
+    // text lane to search: an empty lane, not a failed one (every named
+    // group is gone, exactly as the graph lane then has no target).
+    if (this.include_text && (direct.length > 0 || groups.length > 0)) {
       // The server's cross_targets validation rejects the WHOLE request
       // if even one named context is gone — without this isolation, a
-      // single deleted group member would silently discard the graph
+      // single deleted direct target would silently discard the graph
       // lane's already-fetched results too (see the allSettled
       // isolation just above).
       try {
         const page = await this.client.searchPassages(query, {
-          context_ids: targets,
+          context_ids: direct.length > 0 ? direct : undefined,
+          group_ids: groups.length > 0 ? groups : undefined,
           limit: this.text_limit,
         });
         textHits = page.hits;
-      } catch {
-        textHits = [];
+      } catch (error) {
+        textFailed = true;
+        textError = error;
       }
+    }
+    // The single-target branch's rule, across targets: when every ENABLED
+    // lane failed, raise — an empty result would read as "nothing found"
+    // instead of "retrieval is broken."
+    const graphHealthy = graphAnswered;
+    const textHealthy = this.include_text && !textFailed;
+    if ((graphFailed || textFailed) && !graphHealthy && !textHealthy) {
+      throw graphFailed ? graphError : textError;
     }
     return mergeLanes(graphDocs, textHits, this.k);
   }

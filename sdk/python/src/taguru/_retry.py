@@ -29,9 +29,11 @@ def should_retry_status(status: int, retry_class: RetryClass) -> bool:
     """Whether a non-2xx status is retryable for this route class.
 
     429/503 mean the request was shed before executing — always retryable.
-    502 is a transient embedding-provider failure ("retry later" per the
-    protocol) — it only occurs on read-shaped routes, all of which are SAFE.
-    501 is static configuration; retrying cannot help.
+    502 is either a transient embedding-provider failure ("retry later" per
+    the protocol, read-shaped routes only) or a router's
+    ``shard_unreachable`` — which can follow a connection lost mid-body,
+    after a write may already have reached its shard, so it retries on
+    SAFE routes only. 501 is static configuration; retrying cannot help.
     """
     if status in (429, 503):
         return True

@@ -20,9 +20,10 @@ export const BACKOFF_CAP_SECS = 8.0;
  * Whether a non-2xx status is retryable for this route class.
  *
  * 429/503 mean the request was shed before executing — always retryable.
- * 502 is a transient embedding-provider failure ("retry later" per the
- * protocol) — it only occurs on read-shaped routes, all of which are safe.
- * 501 is static configuration; retrying cannot help.
+ * 502 is a transient embedding-provider failure or a router's unreachable
+ * shard ("retry later" per the protocol) — but a proxied write can die
+ * mid-body on its way to the shard, so it may have applied: retried on safe
+ * routes only. 501 is static configuration; retrying cannot help.
  */
 export function shouldRetryStatus(status: number, retryClass: RetryClass): boolean {
   if (status === 429 || status === 503) {

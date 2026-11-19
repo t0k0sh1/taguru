@@ -29,6 +29,7 @@ from ._errors import (
     ResponseShapeError,
     ServerError,
     ServiceUnavailableError,
+    ShardUnreachableError,
     StorageFullError,
     TaguruError,
     TransportError,
@@ -136,6 +137,7 @@ from ._models import (
     Trail,
     TwinPair,
     TypeDef,
+    Unreached,
     UnsourcedEdge,
     VectorExplain,
     VocabularyAudit,
@@ -155,7 +157,7 @@ from ._types import (
     SectionSpec,
 )
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 __all__ = [
     "__version__",
@@ -196,6 +198,7 @@ __all__ = [
     "ServiceUnavailableError",
     "StorageFullError",
     "EmbeddingUnavailableError",
+    "ShardUnreachableError",
     "TransportError",
     "UnexpectedStatusError",
     "IncompatibleServerError",
@@ -301,6 +304,7 @@ __all__ = [
     "Trail",
     "TwinPair",
     "TypeDef",
+    "Unreached",
     "UnsourcedEdge",
     "VectorExplain",
     "VocabularyAudit",

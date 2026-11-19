@@ -345,6 +345,15 @@ describe("unwrapEnvelopeFull", () => {
     expect(error.status).toBe(200);
     expect(error.body).toEqual({ result: 5, status: "pending" });
   });
+
+  it("carries a router's unreached report, and an empty one when absent", () => {
+    const unreached = [{ shard: "http://shard-b:8248", context_ids: ["id-b"], error: "refused" }];
+    const partial = JSON.stringify({ result: [], status: "ok", time: 0.001, unreached });
+    expect(unwrapEnvelopeFull(200, partial).unreached).toEqual(unreached);
+    expect(unwrapEnvelopeFull(200, JSON.stringify({ result: [], status: "ok" })).unreached).toEqual(
+      [],
+    );
+  });
 });
 
 describe("isPreConnectFailure on an AggregateError", () => {
@@ -831,6 +840,33 @@ describe("isPreConnectFailure", () => {
     const outer = new TypeError("fetch failed", { cause: loop });
     expect(isPreConnectFailure(outer)).toBe(false);
   });
+
+  it.each(["EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT"])(
+    "recognizes %s from the connect syscall, and only from it",
+    (code) => {
+      // Node tags a failed connect `syscall: "connect"` (as on the real
+      // ECONNREFUSED); the same code from a read on a live socket means the
+      // request may already have reached the server.
+      const connect = new TypeError("fetch failed", {
+        cause: Object.assign(new Error(`connect ${code}`), { code, syscall: "connect" }),
+      });
+      expect(isPreConnectFailure(connect)).toBe(true);
+      const dualStack = new TypeError("fetch failed", {
+        cause: new AggregateError([
+          Object.assign(new Error(`connect ${code}`), { code, syscall: "connect" }),
+        ]),
+      });
+      expect(isPreConnectFailure(dualStack)).toBe(true);
+      const midStream = new TypeError("fetch failed", {
+        cause: Object.assign(new Error(`read ${code}`), { code, syscall: "read" }),
+      });
+      expect(isPreConnectFailure(midStream)).toBe(false);
+      const untagged = new TypeError("fetch failed", {
+        cause: Object.assign(new Error(code), { code }),
+      });
+      expect(isPreConnectFailure(untagged)).toBe(false);
+    },
+  );
 });
 
 describe("describeError", () => {

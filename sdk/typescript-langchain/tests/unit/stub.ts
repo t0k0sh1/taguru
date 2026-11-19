@@ -75,6 +75,10 @@ export class FakeServer {
   /** The body /embeddings/refresh returns when embeddingsRefreshStatus is
    * 200. */
   embeddingsRefreshResult: { embedded: number; total: number } = { embedded: 0, total: 0 };
+  /** The error `code` a non-200 /embeddings/refresh carries, or null (the
+   * default) for none — "shard_unreachable" makes the 502 a router's dead
+   * shard rather than a provider failure. */
+  embeddingsRefreshCode: string | null = null;
   /** When true, /import fails with a 500 — exercises checkpoint survival
    * across an import failure (issue #212). Mirrors the Python conftest's
    * `fail_import` knob. */
@@ -91,6 +95,11 @@ export class FakeServer {
    * from a listing that failed for another reason. Mirrors the Python
    * conftest's `contexts_listing_status` knob. */
   contextsListingStatus: number | null = null;
+  /** When set, GET /contexts answers 200 with this top-level `unreached`
+   * array beside the rows — a `taguru router` that could not reach every
+   * shard. Mirrors the Python conftest's `contexts_unreached` knob. */
+  contextsUnreached: Array<{ shard: string; context_ids: string[]; error: string }> | null =
+    null;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -142,6 +151,17 @@ export class FakeServer {
         usage: { reads: 0, empty_reads: 0, writes: 0, last_read_epoch: 0, last_write_epoch: 0 },
       });
       const rows = url.searchParams.get("after") === null ? [row("sake"), row("tea")] : [];
+      if (this.contextsUnreached !== null) {
+        return new Response(
+          JSON.stringify({
+            result: { total: 2, contexts: rows },
+            status: "ok",
+            time: 0.001,
+            unreached: this.contextsUnreached,
+          }),
+          { status: 200 },
+        );
+      }
       return ok({ total: 2, contexts: rows });
     }
     let body: unknown = null;
@@ -194,10 +214,46 @@ export class FakeServer {
           { status: 500 },
         );
       }
-      // The cross-context search: one tagged hit per named context,
-      // already rank-interleaved the way the server merges, the plan
-      // listing every target (#151).
-      const { context_ids: contextIds } = body as { context_ids: string[] };
+      // The cross-context search: one tagged hit per target, already
+      // rank-interleaved the way the server merges, the plan listing
+      // every target (#151). Targets resolve the way the server's
+      // cross_targets does: direct ids first (capped at 1000 — 400
+      // over_limit past it), then every `group_ids` entry expanded
+      // through GROUP_ROWS, nested children included, with no member cap;
+      // an unknown group refuses the whole request with a 404.
+      const { context_ids: direct = [], group_ids: groupIds = [] } = body as {
+        context_ids?: string[];
+        group_ids?: string[];
+      };
+      if (direct.length > 1000) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "over_limit", error: "too many context_ids", time: 0.001 }),
+          { status: 400 },
+        );
+      }
+      const contextIds = [...new Set(direct)];
+      const pending = [...groupIds];
+      const walked = new Set<string>();
+      while (pending.length > 0) {
+        const id = pending.shift()!;
+        if (walked.has(id)) {
+          continue;
+        }
+        walked.add(id);
+        const group = GROUP_ROWS[id] as { context_ids: string[]; group_ids: string[] } | undefined;
+        if (group === undefined) {
+          return new Response(
+            JSON.stringify({ status: "error", code: "no_group", error: "group not found", time: 0.001 }),
+            { status: 404 },
+          );
+        }
+        for (const member of group.context_ids) {
+          if (!contextIds.includes(member)) {
+            contextIds.push(member);
+          }
+        }
+        pending.push(...group.group_ids);
+      }
       const nameOf = (id: string): string => id.replace(/^id-/, "");
       return ok({
         plan: {
@@ -334,7 +390,12 @@ export class FakeServer {
       const error =
         this.embeddingsRefreshStatus === 502 ? "provider failure" : "no provider";
       return new Response(
-        JSON.stringify({ status: "error", error, time: 0.001 }),
+        JSON.stringify({
+          status: "error",
+          ...(this.embeddingsRefreshCode !== null ? { code: this.embeddingsRefreshCode } : {}),
+          error,
+          time: 0.001,
+        }),
         { status: this.embeddingsRefreshStatus },
       );
     }

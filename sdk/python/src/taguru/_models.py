@@ -114,6 +114,7 @@ __all__ = [
     "Trail",
     "TwinPair",
     "TypeDef",
+    "Unreached",
     "UnsourcedEdge",
     "VectorExplain",
     "VocabularyAudit",
@@ -187,14 +188,40 @@ class DirectoryEntry:
     semantic_floor: float | None = None
     #: ``None`` only from a server that predates the field.
     revision: ContextRevision | None = None
+    #: The installed schema's own ``mode`` (``"off"``/``"warn"``/
+    #: ``"strict"``), echoed read-only so a caller can route without a
+    #: second ``get_schema`` call. ``None`` for a ``context`` that never
+    #: installed one — never ``"off"`` standing in for "no document" —
+    #: and, transiently, for a schema recorded but not yet resolved
+    #: locally (a replica mid-hydration); also from a server predating
+    #: the field.
+    schema_mode: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Unreached:
+    """One shard a ``taguru router`` could not reach during a fan-out read:
+    its URL, the directly-named ``context_ids`` that routed to it (``group``
+    members it may also hold are not enumerable while it is down), and the
+    transport error. A page carrying any of these is PARTIAL — rows or hits
+    that shard holds are missing, not absent — so retry before trusting
+    absence, uniqueness, or a ``total``."""
+
+    shard: str
+    context_ids: list[str]
+    error: str
 
 
 @dataclass(slots=True, frozen=True)
 class ContextPage:
-    """One page of the ``context`` directory. ``total`` is the whole population."""
+    """One page of the ``context`` directory. ``total`` is the whole population.
+
+    ``unreached`` is empty except from a ``taguru router`` that could not
+    reach every shard — see :class:`Unreached`."""
 
     total: int
     contexts: list[DirectoryEntry]
+    unreached: list[Unreached] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -306,11 +333,14 @@ class CrossAssociation(Association):
 class CrossMatchPage:
     """:class:`MatchPage` across ``contexts``: same truncation contract, every
     match tagged. Weights share one scale (evidence mass), so the cut past
-    ``total`` means the same thing across ``contexts``."""
+    ``total`` means the same thing across ``contexts``. A non-empty
+    ``unreached`` (``taguru router`` only) marks the page partial — see
+    :class:`Unreached`."""
 
     total: int
     matches: list[CrossAssociation]
     plan: MatchPlan | None = None
+    unreached: list[Unreached] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -761,10 +791,12 @@ class PassagePage:
 @dataclass(slots=True, frozen=True)
 class CrossPassagePage:
     """:class:`PassagePage` across contexts: the same wrap, every hit
-    tagged."""
+    tagged. A non-empty ``unreached`` (``taguru router`` only) marks the
+    page partial — see :class:`Unreached`."""
 
     plan: SearchPlan
     hits: list[CrossPassageHit]
+    unreached: list[Unreached] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1013,10 +1045,31 @@ class DriftAudit:
 
 @dataclass(slots=True, frozen=True)
 class CompactOutcome:
+    """What one ``compact`` accomplished.
+
+    ``passages_compacted`` says whether the passage log was rewritten too
+    (dropping retracted sources' text); ``False`` when there was no passage
+    history to rewrite or that rewrite failed — never fatal, the graph
+    compaction already succeeded. ``image_persisted`` says whether the
+    rebuilt image these numbers describe was durably published, and
+    ``False`` has two meanings the response cannot tell apart: the image
+    never landed (most plausibly a full disk) — the ``context`` keeps its
+    previous image, the numbers describe a rebuild that was NOT applied,
+    and the remedy is to compact again once the cause is fixed — or it
+    landed but its directory fsync failed — the ``context`` already runs
+    on the compacted image and the next flush re-publishes it durably.
+    Both default as the server's own decoder does for a response
+    predating them: ``image_persisted`` to ``True`` (such a server never
+    reported a publish failure apart from the call's own error),
+    ``passages_compacted`` to ``False``.
+    """
+
     bytes_before: int
     bytes_after: int
     dead_edges: int
     aliases_dropped: int
+    passages_compacted: bool = False
+    image_persisted: bool = True
 
 
 @dataclass(slots=True, frozen=True)

@@ -14,7 +14,7 @@ use taguru::context::Context;
 
 use crate::bm25::Bm25Index;
 use crate::config::fmt_bytes;
-use crate::embedding::{PassageKey, PassageVectorStore};
+use crate::embedding::PassageVectorStore;
 use crate::passages::{PassageRecord, record_bytes};
 use crate::registry::DEFAULT_PASSAGE_VECTOR_LIMIT;
 
@@ -408,6 +408,41 @@ fn synthetic_passage_text(bytes: u64) -> String {
     text
 }
 
+/// Resident bytes of a `PassageVectorStore` holding
+/// `vectorized_paragraphs` rows of `dims` floats, extrapolated from the
+/// sample `records` (which hold `sample_paragraphs` paragraphs in all);
+/// 0 when `dims` is 0 (vectors off) or the sample has no paragraphs.
+///
+/// Priced from `PassageVectorStore::row_footprint` — the same per-row
+/// formula `footprint()` sums — never by pushing zeroed `dims`-wide rows
+/// into a real store: that would allocate `paragraphs × dims × 4` bytes
+/// (~0.5 GB at 3072 dims on a full sample, an allocation abort for a
+/// large enough dims) only to read back a number that is pure
+/// arithmetic. Summed in f64 so an absurd `dims` saturates the report
+/// instead of overflowing.
+fn price_passage_vectors(
+    records: &[(String, Arc<PassageRecord>)],
+    sample_paragraphs: u64,
+    dims: u64,
+    vectorized_paragraphs: u64,
+) -> u64 {
+    if dims == 0 {
+        return 0;
+    }
+    let dims = usize::try_from(dims).unwrap_or(usize::MAX);
+    let sample_vector_bytes: f64 = records
+        .iter()
+        .map(|(source, record)| {
+            record.paragraphs.len() as f64
+                * PassageVectorStore::row_footprint(dims, source.len()) as f64
+        })
+        .sum();
+    // `max(1)`: an empty sample sums to 0 bytes, so this prices it at 0
+    // rather than at 0/0 = NaN.
+    let per_paragraph = sample_vector_bytes / sample_paragraphs.max(1) as f64;
+    (per_paragraph * vectorized_paragraphs as f64) as u64
+}
+
 fn estimate_passages(plan: &Plan) -> PassageEstimate {
     let sample_bytes = plan.passage_bytes.min(PASSAGE_SAMPLE_CAP);
     let factor = plan.passage_bytes as f64 / sample_bytes as f64;
@@ -447,26 +482,12 @@ fn estimate_passages(plan: &Plan) -> PassageEstimate {
 
     let total_paragraphs = (sample_paragraphs as f64 * factor).round() as u64;
     let vectorized_paragraphs = total_paragraphs.min(DEFAULT_PASSAGE_VECTOR_LIMIT as u64);
-    let vector_bytes = if plan.embedding_dims > 0 && sample_paragraphs > 0 {
-        let mut store = PassageVectorStore::new("estimate");
-        for (source, record) in &records {
-            for span in &record.paragraphs {
-                store.push(
-                    PassageKey {
-                        source: source.clone(),
-                        index: span.index,
-                        hash: span.hash,
-                        question_hash: None,
-                    },
-                    vec![0.0f32; plan.embedding_dims as usize],
-                );
-            }
-        }
-        let per_paragraph = store.footprint() as f64 / sample_paragraphs as f64;
-        (per_paragraph * vectorized_paragraphs as f64) as u64
-    } else {
-        0
-    };
+    let vector_bytes = price_passage_vectors(
+        &records,
+        sample_paragraphs,
+        plan.embedding_dims,
+        vectorized_paragraphs,
+    );
 
     PassageEstimate {
         store_bytes: (store_bytes_sample as f64 * factor) as u64,
@@ -632,6 +653,74 @@ mod tests {
         let estimate = estimate_passages(&plan);
         assert!(estimate.vector_bytes > 0);
         assert_eq!(estimate.vectorized_paragraphs, estimate.total_paragraphs);
+    }
+
+    /// The arithmetic pricing must reproduce what measuring a real
+    /// `PassageVectorStore` filled with the same rows reports — distinct
+    /// source-name widths and a `vectorized_paragraphs` unlike the sample
+    /// size so both the per-row formula and the extrapolation are pinned.
+    #[test]
+    fn price_passage_vectors_matches_a_measured_store() {
+        let dims = 5usize;
+        let records: Vec<(String, Arc<PassageRecord>)> = ["s", "docs/a-longer-name.md"]
+            .iter()
+            .zip([900u64, 2_000])
+            .map(|(source, bytes)| {
+                let text = synthetic_passage_text(bytes);
+                let (record, _) = PassageRecord::new(
+                    Arc::from(text.as_str()),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    crate::passages::SourceMeta::default(),
+                );
+                ((*source).to_string(), record)
+            })
+            .collect();
+        let mut store = PassageVectorStore::new("estimate-test");
+        for (source, record) in &records {
+            for span in &record.paragraphs {
+                store.push(
+                    crate::embedding::PassageKey {
+                        source: source.clone(),
+                        index: span.index,
+                        hash: span.hash,
+                        question_hash: None,
+                    },
+                    vec![0.5f32; dims],
+                );
+            }
+        }
+        let sample_paragraphs = store.len() as u64;
+        assert!(sample_paragraphs > 2, "sample must span several paragraphs");
+        let vectorized = 37u64;
+        let measured =
+            (store.footprint() as f64 / sample_paragraphs as f64 * vectorized as f64) as u64;
+        assert_eq!(
+            price_passage_vectors(&records, sample_paragraphs, dims as u64, vectorized),
+            measured
+        );
+        assert_eq!(price_passage_vectors(&records, 0, dims as u64, 0), 0);
+        assert_eq!(price_passage_vectors(&[], 0, dims as u64, vectorized), 0);
+    }
+
+    /// Regression test: the vector estimate used to push one zeroed
+    /// `embedding_dims`-wide row per sampled paragraph into a real store,
+    /// so a huge `--embedding-dims` aborted on a multi-TiB allocation (or
+    /// a capacity overflow) instead of reporting the number it implies.
+    #[test]
+    fn estimate_passages_prices_huge_embedding_dims_without_allocating_them() {
+        let dims = 1u64 << 40;
+        let estimate = estimate_passages(&passage_plan(1, 1, dims));
+        assert!(estimate.vectorized_paragraphs > 0);
+        assert_eq!(
+            estimate.vector_bytes,
+            estimate.vectorized_paragraphs
+                * PassageVectorStore::row_footprint(dims as usize, 24) as u64
+        );
+
+        let absurd = estimate_passages(&passage_plan(1, 1, u64::MAX));
+        assert_eq!(absurd.vector_bytes, u64::MAX, "saturates, never overflows");
     }
 
     /// Regression test for the server-side ceiling: however many

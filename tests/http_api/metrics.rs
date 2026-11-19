@@ -155,18 +155,53 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
     assert_eq!(
         gauge(
             text,
-            "taguru_context_disk_bytes{context=\"pc\",file=\"image\"} "
+            &format!(
+                "taguru_context_disk_bytes{{context=\"pc\",context_id=\"{}\",file=\"image\"}} ",
+                server.cx("pc")
+            )
         ),
         0,
         "disk sizes are flush-time bookkeeping, not scrape-time stats"
     );
     assert_eq!(
-        gauge(text, "taguru_context_associations{context=\"pc\"} "),
+        gauge(
+            text,
+            &format!(
+                "taguru_context_associations{{context=\"pc\",context_id=\"{}\"}} ",
+                server.cx("pc")
+            )
+        ),
         3
     );
-    assert_eq!(gauge(text, "taguru_context_sources{context=\"pc\"} "), 1);
-    assert_eq!(gauge(text, "taguru_context_pinned{context=\"pc\"} "), 1);
-    assert!(gauge(text, "taguru_context_resident_bytes{context=\"pc\"} ") > 0);
+    assert_eq!(
+        gauge(
+            text,
+            &format!(
+                "taguru_context_sources{{context=\"pc\",context_id=\"{}\"}} ",
+                server.cx("pc")
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        gauge(
+            text,
+            &format!(
+                "taguru_context_pinned{{context=\"pc\",context_id=\"{}\"}} ",
+                server.cx("pc")
+            )
+        ),
+        1
+    );
+    assert!(
+        gauge(
+            text,
+            &format!(
+                "taguru_context_resident_bytes{{context=\"pc\",context_id=\"{}\"}} ",
+                server.cx("pc")
+            )
+        ) > 0
+    );
 
     // POST /flush runs the sweep: the scraped image size becomes the
     // real file's — the very bytes `to_bytes()` staged, which is also
@@ -185,21 +220,30 @@ fn per_context_gauges_measure_at_flush_time_behind_the_knob() {
     assert_eq!(
         gauge(
             text,
-            "taguru_context_disk_bytes{context=\"pc\",file=\"image\"} "
+            &format!(
+                "taguru_context_disk_bytes{{context=\"pc\",context_id=\"{}\",file=\"image\"}} ",
+                server.cx("pc")
+            )
         ),
         image_len
     );
     assert!(
         gauge(
             text,
-            "taguru_context_disk_bytes{context=\"pc\",file=\"sidecars\"} "
+            &format!(
+                "taguru_context_disk_bytes{{context=\"pc\",context_id=\"{}\",file=\"sidecars\"}} ",
+                server.cx("pc")
+            )
         ) > 0,
         "the meta sidecar has bytes"
     );
     assert_eq!(
         gauge(
             text,
-            "taguru_context_disk_bytes{context=\"pc\",file=\"wal\"} "
+            &format!(
+                "taguru_context_disk_bytes{{context=\"pc\",context_id=\"{}\",file=\"wal\"}} ",
+                server.cx("pc")
+            )
         ),
         0,
         "a successful flush truncates the graph WAL"
@@ -470,7 +514,10 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         "{after}"
     );
     assert!(
-        after.contains("taguru_context_schema_violations_total{context=\"sake\"} 1"),
+        after.contains(&format!(
+            "taguru_context_schema_violations_total{{context=\"sake\",context_id=\"{}\"}} 1",
+            server.cx("sake")
+        )),
         "{after}"
     );
 
@@ -505,11 +552,17 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         "still just the one refusal from sake: {text}"
     );
     assert!(
-        text.contains("taguru_context_schema_violations_total{context=\"nomi\"} 1"),
+        text.contains(&format!(
+            "taguru_context_schema_violations_total{{context=\"nomi\",context_id=\"{}\"}} 1",
+            server.cx("nomi")
+        )),
         "{text}"
     );
     assert!(
-        text.contains("taguru_context_schema_violations_total{context=\"sake\"} 1"),
+        text.contains(&format!(
+            "taguru_context_schema_violations_total{{context=\"sake\",context_id=\"{}\"}} 1",
+            server.cx("sake")
+        )),
         "sake's row must not have moved: {text}"
     );
 
@@ -552,7 +605,10 @@ fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
         "sake's import refusal plus musubi's associations refusal: {text}"
     );
     assert!(
-        text.contains("taguru_context_schema_violations_total{context=\"musubi\"} 1"),
+        text.contains(&format!(
+            "taguru_context_schema_violations_total{{context=\"musubi\",context_id=\"{}\"}} 1",
+            server.cx("musubi")
+        )),
         "{text}"
     );
 }

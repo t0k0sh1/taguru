@@ -100,6 +100,7 @@ from .._shared import (
     run_contract_probe,
     unwrap_envelope,
     unwrap_envelope_full,
+    unwrap_envelope_partial,
 )
 from .._types import (
     AssocOp,
@@ -314,6 +315,20 @@ class AsyncTaguru:
         response = await self._send(method, path, params=params, json_body=json_body, retry=retry)
         return unwrap_envelope_full(response)
 
+    async def _request_json_partial(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any = None,
+    ) -> Any:
+        """``_request_json`` for a fan-out read a ``taguru router`` may answer
+        partially — the result carries the envelope's ``unreached``, see
+        ``unwrap_envelope_partial``."""
+        response = await self._send(method, path, params=params, json_body=json_body)
+        return unwrap_envelope_partial(response)
+
     # -- server-level operations -------------------------------------------
 
     async def health(self) -> None:
@@ -408,7 +423,8 @@ class AsyncTaguru:
         included), overlaps deduped. At least one of the two must name something. Weights share
         one scale, so past the limit the strongest |weight| survives exactly
         as within one ``context``. ``after`` resumes past the previous page's
-        last match; ``total`` stays constant across pages.
+        last match; ``total`` stays constant across pages. Through a
+        ``taguru router``, a non-empty ``unreached`` marks the page partial.
         """
         body = drop_none(
             {
@@ -419,7 +435,7 @@ class AsyncTaguru:
                 "after": after,
             }
         )
-        result = await self._request_json("POST", "/recall", json_body=body)
+        result = await self._request_json_partial("POST", "/recall", json_body=body)
         return decode(CrossMatchPage, result)  # type: ignore[no-any-return]
 
     async def query(
@@ -453,7 +469,7 @@ class AsyncTaguru:
                 "after": after,
             }
         )
-        result = await self._request_json("POST", "/query", json_body=body)
+        result = await self._request_json_partial("POST", "/query", json_body=body)
         return decode(CrossMatchPage, result)  # type: ignore[no-any-return]
 
     async def search_passages(
@@ -480,7 +496,8 @@ class AsyncTaguru:
         sources may answer, before the lanes run and identically on every
         target; a source without the respective metadata never matches.
         The page's ``plan`` names every ``context`` actually searched and each
-        lane's verdict there — see :class:`SearchPlan`.
+        lane's verdict there — see :class:`SearchPlan`; through a ``taguru
+        router``, ``unreached`` names the shards that were not.
         """
         body = drop_none(
             {
@@ -494,7 +511,7 @@ class AsyncTaguru:
                 "until": until,
             }
         )
-        result = await self._request_json("POST", "/sources/search", json_body=body)
+        result = await self._request_json_partial("POST", "/sources/search", json_body=body)
         return decode(CrossPassagePage, result)  # type: ignore[no-any-return]
 
     async def close(self) -> None:
@@ -529,7 +546,7 @@ class AsyncContexts:
         breaks ties). ``pinned`` narrows to that pinned state; unlike
         the cursor, it counts toward ``total``.
         """
-        result = await self._client._request_json(
+        result = await self._client._request_json_partial(
             "GET",
             "/contexts",
             params=drop_none(
@@ -1301,7 +1318,12 @@ class AsyncContext:
         CONTESTED wants a negative-weight assertion instead.
         """
         body = {"subject": subject, "label": label, "object": object}
-        result = await self._post("/associations/retract", body)
+        # The edge row survives at weight 0, so a phantom retry after an
+        # ambiguous transport failure answers ``retracted=False`` — "nothing
+        # changed" — for a retraction the first attempt already applied.
+        result = await self._post(
+            "/associations/retract", body, retry=RetryClass.UNSAFE_ON_AMBIGUOUS
+        )
         return decode(RetractAssociationOutcome, result)  # type: ignore[no-any-return]
 
     # -- passages / sources ----------------------------------------------------
@@ -1474,6 +1496,11 @@ class AsyncContext:
             self._path + "/sources/retract",
             params=drop_none({"dry_run": True if dry_run else None}),
             json_body={"source_id": source_id},
+            # A phantom retry of an applied retraction reports
+            # ``associations_touched=0`` — "nothing to withdraw" — so an
+            # ambiguous failure is not retried; a dry run writes nothing,
+            # so its repeat reports the same preview.
+            retry=RetryClass.SAFE if dry_run else RetryClass.UNSAFE_ON_AMBIGUOUS,
         )
         return decode(RetractOutcome, result)  # type: ignore[no-any-return]
 

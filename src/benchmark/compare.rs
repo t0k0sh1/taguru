@@ -130,7 +130,9 @@ fn rung_drift_warnings(manifest: &super::BenchManifest) -> Vec<String> {
         .filter(|(_, rungs)| rungs.len() > 1)
         .map(|(model, rungs)| {
             format!(
-                "WARNING: model '{model}' resolved different structured-output rungs                  across its runs ({}) — its aggregated numbers mix measurement                  conditions (ADR 0003 §6)",
+                "WARNING: model '{model}' resolved different structured-output rungs \
+                 across its runs ({}) — its aggregated numbers mix measurement \
+                 conditions (ADR 0003 §6)",
                 rungs.into_iter().collect::<Vec<_>>().join(", ")
             )
         })

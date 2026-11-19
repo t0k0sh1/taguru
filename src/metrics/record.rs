@@ -132,7 +132,11 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_flush(&self, name: &str, ok: bool) {
+    /// Count one image flush of the `context` with id `id`. Keyed by the
+    /// id, never the display name: names are not unique (two same-named
+    /// `contexts` would heal each other's failures) and a rename would
+    /// strand a failure under the old name, latching `/health` degraded.
+    pub fn record_flush(&self, id: &str, ok: bool) {
         let counter = if ok {
             &self.flush_ok
         } else {
@@ -146,9 +150,9 @@ impl Metrics {
         {
             let mut failing = self.flush_failing.lock();
             if ok {
-                failing.remove(name);
+                failing.remove(id);
             } else {
-                failing.insert(name.to_string());
+                failing.insert(id.to_string());
             }
             self.flush_degraded
                 .store(!failing.is_empty(), Ordering::Relaxed);
@@ -161,6 +165,16 @@ impl Metrics {
             self.last_flush_success_epoch
                 .store(epoch, Ordering::Relaxed);
         }
+    }
+
+    /// Drop a deleted `context`'s unhealed flush failure: it will never
+    /// flush again, so leaving it in the set would latch `/health`
+    /// degraded forever.
+    pub fn forget_flush(&self, id: &str) {
+        let mut failing = self.flush_failing.lock();
+        failing.remove(id);
+        self.flush_degraded
+            .store(!failing.is_empty(), Ordering::Relaxed);
     }
 
     /// Count one `flush_entry` attempt that backed off without either

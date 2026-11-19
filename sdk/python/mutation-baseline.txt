@@ -16,6 +16,9 @@
 #   is already the parameter's default.
 # - x_error_for_status__mutmut_96/110: drop `status=status` where the
 #   constructor's default (429/503) equals the status being mapped.
+# - x_error_for_status__mutmut_139/140: drop `status=status` / `code=code`
+#   on the ShardUnreachableError branch, which only runs for status 502
+#   and code "shard_unreachable" — exactly the constructor's defaults.
 # - x_encode_name__mutmut_5: `quote(safe="XXXX")` — "X" is unreserved and
 #   never percent-encoded regardless of `safe`.
 # - x_dumps_compact__mutmut_3: `ensure_ascii=None` is falsy, same as False.
@@ -36,6 +39,8 @@ taguru._contract.x_incompatibility__mutmut_25
 taguru._contract.x_incompatibility__mutmut_7
 taguru._decode.x_decode__mutmut_24
 taguru._errors.x_error_for_status__mutmut_110
+taguru._errors.x_error_for_status__mutmut_139
+taguru._errors.x_error_for_status__mutmut_140
 taguru._errors.x_error_for_status__mutmut_96
 taguru._errors.xǁIncompatibleServerErrorǁ__init____mutmut_3
 taguru._retry.x_backoff_delay__mutmut_6

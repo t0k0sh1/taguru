@@ -108,7 +108,9 @@ export class StorageFullError extends ServerError {}
 
 /**
  * 501/502 — no embedding provider configured, or the provider failed.
- * `reason` is "not_configured" for 501 and "provider_error" for 502.
+ * `reason` is "not_configured" for 501 and "provider_error" for 502. A 502
+ * whose `code` is `"shard_unreachable"` is a router's dead shard, not a
+ * provider failure — that one is {@link ShardUnreachableError} instead.
  */
 export class EmbeddingUnavailableError extends ServerError {
   readonly reason: "not_configured" | "provider_error";
@@ -118,6 +120,21 @@ export class EmbeddingUnavailableError extends ServerError {
     this.reason = options.status === 501 ? "not_configured" : "provider_error";
   }
 }
+
+/**
+ * 502 `shard_unreachable` — a `taguru router` could not reach the shard
+ * that holds the addressed `context` (sharded deployments only). Not an
+ * embedding failure, and not a {@link ServiceUnavailableError} either: 503
+ * means the request never executed, while a proxied write can die mid-body
+ * on its way to the shard, so whether it applied is unknown. Retry therefore
+ * stays status-based — 502 is retried on safe routes only.
+ *
+ * A fan-out that reaches only SOME shards answers 200 with a non-empty
+ * `unreached` instead (see the `Unreached` model); callers that cannot act on a
+ * partial view raise this class themselves, with `status` 200 and the
+ * `unreached` entries as `body`.
+ */
+export class ShardUnreachableError extends ServerError {}
 
 /** No HTTP response was obtained (DNS, refused connection, timeout, ...). */
 export class TransportError extends TaguruError {}
@@ -200,8 +217,11 @@ export function errorForStatus(
     case 507:
       return new StorageFullError(message, base);
     case 501:
-    case 502:
       return new EmbeddingUnavailableError(message, base);
+    case 502:
+      return options.code === "shard_unreachable"
+        ? new ShardUnreachableError(message, base)
+        : new EmbeddingUnavailableError(message, base);
     default:
       if (status >= 500 && status < 600) {
         return new ServerError(message, base);

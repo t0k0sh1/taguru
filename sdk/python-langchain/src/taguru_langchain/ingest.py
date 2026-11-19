@@ -31,12 +31,14 @@ from langchain_core.runnables import Runnable
 from pydantic import BaseModel
 from taguru import (
     AsyncTaguru,
+    ContextPage,
     EmbeddingUnavailableError,
     ImportOutcome,
     LocatorSpec,
     NotFoundError,
     SchemaDocument,
     SectionSpec,
+    ShardUnreachableError,
     Taguru,
 )
 
@@ -344,6 +346,23 @@ def _normalize_stop(
     if isinstance(should_stop, threading.Event):
         return should_stop.is_set
     return should_stop
+
+
+def _refuse_partial_listing(page: ContextPage, name: str) -> None:
+    """Raise when a ``taguru router`` answered a directory page without
+    every shard: rows the unreached shards hold are missing, not absent, so
+    the page proves neither that the name is free nor that one match is the
+    only one — reading it as complete would mint a duplicate context or
+    report a misleading "does not resolve"."""
+    if not page.unreached:
+        return
+    shards = ", ".join(entry.shard for entry in page.unreached)
+    raise ShardUnreachableError(
+        f"the context directory is partial (unreachable shard(s): {shards}), so whether "
+        f"a context named {name!r} exists, or is unique, is unknown",
+        status=200,
+        body=[asdict(entry) for entry in page.unreached],
+    )
 
 
 @dataclass
@@ -1130,9 +1149,12 @@ class TaguruIngester:
         Only "no such context" — no matching row, or a 404 from the listing —
         reads as ``None``. Any other listing failure (403, 503, transport)
         propagates, so a caller reports the real cause instead of a
-        misleading "not found". ``strict`` makes the 404 propagate too: the
-        batch header must not mint a second id for a context the directory
-        merely failed to show."""
+        misleading "not found" — including a ``taguru router``'s partial
+        listing (a shard it could not reach), raised as
+        ``ShardUnreachableError``: the missing shard may hold the context,
+        or a second one sharing the name. ``strict`` makes the 404
+        propagate too: the batch header must not mint a second id for a
+        context the directory merely failed to show."""
         return self._lookup_context_id(strict=strict, offline=False)
 
     def _lookup_context_id(self, *, strict: bool, offline: bool) -> str | None:
@@ -1142,7 +1164,7 @@ class TaguruIngester:
         if self.client is None:
             raise ValueError("this ingester was built with only an async client")
         try:
-            matches = [row.id for row in self.client.contexts.iter() if row.name == self.context]
+            matches = self._matching_ids()
         except NotFoundError:
             if strict:
                 raise
@@ -1156,6 +1178,24 @@ class TaguruIngester:
                 f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
             )
         return matches[0] if matches else None
+
+    def _matching_ids(self) -> list[str]:
+        """Every directory row's id whose name is the ingester's context,
+        paged by hand rather than through ``contexts.iter()`` — which
+        yields rows and so cannot show a page's ``unreached`` — so a
+        router's partial page refuses instead of reading as complete."""
+        assert self.client is not None
+        matches: list[str] = []
+        after: str | None = None
+        after_id: str | None = None
+        while True:
+            page = self.client.contexts.list(after=after, after_id=after_id)
+            _refuse_partial_listing(page, self.context)
+            if not page.contexts:
+                return matches
+            matches.extend(row.id for row in page.contexts if row.name == self.context)
+            after = page.contexts[-1].name
+            after_id = page.contexts[-1].id
 
     def _header_context_id(self, *, dry_run: bool) -> str:
         """The id every batch header names: the existing context's, or — on a
@@ -1664,11 +1704,7 @@ class TaguruIngester:
         if self.async_client is None:
             raise ValueError("this ingester was built with only a sync client")
         try:
-            matches = [
-                row.id
-                async for row in self.async_client.contexts.iter()
-                if row.name == self.context
-            ]
+            matches = await self._amatching_ids()
         except NotFoundError:
             if strict:
                 raise
@@ -1682,6 +1718,21 @@ class TaguruIngester:
                 f"context name {self.context!r} is ambiguous: {len(matches)} contexts share it"
             )
         return matches[0] if matches else None
+
+    async def _amatching_ids(self) -> list[str]:
+        """Async twin of ``_matching_ids``."""
+        assert self.async_client is not None
+        matches: list[str] = []
+        after: str | None = None
+        after_id: str | None = None
+        while True:
+            page = await self.async_client.contexts.list(after=after, after_id=after_id)
+            _refuse_partial_listing(page, self.context)
+            if not page.contexts:
+                return matches
+            matches.extend(row.id for row in page.contexts if row.name == self.context)
+            after = page.contexts[-1].name
+            after_id = page.contexts[-1].id
 
     async def _afetch_vocabulary(self, *, dry_run: bool) -> list[str]:
         assert self.async_client is not None

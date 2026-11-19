@@ -16,6 +16,7 @@ from taguru import (
     RequestTimeoutError,
     ServerError,
     ServiceUnavailableError,
+    ShardUnreachableError,
     StorageFullError,
     TaguruError,
     UnexpectedStatusError,
@@ -120,6 +121,40 @@ def test_embedding_error_reason_distinguishes_501_from_502() -> None:
     assert excinfo.value.reason == "provider_error"
 
 
+def test_a_routers_shard_unreachable_502_is_not_an_embedding_failure() -> None:
+    """A ``taguru router`` answers 502 ``shard_unreachable`` when a shard a
+    routed verb needs did not answer — no embedding provider was involved,
+    so it must not arrive as ``EmbeddingUnavailableError(provider_error)``
+    (which, e.g., the ingester's refresh path records as an embedding
+    warning). Every other 502 keeps the embedding mapping."""
+    client = sync_client(
+        lambda _req: err_response(502, "shard down", code="shard_unreachable"), retries=0
+    )
+    with pytest.raises(ShardUnreachableError) as excinfo:
+        client.context("sake").refresh_embeddings()
+    assert not isinstance(excinfo.value, EmbeddingUnavailableError)
+    assert isinstance(excinfo.value, ServerError)
+    assert (excinfo.value.status, excinfo.value.code, excinfo.value.message) == (
+        502,
+        "shard_unreachable",
+        "shard down",
+    )
+
+    coded = sync_client(
+        lambda _req: err_response(502, "provider died", code="embeddings_failed"), retries=0
+    )
+    with pytest.raises(EmbeddingUnavailableError) as excinfo2:
+        coded.context("sake").refresh_embeddings()
+    assert excinfo2.value.reason == "provider_error"
+
+
+def test_shard_unreachable_constructor_defaults_to_the_routers_refusal() -> None:
+    """Built by a caller (e.g. the ingester over a partial listing), the
+    defaults are the router refusal's own status and code."""
+    error = ShardUnreachableError("partial")
+    assert (error.status, error.code) == (502, "shard_unreachable")
+
+
 @pytest.mark.parametrize("status", [None, 500, 503])
 def test_embedding_error_rejects_any_status_other_than_501_or_502(
     status: int | None,
@@ -183,6 +218,21 @@ def test_error_for_status_threads_every_attribute_through(
     assert error.body is body
     if isinstance(error, (RateLimitError, ServiceUnavailableError)):
         assert error.retry_after == 7.5
+
+
+def test_error_for_status_threads_every_attribute_through_a_shard_unreachable() -> None:
+    body = {"detail": "sentinel"}
+    error = error_for_status(502, "boom", code="shard_unreachable", time=1.25, body=body)
+    assert type(error) is ShardUnreachableError
+    assert (error.message, error.status, error.code, error.time, error.body) == (
+        "boom",
+        502,
+        "shard_unreachable",
+        1.25,
+        body,
+    )
+    # The code alone does not pick the class: only a 502 carries this meaning.
+    assert type(error_for_status(500, "boom", code="shard_unreachable")) is ServerError
 
 
 def test_direct_constructors_default_their_status_and_keep_every_field() -> None:

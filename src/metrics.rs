@@ -118,11 +118,13 @@ pub struct Metrics {
     /// without taking the lock. Drives /health: the flusher retries every
     /// tick, so this is a self-healing signal, never a latched one.
     flush_degraded: AtomicBool,
-    /// The `contexts` whose latest flush failed, by name. Tracked as a set,
+    /// The `contexts` whose latest flush failed, by id (never by display
+    /// name — names are not unique and renames move them). Tracked as a set,
     /// not a single bit, so one `context`'s success cannot mask another's
     /// failure (last-write-wins would), and a lone transient failure among
     /// many healthy `contexts` does not flip the whole server to 503. A
-    /// `context` leaves the set when its next flush succeeds.
+    /// `context` leaves the set when its next flush succeeds or it is
+    /// deleted.
     flush_failing: Mutex<HashSet<String>>,
     /// Unix seconds of the last successful image flush (0 = none since
     /// boot). `time() - this` on a dashboard says how stale images are
@@ -299,8 +301,34 @@ mod tests {
         assert!(!without.contains("taguru_context_"), "{without}");
 
         let mut gauges = empty_gauges();
-        gauges.per_context.push(ContextGaugeRow {
-            name: "日本\"酒\\".to_string(),
+        gauges.per_context.push(sample_row("日本\"酒\\", "id-1"));
+        let with = metrics.render_prometheus(&gauges);
+        let escaped = "日本\\\"酒\\\\";
+        let labels = format!("context=\"{escaped}\",context_id=\"id-1\"");
+        for line in [
+            format!("taguru_context_quota_bytes{{{labels},resource=\"cache\"}} 1536"),
+            format!("taguru_context_quota_bytes{{{labels},resource=\"storage\"}} 4096"),
+            format!("taguru_context_disk_bytes{{{labels},file=\"image\"}} 2048"),
+            format!("taguru_context_disk_bytes{{{labels},file=\"passages\"}} 512"),
+            format!("taguru_context_disk_bytes{{{labels},file=\"passages_wal\"}} 32"),
+            format!("taguru_context_disk_bytes{{{labels},file=\"sidecars\"}} 256"),
+            format!("taguru_context_disk_bytes{{{labels},file=\"wal\"}} 64"),
+            format!("taguru_context_resident_bytes{{{labels}}} 1024"),
+            format!("taguru_context_pinned{{{labels}}} 1"),
+            format!("taguru_context_concepts{{{labels}}} 7"),
+            format!("taguru_context_associations{{{labels}}} 9"),
+            format!("taguru_context_labels{{{labels}}} 3"),
+            format!("taguru_context_sources{{{labels}}} 2"),
+            format!("taguru_context_schema_violations_total{{{labels}}} 5"),
+        ] {
+            assert!(with.contains(&line), "missing {line} in: {with}");
+        }
+    }
+
+    fn sample_row(name: &str, id: &str) -> ContextGaugeRow {
+        ContextGaugeRow {
+            name: name.to_string(),
+            id: id.to_string(),
             pinned: true,
             resident_bytes: 1024,
             disk_image_bytes: 2048,
@@ -315,28 +343,47 @@ mod tests {
             labels: 3,
             sources: 2,
             schema_violations: 5,
-        });
-        let with = metrics.render_prometheus(&gauges);
-        let escaped = "日本\\\"酒\\\\";
-        for line in [
-            format!("taguru_context_quota_bytes{{context=\"{escaped}\",resource=\"cache\"}} 1536"),
-            format!(
-                "taguru_context_quota_bytes{{context=\"{escaped}\",resource=\"storage\"}} 4096"
-            ),
-            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"image\"}} 2048"),
-            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages\"}} 512"),
-            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"passages_wal\"}} 32"),
-            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"sidecars\"}} 256"),
-            format!("taguru_context_disk_bytes{{context=\"{escaped}\",file=\"wal\"}} 64"),
-            format!("taguru_context_resident_bytes{{context=\"{escaped}\"}} 1024"),
-            format!("taguru_context_pinned{{context=\"{escaped}\"}} 1"),
-            format!("taguru_context_concepts{{context=\"{escaped}\"}} 7"),
-            format!("taguru_context_associations{{context=\"{escaped}\"}} 9"),
-            format!("taguru_context_labels{{context=\"{escaped}\"}} 3"),
-            format!("taguru_context_sources{{context=\"{escaped}\"}} 2"),
-            format!("taguru_context_schema_violations_total{{context=\"{escaped}\"}} 5"),
-        ] {
-            assert!(with.contains(&line), "missing {line} in: {with}");
+        }
+    }
+
+    /// Names are not unique: two same-named `contexts` must render two
+    /// distinct series (told apart by `context_id`), never one label set
+    /// emitted twice — Prometheus rejects such a scrape.
+    #[test]
+    fn same_named_contexts_render_distinct_series() {
+        let metrics = Metrics::default();
+        let mut gauges = empty_gauges();
+        gauges.per_context.push(sample_row("sake", "id-a"));
+        gauges.per_context.push(sample_row("sake", "id-b"));
+        let rendered = metrics.render_prometheus(&gauges);
+        let series: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("taguru_context_pinned{"))
+            .map(|line| line.rsplit_once(' ').unwrap().0)
+            .collect();
+        assert_eq!(
+            series,
+            [
+                "taguru_context_pinned{context=\"sake\",context_id=\"id-a\"}",
+                "taguru_context_pinned{context=\"sake\",context_id=\"id-b\"}",
+            ]
+        );
+    }
+
+    /// The replication lag families key by stem; the stem renders as
+    /// `context_id`, so two same-named `contexts` stay two series.
+    #[test]
+    fn same_named_replication_lanes_render_distinct_series() {
+        let metrics = Metrics::default();
+        for stem in ["id-a", "id-b"] {
+            metrics.note_replication_lane(stem, "sake", "graph", 1, 0);
+        }
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        for stem in ["id-a", "id-b"] {
+            let line = format!(
+                "taguru_replication_lag_records{{context=\"sake\",context_id=\"{stem}\",lane=\"graph\"}} 1"
+            );
+            assert!(rendered.contains(&line), "missing {line} in: {rendered}");
         }
     }
 
@@ -485,11 +532,11 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 2"),
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 2"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0"),
+            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 0"),
             "{rendered}"
         );
 
@@ -498,11 +545,11 @@ mod tests {
         metrics.note_replica_shipped("sake-id", "sake", "graph", 5);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
-            rendered.contains("taguru_replica_shipped_seq{context=\"sake\",lane=\"graph\"} 5"),
+            rendered.contains("taguru_replica_shipped_seq{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 5"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 2"),
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 2"),
             "{rendered}"
         );
 
@@ -510,7 +557,7 @@ mod tests {
         metrics.note_replica_lane("sake-id", "sake", "graph", 5, 5);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
-            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0"),
+            rendered.contains("taguru_replica_behind_seconds{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 0"),
             "{rendered}"
         );
 
@@ -532,7 +579,7 @@ mod tests {
         metrics.note_replica_shipped("sake-id", "sake", "graph", 4);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
-            rendered.contains("taguru_replica_applied_seq{context=\"sake\",lane=\"graph\"} 0"),
+            rendered.contains("taguru_replica_applied_seq{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 0"),
             "the successor's gap must show from zero, not the predecessor's applied: {rendered}"
         );
     }
@@ -640,7 +687,7 @@ mod tests {
         metrics.note_replication_lane("sake-id", "sake", "graph", 3, 60);
         let with_lane = metrics.render_prometheus(&empty_gauges());
         assert!(
-            with_lane.contains("taguru_replication_lag_records{context=\"sake\",lane=\"graph\"} 3"),
+            with_lane.contains("taguru_replication_lag_records{context=\"sake\",context_id=\"sake-id\",lane=\"graph\"} 3"),
             "{with_lane}"
         );
         metrics.forget_replication_lane("sake-id", "graph");
@@ -709,7 +756,7 @@ mod tests {
         metrics.note_replica_lane("id-1", "shochu", "graph", 2, 2);
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
-            rendered.contains("taguru_replica_applied_seq{context=\"shochu\",lane=\"graph\"} 2"),
+            rendered.contains("taguru_replica_applied_seq{context=\"shochu\",context_id=\"id-1\",lane=\"graph\"} 2"),
             "{rendered}"
         );
         assert!(
@@ -727,7 +774,7 @@ mod tests {
         let rendered = metrics.render_prometheus(&empty_gauges());
         assert!(
             rendered
-                .contains("taguru_replication_lag_records{context=\"shochu\",lane=\"graph\"} 3"),
+                .contains("taguru_replication_lag_records{context=\"shochu\",context_id=\"id-1\",lane=\"graph\"} 3"),
             "{rendered}"
         );
         assert!(!rendered.contains("context=\"sake\""), "{rendered}");
@@ -1267,6 +1314,7 @@ mod tests {
             // else's.
             per_context: vec![ContextGaugeRow {
                 name: "sake".to_string(),
+                id: "6f0e3c1a-2b4d-4e8f-9a1b-3c5d7e9f0a2b".to_string(),
                 pinned: false,
                 resident_bytes: 640,
                 disk_image_bytes: 100,

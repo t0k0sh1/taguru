@@ -15,7 +15,9 @@ The retriever addresses one ``context_id``, several ``context_ids``, or ``group_
 (each ``group`` reaches every member ``context``, nested children included). Across
 several ``contexts`` the graph lane runs per ``context`` and interleaves by
 per-``context`` rank — the posture the server itself takes for passage scores —
-and the text lane rides the server's own cross-``context`` search.
+and the text lane rides the server's own cross-``context`` search, naming the
+``groups`` themselves so the server expands them (a ``group`` may reach more
+``contexts`` than one request may list).
 
 Every target is an id: ``context_id``/``context_ids`` take the ``id`` column of
 ``client.contexts.list()`` (#964, #965, #967) and ``group_ids`` the ``id`` column of
@@ -158,9 +160,17 @@ class TaguruRetriever(BaseRetriever):
 
     # -- sync lane ---------------------------------------------------------
 
-    def _resolve_targets(self, client: Taguru) -> list[str]:
+    def _resolve_targets(self, client: Taguru) -> tuple[list[str], list[str]]:
+        """The graph lane's per-``context`` targets, and the text lane's
+        ``group_ids`` — the named ``groups`` minus any that answered 404.
+
+        The text lane sends ``groups`` rather than their expansion: one
+        ``group`` may reach far more ``contexts`` than a request's
+        ``context_ids`` cap (1000), and an over-cap list is a 400 that
+        would blank the lane outright. The server expands them itself, in
+        the same direct-first, members-in-id-order tie order."""
         if not self.group_ids:
-            return self._direct_targets()
+            return self._direct_targets(), []
         # Walk down from the named ``groups``, one ``groups.get`` per ``group``
         # reached (#1024): only the rows this search needs are read — never
         # the whole directory, whose every row costs the server a
@@ -171,6 +181,7 @@ class TaguruRetriever(BaseRetriever):
         # caller's to hear, never an empty search that looks complete.
         direct = self._direct_targets()
         members: set[str] = set()
+        missing: set[str] = set()
         storey = list(dict.fromkeys(self.group_ids))
         seen = set(storey)
         try:
@@ -181,6 +192,7 @@ class TaguruRetriever(BaseRetriever):
                     try:
                         entries.append(client.groups.get(group_id))
                     except NotFoundError:
+                        missing.add(group_id)
                         entries.append(None)
                     except Exception as error:
                         failure = failure or error
@@ -190,7 +202,14 @@ class TaguruRetriever(BaseRetriever):
         except Exception:
             if not direct:
                 raise
-        return self._with_members(direct, members)
+        return self._with_members(direct, members), self._text_groups(missing)
+
+    def _text_groups(self, missing: set[str]) -> list[str]:
+        """The named ``groups`` the text lane sends: a deleted one would
+        refuse the whole search (``no_group``), so it drops out exactly as
+        it contributes no graph targets."""
+        named = dict.fromkeys(self.group_ids or [])
+        return [group_id for group_id in named if group_id not in missing]
 
     def _graph_lane(self, client: Taguru, target: str, query: str) -> list[Document]:
         """``target`` is the context ID, which the Documents' metadata carries
@@ -257,21 +276,19 @@ class TaguruRetriever(BaseRetriever):
             # healthy one, so with a single lane enabled its failure alone
             # must raise: an empty result here would read as "nothing
             # found" instead of "retrieval is broken."
-            graph_healthy = self.include_graph and graph_error is None
-            text_healthy = self.include_text and text_error is None
-            if (
-                (graph_error is not None or text_error is not None)
-                and not graph_healthy
-                and not text_healthy
-            ):
-                if graph_error is not None:
-                    raise graph_error
-                assert text_error is not None  # implied by the guard above
-                raise text_error
+            _raise_if_every_lane_failed(
+                self.include_graph and graph_error is None,
+                graph_error,
+                self.include_text and text_error is None,
+                text_error,
+            )
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
-        targets = self._resolve_targets(self.client)
+        targets, text_groups = self._resolve_targets(self.client)
+        direct = self._direct_targets()
         graph_docs = []
+        graph_ok = False
+        graph_error = None
         if self.include_graph:
             # One target erroring (a deleted context, a transient
             # failure) should not blank out the graph docs every other
@@ -281,38 +298,50 @@ class TaguruRetriever(BaseRetriever):
             for target in targets:
                 try:
                     per_target.append(self._graph_lane(self.client, target, query))
-                except Exception:
+                    graph_ok = True
+                except Exception as error:
+                    graph_error = graph_error or error
                     per_target.append([])
             graph_docs = _interleave(per_target)
         text_hits = []
-        if self.include_text:
+        text_error = None
+        if self.include_text and (direct or text_groups):
             # The server's cross_targets validation rejects the WHOLE
-            # request if even one named context is gone — without this
-            # isolation, a single deleted group member would silently
-            # discard the graph lane's results too (see the per-target
-            # isolation just above).
+            # request if even one named context is gone — isolated so a
+            # single deleted context does not also discard the graph
+            # lane's results (see the per-target isolation just above).
             try:
                 text_hits = list(
                     self.client.search_passages(
-                        query, context_ids=targets, limit=self.text_limit
+                        query,
+                        context_ids=direct or None,
+                        group_ids=text_groups or None,
+                        limit=self.text_limit,
                     ).hits
                 )
-            except Exception:
-                text_hits = []
+            except Exception as error:
+                text_error = error
+        # Isolation is per target, not a licence to hide an outage: when
+        # NO target's graph lane answered and the text lane failed too
+        # (401, server down), an empty list would read as "nothing found".
+        _raise_if_every_lane_failed(
+            graph_ok, graph_error, self.include_text and text_error is None, text_error
+        )
         return _merge_lanes(graph_docs, text_hits, limit)
 
     # -- async lane ----------------------------------------------------------
 
-    async def _aresolve_targets(self, client: AsyncTaguru) -> list[str]:
+    async def _aresolve_targets(self, client: AsyncTaguru) -> tuple[list[str], list[str]]:
         """:meth:`_resolve_targets`' async twin, fetching each storey's
         ``groups`` concurrently, so the round trips follow the nesting depth
         (at most 3), not the ``group`` count. ``except Exception`` lets a
         BaseException that is NOT an Exception — CancelledError above all —
         propagate, never swallowed as an unreadable ``group``."""
         if not self.group_ids:
-            return self._direct_targets()
+            return self._direct_targets(), []
         direct = self._direct_targets()
         members: set[str] = set()
+        missing: set[str] = set()
         storey = list(dict.fromkeys(self.group_ids))
         seen = set(storey)
 
@@ -320,6 +349,7 @@ class TaguruRetriever(BaseRetriever):
             try:
                 return await client.groups.get(group_id)
             except NotFoundError:
+                missing.add(group_id)
                 return None
 
         try:
@@ -339,7 +369,7 @@ class TaguruRetriever(BaseRetriever):
         except Exception:
             if not direct:
                 raise
-        return self._with_members(direct, members)
+        return self._with_members(direct, members), self._text_groups(missing)
 
     async def _agraph_lane(self, client: AsyncTaguru, target: str, query: str) -> list[Document]:
         """:meth:`_graph_lane`'s async twin."""
@@ -423,21 +453,19 @@ class TaguruRetriever(BaseRetriever):
                     text_error = error
             # Same rule as the sync path above: every ENABLED lane failing
             # must raise, including when only one lane is enabled.
-            graph_healthy = self.include_graph and graph_error is None
-            text_healthy = self.include_text and text_error is None
-            if (
-                (graph_error is not None or text_error is not None)
-                and not graph_healthy
-                and not text_healthy
-            ):
-                if graph_error is not None:
-                    raise graph_error
-                assert text_error is not None  # implied by the guard above
-                raise text_error
+            _raise_if_every_lane_failed(
+                self.include_graph and graph_error is None,
+                graph_error,
+                self.include_text and text_error is None,
+                text_error,
+            )
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
-        targets = await self._aresolve_targets(self.async_client)
+        targets, text_groups = await self._aresolve_targets(self.async_client)
+        direct = self._direct_targets()
         graph_docs = []
+        graph_ok = False
+        graph_error = None
         if self.include_graph:
             # Each target's lane is an independent chain of round
             # trips, and completion order is irrelevant (_interleave
@@ -458,21 +486,31 @@ class TaguruRetriever(BaseRetriever):
                     # BaseException (CancelledError) must propagate.
                     if not isinstance(docs, Exception):
                         raise docs
+                    graph_error = graph_error or docs
                     lanes.append([])
                 else:
+                    graph_ok = True
                     lanes.append(docs)
             graph_docs = _interleave(lanes)
         text_hits = []
-        if self.include_text:
+        text_error = None
+        if self.include_text and (direct or text_groups):
             # Same isolation as the sync lane above: one gone target must
             # not blank out the graph lane's already-fetched results.
             try:
                 crossed = await self.async_client.search_passages(
-                    query, context_ids=targets, limit=self.text_limit
+                    query,
+                    context_ids=direct or None,
+                    group_ids=text_groups or None,
+                    limit=self.text_limit,
                 )
                 text_hits = list(crossed.hits)
-            except Exception:
-                text_hits = []
+            except Exception as error:
+                text_error = error
+        # Same rule as the sync path: every lane failing raises.
+        _raise_if_every_lane_failed(
+            graph_ok, graph_error, self.include_text and text_error is None, text_error
+        )
         return _merge_lanes(graph_docs, text_hits, limit)
 
     # -- lifecycle -----------------------------------------------------------
@@ -519,6 +557,26 @@ class TaguruRetriever(BaseRetriever):
 
 
 # -- lane assembly (pure functions shared by both entry points) -----------------
+
+
+def _raise_if_every_lane_failed(
+    graph_ok: bool,
+    graph_error: Exception | None,
+    text_ok: bool,
+    text_error: Exception | None,
+) -> None:
+    """Raise when some lane failed and none succeeded — a disabled lane
+    (``*_ok`` False) is not a healthy one, so with one lane enabled its
+    failure alone raises. ``graph_ok`` means at least one graph target
+    answered: partial failures stay isolated, but an empty result built
+    from nothing but failures would read as "nothing found" instead of
+    "retrieval is broken." The graph error wins when both failed."""
+    if graph_ok or text_ok:
+        return
+    if graph_error is not None:
+        raise graph_error
+    if text_error is not None:
+        raise text_error
 
 
 def _wanted_citations(activations: list[Activation]) -> list[tuple[str, int]]:

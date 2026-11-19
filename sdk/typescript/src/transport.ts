@@ -8,6 +8,7 @@ import type {
   ImportResult,
   Issue,
   SchemaImportOutcome,
+  Unreached,
 } from "./models.js";
 import { parseRetryAfter } from "./retry.js";
 
@@ -131,16 +132,19 @@ export function unwrapEnvelope(status: number, bodyText: string): unknown {
 }
 
 /**
- * `unwrapEnvelope` plus the envelope's warn-mode carrier: `issues` and
- * `schema_violations` are ADR 0009 §8.3's fields, riding *beside* `result`
- * on a `warn`-mode write whose associations violated the `context`'s schema.
- * Both are empty/zero on every other response (and on servers predating the
- * fields), so result-only callers go through `unwrapEnvelope`.
+ * `unwrapEnvelope` plus the envelope's carriers beside `result`: `issues`
+ * and `schema_violations` are ADR 0009 §8.3's warn-mode fields, riding on a
+ * `warn`-mode write whose associations violated the `context`'s schema;
+ * `unreached` is a `taguru router`'s partial-fan-out report — the shards a
+ * cross-`context` search or the `/contexts` listing could not reach, so the
+ * result is real but missing their rows. All three are empty/zero on every
+ * other response (and on servers predating the fields), so result-only
+ * callers go through `unwrapEnvelope`.
  */
 export function unwrapEnvelopeFull(
   status: number,
   bodyText: string,
-): { result: unknown; issues: Issue[]; schema_violations: number } {
+): { result: unknown; issues: Issue[]; schema_violations: number; unreached: Unreached[] } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
@@ -157,6 +161,7 @@ export function unwrapEnvelopeFull(
       status?: unknown;
       issues?: unknown;
       schema_violations?: unknown;
+      unreached?: unknown;
     };
     if (shaped.status === "ok") {
       return {
@@ -164,6 +169,7 @@ export function unwrapEnvelopeFull(
         issues: Array.isArray(shaped.issues) ? (shaped.issues as Issue[]) : [],
         schema_violations:
           typeof shaped.schema_violations === "number" ? shaped.schema_violations : 0,
+        unreached: Array.isArray(shaped.unreached) ? (shaped.unreached as Unreached[]) : [],
       };
     }
   }
@@ -220,10 +226,9 @@ export function encodeName(name: string): string {
 }
 
 /**
- * Whether a fetch failure certainly happened before the request was sent
- * (refused connection, unresolvable host, connect-phase timeout) — always
- * safe to retry. Anything else is ambiguous: the request may have executed
- * server-side.
+ * Error codes that only ever come from establishing a connection — a
+ * refused connect, an unresolvable host, undici's own connect-phase timeout
+ * — so their presence alone proves the request was never sent.
  *
  * UND_ERR_CONNECT_TIMEOUT is undici's own connect-phase timeout, distinct
  * from the AbortSignal.timeout() `send` races against the whole request: that
@@ -232,28 +237,51 @@ export function encodeName(name: string): string {
  * The undici error fires only while the TCP handshake itself is still
  * outstanding, which is why it belongs in this set and TimeoutError does not.
  */
+const CONNECT_ONLY_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/**
+ * Error codes the OS raises on a connect attempt AND on an established
+ * socket — an unreachable host or network, a TCP timeout. Pre-connect only
+ * when Node tagged the error `syscall: "connect"`: the same code from a
+ * `read`/`write` on a live connection means the request may already have
+ * reached the server.
+ */
+const CONNECT_PHASE_CODES = new Set(["EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT"]);
+
+/** Whether one error object, by itself, proves a pre-connect failure. */
+function provesPreConnect(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { code, syscall } = value as { code?: unknown; syscall?: unknown };
+  if (typeof code !== "string") {
+    return false;
+  }
+  return CONNECT_ONLY_CODES.has(code) || (CONNECT_PHASE_CODES.has(code) && syscall === "connect");
+}
+
+/**
+ * Whether a fetch failure certainly happened before the request was sent
+ * (refused connection, unresolvable host, unreachable host or network,
+ * connect-phase timeout) — always safe to retry. Anything else is
+ * ambiguous: the request may have executed server-side.
+ */
 export function isPreConnectFailure(error: unknown): boolean {
-  const codes = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
-  const codeOf = (value: unknown): string | undefined => {
-    if (typeof value === "object" && value !== null && "code" in value) {
-      const code = (value as { code?: unknown }).code;
-      return typeof code === "string" ? code : undefined;
-    }
-    return undefined;
-  };
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== undefined && current !== null && !seen.has(current)) {
     seen.add(current);
-    const code = codeOf(current);
-    if (code !== undefined && codes.has(code)) {
+    if (provesPreConnect(current)) {
       return true;
     }
     if (current instanceof AggregateError) {
-      return current.errors.some((inner) => {
-        const innerCode = codeOf(inner);
-        return innerCode !== undefined && codes.has(innerCode);
-      });
+      // One entry per address a dual-stack connect attempt tried.
+      return current.errors.some(provesPreConnect);
     }
     current = (current as { cause?: unknown }).cause;
   }

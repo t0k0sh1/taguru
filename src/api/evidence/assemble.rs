@@ -62,7 +62,7 @@ use super::{CitationEntry, EvidenceCandidate, FusedCandidate, fuse};
 /// well above the default (5) and any realistic caller's real need —
 /// nothing in ADR 0006 requires `search_limit` to share
 /// `MAX_MATCH_LIMIT`'s ceiling, only that it default to 5 (§5.1).
-const MAX_EVIDENCE_SEARCH_LIMIT: usize = 200;
+pub(crate) const MAX_EVIDENCE_SEARCH_LIMIT: usize = 200;
 
 /// `origins`/`labels` accept `"..."` and `["...", ...]` interchangeably
 /// (the same contract `retrieve`'s own arguments use); flattened to an

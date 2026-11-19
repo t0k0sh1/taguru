@@ -62,6 +62,7 @@ import type {
   SourcePage,
   StoredPassages,
   TieredResolution,
+  Unreached,
   VocabularyAudit,
 } from "./models.js";
 import { citationKey, crossMatchCursor, matchCursor } from "./models.js";
@@ -301,6 +302,7 @@ export class Taguru {
     let attempt = 0;
     for (;;) {
       let response: Response;
+      let bodyText: string;
       try {
         response = await this.fetchImpl(url, {
           method,
@@ -319,8 +321,25 @@ export class Taguru {
         }
         throw new TransportError(describeError(error), { cause: error });
       }
+      try {
+        // Read inside the same budget: `AbortSignal.timeout` keeps running
+        // through the body, and a drop mid-body rejects here too. Both
+        // throw raw DOMException/TypeError, so they are wrapped like a
+        // failed fetch — otherwise they would skip the retry policy, slip
+        // past `catch (e instanceof TaguruError)`, and make the contract
+        // probe record "checked" off a response it never read. The headers
+        // already arrived, so the request reached the server: always
+        // ambiguous, whatever code the failure carries.
+        bodyText = await response.text();
+      } catch (error) {
+        attempt += 1;
+        if (attempt < maxAttempts && shouldRetryTransport(true, retryClass)) {
+          await sleep(backoffDelay(attempt - 1));
+          continue;
+        }
+        throw new TransportError(describeError(error), { cause: error });
+      }
       if (response.status >= 400) {
-        const bodyText = await response.text();
         attempt += 1;
         if (attempt < maxAttempts && shouldRetryStatus(response.status, retryClass)) {
           const delay = parseRetryAfter(response.headers.get("retry-after"));
@@ -329,7 +348,7 @@ export class Taguru {
         }
         throw errorFromBody(response.status, response.headers.get("retry-after"), bodyText);
       }
-      return { status: response.status, headers: response.headers, text: await response.text() };
+      return { status: response.status, headers: response.headers, text: bodyText };
     }
   }
 
@@ -340,14 +359,19 @@ export class Taguru {
   }
 
   /**
-   * @internal `requestJson` plus the envelope's warn-mode carrier — see
-   * `unwrapEnvelopeFull`.
+   * @internal `requestJson` plus the envelope's carriers beside `result` —
+   * see `unwrapEnvelopeFull`.
    */
   async requestJsonFull(
     method: string,
     path: string,
     options: SendOptions = {},
-  ): Promise<{ result: unknown; issues: Issue[]; schema_violations: number }> {
+  ): Promise<{
+    result: unknown;
+    issues: Issue[];
+    schema_violations: number;
+    unreached: Unreached[];
+  }> {
     const response = await this.send(method, path, options);
     return unwrapEnvelopeFull(response.status, response.text);
   }
@@ -480,7 +504,7 @@ export class Taguru {
       after?: CrossMatchCursor;
     } = {},
   ): Promise<CrossMatchPage> {
-    const result = await this.requestJson("POST", "/recall", {
+    const { result, unreached } = await this.requestJsonFull("POST", "/recall", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
         group_ids: options.group_ids,
@@ -489,7 +513,7 @@ export class Taguru {
         after: options.after ? crossMatchCursor(options.after) : undefined,
       }),
     });
-    return result as CrossMatchPage;
+    return { ...(result as Omit<CrossMatchPage, "unreached">), unreached };
   }
 
   /**
@@ -512,7 +536,7 @@ export class Taguru {
       after?: CrossMatchCursor;
     } = {},
   ): Promise<CrossMatchPage> {
-    const result = await this.requestJson("POST", "/query", {
+    const { result, unreached } = await this.requestJsonFull("POST", "/query", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
         group_ids: options.group_ids,
@@ -525,7 +549,7 @@ export class Taguru {
         after: options.after ? crossMatchCursor(options.after) : undefined,
       }),
     });
-    return result as CrossMatchPage;
+    return { ...(result as Omit<CrossMatchPage, "unreached">), unreached };
   }
 
   /**
@@ -550,7 +574,7 @@ export class Taguru {
       until?: number;
     } = {},
   ): Promise<CrossPassagePage> {
-    const result = await this.requestJson("POST", "/sources/search", {
+    const { result, unreached } = await this.requestJsonFull("POST", "/sources/search", {
       jsonBody: dropUndefined({
         context_ids: options.context_ids,
         group_ids: options.group_ids,
@@ -562,7 +586,7 @@ export class Taguru {
         until: options.until,
       }),
     });
-    return result as CrossPassagePage;
+    return { ...(result as Omit<CrossPassagePage, "unreached">), unreached };
   }
 
   /**
@@ -589,7 +613,7 @@ export class Contexts {
   async list(
     options: { limit?: number; after?: string; after_id?: string; pinned?: boolean } = {},
   ): Promise<ContextPage> {
-    const result = await this.client.requestJson("GET", "/contexts", {
+    const { result, unreached } = await this.client.requestJsonFull("GET", "/contexts", {
       params: {
         limit: options.limit,
         after: options.after,
@@ -597,10 +621,14 @@ export class Contexts {
         pinned: options.pinned,
       },
     });
-    return result as ContextPage;
+    return { ...(result as Omit<ContextPage, "unreached">), unreached };
   }
 
-  /** Walk every directory page transparently. */
+  /**
+   * Walk every directory page transparently. Rows only: a router's
+   * `unreached` report has no row to ride on, so a caller that must know
+   * whether the walk was complete pages with `list` instead.
+   */
   async *iter(
     options: { limit?: number; pinned?: boolean } = {},
   ): AsyncGenerator<DirectoryEntry, void, undefined> {
@@ -1337,14 +1365,20 @@ export class Context {
    * `retracted: false` means the triple named no live edge and nothing
    * changed. The surgical correction for a fact that should never have been
    * asserted; a fact that is merely CONTESTED wants a negative-weight
-   * assertion instead.
+   * assertion instead. Never blindly retried after an ambiguous transport
+   * failure: a repeat of an APPLIED retract answers `retracted: false`,
+   * reporting "nothing changed" for a call that did change the graph.
    */
   async retractAssociation(
     subject: string,
     label: string,
     object: string,
   ): Promise<RetractAssociationOutcome> {
-    const result = await this.post("/associations/retract", { subject, label, object });
+    const result = await this.post(
+      "/associations/retract",
+      { subject, label, object },
+      "unsafe_on_ambiguous",
+    );
     return result as RetractAssociationOutcome;
   }
 
@@ -1506,12 +1540,14 @@ export class Context {
     return result as SearchExplanation;
   }
 
-  /** Withdraw one source's contributions (diff sync before re-ingest). */
   /**
    * Withdraw one source's contributions (diff sync before re-ingest).
    * `dry_run: true` previews the same `{associations_touched,
    * passage_removed}` with nothing written. Full erasure — the withdrawn
-   * bytes physically off disk — is retract, then `compact`.
+   * bytes physically off disk — is retract, then `compact`. A real retract
+   * is never blindly retried after an ambiguous transport failure: a repeat
+   * of an APPLIED one answers zero touched and nothing removed. A dry run
+   * writes nothing, so its repeat previews the same and stays safe.
    */
   async retractSource(
     sourceId: string,
@@ -1520,6 +1556,7 @@ export class Context {
     const result = await this.client.requestJson("POST", `${this.path}/sources/retract`, {
       params: { dry_run: options.dry_run ? true : undefined },
       jsonBody: { source_id: sourceId },
+      retry: options.dry_run ? "safe" : "unsafe_on_ambiguous",
     });
     return result as RetractOutcome;
   }
@@ -1730,10 +1767,23 @@ export class Context {
     return result as EmbeddingsStatus;
   }
 
-  /** Rebuild the image without dead records (admin role). */
+  /**
+   * Rebuild the image without dead records (admin role). Check
+   * `image_persisted` before trusting `bytes_after` — see `CompactOutcome`
+   * for its two `false` meanings.
+   */
   async compact(): Promise<CompactOutcome> {
-    const result = await this.post("/compact");
-    return result as CompactOutcome;
+    const result = (await this.post("/compact")) as Omit<
+      CompactOutcome,
+      "passages_compacted" | "image_persisted"
+    > &
+      Partial<Pick<CompactOutcome, "passages_compacted" | "image_persisted">>;
+    return {
+      ...result,
+      // A server predating the fields omits both; see `CompactOutcome`.
+      passages_compacted: result.passages_compacted ?? false,
+      image_persisted: result.image_persisted ?? true,
+    };
   }
 
   // -- promotion -----------------------------------------------------------------
@@ -1812,9 +1862,19 @@ export class Context {
         return;
       }
       const reader = response.body.getReader();
+      // Whether the body ended or failed on its own. Leaving the loop any
+      // other way is the consumer abandoning the stream (a `break`, a
+      // `return`, or a throw out of its `for await` body).
+      let settled = false;
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (error) {
+            settled = true;
+            throw error;
+          }
           // Stop the clock the instant a chunk lands, before handing
           // control to the consumer via yield — otherwise the timer
           // armed for this read keeps running through however long the
@@ -1822,13 +1882,20 @@ export class Context {
           // chunk to disk, say), charging that time against a budget
           // meant only for the network wait.
           clearTimeout(timer);
-          if (done) {
+          if (chunk.done) {
+            settled = true;
             return;
           }
-          yield value;
+          yield chunk.value;
           arm();
         }
       } finally {
+        if (!settled) {
+          // An abandoned body left unread keeps its connection open
+          // until the server finishes sending into a buffer no one reads;
+          // cancelling releases the connection now.
+          await reader.cancel();
+        }
         reader.releaseLock();
       }
     } catch (error) {

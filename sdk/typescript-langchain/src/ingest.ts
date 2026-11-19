@@ -15,6 +15,7 @@ import type { Runnable } from "@langchain/core/runnables";
 import {
   EmbeddingUnavailableError,
   NotFoundError,
+  ShardUnreachableError,
   Taguru,
   type ImportOutcome,
   type LocatorSpec,
@@ -1130,7 +1131,9 @@ export class TaguruIngester {
    * propagates, so a caller reports the real cause instead of a
    * misleading "not found". `strict` makes the 404 propagate too: the
    * batch header must not mint a second id for a context the directory
-   * merely failed to show.
+   * merely failed to show. Behind a `taguru router`, a listing that could
+   * not reach every shard throws `ShardUnreachableError`: a partial view
+   * proves neither that the name is absent nor that it is unique.
    */
   async contextId(strict = false): Promise<string | null> {
     return this.lookupContextId(strict, false);
@@ -1144,10 +1147,35 @@ export class TaguruIngester {
   private async lookupContextId(strict: boolean, offline: boolean): Promise<string | null> {
     const matches: string[] = [];
     try {
-      for await (const row of this.client.contexts.iter()) {
-        if (row.name === this.context) {
-          matches.push(row.id);
+      // Paged by hand, not `contexts.iter()`: only a page carries the
+      // router's `unreached` report, and a missing row on a partial page
+      // is no evidence — returning `null` there would let the batch header
+      // mint a duplicate of a context that lives on the unreachable shard.
+      let after: string | undefined;
+      let afterId: string | undefined;
+      for (;;) {
+        const page = await this.client.contexts.list({ after, after_id: afterId });
+        if (page.unreached.length > 0) {
+          const shards = page.unreached.map((entry) => entry.shard).join(", ");
+          throw new ShardUnreachableError(
+            `cannot resolve context name ${JSON.stringify(this.context)}: ` +
+              `the directory listing could not reach shard(s) ${shards}`,
+            { status: 200, code: "shard_unreachable", body: page.unreached },
+          );
         }
+        if (page.contexts.length === 0) {
+          break;
+        }
+        for (const row of page.contexts) {
+          if (row.name === this.context) {
+            matches.push(row.id);
+          }
+        }
+        // A short page is not the last one (a concurrent delete can
+        // shorten it while later rows remain): page until an empty one.
+        const last = page.contexts[page.contexts.length - 1]!;
+        after = last.name;
+        afterId = last.id;
       }
     } catch (error) {
       if (error instanceof NotFoundError ? !strict : offline) {

@@ -143,7 +143,7 @@
         <tbody>
           <tr><td><code>0</code></td><td>Run completed, no <code>--thresholds</code> given (report-only), or every threshold satisfied.</td></tr>
           <tr><td><code>1</code></td><td>The run could not complete — server unreachable at the <code>/health</code> preflight, a <code>context</code>-entry read failed before or after the run, listing the <code>context</code>'s sources failed, or the artifact could not be written.</td></tr>
-          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable, unparsable, or userinfo-bearing URL, an unknown <code>context</code>, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
+          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code> (<code>1..=200</code> under <code>--assembly</code>), an unresolvable, unparsable, or userinfo-bearing URL, an unknown <code>context</code>, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
           <tr><td><code>3</code></td><td>The run completed and a <code>--thresholds</code> bound was violated — the only exit code this tree assigns that meaning to, and the only verb that returns it.</td></tr>
         </tbody>
       </table>
@@ -432,7 +432,7 @@
           <tr><td><code>expected_labels[]</code></td><td>Matched against a label-kind cue's resolved names — <code>/resolve_label</code>'s own coverage check.</td></tr>
           <tr><td><code>expected_associations[]</code></td><td><code>{subject, label, object}</code> — all three required; drives the association-probe/<code>/query</code> path above.</td></tr>
           <tr><td><code>expected_citations[]</code></td><td><code>{source, paragraph, section?, quote?}</code> — drives the citation lane. See below for <code>section</code>'s three-valued semantics.</td></tr>
-          <tr><td><code>options.limit</code></td><td>Per-case search limit, <code>1..=1000</code>; omitted means 10. Also the <i>k</i> in this case's own <code>recall_at_k</code> — there is no fixed recall@1/@5/@10 family, one value per case at that case's own limit.</td></tr>
+          <tr><td><code>options.limit</code></td><td>Per-case search limit, <code>1..=1000</code>; omitted means 10. Under <code>--assembly</code> the ceiling is <code>200</code> — the evidence endpoint's own <code>search_limit</code> ceiling, which it would otherwise apply silently while the artifact recorded the larger value — so a larger limit is refused at load. Also the <i>k</i> in this case's own <code>recall_at_k</code> — there is no fixed recall@1/@5/@10 family, one value per case at that case's own limit.</td></tr>
           <tr><td><code>options.floor</code></td><td>Passage-lane <code>semantic_floor</code> override.</td></tr>
           <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim. Under <code>--assembly</code> (#308), <code>POST /contexts/{id}/evidence</code> has no matching request field — a case declaring any of these still runs, but the filter is silently not applied unless said out loud, so <code>evaluate</code> emits one warning per such case.</td></tr>
         </tbody>
@@ -554,8 +554,9 @@
       <code>inputs.budget</code> is absent in <code>baseline</code> mode unless a
       <code>--max-*</code> flag was given; <code>inputs.rerank</code> is absent unless
       <code>--rerank MODEL</code> was. A case's own <code>evidence</code> block is present only
-      in <code>--assembly</code> mode; <code>budget</code> is present in either mode once a
-      budget flag applies. See <a href="evidence.html">evidence assembly</a> for the full
+      in <code>--assembly</code> mode; <code>budget</code> is present on every assembled
+      <code>--assembly</code> case (the endpoint always budgets — against its defaults when no
+      flag was given) and on a <code>baseline</code> case only once a budget flag applies. See <a href="evidence.html">evidence assembly</a> for the full
       <code>EvidencePackage</code> shape <code>evidence.items[]</code> mirrors (stripped of
       corpus body text, ADR 0004 §11).
     </p>
@@ -577,20 +578,23 @@
       one.
     </p>
     <p>
-      Without a budget flag, <code>hits[]</code> is <b>not</b> capped below a case's own
+      In <code>baseline</code> mode without a budget flag, <code>hits[]</code> is <b>not</b> capped below a case's own
       <code>options.limit</code> — the bound is exactly that case's configured limit, so an
       external offline scorer can build a recall@<i>k</i> for any <i>k</i> up to it (a case
       wanting an offline <code>recall@50</code> must set that case's own
       <code>options.limit</code> to 50 or higher). Two things narrow this, both by design: a
-      <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> flag can
-      truncate <code>hits[]</code> below <code>options.limit</code> in either mode (that is the
+      budget can truncate <code>hits[]</code> below <code>options.limit</code> — a
+      <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> flag in either
+      mode, and the endpoint's default budget in an unflagged <code>--assembly</code> run (that is the
       whole point of an equal-budget comparison — see
       <a href="evidence.html#budget">evidence assembly's budget semantics</a>); and in
       <code>--assembly</code> mode, <code>hits[]</code> is capped <b>at</b>
       <code>options.limit</code> rather than left to the admitted package's own item count (up to
       <code>budget.max_items</code>, default 40 — structurally unrelated to <code>options.limit</code>),
-      so a <code>baseline</code>/<code>assembly</code> run pair at the same <code>--limit</code>
-      scores over the same <i>k</i>. No corpus body text is ever written into this artifact; on a
+      and a paragraph reached twice (as a passage item and again as an association's
+      attribution) counts once, first occurrence wins — baseline <code>hits[]</code> never
+      repeat a paragraph, so a <code>baseline</code>/<code>assembly</code> run pair at the same <code>--limit</code>
+      scores over the same <i>k</i> distinct paragraphs. No corpus body text is ever written into this artifact; on a
       <code>quote</code> mismatch, only the user's own declared quote and a boolean match result
       are recorded, never the served paragraph body. <code>missed[]</code> is capped at 3 entries
       with a <code>missed_truncated</code> count of what was dropped (not the total). The
@@ -727,7 +731,7 @@
       token. Server error messages truncated to 200 bytes on a UTF-8 character boundary.
       <code>missed[]</code> capped at 3 entries per case, with the dropped count recorded
       separately. <code>hits[]</code> is not capped below a case's own <code>options.limit</code>
-      when no budget flag applies — a <code>HitLocator</code> is roughly 40 bytes, so even a
+      in <code>baseline</code> mode when no budget flag applies — a <code>HitLocator</code> is roughly 40 bytes, so even a
       limit of 1000 is cheap, and capping below the case's own configured limit would prevent an
       external scorer from ever seeing the full window that case asked for. A
       <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> flag is the one

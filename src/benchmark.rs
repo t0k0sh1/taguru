@@ -3138,6 +3138,12 @@ fn run_cell(
     let runs_file_rel =
         PathBuf::from("runs").join(format!("{}.{}.jsonl", model.id, run_label(run_index)));
     let runs_file_path = bench_args.out.join(&runs_file_rel);
+    // A previous attempt at this cell (resume) left its diagnostics
+    // file behind. The tail below reads from offset 0 while the child
+    // only truncates it once it starts, so a stale file would be
+    // replayed — double-counting attempts and synthesizing failed ends.
+    // It must be gone before the child spawns and the tail opens.
+    remove_stale_diagnostics(&diagnostics_path)?;
 
     let is_resume = runs_file_path.is_file();
     let (mut attempts_total, mut segments_written) = if is_resume {
@@ -3311,6 +3317,15 @@ fn run_cell(
     })
 }
 
+/// Removes a previous run's diagnostics file; a missing one is fine.
+fn remove_stale_diagnostics(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("removing stale {}: {error}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod cell_runs_tests {
     use super::*;
@@ -3330,6 +3345,26 @@ mod cell_runs_tests {
         );
         assert_eq!(outcome_for_exit_code(None, "m.run01"), Ok("interrupted"));
         assert!(outcome_for_exit_code(Some(42), "m.run01").is_err());
+    }
+
+    #[test]
+    fn resume_removes_the_stale_diagnostics_file_before_the_tail_reads_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-stale-diag-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("diagnostics.jsonl");
+        std::fs::write(&path, "{\"kind\":\"attempt\"}\n").unwrap();
+        remove_stale_diagnostics(&path).unwrap();
+        assert!(
+            !path.exists(),
+            "a stale diagnostics file must not survive into the rerun"
+        );
+        // A fresh cell has no file at all; that must not be an error.
+        remove_stale_diagnostics(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
