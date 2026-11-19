@@ -768,7 +768,7 @@ wheels = [
 
 [[package]]
 name = "langchain-taguru"
-version = "0.10.1"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -2373,7 +2373,7 @@ wheels = [
 
 [[package]]
 name = "taguru"
-version = "0.10.1"
+version = "0.11.0"
 source = { editable = "../python" }
 dependencies = [
     { name = "httpx" },
