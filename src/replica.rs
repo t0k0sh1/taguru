@@ -1090,11 +1090,11 @@ mod tests {
         );
         let text = scrape(&state);
         assert!(
-            text.contains("taguru_replica_shipped_seq{context=\"ctx_a\",lane=\"graph\"} 2"),
+            text.contains(&format!("taguru_replica_shipped_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 2")),
             "{text}"
         );
         assert!(
-            text.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 0"),
+            text.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 0")),
             "{text}"
         );
 
@@ -1111,11 +1111,11 @@ mod tests {
         );
         let text = scrape(&state);
         assert!(
-            text.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 2"),
+            text.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 2")),
             "{text}"
         );
         assert!(
-            text.contains("taguru_replica_behind_seconds{context=\"ctx_a\",lane=\"graph\"} 0"),
+            text.contains(&format!("taguru_replica_behind_seconds{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 0")),
             "{text}"
         );
 
@@ -1401,7 +1401,7 @@ mod tests {
         tailer.poll_once().await.expect("the first manifest lands");
         let before = scrape(&state);
         assert!(
-            before.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 1"),
+            before.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 1")),
             "{before}"
         );
 
@@ -1452,7 +1452,7 @@ mod tests {
 
         let after = scrape(&state);
         assert!(
-            after.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 1"),
+            after.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}} 1")),
             "the previous lineage's lag row must survive a failed switch, not go blank: {after}"
         );
 
@@ -1535,7 +1535,7 @@ mod tests {
         tailer.poll_once().await.expect("the first manifest lands");
         let before = scrape(&state);
         assert!(
-            before.contains("taguru_replica_applied_seq{context=\"ctx_b\",lane=\"graph\"} 1"),
+            before.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_b\",context_id=\"{CTX_B}\",lane=\"graph\"}} 1")),
             "{before}"
         );
 
@@ -1594,12 +1594,14 @@ mod tests {
 
         let after = scrape(&state);
         assert!(
-            !after.contains("taguru_replica_applied_seq{context=\"ctx_b\""),
+            !after.contains(&format!(
+                "taguru_replica_applied_seq{{context=\"ctx_b\",context_id=\"{CTX_B}\""
+            )),
             "a lane the new generation no longer carries must be dropped on the poll \
              that actually completes the switch, not left stale forever: {after}"
         );
         assert!(
-            after.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"}"),
+            after.contains(&format!("taguru_replica_applied_seq{{context=\"ctx_a\",context_id=\"{CTX_A}\",lane=\"graph\"}}")),
             "{after}"
         );
 

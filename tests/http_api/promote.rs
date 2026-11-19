@@ -579,8 +579,10 @@ fn disk_total_bytes(server: &Server, context: &str) -> u64 {
     ["image", "passages", "passages_wal", "sidecars", "wal"]
         .iter()
         .map(|file| {
-            let prefix =
-                format!("taguru_context_disk_bytes{{context=\"{context}\",file=\"{file}\"}} ");
+            let prefix = format!(
+                "taguru_context_disk_bytes{{context=\"{context}\",context_id=\"{}\",file=\"{file}\"}} ",
+                server.cx(context)
+            );
             text.lines()
                 .find_map(|line| line.strip_prefix(prefix.as_str()))
                 .and_then(|value| value.trim().parse::<u64>().ok())

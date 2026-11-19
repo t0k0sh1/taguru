@@ -358,7 +358,11 @@ pub enum PerContextMetrics {
 /// directory (see `AppState::refresh_disk_usage`).
 #[derive(Debug, Clone)]
 pub struct ContextGaugeRow {
+    /// Display name, rendered as the `context` label — not unique.
     pub name: String,
+    /// The `context`'s id, rendered as `context_id`: what keeps two
+    /// same-named `contexts` on distinct series.
+    pub id: String,
     pub pinned: bool,
     /// Graph plus cached gloss/passage/BM25/vector stores — the same
     /// per-entry accounting `taguru_resident_bytes` sums fleet-wide.

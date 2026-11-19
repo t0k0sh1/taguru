@@ -449,10 +449,14 @@ impl Metrics {
                  summed. The WAL lanes are live bookkeeping; the rest refresh at each \
                  flush tick and POST /flush, so they lag up to one flush \
                  interval — a scrape never stats the data directory. Present \
-                 only with TAGURU_METRICS_PER_CONTEXT.",
+                 only with TAGURU_METRICS_PER_CONTEXT. Every taguru_context_* \
+                 series carries context (the display name, which need not be \
+                 unique) and context_id (the stable id); select on \
+                 context_id to tell same-named contexts apart.",
             );
             for row in &gauges.per_context {
                 let context = escape_label(&row.name);
+                let id = escape_label(&row.id);
                 for (file, value) in [
                     ("image", row.disk_image_bytes),
                     ("passages", row.disk_passages_bytes),
@@ -461,7 +465,7 @@ impl Metrics {
                     ("wal", row.disk_wal_bytes),
                 ] {
                     out.push_str(&format!(
-                        "taguru_context_disk_bytes{{context=\"{context}\",file=\"{file}\"}} {value}\n"
+                        "taguru_context_disk_bytes{{context=\"{context}\",context_id=\"{id}\",file=\"{file}\"}} {value}\n"
                     ));
                 }
             }
@@ -475,8 +479,9 @@ impl Metrics {
             );
             for row in &gauges.per_context {
                 out.push_str(&format!(
-                    "taguru_context_resident_bytes{{context=\"{}\"}} {}\n",
+                    "taguru_context_resident_bytes{{context=\"{}\",context_id=\"{}\"}} {}\n",
                     escape_label(&row.name),
+                    escape_label(&row.id),
                     row.resident_bytes
                 ));
             }
@@ -489,8 +494,9 @@ impl Metrics {
             );
             for row in &gauges.per_context {
                 out.push_str(&format!(
-                    "taguru_context_pinned{{context=\"{}\"}} {}\n",
+                    "taguru_context_pinned{{context=\"{}\",context_id=\"{}\"}} {}\n",
                     escape_label(&row.name),
+                    escape_label(&row.id),
                     u64::from(row.pinned)
                 ));
             }
@@ -525,8 +531,9 @@ impl Metrics {
                 push_header(&mut out, name, "gauge", help);
                 for row in &gauges.per_context {
                     out.push_str(&format!(
-                        "{name}{{context=\"{}\"}} {}\n",
+                        "{name}{{context=\"{}\",context_id=\"{}\"}} {}\n",
                         escape_label(&row.name),
+                        escape_label(&row.id),
                         pick(row)
                     ));
                 }
@@ -544,8 +551,9 @@ impl Metrics {
             );
             for row in &gauges.per_context {
                 out.push_str(&format!(
-                    "taguru_context_schema_violations_total{{context=\"{}\"}} {}\n",
+                    "taguru_context_schema_violations_total{{context=\"{}\",context_id=\"{}\"}} {}\n",
                     escape_label(&row.name),
+                    escape_label(&row.id),
                     row.schema_violations
                 ));
             }
@@ -570,13 +578,14 @@ impl Metrics {
                 );
                 for row in &gauges.per_context {
                     let context = escape_label(&row.name);
+                    let id = escape_label(&row.id);
                     for (resource, ceiling) in [
                         ("cache", row.quota_cache_bytes),
                         ("storage", row.quota_storage_bytes),
                     ] {
                         if let Some(ceiling) = ceiling {
                             out.push_str(&format!(
-                                "taguru_context_quota_bytes{{context=\"{context}\",resource=\"{resource}\"}} {ceiling}\n"
+                                "taguru_context_quota_bytes{{context=\"{context}\",context_id=\"{id}\",resource=\"{resource}\"}} {ceiling}\n"
                             ));
                         }
                     }
@@ -694,12 +703,13 @@ impl Metrics {
                 &mut out,
                 "taguru_replication_lag_records",
                 "gauge",
-                "Acknowledged log records not yet in the bucket, per context and lane.",
+                "Acknowledged log records not yet in the bucket, per context and lane (context is the display name, context_id the stable id).",
             );
-            for ((_, lane), entry) in lag.iter() {
+            for ((stem, lane), entry) in lag.iter() {
                 out.push_str(&format!(
-                    "taguru_replication_lag_records{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    "taguru_replication_lag_records{{context=\"{}\",context_id=\"{}\",lane=\"{lane}\"}} {}\n",
                     escape_label(&entry.label),
+                    escape_label(stem),
                     entry.behind_records
                 ));
             }
@@ -707,12 +717,13 @@ impl Metrics {
                 &mut out,
                 "taguru_replication_lag_seconds",
                 "gauge",
-                "Age of the oldest unshipped record, per context and lane (0 = caught up).",
+                "Age of the oldest unshipped record, per context and lane (0 = caught up; context is the display name, context_id the stable id).",
             );
-            for ((_, lane), entry) in lag.iter() {
+            for ((stem, lane), entry) in lag.iter() {
                 out.push_str(&format!(
-                    "taguru_replication_lag_seconds{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    "taguru_replication_lag_seconds{{context=\"{}\",context_id=\"{}\",lane=\"{lane}\"}} {}\n",
                     escape_label(&entry.label),
+                    escape_label(stem),
                     entry.age_secs
                 ));
             }
@@ -758,12 +769,13 @@ impl Metrics {
                 &mut out,
                 "taguru_replica_applied_seq",
                 "gauge",
-                "Highest record seq this replica has applied, per context and lane.",
+                "Highest record seq this replica has applied, per context and lane (context is the display name, context_id the stable id).",
             );
-            for ((_, lane), entry) in lag.iter() {
+            for ((stem, lane), entry) in lag.iter() {
                 out.push_str(&format!(
-                    "taguru_replica_applied_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    "taguru_replica_applied_seq{{context=\"{}\",context_id=\"{}\",lane=\"{lane}\"}} {}\n",
                     escape_label(&entry.label),
+                    escape_label(stem),
                     entry.applied_seq
                 ));
             }
@@ -773,10 +785,11 @@ impl Metrics {
                 "gauge",
                 "Newest record seq the bucket ships, per context and lane; minus applied_seq = the promotion-time RPO in records.",
             );
-            for ((_, lane), entry) in lag.iter() {
+            for ((stem, lane), entry) in lag.iter() {
                 out.push_str(&format!(
-                    "taguru_replica_shipped_seq{{context=\"{}\",lane=\"{lane}\"}} {}\n",
+                    "taguru_replica_shipped_seq{{context=\"{}\",context_id=\"{}\",lane=\"{lane}\"}} {}\n",
                     escape_label(&entry.label),
+                    escape_label(stem),
                     entry.shipped_seq
                 ));
             }
@@ -787,14 +800,15 @@ impl Metrics {
                 "How long the lane has been behind the shipped stream (0 = caught up).",
             );
             let now = Self::unix_now();
-            for ((_, lane), entry) in lag.iter() {
+            for ((stem, lane), entry) in lag.iter() {
                 let behind = match entry.behind_since_epoch {
                     0 => 0,
                     since => now.saturating_sub(since),
                 };
                 out.push_str(&format!(
-                    "taguru_replica_behind_seconds{{context=\"{}\",lane=\"{lane}\"}} {behind}\n",
+                    "taguru_replica_behind_seconds{{context=\"{}\",context_id=\"{}\",lane=\"{lane}\"}} {behind}\n",
                     escape_label(&entry.label),
+                    escape_label(stem),
                 ));
             }
         }

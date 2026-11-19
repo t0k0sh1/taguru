@@ -1218,7 +1218,10 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     // The lag arithmetic drains to zero on display.
     wait_for("the lag metrics to drain", || {
         let scrape = metrics_text(&replica);
-        scrape.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0")
+        scrape.contains(&format!(
+            "taguru_replica_behind_seconds{{context=\"sake\",context_id=\"{}\",lane=\"graph\"}} 0",
+            replica.cx("sake")
+        ))
     });
 
     // A deletion propagates: the context leaves the directory AND its
@@ -1316,7 +1319,10 @@ fn promotion_rehearsal_the_standby_drains_flips_and_the_pool_follows() {
     // Step 2 — drain: the standby's lag reads zero against the bucket.
     wait_for("the standby to drain the shipped tail", || {
         let scrape = metrics_text(&standby);
-        scrape.contains("taguru_replica_behind_seconds{context=\"sake\",lane=\"graph\"} 0")
+        scrape.contains(&format!(
+            "taguru_replica_behind_seconds{{context=\"sake\",context_id=\"{}\",lane=\"graph\"}} 0",
+            standby.cx("sake")
+        ))
     });
 
     // Step 3+4 — flip: stop the standby, restart its directory as the

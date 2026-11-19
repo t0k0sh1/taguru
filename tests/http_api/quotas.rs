@@ -93,17 +93,20 @@ fn storage_quota_refuses_growth_with_507_and_keeps_the_ways_down_open() {
     assert_eq!(status, 200);
     let text = body.as_str().expect("metrics body is text, not JSON");
     assert!(
-        text.contains("taguru_context_quota_bytes{context=\"capped\",resource=\"storage\"} 1\n"),
+        text.contains(&format!("taguru_context_quota_bytes{{context=\"capped\",context_id=\"{}\",resource=\"storage\"}} 1\n", server.cx("capped"))),
         "{text}"
     );
     assert!(
         text.contains(
-            "taguru_context_quota_bytes{context=\"capped\",resource=\"cache\"} 1048576\n"
+            &format!("taguru_context_quota_bytes{{context=\"capped\",context_id=\"{}\",resource=\"cache\"}} 1048576\n", server.cx("capped"))
         ),
         "{text}"
     );
     assert!(
-        !text.contains("taguru_context_quota_bytes{context=\"free\""),
+        !text.contains(&format!(
+            "taguru_context_quota_bytes{{context=\"free\",context_id=\"{}\"",
+            server.cx("free")
+        )),
         "an uncapped context renders no quota series"
     );
     let refusals = text

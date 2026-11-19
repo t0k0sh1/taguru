@@ -305,6 +305,7 @@ impl AppState {
                 let quota = self.0.context_quotas.get(entry.id.as_str());
                 per_context.push(ContextGaugeRow {
                     name,
+                    id: entry.id.clone(),
                     pinned,
                     resident_bytes: graph_footprint + cache_footprint,
                     disk_image_bytes: disk.image_bytes,
@@ -323,16 +324,18 @@ impl AppState {
             }
         }
         if let PerContextMetrics::Top(keep) = self.0.per_context_metrics {
-            // Rank by total disk bytes (ties by name, so equal sizes
-            // cannot flap), cut, then restore name order — the render
-            // stays deterministic and diff-friendly either mode.
+            // Rank by total disk bytes (ties by name, then id — names
+            // are not unique — so equal sizes cannot flap), cut, then
+            // restore name order — the render stays deterministic and
+            // diff-friendly either mode.
             per_context.sort_by(|a, b| {
                 b.disk_total_bytes()
                     .cmp(&a.disk_total_bytes())
                     .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.id.cmp(&b.id))
             });
             per_context.truncate(keep);
-            per_context.sort_by(|a, b| a.name.cmp(&b.name));
+            per_context.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
         }
         let (retrieval_cache_entries, retrieval_cache_bytes) = self.retrieval_cache_gauges();
         let semantic_cache_entries = self.semantic_cache_entries();

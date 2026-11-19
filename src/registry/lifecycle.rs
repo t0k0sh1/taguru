@@ -383,6 +383,10 @@ impl AppState {
         };
         let mut in_flight = entry.inner.write();
         self.tombstone_locked(&mut in_flight, &entry);
+        // Under the entry lock, after the tombstone: a flush racing this
+        // delete publishes (and records) only under this lock, and backs
+        // off once it sees `Deleted`, so nothing re-adds the id after.
+        self.0.metrics.forget_flush(&entry.id);
         // The rest of this function is disk I/O (marker, group sweep,
         // unlinks), guarded by the `pending_deletes` reservation, not
         // by `inner`: the entry is out of the registry (nothing new can

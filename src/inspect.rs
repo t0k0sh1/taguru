@@ -641,6 +641,7 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         // the two refused shapes fail the inspection outright — the
         // server will not start on this directory.
         let scanned = read_scanned_meta(dir, stem);
+        let meta_unparseable = meta_will_reset(dir, stem, &scanned);
         let name = match (scanned.display_name(stem), scanned) {
             (Some(name), _) => {
                 display_names.insert(stem.clone(), name.clone());
@@ -806,12 +807,6 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
                 }
             };
 
-        // Meta is self-healing on the server side (defaults + warning),
-        // so a broken one is reported without failing the inspection.
-        let meta_unparseable = matches!(
-            std::fs::read(meta_path(dir, stem)),
-            Ok(bytes) if serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
-        );
         let meta_note = if meta_unparseable {
             " · WARNING: meta.json unparseable (description/usage will reset)"
         } else {
@@ -1415,4 +1410,66 @@ fn stats_line(context: &Context, image_bytes: u64, generation: &str) -> String {
 
 fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// Whether the server will discard `stem`'s sidecar for defaults —
+/// judged by the boot scan's own classification (`scanned`), not a
+/// looser parse, so inspect and boot cannot disagree: a sidecar that
+/// EXISTS yet scans [`ScannedMeta::Degraded`] (unreadable, or JSON whose
+/// fields fail `MetaFile`'s types) is reset by the server. A missing
+/// sidecar also scans `Degraded`, but that is a fresh `context`'s
+/// normal state, not a warning.
+fn meta_will_reset(dir: &Path, stem: &str, scanned: &ScannedMeta) -> bool {
+    matches!(scanned, ScannedMeta::Degraded(_)) && meta_path(dir, stem).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_support::scratch_dir;
+
+    const STEM: &str = "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5";
+
+    fn judged(tag: &str, sidecar: Option<&[u8]>) -> bool {
+        let dir = scratch_dir(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(bytes) = sidecar {
+            std::fs::write(meta_path(&dir, STEM), bytes).unwrap();
+        }
+        let verdict = meta_will_reset(&dir, STEM, &read_scanned_meta(&dir, STEM));
+        let _ = std::fs::remove_dir_all(&dir);
+        verdict
+    }
+
+    /// Valid JSON whose fields the server's typed parse rejects is
+    /// reset at boot — an untyped `Value` parse called it fine.
+    #[test]
+    fn a_type_mismatched_sidecar_is_reported_as_resetting() {
+        let sidecar = format!(r#"{{"id":"{STEM}","name":42}}"#);
+        assert!(judged("inspect-meta-typed", Some(sidecar.as_bytes())));
+    }
+
+    #[test]
+    fn meta_reset_follows_the_boot_classification() {
+        assert!(judged("inspect-meta-garbage", Some(b"not json")));
+        let healthy = format!(r#"{{"id":"{STEM}","name":"sake"}}"#);
+        assert!(!judged("inspect-meta-healthy", Some(healthy.as_bytes())));
+        assert!(
+            !judged("inspect-meta-missing", None),
+            "a missing sidecar is a fresh context, not a reset"
+        );
+    }
+
+    /// A sidecar that exists but cannot be read is reset too.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_sidecar_is_reported_as_resetting() {
+        let dir = scratch_dir("inspect-meta-dir");
+        // A directory where the sidecar belongs: exists, never readable
+        // as a file — portable across uid 0, unlike a chmod.
+        std::fs::create_dir_all(meta_path(&dir, STEM)).unwrap();
+        let verdict = meta_will_reset(&dir, STEM, &read_scanned_meta(&dir, STEM));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(verdict);
+    }
 }

@@ -110,7 +110,7 @@
       "targets": [
         {
           "expr": "taguru_context_disk_bytes",
-          "legendFormat": "{{context}} {{file}}"
+          "legendFormat": "{{context}} ({{context_id}}) {{file}}"
         }
       ]
     }
