@@ -236,6 +236,7 @@ impl AppState {
                 // The staged capture, not the live value: these are
                 // the bytes that just became the image.
                 inner.published_graph_revision = staged_graph_revision;
+                inner.publish_unsynced = false;
                 self.0.metrics.record_flush(&entry.id, true);
                 // `dirty` stays as claimed: clear (nothing raced) means the
                 // image is current; a racing write re-set it and will
@@ -396,6 +397,18 @@ impl AppState {
             // so the budget sweep never reclaims those bytes. recount_entry is
             // absolute, so the post-`operate` recount below just refreshes this.
             self.recount_entry(&mut inner);
+            // A compacted image whose rename may not survive power loss
+            // (see `EntryInner::publish_unsynced`): no write is admitted
+            // against a graph the disk may not keep, until the flusher
+            // re-publishes it durably.
+            if inner.publish_unsynced {
+                break 'write Err(AccessError::Unpersisted(
+                    "the compacted image is published but not yet durable (its directory \
+                     fsync failed twice); writes resume once the next flush lands it — check \
+                     the disk and the server log"
+                        .to_string(),
+                ));
+            }
             // The policy ceiling, ahead of the failure backstop below and
             // WAL on or off: only batches that GROW the context are gated —
             // a retract/unalias batch always passes, because shrinking is
@@ -859,6 +872,7 @@ impl AppState {
                 }
                 inner.stats = stats;
                 inner.published_graph_revision = inner.graph_revision;
+                inner.publish_unsynced = false;
                 entry.dirty.store(false, Ordering::Relaxed);
                 self.truncate_wal(name, &entry.id, inner);
             } else {

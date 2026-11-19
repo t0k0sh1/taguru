@@ -396,7 +396,8 @@ fn success_line(name: &str, outcome: &CompactOutcome) -> String {
         } else {
             " [not durably persisted: either the image never landed and the context keeps its \
              previous image — compact again once the disk recovers — or it landed but its \
-             directory fsync failed and the next flush re-publishes it durably]"
+             directory fsync failed twice; writes are refused until the next flush re-publishes \
+             it durably]"
                 .to_string()
         },
     )

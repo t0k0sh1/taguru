@@ -19,6 +19,15 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Fixed
 
+- **A router refuses an unroutable import `create` with
+  `400 invalid_argument`** (response shape: status and code). It
+  answered `404 no_context`, while `POST /contexts` refuses the same
+  name with `400 invalid_argument`; both now say no shard owns the name.
+- **SDK `flush()` raises on a partial router flush.** A router's
+  `POST /flush` lists unreached shards in `unreached`, and `flush()`
+  returned only the flushed names, so a partial flush looked complete.
+  It now raises `ShardUnreachableError` carrying the unreached list;
+  the return type is unchanged.
 - **`/health` recovers once a failing context heals or is deleted.**
   The flush-failure set was keyed by whatever name the caller passed:
   the periodic flush used the display name, the post-write recovery
@@ -109,10 +118,12 @@ Entries that change an on-disk format or a response shape say so.
   `image_persisted: false` now means the rebuilt image was not durably
   published, in one of two shapes: it could not be written, and the
   context keeps its previous image (nothing retries it; compact again
-  once the disk recovers), or it landed but its directory fsync failed,
-  and the context runs on the compacted image — matching the disk — while
-  the next flush re-publishes it durably. It used to mean the compacted
-  graph stood in memory until a later flush landed.
+  once the disk recovers), or it landed but its directory fsync failed
+  even after one synchronous retry, and the context runs on the
+  compacted image — matching the disk — refusing writes until the next
+  flush re-publishes it durably (no write is validated against a graph
+  a power loss could drop). It used to mean the compacted graph stood
+  in memory until a later flush landed.
 - **A file published before its fsync failed is treated as written.**
   `write_atomic` reported a post-rename directory-fsync failure like a
   failed write; a group create, update, rename, or restore then rolled

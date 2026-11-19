@@ -2504,8 +2504,8 @@ fn an_unreachable_cached_owner_is_forgotten() {
 /// context the map does not route is refused, exactly as with several
 /// shards — the router's single-shard shortcut used to skip the
 /// existence probe that guards it, so the lone shard created a
-/// context `POST /contexts` refuses by the same name. A routed name
-/// still lands.
+/// context `POST /contexts` refuses by the same name. The refusal is
+/// that same `invalid_argument`. A routed name still lands.
 #[test]
 fn a_single_shard_router_refuses_an_import_create_the_map_does_not_route() {
     let shard = Server::start("router-import-one");
@@ -2516,14 +2516,21 @@ fn a_single_shard_router_refuses_an_import_create_the_map_does_not_route() {
     );
     let (status, body) = router.call("POST", "/contexts", Some(json!({"name": "unmapped"})));
     assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "invalid_argument", "{body}");
     let ghost = fixed_id("unmapped");
     let header = json!({
         "type": "source", "context_id": ghost, "id": "seed:create",
         "create": {"name": "unmapped"},
     });
     let (status, body) = post_import(&router, &format!("{header}\n"), None);
-    assert_eq!(status, 404, "{body}");
-    assert_eq!(body["code"], "no_context", "{body}");
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "invalid_argument", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no shard owns context 'unmapped'")),
+        "{body}"
+    );
     let (status, body) = shard.call("GET", &format!("/contexts/{ghost}"), None);
     assert_eq!(status, 404, "nothing was created on the shard: {body}");
 

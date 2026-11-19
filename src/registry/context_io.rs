@@ -315,13 +315,28 @@ impl AppState {
                 // graph live would validate the next write (through an
                 // alias the rebuild dropped, say) against a graph its
                 // replay never sees again. Swap below as on success.
+                //
+                // One synchronous retry first: a transient failure then
+                // costs nothing. Only if the retry fails too does the
+                // rename stay at risk of a power loss — and writes stop
+                // (`publish_unsynced`) until a later publish lands
+                // durably, so none is validated against a graph the
+                // disk may not keep.
                 Err(error) if crate::storage::is_published_unsynced(&error) => {
-                    tracing::warn!(
-                        context = %id, save_error = %error,
-                        "compacted image published but its directory fsync failed; the context \
-                         runs on the compacted image and the next flush re-publishes it durably"
-                    );
-                    false
+                    match crate::storage::resync_published(&image_path(&self.0.data_dir, &entry.id))
+                    {
+                        Ok(()) => true,
+                        Err(retry_error) => {
+                            tracing::warn!(
+                                context = %id, save_error = %error,
+                                resync_error = %retry_error,
+                                "compacted image published but its directory fsync failed \
+                                 twice; the context runs on the compacted image and refuses \
+                                 writes until the next flush re-publishes it durably"
+                            );
+                            false
+                        }
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -380,11 +395,12 @@ impl AppState {
                 self.truncate_wal(&name, &entry.id, inner);
             } else {
                 // Durability unconfirmed: dirty makes the next flush
-                // re-publish (and fsync) this image. The log stays —
-                // replay-inert behind the image's watermark if the
-                // rename survives, the whole history if power loss
-                // drops it.
+                // re-publish (and fsync) this image, and writes wait for
+                // it. The log stays — replay-inert behind the image's
+                // watermark if the rename survives, the whole history if
+                // power loss drops it.
                 entry.dirty.store(true, Ordering::Relaxed);
+                inner.publish_unsynced = true;
             }
             self.recount_entry(inner);
             Ok((bytes_before, bytes_after, stats, durable))
@@ -1387,16 +1403,57 @@ mod tests {
 
     /// The other publish failure: the compacted image's rename LANDED
     /// and only its directory fsync failed, so the disk now holds the
-    /// compacted image. Memory must swap to it too — the same alias
-    /// `X → C` the rebuild drops would otherwise resolve live (the old
-    /// graph applies the write to `C`) but not on replay (the
-    /// compacted image plus the log applies it to `X`). The call still
-    /// reports `image_persisted: false`, and the entry stays dirty so
-    /// the next flush re-publishes the image durably.
+    /// compacted image. One synchronous retry of the fsync settles a
+    /// transient failure: the publish is durable after all.
     #[test]
-    fn a_write_after_a_published_but_unsynced_compaction_replays_as_it_applied() {
+    fn a_compaction_whose_publish_fsync_fails_once_is_durable_after_the_retry() {
         use crate::storage::{clear_publish_sync_fault, fail_publish_syncs_after};
-        let dir = scratch_dir("compact-replay-unsynced");
+        let dir = scratch_dir("compact-unsynced-retry");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let id = state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                &id,
+                vec![assoc_op("C", "旧", "Y", 1.0, Some("gone.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source(&id, "gone.md").unwrap();
+        // Publishes: sidecar (0), image (1) — the image's fsync fails once.
+        fail_publish_syncs_after(1);
+        let outcome = state.compact_context(&id, Deadline::unbounded()).unwrap();
+        assert!(
+            !clear_publish_sync_fault(),
+            "the image's sync must have failed"
+        );
+        assert!(
+            outcome.image_persisted,
+            "the retry made it durable: {outcome:?}"
+        );
+        assert!(!state.lookup_id(&id).unwrap().dirty.load(Ordering::Relaxed));
+        state
+            .add_associations(
+                &id,
+                vec![assoc_op("X", "新", "Z", 1.0, Some("new.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The fsync keeps failing: memory swaps to the compacted image the
+    /// disk now holds (the alias `X → C` the rebuild drops would
+    /// otherwise resolve live but not on replay), the call reports
+    /// `image_persisted: false`, and writes are refused until a flush
+    /// re-publishes the image durably — none is validated against a
+    /// graph a power loss could drop. After that flush, a write applies
+    /// and replays the same.
+    #[test]
+    fn a_compaction_whose_publish_fsync_keeps_failing_refuses_writes_until_durable() {
+        use crate::storage::{clear_publish_sync_fault, fail_publish_syncs};
+        let dir = scratch_dir("compact-unsynced-fenced");
         let subjects = |state: &AppState| -> Vec<String> {
             let mut subjects: Vec<String> = state
                 .read_context(&state.id_of("sake"), |context| {
@@ -1412,14 +1469,17 @@ mod tests {
             subjects.sort();
             subjects
         };
+        let write_x = |state: &AppState, id: &str| {
+            state.add_associations(
+                id,
+                vec![assoc_op("X", "新", "Z", 1.0, Some("new.md"))],
+                Deadline::unbounded(),
+            )
+        };
         let live;
         {
             let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
-            state
-                .create("sake", ContextMeta::default())
-                .map_err(|_| "create")
-                .unwrap();
-            let id = state.id_of("sake");
+            let id = state.create("sake", ContextMeta::default()).unwrap();
             state
                 .add_associations(
                     &id,
@@ -1438,37 +1498,25 @@ mod tests {
                 .unwrap();
             state.flush_dirty();
             state.retract_source(&id, "gone.md").unwrap();
-            // Publishes: sidecar (0), image (1) — the image's rename
-            // lands and its directory fsync fails.
-            fail_publish_syncs_after(1);
+            // Publishes: sidecar (0), then the image's sync AND its
+            // retry fail.
+            fail_publish_syncs(1, 2);
             let outcome = state.compact_context(&id, Deadline::unbounded()).unwrap();
-            assert!(
-                !clear_publish_sync_fault(),
-                "the image's publish sync must be what failed"
-            );
+            assert!(!clear_publish_sync_fault(), "both syncs must have failed");
             assert!(!outcome.image_persisted, "{outcome:?}");
             assert_eq!(outcome.aliases_dropped, 1, "{outcome:?}");
+            assert!(state.lookup_id(&id).unwrap().dirty.load(Ordering::Relaxed));
             assert!(
-                state
-                    .lookup_named("sake")
-                    .unwrap()
-                    .dirty
-                    .load(Ordering::Relaxed),
-                "an undurable publish must leave the next flush to re-publish it"
+                matches!(write_x(&state, &id), Err(AccessError::Unpersisted(_))),
+                "no write may land on a graph the disk may not keep"
             );
-            state
-                .add_associations(
-                    &id,
-                    vec![assoc_op("X", "新", "Z", 1.0, Some("new.md"))],
-                    Deadline::unbounded(),
-                )
-                .unwrap()
-                .unwrap();
+            assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
+            write_x(&state, &id).unwrap().unwrap();
             live = subjects(&state);
             assert_eq!(
                 live,
                 vec!["X".to_string()],
-                "the write must apply against the published (alias-free) graph"
+                "the write applies against the published (alias-free) graph"
             );
             // Drop WITHOUT flushing: the crash.
         }
@@ -1476,7 +1524,7 @@ mod tests {
         assert_eq!(
             subjects(&state),
             live,
-            "the replay over the published image must match the live write"
+            "the replay must match the live write"
         );
         let _ = fs::remove_dir_all(&dir);
     }

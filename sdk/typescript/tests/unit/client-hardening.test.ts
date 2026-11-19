@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { Taguru } from "../../src/client.js";
-import { ServerError, TransportError } from "../../src/errors.js";
+import { ServerError, ShardUnreachableError, TransportError } from "../../src/errors.js";
 import type { DirectoryEntry } from "../../src/models.js";
 import { errBody, okBody, stubClient } from "./stub.js";
 
@@ -311,6 +311,27 @@ describe("a router's unreached report", () => {
     expect(await call(partial)).toEqual({ ...result, unreached });
     const complete = rawClient(async () => envelope(result));
     expect(await call(complete)).toEqual({ ...result, unreached: [] });
+  });
+});
+
+describe("a partial flush", () => {
+  const unreached = [{ shard: "http://shard-b:8248", context_ids: ["id-b"], error: "refused" }];
+
+  it("throws ShardUnreachableError carrying the unreached list", async () => {
+    const partial = rawClient(async () => envelope(["sake"], { unreached }));
+    const error = await partial.flush().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ShardUnreachableError);
+    expect(error).toMatchObject({ status: 200, code: "shard_unreachable", body: unreached });
+  });
+
+  it("returns the flushed names when every shard answered", async () => {
+    expect(await rawClient(async () => envelope(["sake", "shochu"])).flush()).toEqual([
+      "sake",
+      "shochu",
+    ]);
+    expect(await rawClient(async () => envelope(["sake"], { unreached: [] })).flush()).toEqual([
+      "sake",
+    ]);
   });
 });
 
