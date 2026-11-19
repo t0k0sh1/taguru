@@ -19,6 +19,54 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Fixed
 
+- **`/health` recovers once a failing context heals or is deleted.**
+  The flush-failure set was keyed by whatever name the caller passed:
+  the periodic flush used the display name, the post-write recovery
+  flush the id, and delete/rename never cleared it — a failure recorded
+  by id kept `/health` at 503 until restart, deleting the failing
+  context did not clear it, and a same-named context's success hid
+  another's real failure. It is keyed by context id and cleared on
+  delete.
+- **Per-context metrics carry a `context_id` label** (response shape:
+  additive label). `taguru_context_*`, `taguru_replication_lag_*`, and
+  `taguru_replica_{applied_seq,shipped_seq,behind_seconds}` labelled by
+  display name only, so same-named contexts emitted duplicate series and
+  Prometheus dropped one — a stalled replica lane could hide behind a
+  caught-up namesake. Queries selecting on `context` keep working; the
+  series are new, so graphs do not join with pre-upgrade history.
+- **`taguru inspect` flags a sidecar the server would reset.** It judged
+  `.meta.json` as untyped JSON, so a type-mismatched or unreadable
+  sidecar — which boot treats as degraded, resetting name, description,
+  usage, and pin — reported ok.
+- **Benchmark and evaluate.** Rerunning an interrupted benchmark cell
+  read the previous attempt's `diagnostics.jsonl`, double-counting,
+  dropping records, and turning written segments into failures; it is
+  removed before the run. An expected source matches whole path
+  components (`brewery.md` no longer matches `microbrewery.md`). A blank
+  `expected_concepts` entry is refused at load (it matched every hit in
+  benchmark and none in evaluate). `taguru estimate` prices passage
+  vectors arithmetically instead of allocating them (hundreds of MB, or
+  an abort, for large `--embedding-dims`). `evaluate --assembly`
+  deduplicates hits on `(source, paragraph)` before the `limit` cap and
+  refuses a `limit` above the evidence endpoint's 200 instead of being
+  silently clamped; the embedded `budget.*` and `missed` definitions
+  match what is computed.
+- **SDKs (Python, TypeScript, LangChain).** `CompactOutcome` carries
+  `image_persisted` and `passages_compacted` — a failed compaction no
+  longer reads as a success. A router's `unreached` shards ride the
+  directory and cross-search results, and the ingester refuses a
+  partial directory view instead of reporting "no such context". A
+  router's `502 shard_unreachable` raises `ShardUnreachableError`, not
+  an embedding failure. Retrievers send groups as `group_ids` (a group
+  past 1,000 members no longer silently empties the text lane) and raise
+  when every lane of a multi-target search fails. `DirectoryEntry` has
+  `schema_mode`. Retractions no longer retry on an ambiguous failure.
+  Python: one cancelled caller no longer cancels the shared version
+  probe for the rest. TypeScript: a response body that fails mid-read
+  is a retryable `TransportError` (it escaped as a raw exception and
+  disabled the version probe), an abandoned `exportStream` releases its
+  connection, and `EHOSTUNREACH`/`ENETUNREACH`/`ETIMEDOUT` on `connect`
+  count as pre-connect.
 - **The router refuses `..` segments delimited by `\`.** The proxy's
   dot-segment check split paths on `/` only, while the outbound URL
   parser reads `\` as `/`: `POST /contexts/<id>/..\..\import` reached a
