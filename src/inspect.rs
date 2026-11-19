@@ -1418,9 +1418,12 @@ fn file_size(path: &Path) -> u64 {
 /// EXISTS yet scans [`ScannedMeta::Degraded`] (unreadable, or JSON whose
 /// fields fail `MetaFile`'s types) is reset by the server. A missing
 /// sidecar also scans `Degraded`, but that is a fresh `context`'s
-/// normal state, not a warning.
+/// normal state, not a warning — and only a confirmed absence counts as
+/// missing: a sidecar whose existence cannot even be checked (a symlink
+/// into a directory without search permission) is one boot resets.
 fn meta_will_reset(dir: &Path, stem: &str, scanned: &ScannedMeta) -> bool {
-    matches!(scanned, ScannedMeta::Degraded(_)) && meta_path(dir, stem).exists()
+    matches!(scanned, ScannedMeta::Degraded(_))
+        && !matches!(meta_path(dir, stem).try_exists(), Ok(false))
 }
 
 #[cfg(test)]
@@ -1469,6 +1472,26 @@ mod tests {
         // as a file — portable across uid 0, unlike a chmod.
         std::fs::create_dir_all(meta_path(&dir, STEM)).unwrap();
         let verdict = meta_will_reset(&dir, STEM, &read_scanned_meta(&dir, STEM));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(verdict);
+    }
+
+    /// A sidecar whose existence cannot be checked — a symlink into a
+    /// directory without search permission — is reset by boot, so it
+    /// is not "missing". The target is garbage, so the verdict holds
+    /// under uid 0 too, where the permission check passes.
+    #[test]
+    #[cfg(unix)]
+    fn a_sidecar_behind_an_unsearchable_directory_is_reported_as_resetting() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("inspect-meta-locked");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("meta.json"), b"not json").unwrap();
+        std::os::unix::fs::symlink(locked.join("meta.json"), meta_path(&dir, STEM)).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let verdict = meta_will_reset(&dir, STEM, &read_scanned_meta(&dir, STEM));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(verdict);
     }

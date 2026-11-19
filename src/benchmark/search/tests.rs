@@ -430,6 +430,20 @@ fn resolve_expected_source_path_rejects_a_mid_component_suffix() {
     assert!(warning.unwrap().contains("matches no segment"));
 }
 
+#[test]
+fn resolve_expected_source_path_accepts_a_suffix_that_starts_with_a_separator() {
+    let docs = [
+        doc("d1", "corpus/brewery.md"),
+        doc("d2", "corpus/microbrewery.md"),
+    ];
+    let (resolved, warning) = resolve_expected_source_path("/brewery.md", &docs);
+    assert_eq!(resolved, "corpus/brewery.md");
+    assert_eq!(warning, None);
+    let (resolved, _) =
+        resolve_expected_source_path("\\brewery.md", &[doc("d1", "corpus\\brewery.md")]);
+    assert_eq!(resolved, "corpus\\brewery.md");
+}
+
 // ============================== recall@k / MRR ==============================
 
 #[test]

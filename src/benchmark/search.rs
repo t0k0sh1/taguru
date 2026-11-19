@@ -1038,10 +1038,14 @@ fn resolve_expected_source_path(
 /// Whether `expected` is a whole-component suffix of `path`: the
 /// character before the suffix must be a separator (`/` or `\`, since
 /// manifests can carry either), so `brewery.md` matches
-/// `corpus/brewery.md` but not `corpus/microbrewery.md`.
+/// `corpus/brewery.md` but not `corpus/microbrewery.md`. A suffix that
+/// itself starts with a separator (`/brewery.md`) carries its own
+/// component boundary.
 fn path_ends_with_components(path: &str, expected: &str) -> bool {
-    path.strip_suffix(expected)
-        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\'))
+    let starts_a_component = expected.starts_with(['/', '\\']);
+    path.strip_suffix(expected).is_some_and(|prefix| {
+        starts_a_component || prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\')
+    })
 }
 
 /// Resolves a case's `expected_sources`/`expected_concepts` into one
