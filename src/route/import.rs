@@ -93,14 +93,19 @@ pub(super) async fn route_import(
                     Located::Unreached { refusal, .. } => return refusal,
                     Located::Missing => match &batch.create {
                         Some(spec) => {
+                            // The refusal `POST /contexts` gives the same
+                            // name — a bad input, not a missing context:
+                            // nothing holds the id, and the map says
+                            // nowhere it may be created.
                             let Some(shard) = map.shard_of(&spec.name) else {
                                 return api::error(
-                                    ErrorCode::NoContext,
+                                    ErrorCode::InvalidArgument,
                                     format!(
-                                        "source '{}': context '{}' (create name '{}') has no \
-                                         route-map entry and no '*' fallback \
-                                         (TAGURU_ROUTE_MAP); nothing was applied",
-                                        batch.source, batch.context_id, spec.name
+                                        "source '{}': no shard owns context '{}' (create name \
+                                         '{}', id '{}'): add a route-map entry for it, or a \
+                                         '*' fallback for unmapped contexts (TAGURU_ROUTE_MAP); \
+                                         nothing was applied",
+                                        batch.source, spec.name, spec.name, batch.context_id
                                     ),
                                     started_at,
                                 );
