@@ -66,7 +66,9 @@ Entries that change an on-disk format or a response shape say so.
   is a retryable `TransportError` (it escaped as a raw exception and
   disabled the version probe), an abandoned `exportStream` releases its
   connection, and `EHOSTUNREACH`/`ENETUNREACH`/`ETIMEDOUT` on `connect`
-  count as pre-connect.
+  count as pre-connect. Both LangChain packages now require taguru
+  `>=0.10.1` (Python) / `^0.10.1` (npm): they use `ShardUnreachableError`,
+  which 0.10.0 does not have — every package moves to 0.10.1 in lockstep.
 - **The router refuses `..` segments delimited by `\`.** The proxy's
   dot-segment check split paths on `/` only, while the outbound URL
   parser reads `\` as `/`: `POST /contexts/<id>/..\..\import` reached a

@@ -1,6 +1,6 @@
 [package]
 name = "taguru"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 # Tracks the Dockerfile's release toolchain (`rust:1.96-alpine`), not
 # the lowest version the code happens to build on (ADR 0049): bump the
