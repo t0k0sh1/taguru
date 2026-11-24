@@ -3,10 +3,3 @@
 # first field; `#` starts a comment. Every entry names why it is safe to
 # accept and when it leaves. Any high/critical advisory NOT listed here
 # still fails the job.
-
-# picomatch <= 4.0.7: ReDoS through single-branch repeated extglobs, no
-# patched release yet. Reached only through dev tooling (tsup -> tinyglobby /
-# fdir, vitest -> vite); `npm audit --omit=dev` is clean, so the published
-# packages never carry it. Remove once a fixed picomatch resolves under
-# tsup/vitest/vite, or at once if it reaches a runtime dependency (#1067).
-GHSA-fc5q-39xc-vjpf
