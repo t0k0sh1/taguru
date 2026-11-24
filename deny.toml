@@ -6,6 +6,10 @@ targets = [
 ]
 
 [advisories]
+# cargo-deny 0.22 narrowed the default to `workspace`; taguru tracks
+# unmaintained notices across the whole graph, so the ignores below
+# stay deliberate decisions rather than silently unchecked crates.
+unmaintained = "all"
 ignore = [
     # paste@1.0.15: unmaintained notice, not a vulnerability — a
     # compile-time proc-macro with no runtime surface, reached only
