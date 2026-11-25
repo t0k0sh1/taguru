@@ -6,7 +6,7 @@
 
 ## Pre-PR Mutation Gate
 
-- Before `gh pr create` — and before pushing fix commits to an existing PR — run the same diff-scoped mutation check CI runs (mutants-diff.yml), so missed mutants are resolved locally instead of surfacing as a CI round-trip. Fetch first so the diff matches the PR's actual base, and count before running — the full run only happens within CI's per-PR budget (25, recalibrated on #574 — see mutants-diff.yml's `MUTANT_BUDGET` comment for the measured per-mutant rate behind the number):
+- Before `gh pr create` — and before pushing fix commits to an existing PR — run the same diff-scoped mutation check CI runs (mutants-diff.yml), so missed mutants are resolved locally instead of surfacing as a CI round-trip. Fetch first so the diff matches the PR's actual base, and count before running — the full run only happens within CI's per-PR budget (25, the same value as `MUTANT_BUDGET` in mutants-diff.yml — keep the two in step, and see that comment for the measured per-mutant rate behind it):
   ```sh
   git fetch origin main &&
     diff=$(mktemp) && git diff origin/main...HEAD > "$diff" &&
