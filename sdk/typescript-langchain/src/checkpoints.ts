@@ -30,7 +30,7 @@
 
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
-import type { ModelOutput } from "./extract.js";
+import { removalFromJson, type ModelOutput, type Removal } from "./extract.js";
 
 /**
  * Durable blob storage for one document's checkpoint state, keyed by
@@ -515,6 +515,11 @@ export interface CheckpointPiece {
   user: string;
   /** The model's own final accepted answer text. */
   answer: string;
+  /** What the mechanical pass removed from `answer` (ADR 0013), so a reused
+   * piece keeps its accounting. A checkpoint written before issue #1098 has
+   * no such key and loads with none — right for it, too: its answer was
+   * accepted under rules that removed nothing. */
+  removed: Removal[];
 }
 
 function modelOutputFromJson(data: unknown): ModelOutput | null {
@@ -553,7 +558,19 @@ function checkpointPieceFromJson(data: unknown): CheckpointPiece | null {
   if (parsedOutput === null) {
     return null;
   }
-  return { chunk_index: chunk_index as number, output: parsedOutput, user, answer };
+  const rawRemoved = raw.removed ?? [];
+  if (!Array.isArray(rawRemoved)) {
+    return null;
+  }
+  const removed: Removal[] = [];
+  for (const entry of rawRemoved) {
+    const removal = removalFromJson(entry);
+    if (removal === null) {
+      return null;
+    }
+    removed.push(removal);
+  }
+  return { chunk_index: chunk_index as number, output: parsedOutput, user, answer, removed };
 }
 
 /**

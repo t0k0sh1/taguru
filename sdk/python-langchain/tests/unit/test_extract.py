@@ -25,6 +25,7 @@ from taguru_langchain._extract import (
     ModelAssociation,
     ModelOutput,
     ModelQuestion,
+    Removal,
     SyntaxFault,
     candidate_json,
     chunk,
@@ -39,6 +40,7 @@ from taguru_langchain._extract import (
     indicates_refusal,
     interpret_model_output,
     labeled_document,
+    mechanical_interpret,
     merge,
     parse_model_output,
     render_batch,
@@ -1064,7 +1066,8 @@ def test_evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_igno
 
     # Lossy mode (rules=None) ignores the same issue and hands back the
     # parsed output, byte-for-byte parse_model_output's behavior.
-    output, _repairs = evaluate_answer(content, None)
+    output, _repairs, removed = evaluate_answer(content, None)
+    assert removed == []
     assert len(output.associations) == 1
     assert output.associations[0].weight is None
 
@@ -1218,3 +1221,136 @@ def test_render_batch_always_renders_exactly_one_batch_header() -> None:
         "context_id": "cef2e28b-43f0-4b6c-8201-abab0785399f",
     }
     assert lines[1]["passage"] == hostile_passage
+
+
+# -- mechanical removal (ADR 0013 Stage 1, issue #1098) -------------------------
+
+# tests/fixtures/model_output/removed/ fixtures whose rule this port does not
+# implement yet — each still takes the corrective path here. Listed by name so
+# a fixture added to the shared corpus later fails this test until someone
+# decides which side of the line it falls on.
+_REMOVED_FIXTURES_NOT_YET_PORTED = {
+    "alias_dangling_canonical.json",  # Stage 2 prune
+    "association_fabricated_object.json",  # occurrence check (ADR 0013 §4)
+    "association_fabricated_sparse_object.json",  # occurrence check (ADR 0036)
+    "association_foreign_ideograph_label.json",  # foreign ideographs (ADR 0039)
+}
+
+
+def test_removed_fixtures_are_removed_mechanically_with_zero_corrective_issues() -> None:
+    """Port of extract.rs removed_fixtures_are_removed_mechanically_with_zero_corrective_issues,
+    for the removal classes this port implements: the same removals, byte for
+    byte, and nothing left for a corrective turn."""
+    paths = sorted((FIXTURES_ROOT / "removed").glob("*.json"))
+    names = {path.name for path in paths}
+    assert _REMOVED_FIXTURES_NOT_YET_PORTED <= names, "a pending fixture was renamed or removed"
+    ported = [path for path in paths if path.name not in _REMOVED_FIXTURES_NOT_YET_PORTED]
+    assert ported, "no removed fixture exercises the ported rules"
+    for path in ported:
+        fixture = json.loads(path.read_text(encoding="utf-8"))
+        rules = ItemRules(
+            paragraph_count=fixture["rules"]["paragraph_count"],
+            questions_requested=fixture["rules"]["questions_cap"] > 0,
+        )
+        output, removed, issues = mechanical_interpret(fixture["answer"], rules)
+        assert issues == [], path.name
+        assert [str(removal) for removal in removed] == fixture["removed"], path.name
+        assert len(output.associations) == fixture["surviving_associations"], path.name
+        assert len(output.aliases) == fixture["surviving_aliases"], path.name
+
+
+def test_mechanical_pass_removes_each_stage_one_class_with_its_original_item() -> None:
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {
+        "associations": [
+            "not an object",
+            {"subject": " ", "label": "l"},
+            {"subject": "a", "label": "l", "object": "b"},
+        ],
+        "aliases": [
+            7,
+            {"alias": "x", "canonical": None},
+            {"alias": "b", "canonical": "b", "kind": "concept"},
+            {"alias": "B", "canonical": "b", "kind": "concept"},
+        ],
+    }
+    output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == []
+    assert [str(removal) for removal in removed] == [
+        'associations[0]: expected an object, got string "not an object"',
+        "associations[1]: subject empty, object missing",
+        "aliases[0]: expected an object, got number 7",
+        "aliases[1]: canonical missing, kind missing",
+        "aliases[2]: alias equals its canonical",
+    ]
+    # The item is the model's own element, verbatim — not the parsed form.
+    assert removed[1] == Removal(
+        path="associations[1]",
+        reason="subject empty, object missing",
+        item={"subject": " ", "label": "l"},
+    )
+    assert [(a.subject, a.object) for a in output.associations] == [("a", "b")]
+    assert [(a.alias, a.canonical) for a in output.aliases] == [("B", "b")]
+
+
+def test_a_self_alias_drops_its_other_issues_with_it() -> None:
+    """mechanical.rs discards a removed alias's own item issues: an invalid
+    kind on a self-alias is not worth a corrective turn either."""
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {"aliases": [{"alias": "b", "canonical": "b", "kind": "entity"}]}
+    _output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == []
+    assert [str(removal) for removal in removed] == ["aliases[0]: alias equals its canonical"]
+
+
+def test_mechanical_pass_keeps_present_but_wrong_values_for_the_corrective_turn() -> None:
+    """Port of the extract.rs test of the same name: a present-but-wrong value
+    stays corrective even while a removable item in the SAME answer would be
+    removed — and evaluate_answer discards that attempt's removals."""
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {
+        "associations": [
+            {"subject": "a", "label": "l", "object": ""},
+            {"subject": "a", "label": "l", "object": "b", "weight": 0},
+        ],
+        "aliases": [],
+    }
+    _output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == ["associations[1].weight: expected finite non-zero number, got 0"]
+    assert [str(removal) for removal in removed] == ["associations[0]: object empty"]
+    try:
+        evaluate_answer(json.dumps(answer), rules)
+    except InvalidFault as fault:
+        assert fault.issues == issues
+    else:
+        raise AssertionError("expected InvalidFault")
+
+
+def test_evaluate_answer_accepts_after_mechanical_removal_and_records_it() -> None:
+    """Port of the extract.rs test of the same name: only removable
+    departures — accepted on the first evaluation, removals recorded."""
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    content = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
+                {"subject": "リリース署名鍵", "label": "管理者", "object": ""},
+            ],
+            "aliases": [{"alias": "nextest", "canonical": "nextest", "kind": "concept"}],
+        },
+        ensure_ascii=False,
+    )
+    output, _repairs, removed = evaluate_answer(content, rules)
+    assert [str(removal) for removal in removed] == [
+        "associations[1]: object empty",
+        "aliases[0]: alias equals its canonical",
+    ]
+    assert len(output.associations) == 1
+    assert output.aliases == []
+
+
+def test_removal_round_trips_through_its_dict_form() -> None:
+    removal = Removal(path="aliases[0]", reason="alias equals its canonical", item={"alias": "b"})
+    assert Removal.from_dict(removal.to_dict()) == removal
+    assert Removal.from_dict({"path": "aliases[0]"}) is None
+    assert Removal.from_dict("aliases[0]: alias equals its canonical") is None

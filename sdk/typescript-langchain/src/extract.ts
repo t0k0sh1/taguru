@@ -1304,6 +1304,175 @@ export function interpretModelOutput(
   return { output: { associations, aliases, questions }, issues };
 }
 
+// -- mechanical removal before corrective turns (ADR 0013, mirrors Python's ---
+// -- mechanical_interpret / src/extract/mechanical.rs's Stage 1) --------------
+//
+// Issue #1098, first slice: the removal classes that need nothing beyond the
+// item itself — a non-object element, a required field missing/null/empty,
+// and an alias whose spelling equals its canonical. mechanical.rs's other
+// Stage 1 rules (the occurrence check, ADR 0039's foreign ideographs, the
+// redaction placeholder and single-character label rules) and its Stage 2
+// prunes are not ported yet; until they are, those items keep this module's
+// corrective path exactly as before.
+
+/**
+ * One mechanically removed item (ADR 0013, as ADR 0024 records it): the
+ * path-addressed `reason` plus the item the model actually wrote, verbatim.
+ * {@link removalText} is extract.rs's `Removal` display, byte for byte —
+ * `aliases[0]: alias equals its canonical`.
+ */
+export interface Removal {
+  path: string;
+  reason: string;
+  item: unknown;
+}
+
+/** `path: reason` — the text every producer's accounting uses. */
+export function removalText(removal: Removal): string {
+  return `${removal.path}: ${removal.reason}`;
+}
+
+/** A checkpointed removal, or `null` when the value is not one. */
+export function removalFromJson(value: unknown): Removal | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  const { path, reason } = value;
+  if (typeof path !== "string" || typeof reason !== "string") {
+    return null;
+  }
+  return { path, reason, item: value.item ?? null };
+}
+
+/**
+ * A required field that is mechanically absent: missing (or null) or a
+ * string that trims to nothing. A present wrong-typed value is NOT absent —
+ * it is content a corrective turn can fix. Trims exactly as
+ * interpretRequiredString does, so a field this passes is never then
+ * flagged `empty`.
+ */
+function fieldAbsence(obj: Record<string, unknown>, key: string): string | null {
+  const value = getPresent(obj, key);
+  if (value === undefined) {
+    return "missing";
+  }
+  if (typeof value === "string" && value.trim() === "") {
+    return "empty";
+  }
+  return null;
+}
+
+function absentFields(obj: Record<string, unknown>, keys: readonly string[]): string[] {
+  const absent: string[] = [];
+  for (const key of keys) {
+    const kind = fieldAbsence(obj, key);
+    if (kind !== null) {
+      absent.push(`${key} ${kind}`);
+    }
+  }
+  return absent;
+}
+
+function associationMechanically(
+  index: number,
+  item: unknown,
+  issues: string[],
+  removed: Removal[],
+): ModelAssociation | null {
+  const path = `associations[${index}]`;
+  if (!isPlainObject(item)) {
+    removed.push({ path, reason: `expected an object, got ${describeValue(item)}`, item });
+    return null;
+  }
+  const absent = absentFields(item, ["subject", "label", "object"]);
+  if (absent.length > 0) {
+    removed.push({ path, reason: absent.join(", "), item });
+    return null;
+  }
+  return interpretAssociationItem(index, item, issues);
+}
+
+function aliasMechanically(
+  index: number,
+  item: unknown,
+  issues: string[],
+  removed: Removal[],
+): ModelAlias | null {
+  const path = `aliases[${index}]`;
+  if (!isPlainObject(item)) {
+    removed.push({ path, reason: `expected an object, got ${describeValue(item)}`, item });
+    return null;
+  }
+  const absent = absentFields(item, ["alias", "canonical", "kind"]);
+  if (absent.length > 0) {
+    removed.push({ path, reason: absent.join(", "), item });
+    return null;
+  }
+  const itemIssues: string[] = [];
+  const parsed = interpretAliasItem(index, item, itemIssues);
+  if (
+    parsed !== null &&
+    parsed.alias !== null &&
+    parsed.canonical !== null &&
+    parsed.alias === parsed.canonical
+  ) {
+    // interpretAliasItem's own self-alias issue (and any other issue of this
+    // item) dies with the item rather than becoming a corrective ask,
+    // exactly as mechanical.rs drops item_issues here.
+    removed.push({ path, reason: "alias equals its canonical", item });
+    return null;
+  }
+  issues.push(...itemIssues);
+  return parsed;
+}
+
+/**
+ * The strict-mode replacement for interpretModelOutput: the same lenient
+ * walk and the same issue texts, but items whose departure is mechanically
+ * judgeable are removed (and returned as Removal records) instead of
+ * flagged, so only genuinely corrective issues survive. Lossy mode never
+ * calls this — its contract stays the plain lenient walk.
+ */
+export function mechanicalInterpret(
+  value: unknown,
+  rules: ItemRules,
+): { output: ModelOutput; removed: Removal[]; issues: string[] } {
+  const issues: string[] = [];
+  const removed: Removal[] = [];
+  const obj = isPlainObject(value) ? value : {};
+
+  const associations: ModelAssociation[] = [];
+  const rawAssociations = getPresent(obj, "associations");
+  if (Array.isArray(rawAssociations)) {
+    rawAssociations.forEach((item, index) => {
+      const parsed = associationMechanically(index, item, issues, removed);
+      if (parsed !== null) {
+        associations.push(parsed);
+      }
+    });
+  } else if (rawAssociations !== undefined) {
+    issues.push(`associations: expected an array, got ${describeValue(rawAssociations)}`);
+  }
+
+  const aliases: ModelAlias[] = [];
+  const rawAliases = getPresent(obj, "aliases");
+  if (Array.isArray(rawAliases)) {
+    rawAliases.forEach((item, index) => {
+      const parsed = aliasMechanically(index, item, issues, removed);
+      if (parsed !== null) {
+        aliases.push(parsed);
+      }
+    });
+  } else if (rawAliases !== undefined) {
+    issues.push(`aliases: expected an array, got ${describeValue(rawAliases)}`);
+  }
+
+  // Questions have no mechanical rule: a bad paragraph citation or a
+  // malformed question is always the corrective path, unchanged.
+  const questions = interpretQuestions(obj, rules, issues);
+  return { output: { associations, aliases, questions }, removed, issues };
+}
+
 const LENIENT_RULES: ItemRules = {
   paragraphCount: Number.MAX_SAFE_INTEGER,
   questionsRequested: true,
@@ -1323,25 +1492,28 @@ export function effectiveItemRules(rules: ItemRules | null): ItemRules {
 /**
  * The Stage 1 gate every corrective loop calls instead of parseModelOutput
  * directly: parse, then — when `rules` is not null (this run is not lossy)
- * — validate every item and throw InvalidFault on any path-addressed
- * issue. `rules: null` (lossy mode) parses only and discards whatever
- * interpretModelOutput would have flagged, reproducing today's behavior
- * byte for byte: merge() alone decides what survives.
+ * — run the mechanical pass (mechanicalInterpret, ADR 0013) and throw
+ * InvalidFault on any path-addressed issue it leaves for a corrective turn.
+ * A faulted answer's removals are discarded with it (ADR 0013 §3.5): only
+ * the accepted attempt's own removals are returned. `rules: null` (lossy
+ * mode) parses only and discards whatever interpretModelOutput would have
+ * flagged, reproducing today's behavior byte for byte: merge() alone
+ * decides what survives, and nothing is reported removed.
  */
 export function evaluateAnswer(
   content: string,
   rules: ItemRules | null,
-): { output: ModelOutput; repairs: string[] } {
+): { output: ModelOutput; repairs: string[]; removed: Removal[] } {
   const { value, repairs } = candidateJson(content);
   if (rules === null) {
     const { output } = interpretModelOutput(value, LENIENT_RULES);
-    return { output, repairs };
+    return { output, repairs, removed: [] };
   }
-  const { output, issues } = interpretModelOutput(value, rules);
+  const { output, removed, issues } = mechanicalInterpret(value, rules);
   if (issues.length > 0) {
     throw new InvalidFault(issues);
   }
-  return { output, repairs };
+  return { output, repairs, removed };
 }
 
 /**

@@ -28,7 +28,7 @@ from typing import IO, Protocol, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
 
-from ._extract import ModelOutput
+from ._extract import ModelOutput, Removal
 
 try:
     import fcntl
@@ -428,6 +428,11 @@ class _CheckpointPiece:
     """The exact user turn that produced ``output``."""
     answer: str
     """The model's own final accepted answer text."""
+    removed: list[Removal] = field(default_factory=list)
+    """What the mechanical pass removed from ``answer`` (ADR 0013), so a
+    reused piece keeps its accounting. A checkpoint written before issue
+    #1098 has no such key and loads with none — right for it, too: its
+    answer was accepted under rules that removed nothing."""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -435,11 +440,18 @@ class _CheckpointPiece:
             "output": self.output.model_dump(mode="json"),
             "user": self.user,
             "answer": self.answer,
+            "removed": [removal.to_dict() for removal in self.removed],
         }
 
     @classmethod
     def from_dict(cls, data: object) -> _CheckpointPiece | None:
         if not isinstance(data, dict):
+            return None
+        raw_removed = data.get("removed", [])
+        if not isinstance(raw_removed, list):
+            return None
+        removed = [Removal.from_dict(entry) for entry in raw_removed]
+        if any(removal is None for removal in removed):
             return None
         try:
             return cls(
@@ -447,6 +459,7 @@ class _CheckpointPiece:
                 output=ModelOutput.model_validate(data["output"]),
                 user=str(data["user"]),
                 answer=str(data["answer"]),
+                removed=[removal for removal in removed if removal is not None],
             )
         except (KeyError, TypeError, ValueError):
             return None

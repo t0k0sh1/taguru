@@ -1179,6 +1179,145 @@ def interpret_model_output(value: Any, rules: ItemRules) -> tuple[ModelOutput, l
     return ModelOutput(associations=associations, aliases=aliases, questions=questions), issues
 
 
+# -- mechanical removal before corrective turns (ADR 0013, mirrors -------------
+# -- src/extract/mechanical.rs's Stage 1) ---------------------------------------
+#
+# Issue #1098, first slice: the removal classes that need nothing beyond the
+# item itself — a non-object element, a required field missing/null/empty,
+# and an alias whose spelling equals its canonical. mechanical.rs's other
+# Stage 1 rules (the occurrence check, ADR 0039's foreign ideographs, the
+# redaction placeholder and single-character label rules) and its Stage 2
+# prunes are not ported yet; until they are, those items keep this module's
+# corrective path exactly as before.
+
+
+@dataclass(frozen=True)
+class Removal:
+    """One mechanically removed item (ADR 0013, as ADR 0024 records it): the
+    path-addressed ``reason`` plus the item the model actually wrote,
+    verbatim. ``str()`` is extract.rs's ``Removal`` display, byte for byte —
+    ``aliases[0]: alias equals its canonical`` — so the same answer reads the
+    same in every producer's accounting."""
+
+    path: str
+    reason: str
+    item: Any
+
+    def __str__(self) -> str:
+        return f"{self.path}: {self.reason}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"path": self.path, "reason": self.reason, "item": self.item}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Removal | None:
+        if not isinstance(data, dict):
+            return None
+        path, reason = data.get("path"), data.get("reason")
+        if not isinstance(path, str) or not isinstance(reason, str):
+            return None
+        return cls(path=path, reason=reason, item=data.get("item"))
+
+
+def _field_absence(obj: dict[str, Any], key: str) -> str | None:
+    """A required field that is mechanically absent: missing (or null) or a
+    string that trims to nothing. A present wrong-typed value is NOT absent —
+    it is content a corrective turn can fix, so it stays an issue. Trims
+    exactly as ``_interpret_required_string`` does, so a field this passes is
+    never then flagged ``empty``."""
+    value = _get_present(obj, key)
+    if value is None:
+        return "missing"
+    if isinstance(value, str) and not value.strip():
+        return "empty"
+    return None
+
+
+def _absent_fields(obj: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    return [f"{key} {kind}" for key in keys if (kind := _field_absence(obj, key)) is not None]
+
+
+def _association_mechanically(
+    index: int, item: Any, issues: list[str], removed: list[Removal]
+) -> ModelAssociation | None:
+    path = f"associations[{index}]"
+    if not isinstance(item, dict):
+        removed.append(Removal(path, f"expected an object, got {describe_value(item)}", item))
+        return None
+    absent = _absent_fields(item, ("subject", "label", "object"))
+    if absent:
+        removed.append(Removal(path, ", ".join(absent), item))
+        return None
+    return _interpret_association_item(index, item, issues)
+
+
+def _alias_mechanically(
+    index: int, item: Any, issues: list[str], removed: list[Removal]
+) -> ModelAlias | None:
+    path = f"aliases[{index}]"
+    if not isinstance(item, dict):
+        removed.append(Removal(path, f"expected an object, got {describe_value(item)}", item))
+        return None
+    absent = _absent_fields(item, ("alias", "canonical", "kind"))
+    if absent:
+        removed.append(Removal(path, ", ".join(absent), item))
+        return None
+    item_issues: list[str] = []
+    parsed = _interpret_alias_item(index, item, item_issues)
+    if (
+        parsed is not None
+        and parsed.alias is not None
+        and parsed.canonical is not None
+        and parsed.alias == parsed.canonical
+    ):
+        # _interpret_alias_item's own self-alias issue (and any other issue
+        # of this item) dies with the item rather than becoming a
+        # corrective ask, exactly as mechanical.rs drops item_issues here.
+        removed.append(Removal(path, "alias equals its canonical", item))
+        return None
+    issues.extend(item_issues)
+    return parsed
+
+
+def mechanical_interpret(
+    value: Any, rules: ItemRules
+) -> tuple[ModelOutput, list[Removal], list[str]]:
+    """The strict-mode replacement for ``interpret_model_output``: the same
+    lenient walk and the same issue texts, but items whose departure is
+    mechanically judgeable are removed (and returned as ``Removal`` records)
+    instead of flagged, so only genuinely corrective issues survive. Lossy
+    mode never calls this — its contract stays the plain lenient walk."""
+    issues: list[str] = []
+    removed: list[Removal] = []
+    obj = value if isinstance(value, dict) else {}
+
+    associations: list[ModelAssociation] = []
+    raw = _get_present(obj, "associations")
+    if isinstance(raw, list):
+        for index, item in enumerate(raw):
+            parsed_association = _association_mechanically(index, item, issues, removed)
+            if parsed_association is not None:
+                associations.append(parsed_association)
+    elif raw is not None:
+        issues.append(f"associations: expected an array, got {describe_value(raw)}")
+
+    aliases: list[ModelAlias] = []
+    raw = _get_present(obj, "aliases")
+    if isinstance(raw, list):
+        for index, item in enumerate(raw):
+            parsed_alias = _alias_mechanically(index, item, issues, removed)
+            if parsed_alias is not None:
+                aliases.append(parsed_alias)
+    elif raw is not None:
+        issues.append(f"aliases: expected an array, got {describe_value(raw)}")
+
+    # Questions have no mechanical rule: a bad paragraph citation or a
+    # malformed question is always the corrective path, unchanged.
+    questions = _interpret_questions(obj, rules, issues)
+    output = ModelOutput(associations=associations, aliases=aliases, questions=questions)
+    return output, removed, issues
+
+
 _LENIENT_RULES = ItemRules(paragraph_count=2**63, questions_requested=True)
 
 
@@ -1193,22 +1332,28 @@ def effective_item_rules(rules: ItemRules | None) -> ItemRules:
     return rules if rules is not None else _LENIENT_RULES
 
 
-def evaluate_answer(content: str, rules: ItemRules | None) -> tuple[ModelOutput, list[str]]:
+def evaluate_answer(
+    content: str, rules: ItemRules | None
+) -> tuple[ModelOutput, list[str], list[Removal]]:
     """The Stage 1 gate every corrective loop calls instead of
     ``parse_model_output`` directly: parse, then — when ``rules`` is not
-    ``None`` (this run is not lossy) — validate every item and raise
-    ``InvalidFault`` on any path-addressed issue. ``rules=None`` (lossy
-    mode) parses only and discards whatever ``interpret_model_output``
-    would have flagged, reproducing today's behavior byte for byte:
-    ``merge()`` alone decides what survives."""
+    ``None`` (this run is not lossy) — run the mechanical pass
+    (``mechanical_interpret``, ADR 0013) and raise ``InvalidFault`` on any
+    path-addressed issue it leaves for a corrective turn. A faulted answer's
+    removals are discarded with it (ADR 0013 §3.5): only the accepted
+    attempt's own removals are returned, as the third element.
+    ``rules=None`` (lossy mode) parses only and discards whatever
+    ``interpret_model_output`` would have flagged, reproducing today's
+    behavior byte for byte: ``merge()`` alone decides what survives, and
+    nothing is reported removed."""
     value, repairs = candidate_json(content)
     if rules is None:
         output, _issues = interpret_model_output(value, _LENIENT_RULES)
-        return output, repairs
-    output, issues = interpret_model_output(value, rules)
+        return output, repairs, []
+    output, removed, issues = mechanical_interpret(value, rules)
     if issues:
         raise InvalidFault(issues)
-    return output, repairs
+    return output, repairs, removed
 
 
 def parse_model_output(content: str) -> ModelOutput:
@@ -1216,7 +1361,7 @@ def parse_model_output(content: str) -> ModelOutput:
     Raises ``ValueError`` with a message fit for a corrective turn.
     Lenient-mode-only (like extract.rs's test-only twin): every production
     corrective loop calls ``evaluate_answer`` directly instead."""
-    output, _repairs = evaluate_answer(content, None)
+    output, _repairs, _removed = evaluate_answer(content, None)
     return output
 
 

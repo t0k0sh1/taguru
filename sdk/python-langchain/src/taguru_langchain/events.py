@@ -103,6 +103,12 @@ class ChunkCompleted:
     questions_proposed: int
     llm_calls: int
     elapsed_seconds: float
+    removed_items: tuple[str, ...] = ()
+    """What the mechanical pass removed from this chunk's accepted answer
+    instead of spending a corrective turn on it (ADR 0013, issue #1098),
+    one path-first line per item (``aliases[0]: alias equals its
+    canonical``). The ``*_proposed`` counts are what survived it. A reused
+    chunk replays the removals its checkpoint recorded."""
     reused: bool = False
     """True when this chunk was satisfied from a ``checkpoint_store``
     instead of a fresh model call (issue #211) — ``llm_calls`` is 0 in

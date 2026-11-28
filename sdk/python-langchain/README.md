@@ -431,6 +431,19 @@ restore the old drop-and-proceed behavior instead — the source still
 imports, and `IngestOutcome.invalid_dropped` counts what got silently
 discarded.
 
+Some items carry nothing a correction could save, so they are removed
+without a corrective turn, as `taguru extract` removes them (ADR 0013):
+
+- an array element that is not an object
+- an association or alias with a required field missing, null or empty
+- an alias whose spelling equals its canonical
+
+Each removal is listed in `IngestOutcome.removed_items` and in the chunk's `chunk_completed`
+event, worded as `taguru extract` reports it (`aliases[0]: alias equals its
+canonical`). If the same answer also has an item a correction can fix, the
+whole answer still goes back for correction, and only the removals in the
+answer finally accepted are listed.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similarity_search` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

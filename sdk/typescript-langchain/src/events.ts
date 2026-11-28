@@ -97,6 +97,12 @@ export interface ChunkCompleted {
   associations_proposed: number;
   aliases_proposed: number;
   questions_proposed: number;
+  /** What the mechanical pass removed from this chunk's accepted answer
+   * instead of spending a corrective turn on it (ADR 0013, issue #1098), one
+   * path-first line per item (`aliases[0]: alias equals its canonical`). The
+   * `*_proposed` counts are what survived it. A reused chunk replays the
+   * removals its checkpoint recorded. */
+  removed_items: string[];
   llm_calls: number;
   elapsed_seconds: number;
   /**

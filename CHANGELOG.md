@@ -7,6 +7,25 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- **The LangChain ingesters (Python and TypeScript) remove unsalvageable
+  items instead of failing the segment** (#1098). Three kinds of item are
+  now removed before any corrective turn, as `taguru extract` has removed
+  them since ADR 0013: an array element that is not an object, an
+  association or alias with a required field missing, null or empty, and
+  an alias whose spelling equals its canonical. Before, these were sent
+  back for correction, and a model that repeated them failed the whole
+  segment. A local model returning a self-alias failed the first section
+  of the `local_rag` example this way. Each removal is listed in the new
+  `IngestOutcome.removed_items` and in the `chunk_completed` event's
+  `removed_items`, worded as `taguru extract` reports it. Checkpoints
+  record removals too; checkpoints written before this change still load.
+  `lossy` mode is unchanged. The CLI's other removal rules (the
+  occurrence check, foreign ideographs, redaction placeholders,
+  single-character labels, and the per-segment alias prunes) are not
+  ported yet.
+
 ## [0.11.1] - 2026-11-28
 
 A patch release. `TAGURU_EMBED_AUTO` embeds on the flusher tick again

@@ -1147,3 +1147,73 @@ def test_model_identity_is_derived_from_a_model_attribute_when_present(
     )  # must not raise — model identity derived from llm.model
     fingerprint = ingester._checkpoint_fingerprint("some text", "")  # noqa: SLF001
     assert fingerprint.model == "_NamedFakeChatModel:demo-v1"
+
+
+# -- mechanical removals ride the checkpoint (ADR 0013, issue #1098) -----------
+
+
+def test_a_reused_chunk_keeps_its_removals(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    chunk1_self_alias = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
+            ],
+            "aliases": [{"alias": "1907年", "canonical": "1907年", "kind": "concept"}],
+        },
+        ensure_ascii=False,
+    )
+    store = RecordingCheckpointStore()
+    source = "docs/aomine.md"
+    ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [chunk1_self_alias, "not json", "not json"],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError):
+        ingester.ingest_text(DOC_TEXT, source=source)
+    assert _piece_count(store, source) == 1
+
+    ingester2, llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester2.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert outcome.chunks_reused == 1
+    assert len(llm2.seen_prompts) == 1
+    assert outcome.removed_items == ["chunk 1/2 aliases[0]: alias equals its canonical"]
+
+
+def test_a_checkpoint_piece_written_before_removals_existed_still_loads() -> None:
+    from taguru_langchain.checkpoints import _CheckpointPiece
+
+    piece = _CheckpointPiece.from_dict(
+        {
+            "chunk_index": 0,
+            "output": {"associations": [], "aliases": [], "questions": []},
+            "user": "u",
+            "answer": "{}",
+        }
+    )
+    assert piece is not None
+    assert piece.removed == []
+    # A malformed removal list is a corrupt piece, like any other bad field.
+    assert (
+        _CheckpointPiece.from_dict(
+            {
+                "chunk_index": 0,
+                "output": {"associations": [], "aliases": [], "questions": []},
+                "user": "u",
+                "answer": "{}",
+                "removed": [{"path": 1}],
+            }
+        )
+        is None
+    )

@@ -136,6 +136,7 @@ function makeOutcome(overrides: Partial<IngestOutcome> & { source: string }): In
     llm_calls: 0,
     chunks: 0,
     correction_attempts: 0,
+    removed_items: [],
     lossless_repairs: [],
     error: null,
     embeddings_refresh_warning: null,
