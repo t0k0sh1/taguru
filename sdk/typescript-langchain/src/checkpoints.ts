@@ -437,6 +437,15 @@ export interface CheckpointFingerprint {
    * src/extract.rs's `CheckpointFingerprint.schema_digest`.
    */
   schema_digest: string;
+  /**
+   * `MECHANICAL_RULES_VERSION` when the pieces were accepted. A reused piece
+   * skips the mechanical pass, so a piece accepted under fewer removal rules
+   * must not be reused once more apply. A file written before this field
+   * existed reads as `0`, which no current version equals: it is re-extracted
+   * rather than reused. SDK-only — the CLI accepts this gap for itself
+   * (ADR 0013 §5).
+   */
+  mechanical_rules: number;
 }
 
 function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
@@ -446,7 +455,7 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
   const raw = data as Record<string, unknown>;
   const { sha256, model, prompt_version, context, questions_n } = raw;
   const { no_passage, description, fact_budget, structured_output, lossy } = raw;
-  const { schema_digest } = raw;
+  const { schema_digest, mechanical_rules } = raw;
   if (
     typeof sha256 !== "string" ||
     typeof model !== "string" ||
@@ -458,7 +467,8 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
     !Number.isInteger(fact_budget) ||
     typeof structured_output !== "string" ||
     typeof lossy !== "boolean" ||
-    (schema_digest !== undefined && typeof schema_digest !== "string")
+    (schema_digest !== undefined && typeof schema_digest !== "string") ||
+    (mechanical_rules !== undefined && !Number.isInteger(mechanical_rules))
   ) {
     return null;
   }
@@ -474,6 +484,7 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
     structured_output,
     lossy,
     schema_digest: typeof schema_digest === "string" ? schema_digest : "",
+    mechanical_rules: mechanical_rules === undefined ? 0 : (mechanical_rules as number),
   };
 }
 
@@ -489,7 +500,8 @@ function fingerprintsEqual(a: CheckpointFingerprint, b: CheckpointFingerprint): 
     a.fact_budget === b.fact_budget &&
     a.structured_output === b.structured_output &&
     a.lossy === b.lossy &&
-    a.schema_digest === b.schema_digest
+    a.schema_digest === b.schema_digest &&
+    a.mechanical_rules === b.mechanical_rules
   );
 }
 

@@ -611,15 +611,6 @@ def user_message(source: str, index: int, total: int, text: str) -> str:
     return f"Segment '{source}':\n\n{text}"
 
 
-def user_message_segment(user: str) -> str:
-    """``user_message``'s inverse: the chunk text the model was shown, with
-    the preamble stripped — what the mechanical pass judges an answer
-    against, so the source path never counts as segment text. Mirrors
-    extract.rs's ``user_message_segment``."""
-    _preamble, sep, text = user.partition("\n\n")
-    return text if sep else user
-
-
 # -- model-answer parsing (fence-stripping + widest-braces fallback) --------------
 
 
@@ -1191,6 +1182,13 @@ def interpret_model_output(value: Any, rules: ItemRules) -> tuple[ModelOutput, l
     return ModelOutput(associations=associations, aliases=aliases, questions=questions), issues
 
 
+# The mechanical pass's rule set, as checkpoints record it: bump whenever a
+# rule is added or changes what it removes, so a checkpoint piece accepted
+# under the older rules is re-extracted instead of reused unjudged. 1: the
+# item-local rules (#1098). 2: single-character labels and redaction
+# placeholders. 3: ADR 0039's foreign ideographs (#1101).
+MECHANICAL_RULES_VERSION = 3
+
 # -- mechanical removal before corrective turns (ADR 0013, mirrors -------------
 # -- src/extract/mechanical.rs's Stage 1) ---------------------------------------
 #
@@ -1474,9 +1472,9 @@ def mechanical_interpret(
     lenient walk and the same issue texts, but items whose departure is
     mechanically judgeable are removed (and returned as ``Removal`` records)
     instead of flagged, so only genuinely corrective issues survive.
-    ``segment`` is the chunk text the model was shown, preamble stripped
-    (``user_message_segment``). Lossy mode never calls this — its contract
-    stays the plain lenient walk."""
+    ``segment`` is the chunk text the model was shown, without the user
+    turn's preamble. Lossy mode never calls this — its contract stays the
+    plain lenient walk."""
     issues: list[str] = []
     removed: list[Removal] = []
     obj = value if isinstance(value, dict) else {}

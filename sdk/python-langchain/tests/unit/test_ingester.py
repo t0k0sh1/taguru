@@ -1551,3 +1551,24 @@ def test_the_ingester_judges_foreign_ideographs_against_the_chunk_text(
                 else asyncio.run(ingester.aingest_text(text, source="docs/a.md", dry_run=True))
             )
             assert outcome.removed_items == expected, (run, text)
+
+
+def test_a_blank_line_in_the_source_does_not_leak_into_the_judged_text(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """The user turn's preamble quotes the source verbatim; the answer is
+    judged against the chunk itself, so a source holding a blank line and
+    the ideograph cannot make the ideograph count as segment text."""
+    answer = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "适用", "object": "高瀬", "weight": 1.0}
+            ]
+        },
+        ensure_ascii=False,
+    )
+    ingester, _llm = make_ingester(sync_client, async_client, [answer])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/a\n\n适.md", dry_run=True)
+    assert outcome.removed_items == [
+        'associations[0]: label "适用" uses 适 — an ideograph outside the segment\'s script'
+    ]

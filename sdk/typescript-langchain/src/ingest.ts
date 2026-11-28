@@ -43,6 +43,7 @@ import {
   interpretModelOutput,
   InvalidFault,
   issueInAnswerTerms,
+  MECHANICAL_RULES_VERSION,
   mechanicalInterpret,
   removalText,
   isEmptyAnswer,
@@ -54,7 +55,6 @@ import {
   SyntaxFault,
   systemPrompt,
   userMessage,
-  userMessageSegment,
   type ItemRules,
   type ModelOutput,
   type Removal,
@@ -557,6 +557,11 @@ interface ChunkRecord {
    * (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
    * chunk: removals never mix two answers (ADR 0013 §3.5). */
   removed: Removal[];
+  /** The chunk text the model was shown — what a Stage 2 re-answer is
+   * judged against. Kept as the piece itself rather than re-parsed out of
+   * `user`, whose preamble quotes the caller's source string verbatim (a
+   * source holding a blank line would otherwise move the boundary). */
+  segment: string;
 }
 
 /**
@@ -795,11 +800,7 @@ export class TaguruIngester {
         stage: "cross_chunk",
       });
       const attemptStartedAt = performance.now();
-      const result = await this.attemptOnce(
-        messages,
-        rules,
-        userMessageSegment(chunkRecord.user),
-      );
+      const result = await this.attemptOnce(messages, rules, chunkRecord.segment);
       outcome.llm_calls += 1;
       outcome.correction_attempts += 1;
       if (result.kind === "valid") {
@@ -809,6 +810,7 @@ export class TaguruIngester {
           user: chunkRecord.user,
           answer: result.content,
           removed: result.removed ?? [],
+          segment: chunkRecord.segment,
         };
         outcome.lossless_repairs.push(...result.repairs);
         continue;
@@ -965,7 +967,7 @@ export class TaguruIngester {
           stage: "item",
         });
         const attemptStartedAt = performance.now();
-        const result = await this.attemptOnce(messages, rules, userMessageSegment(user));
+        const result = await this.attemptOnce(messages, rules, chunks[index]!);
         outcome.llm_calls += 1;
         chunkLlmCalls += 1;
 
@@ -976,6 +978,7 @@ export class TaguruIngester {
             user,
             answer: result.content,
             removed: result.removed ?? [],
+            segment: chunks[index]!,
           };
           outcome.lossless_repairs.push(...result.repairs);
           break;
@@ -1367,6 +1370,7 @@ export class TaguruIngester {
       structured_output: this.structured_output ? "langchain" : "",
       lossy: this.lossy,
       schema_digest: digest,
+      mechanical_rules: MECHANICAL_RULES_VERSION,
     };
   }
 
@@ -1420,6 +1424,7 @@ export class TaguruIngester {
       user: cached.user,
       answer: cached.answer,
       removed: cached.removed,
+      segment: piece,
     };
   }
 

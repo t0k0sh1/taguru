@@ -617,17 +617,6 @@ function relationLine(label: string, domain: string[], range: string[]): string 
   return null;
 }
 
-/**
- * userMessage's inverse: the chunk text the model was shown, with the
- * preamble stripped — what the mechanical pass judges an answer against, so
- * the source path never counts as segment text. Mirrors extract.rs's
- * `user_message_segment`.
- */
-export function userMessageSegment(user: string): string {
-  const at = user.indexOf("\n\n");
-  return at === -1 ? user : user.slice(at + 2);
-}
-
 export function userMessage(source: string, index: number, total: number, text: string): string {
   if (total > 1) {
     return `Segment '${source}', chunk ${index + 1} of ${total}:\n\n${text}`;
@@ -1317,6 +1306,16 @@ export function interpretModelOutput(
   return { output: { associations, aliases, questions }, issues };
 }
 
+/**
+ * The mechanical pass's rule set, as checkpoints record it: bump whenever a
+ * rule is added or changes what it removes, so a checkpoint piece accepted
+ * under the older rules is re-extracted instead of reused unjudged. Kept
+ * equal to Python's MECHANICAL_RULES_VERSION. 1: the item-local rules
+ * (#1098). 2: single-character labels and redaction placeholders. 3:
+ * ADR 0039's foreign ideographs (#1101).
+ */
+export const MECHANICAL_RULES_VERSION = 3;
+
 // -- mechanical removal before corrective turns (ADR 0013, mirrors Python's ---
 // -- mechanical_interpret / src/extract/mechanical.rs's Stage 1) --------------
 //
@@ -1641,7 +1640,7 @@ function aliasMechanically(
  * walk and the same issue texts, but items whose departure is mechanically
  * judgeable are removed (and returned as Removal records) instead of
  * flagged, so only genuinely corrective issues survive. `segment` is the
- * chunk text the model was shown, preamble stripped (userMessageSegment).
+ * chunk text the model was shown, without the user turn's preamble.
  * Lossy mode never calls this — its contract stays the plain lenient walk.
  */
 export function mechanicalInterpret(

@@ -367,6 +367,13 @@ class _CheckpointFingerprint:
     same "new field defaults to the value that changes today's behavior
     least" precedent every other field here already sets. Mirrors
     src/extract.rs's ``CheckpointFingerprint.schema_digest``."""
+    mechanical_rules: int = 0
+    """``MECHANICAL_RULES_VERSION`` when the pieces were accepted. A reused
+    piece skips the mechanical pass, so a piece accepted under fewer removal
+    rules must not be reused once more apply. A file written before this
+    field existed reads as ``0``, which no current version equals: it is
+    re-extracted rather than reused. SDK-only — the CLI accepts this gap
+    for itself (ADR 0013 §5)."""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -381,6 +388,7 @@ class _CheckpointFingerprint:
             "structured_output": self.structured_output,
             "lossy": self.lossy,
             "schema_digest": self.schema_digest,
+            "mechanical_rules": self.mechanical_rules,
         }
 
     @classmethod
@@ -400,6 +408,7 @@ class _CheckpointFingerprint:
                 structured_output=str(data["structured_output"]),
                 lossy=bool(data["lossy"]),
                 schema_digest=str(data.get("schema_digest", "")),
+                mechanical_rules=int(data.get("mechanical_rules", 0)),
             )
         except (KeyError, TypeError, ValueError):
             return None

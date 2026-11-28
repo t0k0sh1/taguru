@@ -1560,11 +1560,3 @@ def test_ideographs_outside_the_unified_block_and_kana_are_judged_as_rust_does()
         'associations[0]: subject "𠮷野家" uses 𠮷 — an ideograph outside the segment\'s script',
         'associations[1]: label "说说" uses 说 — an ideograph outside the segment\'s script',
     ]
-
-
-def test_user_message_segment_strips_the_preamble() -> None:
-    from taguru_langchain._extract import user_message, user_message_segment
-
-    assert user_message_segment(user_message("a.md", 0, 1, "本文\n\n二段落")) == "本文\n\n二段落"
-    assert user_message_segment(user_message("a.md", 1, 3, "本文")) == "本文"
-    assert user_message_segment("no blank line") == "no blank line"

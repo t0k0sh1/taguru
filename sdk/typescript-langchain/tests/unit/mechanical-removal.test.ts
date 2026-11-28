@@ -25,11 +25,10 @@ import {
   evaluateAnswer,
   InvalidFault,
   issueInAnswerTerms,
+  MECHANICAL_RULES_VERSION,
   mechanicalInterpret,
   removalFromJson,
   removalText,
-  userMessage,
-  userMessageSegment,
   type ItemRules,
 } from "../../src/extract.js";
 import { JIS_X0208_IDEOGRAPHS } from "../../src/jis-x0208.js";
@@ -457,6 +456,48 @@ describe("TaguruIngester mechanical removal (ADR 0013, issue #1098)", () => {
     expect(withIt.removed_items).toEqual([]);
   });
 
+  it("judges the chunk text, not a blank line the source happens to hold", async () => {
+    // The user turn's preamble quotes the source verbatim; a source holding a
+    // blank line and the ideograph must not make it count as segment text.
+    const answer = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "适用", object: "高瀬", weight: 1.0 }],
+    });
+    const outcome = await make([answer]).ingestText(DOC_TEXT, {
+      source: "docs/a\n\n适.md",
+      dry_run: true,
+    });
+    expect(outcome.removed_items).toEqual([
+      'associations[0]: label "适用" uses 适 — an ideograph outside the segment\'s script',
+    ]);
+  });
+
+  it("does not reuse a checkpoint from an older rule set", async () => {
+    // A reused piece skips the mechanical pass, so a piece accepted under
+    // fewer removal rules is re-extracted. A file written before the rule set
+    // was recorded reads as version 0.
+    const store = new MemoryCheckpointStore();
+    const source = "docs/aomine.md";
+    const options = {
+      chunk_bytes: CROSS_CHUNK_BYTES,
+      checkpoint_store: store,
+      checkpoint_model_id: "fake-model",
+    };
+    await expect(
+      make([CHUNK2_ANSWER, "not json", "not json"], options).ingestText(DOC_TEXT, { source }),
+    ).rejects.toThrow();
+    const file = JSON.parse(new TextDecoder().decode(store.state.get(source)!)) as {
+      fingerprint: Record<string, unknown>;
+    };
+    delete file.fingerprint.mechanical_rules;
+    store.state.set(source, new TextEncoder().encode(JSON.stringify(file)));
+
+    const llm = new RecordingFake([CHUNK2_ANSWER, CHUNK2_ANSWER]);
+    const outcome = await make([], { ...options, llm }).ingestText(DOC_TEXT, { source });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.chunks_reused).toBe(0);
+    expect(llm.seenPrompts).toHaveLength(2);
+  });
+
   it("reports nothing removed in lossy mode", async () => {
     const outcome = await make([REMOVABLE_ANSWER], { lossy: true }).ingestText(DOC_TEXT, {
       source: "docs/aomine.md",
@@ -532,6 +573,7 @@ describe("checkpoint pieces and removals", () => {
     structured_output: "",
     lossy: false,
     schema_digest: "",
+    mechanical_rules: MECHANICAL_RULES_VERSION,
   };
   const fileWith = (piece: Record<string, unknown>): Uint8Array =>
     new TextEncoder().encode(JSON.stringify({ fingerprint, pieces: { h: piece } }));
@@ -659,9 +701,4 @@ describe("ADR 0039 foreign ideographs (issue #1101)", () => {
     ]);
   });
 
-  it("strips the user turn's preamble to find the segment", () => {
-    expect(userMessageSegment(userMessage("a.md", 0, 1, "本文\n\n二段落"))).toBe("本文\n\n二段落");
-    expect(userMessageSegment(userMessage("a.md", 1, 3, "本文"))).toBe("本文");
-    expect(userMessageSegment("no blank line")).toBe("no blank line");
-  });
 });

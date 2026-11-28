@@ -46,6 +46,7 @@ from ._extract import (
     CHUNK_BYTES,
     MAX_PASSAGE_BYTES,
     MAX_QUESTIONS_PER_PARAGRAPH,
+    MECHANICAL_RULES_VERSION,
     MODEL_OUTPUT_JSON_SCHEMA,
     PROMPT_VERSION,
     VOCABULARY_CAP,
@@ -75,7 +76,6 @@ from ._extract import (
     split_paragraphs,
     system_prompt,
     user_message,
-    user_message_segment,
 )
 from .checkpoints import (
     CheckpointLockedError,
@@ -421,6 +421,11 @@ class _ChunkRecord:
     """What the mechanical pass removed from THIS chunk's accepted answer
     (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
     chunk: removals never mix two answers (ADR 0013 §3.5)."""
+    segment: str = ""
+    """The chunk text the model was shown — what a Stage 2 re-answer is
+    judged against. Kept as the piece itself rather than re-parsed out of
+    ``user``, whose preamble quotes the caller's source string verbatim (a
+    source holding a blank line would otherwise move the boundary)."""
 
 
 class TaguruIngester:
@@ -758,6 +763,7 @@ class TaguruIngester:
             structured_output="langchain" if self.structured_output else "",
             lossy=self.lossy,
             schema_digest=schema_digest,
+            mechanical_rules=MECHANICAL_RULES_VERSION,
         )
 
     def _load_checkpoints(
@@ -813,6 +819,7 @@ class TaguruIngester:
             user=cached.user,
             answer=cached.answer,
             removed=cached.removed,
+            segment=piece,
         )
 
     def _record_checkpoint(
@@ -1002,7 +1009,7 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                result = self._attempt_once(messages, rules, user_message_segment(user))
+                result = self._attempt_once(messages, rules, piece)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
 
@@ -1014,6 +1021,7 @@ class TaguruIngester:
                         user=user,
                         answer=result.content,
                         removed=result.removed,
+                        segment=piece,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1360,7 +1368,7 @@ class TaguruIngester:
                 )
             )
             attempt_started_at = time.monotonic()
-            result = self._attempt_once(messages, rules, user_message_segment(record.user))
+            result = self._attempt_once(messages, rules, record.segment)
             outcome.llm_calls += 1
             outcome.correction_attempts += 1
             if result.kind == "valid":
@@ -1371,6 +1379,7 @@ class TaguruIngester:
                     user=record.user,
                     answer=result.content,
                     removed=result.removed,
+                    segment=record.segment,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue
@@ -1494,7 +1503,7 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                result = await self._aattempt_once(messages, rules, user_message_segment(user))
+                result = await self._aattempt_once(messages, rules, piece)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
 
@@ -1506,6 +1515,7 @@ class TaguruIngester:
                         user=user,
                         answer=result.content,
                         removed=result.removed,
+                        segment=piece,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1884,7 +1894,7 @@ class TaguruIngester:
                 )
             )
             attempt_started_at = time.monotonic()
-            result = await self._aattempt_once(messages, rules, user_message_segment(record.user))
+            result = await self._aattempt_once(messages, rules, record.segment)
             outcome.llm_calls += 1
             outcome.correction_attempts += 1
             if result.kind == "valid":
@@ -1895,6 +1905,7 @@ class TaguruIngester:
                     user=record.user,
                     answer=result.content,
                     removed=result.removed,
+                    segment=record.segment,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue
