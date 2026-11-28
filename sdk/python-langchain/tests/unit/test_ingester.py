@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -1456,3 +1457,58 @@ def test_lossy_mode_reports_nothing_removed(
     outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok
     assert outcome.removed_items == []
+
+
+def test_structured_output_removes_removable_items_without_a_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    llm = ToolCallingFakeChatModel(tool_call_args=[json.loads(REMOVABLE_ANSWER)])
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        structured_output=True,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.correction_attempts == 0
+    assert outcome.removed_items == REMOVABLE_ITEMS
+
+
+def test_a_stage_two_reanswer_replaces_the_chunks_removals(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Chunk 2's first answer carries a removable self-alias AND a shadowing
+    alias only Stage 2 sees. Stage 2 re-answers the chunk; the re-answer
+    removes nothing, so the chunk's removals are the re-answer's: none
+    (ADR 0013 §3.5 — removals never mix two answers)."""
+    chunk2_self_alias_and_shadowing = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
+            ],
+            "aliases": [
+                {"alias": "高瀬", "canonical": "高瀬", "kind": "concept"},
+                {"alias": "1907年", "canonical": "青嶺酒造", "kind": "concept"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    for run in ("sync", "async"):
+        ingester, _llm = make_ingester(
+            sync_client,
+            async_client,
+            [CHUNK1_ANSWER, chunk2_self_alias_and_shadowing, CHUNK2_CORRECTED_ANSWER],
+            chunk_bytes=CROSS_CHUNK_BYTES,
+        )
+        outcome = (
+            ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+            if run == "sync"
+            else asyncio.run(ingester.aingest_text(DOC_TEXT, source="docs/aomine.md"))
+        )
+        assert outcome.ok, run
+        assert outcome.correction_attempts == 1, run
+        assert outcome.removed_items == [], run

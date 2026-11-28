@@ -9,6 +9,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { AIMessageChunk } from "@langchain/core/messages";
+import type { ChatResult } from "@langchain/core/outputs";
 import { FakeListChatModel } from "@langchain/core/utils/testing";
 import { describe, expect, it } from "vitest";
 
@@ -197,6 +200,30 @@ const make = (responses: string[], fields: Record<string, unknown> = {}) =>
     ...fields,
   });
 
+/** Echoes scripted tool-call args — the structured_output path end to end
+ * (a local copy of ingester.test.ts's fake; see this file's header). */
+class ToolCallingFake extends BaseChatModel {
+  calls = 0;
+  constructor(private readonly toolCallArgs: Record<string, unknown>[]) {
+    super({});
+  }
+  _llmType(): string {
+    return "tool-calling-fake";
+  }
+  bindTools(): this {
+    return this;
+  }
+  async _generate(): Promise<ChatResult> {
+    const args = this.toolCallArgs[this.calls]!;
+    this.calls += 1;
+    const message = new AIMessageChunk({
+      content: "",
+      tool_calls: [{ name: "ModelOutput", args, id: `call_${this.calls}` }],
+    });
+    return { generations: [{ text: "", message }] };
+  }
+}
+
 class MemoryCheckpointStore implements CheckpointStore {
   state = new Map<string, Uint8Array>();
   async load(source: string): Promise<Uint8Array | null> {
@@ -252,6 +279,48 @@ describe("TaguruIngester mechanical removal (ADR 0013, issue #1098)", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.chunks).toBe(2);
     expect(outcome.removed_items).toEqual(["chunk 1/2 aliases[0]: alias equals its canonical"]);
+  });
+
+  it("removes removable items on the structured-output path too", async () => {
+    const ingester = new TaguruIngester({
+      context: "sake",
+      llm: new ToolCallingFake([JSON.parse(REMOVABLE_ANSWER) as Record<string, unknown>]),
+      client: new FakeServer().client(),
+      questions: 2,
+      structured_output: true,
+    });
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.llm_calls).toBe(1);
+    expect(outcome.correction_attempts).toBe(0);
+    expect(outcome.removed_items).toEqual(REMOVABLE_ITEMS);
+  });
+
+  it("replaces a chunk's removals with a Stage 2 re-answer's", async () => {
+    // Chunk 2's first answer carries a removable self-alias AND a shadowing
+    // alias only Stage 2 sees; the re-answer removes nothing, so the
+    // chunk's removals are none (ADR 0013 §3.5).
+    const chunk2SelfAliasAndShadowing = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
+      aliases: [
+        { alias: "高瀬", canonical: "高瀬", kind: "concept" },
+        { alias: "1907年", canonical: "青嶺酒造", kind: "concept" },
+      ],
+    });
+    const chunk1 = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "創業年", object: "1907年", weight: 1.0 }],
+      aliases: [],
+    });
+    const corrected = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
+      aliases: [{ alias: "Sake", canonical: "青嶺酒造", kind: "concept" }],
+    });
+    const outcome = await make([chunk1, chunk2SelfAliasAndShadowing, corrected], {
+      chunk_bytes: CROSS_CHUNK_BYTES,
+    }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.correction_attempts).toBe(1);
+    expect(outcome.removed_items).toEqual([]);
   });
 
   it("reports nothing removed in lossy mode", async () => {
