@@ -3,6 +3,7 @@ durable per-chunk checkpoints, cooperative stop, and resume."""
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 from pathlib import Path
@@ -1255,3 +1256,66 @@ async def test_a_reused_chunk_keeps_its_removals_async(
     assert outcome.ok
     assert outcome.chunks_reused == 1
     assert outcome.removed_items == ["chunk 1/2 aliases[0]: alias equals its canonical"]
+
+
+def test_a_reused_chunks_removals_name_its_current_position(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """A piece reused under a different chunking keeps the chunk_index of the
+    run that wrote it; the removal is still labelled by where the chunk sits
+    in THIS run. Run 1 (26 bytes) chunks the text [ab, c]; run 2 (16 bytes)
+    chunks it [a, b, c] and reuses c, written as chunk 2 of 2."""
+    text = "aaaaaaaa\n\nbbbbbbbb\n\ncccccccccccc"
+    plain = json.dumps({"associations": [{"subject": "a", "label": "is", "object": "b"}]})
+    self_alias = json.dumps(
+        {
+            "associations": [{"subject": "c", "label": "is", "object": "d"}],
+            "aliases": [{"alias": "c", "canonical": "c", "kind": "concept"}],
+        }
+    )
+    store = RecordingCheckpointStore()
+    first, _llm = _build_ingester(
+        sync_client, async_client, [plain, self_alias], checkpoint_store=store, chunk_bytes=26
+    )
+    assert first.ingest_text(text, source="docs/abc.md", dry_run=True).removed_items == [
+        "chunk 2/2 aliases[0]: alias equals its canonical"
+    ]
+    second, _llm2 = _build_ingester(
+        sync_client, async_client, [plain, plain], checkpoint_store=store, chunk_bytes=16
+    )
+    outcome = second.ingest_text(text, source="docs/abc.md", dry_run=True)
+    assert outcome.chunks_reused == 1
+    assert outcome.removed_items == ["chunk 3/3 aliases[0]: alias equals its canonical"]
+
+
+def test_an_interrupted_ingest_reports_the_removals_of_its_completed_chunks(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    chunk1_self_alias = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0}
+            ],
+            "aliases": [{"alias": "1907年", "canonical": "1907年", "kind": "concept"}],
+        },
+        ensure_ascii=False,
+    )
+    for run in ("sync", "async"):
+        checks = iter([False, True])
+        ingester, _llm = _build_ingester(
+            sync_client,
+            async_client,
+            [chunk1_self_alias],
+            checkpoint_store=None,
+            chunk_bytes=CROSS_CHUNK_BYTES,
+        )
+        stop = lambda checks=checks: next(checks)  # noqa: E731
+        outcome = (
+            ingester.ingest_text(DOC_TEXT, source="docs/aomine.md", should_stop=stop)
+            if run == "sync"
+            else asyncio.run(
+                ingester.aingest_text(DOC_TEXT, source="docs/aomine.md", should_stop=stop)
+            )
+        )
+        assert outcome.interrupted, run
+        assert outcome.removed_items == ["chunk 1/2 aliases[0]: alias equals its canonical"], run

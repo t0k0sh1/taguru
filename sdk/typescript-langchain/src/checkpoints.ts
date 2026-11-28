@@ -558,7 +558,9 @@ function checkpointPieceFromJson(data: unknown): CheckpointPiece | null {
   if (parsedOutput === null) {
     return null;
   }
-  const rawRemoved = raw.removed ?? [];
+  // Only an absent key is a pre-#1098 piece; an explicit null is corrupt,
+  // as the Python twin rules.
+  const rawRemoved = "removed" in raw ? raw.removed : [];
   if (!Array.isArray(rawRemoved)) {
     return null;
   }

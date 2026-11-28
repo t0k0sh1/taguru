@@ -331,6 +331,40 @@ describe("TaguruIngester mechanical removal (ADR 0013, issue #1098)", () => {
     expect(outcome.removed_items).toEqual([]);
   });
 
+  it("labels a reused chunk's removals by its position in this run", async () => {
+    // Run 1 (26 bytes) chunks the text [ab, c]; run 2 (16 bytes) chunks it
+    // [a, b, c] and reuses c, written as chunk 2 of 2.
+    const text = "aaaaaaaa\n\nbbbbbbbb\n\ncccccccccccc";
+    const plain = JSON.stringify({ associations: [{ subject: "a", label: "is", object: "b" }] });
+    const selfAlias = JSON.stringify({
+      associations: [{ subject: "c", label: "is", object: "d" }],
+      aliases: [{ alias: "c", canonical: "c", kind: "concept" }],
+    });
+    const store = new MemoryCheckpointStore();
+    const fields = { checkpoint_store: store, checkpoint_model_id: "fake-model" };
+    const first = await make([plain, selfAlias], { ...fields, chunk_bytes: 26 }).ingestText(text, {
+      source: "docs/abc.md",
+      dry_run: true,
+    });
+    expect(first.removed_items).toEqual(["chunk 2/2 aliases[0]: alias equals its canonical"]);
+    const second = await make([plain, plain], { ...fields, chunk_bytes: 16 }).ingestText(text, {
+      source: "docs/abc.md",
+      dry_run: true,
+    });
+    expect(second.chunks_reused).toBe(1);
+    expect(second.removed_items).toEqual(["chunk 3/3 aliases[0]: alias equals its canonical"]);
+  });
+
+  it("reports the removals of completed chunks when interrupted", async () => {
+    let checks = 0;
+    const outcome = await make([CHUNK1_SELF_ALIAS], { chunk_bytes: CROSS_CHUNK_BYTES }).ingestText(
+      DOC_TEXT,
+      { source: "docs/aomine.md", should_stop: () => (checks += 1) > 1 },
+    );
+    expect(outcome.interrupted).toBe(true);
+    expect(outcome.removed_items).toEqual(["chunk 1/2 aliases[0]: alias equals its canonical"]);
+  });
+
   it("keeps a reused chunk's removals", async () => {
     const store = new MemoryCheckpointStore();
     const source = "docs/aomine.md";
@@ -377,6 +411,14 @@ describe("checkpoint pieces and removals", () => {
   it("loads a piece written before removals existed with none", () => {
     const loaded = DocumentCheckpoints.fromBytes(fileWith(basePiece), fingerprint);
     expect(loaded.lookup("h")?.removed).toEqual([]);
+  });
+
+  it("treats an explicit null removal list as a corrupt file", () => {
+    const loaded = DocumentCheckpoints.fromBytes(
+      fileWith({ ...basePiece, removed: null }),
+      fingerprint,
+    );
+    expect(loaded.lookup("h")).toBeNull();
   });
 
   it("treats a malformed removal list as a corrupt file", () => {

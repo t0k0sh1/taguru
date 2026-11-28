@@ -559,12 +559,15 @@ interface ChunkRecord {
  * Every chunk's accepted-answer removals, in chunk order, as `taguru
  * extract`'s report words them: the removal's own path-first text, prefixed
  * `chunk K/N` when the segment spans several chunks so a path like
- * `aliases[0]` still names one item.
+ * `aliases[0]` still names one item. `records` holds one record per chunk in
+ * chunk order, so K is the record's position — not its `chunkIndex`, which a
+ * reused checkpoint piece carries from the run that wrote it, under that
+ * run's chunking.
  */
 function removedItems(records: ChunkRecord[], chunkTotal: number): string[] {
   const items: string[] = [];
-  for (const record of records) {
-    const prefix = chunkTotal > 1 ? `chunk ${record.chunkIndex + 1}/${chunkTotal} ` : "";
+  for (const [position, record] of records.entries()) {
+    const prefix = chunkTotal > 1 ? `chunk ${position + 1}/${chunkTotal} ` : "";
     for (const removal of record.removed) {
       items.push(`${prefix}${removalText(removal)}`);
     }
@@ -882,6 +885,7 @@ export class TaguruIngester {
     for (let index = 0; index < chunks.length; index += 1) {
       if (stop()) {
         outcome.interrupted = true;
+        outcome.removed_items = removedItems(records, chunks.length);
         return outcome;
       }
       this.emit({

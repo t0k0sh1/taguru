@@ -392,10 +392,13 @@ def _removed_items(records: list[_ChunkRecord], chunk_total: int) -> list[str]:
     """Every chunk's accepted-answer removals, in chunk order, as
     ``taguru extract``'s report words them: the removal's own path-first
     text, prefixed ``chunk K/N`` when the segment spans several chunks so a
-    path like ``aliases[0]`` still names one item."""
+    path like ``aliases[0]`` still names one item. ``records`` holds one
+    record per chunk in chunk order, so K is the record's position — not
+    its ``chunk_index``, which a reused checkpoint piece carries from the
+    run that wrote it, under that run's chunking."""
     items: list[str] = []
-    for record in records:
-        prefix = f"chunk {record.chunk_index + 1}/{chunk_total} " if chunk_total > 1 else ""
+    for position, record in enumerate(records):
+        prefix = f"chunk {position + 1}/{chunk_total} " if chunk_total > 1 else ""
         items.extend(f"{prefix}{removal}" for removal in record.removed)
     return items
 
@@ -947,6 +950,7 @@ class TaguruIngester:
         for index, piece in enumerate(chunks):
             if stop():
                 outcome.interrupted = True
+                outcome.removed_items = _removed_items(records, len(chunks))
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
@@ -1431,6 +1435,7 @@ class TaguruIngester:
         for index, piece in enumerate(chunks):
             if stop():
                 outcome.interrupted = True
+                outcome.removed_items = _removed_items(records, len(chunks))
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
