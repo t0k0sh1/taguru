@@ -22,11 +22,15 @@ export const MODEL_ANSWER = JSON.stringify({
   questions: [{ paragraph: 1, question: "杜氏は誰?" }],
 });
 
-// The business-rule-invalid item issue #181's strict default now rejects on
-// sight (empty subject) rather than letting merge() silently drop it — split
-// out of MODEL_ANSWER so most fixtures stay a clean one-call success; reused
-// by the lossy-mode and corrective-turn tests below.
-const INVALID_ASSOCIATION = { subject: "", label: "壊", object: "れ", weight: 1.0 };
+// The business-rule-invalid item issue #181's strict default rejects on sight
+// (a zero weight) rather than letting merge() silently drop it — split out of
+// MODEL_ANSWER so most fixtures stay a clean one-call success; reused by the
+// lossy-mode and corrective-turn tests below. Corrective, not removable
+// (ADR 0013): a present-but-wrong value is content a corrective turn can fix,
+// so a strict run that never sees it fixed fails the source, while lossy
+// merge() still drops it. An empty field would be mechanically removed
+// instead (issue #1098).
+const INVALID_ASSOCIATION = { subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 0 };
 
 export const DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。";
 

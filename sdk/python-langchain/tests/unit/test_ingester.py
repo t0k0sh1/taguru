@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -25,7 +26,13 @@ from taguru import (
 
 from taguru_langchain import TaguruIngester
 from taguru_langchain._extract import MAX_PASSAGE_BYTES
-from taguru_langchain.events import AttemptFailed, AttemptStarted, ImportCompleted
+from taguru_langchain.events import (
+    AttemptFailed,
+    AttemptStarted,
+    ChunkCompleted,
+    ImportCompleted,
+    IngestEvent,
+)
 
 from .conftest import FakeServer
 
@@ -54,11 +61,15 @@ MODEL_ANSWER = json.dumps(
     ensure_ascii=False,
 )
 
-# The business-rule-invalid item issue #180's strict default now rejects on
-# sight (empty subject) rather than letting merge() silently drop it —
-# split out of MODEL_ANSWER so most fixtures stay a clean one-call success;
-# reused by the lossy-mode and corrective-turn tests below.
-INVALID_ASSOCIATION = {"subject": "", "label": "壊", "object": "れ", "weight": 1.0}
+# The business-rule-invalid item issue #180's strict default rejects on sight
+# (a zero weight) rather than letting merge() silently drop it — split out of
+# MODEL_ANSWER so most fixtures stay a clean one-call success; reused by the
+# lossy-mode and corrective-turn tests below. Corrective, not removable
+# (ADR 0013): a present-but-wrong value is content a corrective turn can fix,
+# so a strict run that never sees it fixed fails the source, while lossy
+# merge() still drops it. An empty field would be mechanically removed
+# instead (issue #1098).
+INVALID_ASSOCIATION = {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 0}
 
 DOC_TEXT = "青嶺酒造は1907年創業。\n\n杜氏は高瀬である。"
 
@@ -1332,3 +1343,172 @@ async def test_refresh_embeddings_reports_a_forbidden_listing_not_a_missing_cont
         else:
             await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
     assert len(fake_server.imported) == 1
+
+
+# -- mechanical removal (ADR 0013 Stage 1, issue #1098) -------------------------
+
+# A self-alias and an association with an empty object: both removable, so the
+# answer is accepted on the first call — the shape a real model produced in the
+# #1098 report, which used to fail the whole source after a corrective turn.
+REMOVABLE_ANSWER = json.dumps(
+    {
+        "associations": [
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
+            {"subject": "青嶺酒造", "label": "創業年", "object": "", "weight": 1.0},
+        ],
+        "aliases": [{"alias": "青嶺酒造", "canonical": "青嶺酒造", "kind": "concept"}],
+    },
+    ensure_ascii=False,
+)
+REMOVABLE_ITEMS = [
+    "associations[1]: object empty",
+    "aliases[0]: alias equals its canonical",
+]
+
+
+def test_removable_items_are_removed_without_a_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    events: list[IngestEvent] = []
+    ingester, llm = make_ingester(
+        sync_client, async_client, [REMOVABLE_ANSWER], on_event=events.append
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.correction_attempts == 0
+    assert outcome.removed_items == REMOVABLE_ITEMS
+    assert len(llm.seen_prompts) == 1
+    completed = [event for event in events if isinstance(event, ChunkCompleted)]
+    assert [event.removed_items for event in completed] == [tuple(REMOVABLE_ITEMS)]
+    assert completed[0].associations_proposed == 1
+    assert completed[0].aliases_proposed == 0
+
+
+async def test_removable_items_are_removed_without_a_corrective_turn_async(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    events: list[IngestEvent] = []
+    ingester, _llm = make_ingester(
+        sync_client, async_client, [REMOVABLE_ANSWER], on_event=events.append
+    )
+    outcome = await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.correction_attempts == 0
+    assert outcome.removed_items == REMOVABLE_ITEMS
+    completed = [event for event in events if isinstance(event, ChunkCompleted)]
+    assert [event.removed_items for event in completed] == [tuple(REMOVABLE_ITEMS)]
+
+
+def test_removals_from_a_corrected_answer_are_discarded_with_it(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0013 §3.5: an answer that still needs a corrective turn goes back
+    whole — its removable items are not counted; only the accepted answer's
+    own removals are."""
+    removable_and_wrong = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "", "weight": 1.0},
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 0},
+            ],
+            "aliases": [],
+        },
+        ensure_ascii=False,
+    )
+    ingester, _llm = make_ingester(
+        sync_client, async_client, [removable_and_wrong, REMOVABLE_ANSWER]
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.correction_attempts == 1
+    assert outcome.removed_items == REMOVABLE_ITEMS
+
+
+def test_removals_across_chunks_name_their_chunk(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    chunk2_self_alias = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
+            ],
+            "aliases": [{"alias": "高瀬", "canonical": "高瀬", "kind": "concept"}],
+        },
+        ensure_ascii=False,
+    )
+    ingester, _llm = make_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, chunk2_self_alias],
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.chunks == 2
+    assert outcome.removed_items == ["chunk 2/2 aliases[0]: alias equals its canonical"]
+
+
+def test_lossy_mode_reports_nothing_removed(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    ingester, _llm = make_ingester(sync_client, async_client, [REMOVABLE_ANSWER], lossy=True)
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.removed_items == []
+
+
+def test_structured_output_removes_removable_items_without_a_corrective_turn(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    llm = ToolCallingFakeChatModel(tool_call_args=[json.loads(REMOVABLE_ANSWER)])
+    ingester = TaguruIngester(
+        context="sake",
+        llm=llm,
+        client=sync_client,
+        async_client=async_client,
+        questions=2,
+        structured_output=True,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    assert outcome.llm_calls == 1
+    assert outcome.correction_attempts == 0
+    assert outcome.removed_items == REMOVABLE_ITEMS
+
+
+def test_a_stage_two_reanswer_replaces_the_chunks_removals(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Chunk 2's first answer carries a removable self-alias AND a shadowing
+    alias only Stage 2 sees. Stage 2 re-answers the chunk; the re-answer
+    removes nothing, so the chunk's removals are the re-answer's: none
+    (ADR 0013 §3.5 — removals never mix two answers)."""
+    chunk2_self_alias_and_shadowing = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0}
+            ],
+            "aliases": [
+                {"alias": "高瀬", "canonical": "高瀬", "kind": "concept"},
+                {"alias": "1907年", "canonical": "青嶺酒造", "kind": "concept"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    for run in ("sync", "async"):
+        ingester, _llm = make_ingester(
+            sync_client,
+            async_client,
+            [CHUNK1_ANSWER, chunk2_self_alias_and_shadowing, CHUNK2_CORRECTED_ANSWER],
+            chunk_bytes=CROSS_CHUNK_BYTES,
+        )
+        outcome = (
+            ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+            if run == "sync"
+            else asyncio.run(ingester.aingest_text(DOC_TEXT, source="docs/aomine.md"))
+        )
+        assert outcome.ok, run
+        assert outcome.correction_attempts == 1, run
+        assert outcome.removed_items == [], run

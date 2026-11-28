@@ -42,6 +42,8 @@ import {
   indicatesRefusal,
   interpretModelOutput,
   InvalidFault,
+  mechanicalInterpret,
+  removalText,
   isEmptyAnswer,
   labeledDocument,
   merge,
@@ -53,6 +55,7 @@ import {
   userMessage,
   type ItemRules,
   type ModelOutput,
+  type Removal,
 } from "./extract.js";
 import type {
   IngestEvent,
@@ -102,8 +105,9 @@ export interface IngestOutcome {
   locators_dropped: number;
   /** Under the strict default this counts only merge()'s policy trims
    * (per-paragraph question-cap overflow, a volunteered question when
-   * none was requested) — a business-rule-invalid item is corrected or
-   * fails the segment before merge() ever runs (issue #181). Under
+   * none was requested) — a business-rule-invalid item is corrected,
+   * mechanically removed (`removed_items`, ADR 0013), or fails the segment
+   * before merge() ever runs (issue #181). Under
    * `lossy: true` it is the old drop-and-proceed tally: every item
    * merge() silently discarded. */
   duplicates_dropped: number;
@@ -114,6 +118,15 @@ export interface IngestOutcome {
    * Stage 2 cross-chunk correction) this ingest needed — 0 means
    * every chunk's first answer was accepted as-is. */
   correction_attempts: number;
+  /** Items the mechanical pass removed from accepted answers instead of
+   * spending a corrective turn on them (ADR 0013, issue #1098): a
+   * non-object element, a required field missing or empty, an alias whose
+   * spelling equals its canonical. One path-first line per item, in chunk
+   * order, worded as `taguru extract` reports them —
+   * `aliases[0]: alias equals its canonical`, prefixed `chunk 2/3` when the
+   * document spans several chunks. Always empty under `lossy: true`, which
+   * validates nothing. */
+  removed_items: string[];
   /** Labels of automatic, information-preserving JSON repairs applied
    * across every accepted answer (e.g. "trailing_comma", "bom",
    * "code_fence", "braces_slice" — see candidateJson). Empty when no
@@ -153,6 +166,7 @@ const emptyOutcome = (source: string): IngestOutcome => ({
   llm_calls: 0,
   chunks: 0,
   correction_attempts: 0,
+  removed_items: [],
   lossless_repairs: [],
   error: null,
   embeddings_refresh_warning: null,
@@ -304,6 +318,10 @@ interface AttemptResult {
   error: string | null;
   issues: string[] | null;
   metadata: ProviderMetadata | null;
+  /** What the mechanical pass removed from a `valid` answer (ADR 0013);
+   * absent for every other kind — a faulted answer's removals are
+   * discarded with it (§3.5). */
+  removed?: Removal[];
 }
 
 function classifyText(
@@ -346,8 +364,17 @@ function classifyText(
     };
   }
   try {
-    const { output, repairs } = evaluateAnswer(content, rules);
-    return { kind: "valid", content, output, repairs, error: null, issues: null, metadata };
+    const { output, repairs, removed } = evaluateAnswer(content, rules);
+    return {
+      kind: "valid",
+      content,
+      output,
+      repairs,
+      error: null,
+      issues: null,
+      metadata,
+      removed,
+    };
   } catch (error) {
     if (error instanceof InvalidFault) {
       return {
@@ -425,11 +452,24 @@ function classifyStructured(
       metadata,
     };
   }
-  const { output, issues } = interpretModelOutput(parsed, effectiveItemRules(rules));
-  if (rules !== null && issues.length > 0) {
+  if (rules === null) {
+    const { output } = interpretModelOutput(parsed, effectiveItemRules(rules));
+    return { kind: "valid", content, output, repairs: [], error: null, issues: null, metadata };
+  }
+  const { output, removed, issues } = mechanicalInterpret(parsed, rules);
+  if (issues.length > 0) {
     return { kind: "invalid", content, output: null, repairs: [], error: null, issues, metadata };
   }
-  return { kind: "valid", content, output, repairs: [], error: null, issues: null, metadata };
+  return {
+    kind: "valid",
+    content,
+    output,
+    repairs: [],
+    error: null,
+    issues: null,
+    metadata,
+    removed,
+  };
 }
 
 /** The raw, unwrapped human-readable reason one attempt failed — used for
@@ -509,6 +549,30 @@ interface ChunkRecord {
   chunkIndex: number;
   user: string;
   answer: string;
+  /** What the mechanical pass removed from THIS chunk's accepted answer
+   * (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
+   * chunk: removals never mix two answers (ADR 0013 §3.5). */
+  removed: Removal[];
+}
+
+/**
+ * Every chunk's accepted-answer removals, in chunk order, as `taguru
+ * extract`'s report words them: the removal's own path-first text, prefixed
+ * `chunk K/N` when the segment spans several chunks so a path like
+ * `aliases[0]` still names one item. `records` holds one record per chunk in
+ * chunk order, so K is the record's position — not its `chunkIndex`, which a
+ * reused checkpoint piece carries from the run that wrote it, under that
+ * run's chunking.
+ */
+function removedItems(records: ChunkRecord[], chunkTotal: number): string[] {
+  const items: string[] = [];
+  for (const [position, record] of records.entries()) {
+    const prefix = chunkTotal > 1 ? `chunk ${position + 1}/${chunkTotal} ` : "";
+    for (const removal of record.removed) {
+      items.push(`${prefix}${removalText(removal)}`);
+    }
+  }
+  return items;
 }
 
 /**
@@ -727,6 +791,7 @@ export class TaguruIngester {
           chunkIndex: chunkRecord.chunkIndex,
           user: chunkRecord.user,
           answer: result.content,
+          removed: result.removed ?? [],
         };
         outcome.lossless_repairs.push(...result.repairs);
         continue;
@@ -820,6 +885,7 @@ export class TaguruIngester {
     for (let index = 0; index < chunks.length; index += 1) {
       if (stop()) {
         outcome.interrupted = true;
+        outcome.removed_items = removedItems(records, chunks.length);
         return outcome;
       }
       this.emit({
@@ -841,6 +907,7 @@ export class TaguruIngester {
           associations_proposed: cached.output.associations.length,
           aliases_proposed: cached.output.aliases.length,
           questions_proposed: cached.output.questions.length,
+          removed_items: cached.removed.map(removalText),
           llm_calls: 0,
           elapsed_seconds: (performance.now() - chunkStartedAt) / 1000,
           reused: true,
@@ -886,7 +953,13 @@ export class TaguruIngester {
         chunkLlmCalls += 1;
 
         if (result.kind === "valid") {
-          chunkRecord = { output: result.output!, chunkIndex: index, user, answer: result.content };
+          chunkRecord = {
+            output: result.output!,
+            chunkIndex: index,
+            user,
+            answer: result.content,
+            removed: result.removed ?? [],
+          };
           outcome.lossless_repairs.push(...result.repairs);
           break;
         }
@@ -964,6 +1037,7 @@ export class TaguruIngester {
         associations_proposed: chunkRecord.output.associations.length,
         aliases_proposed: chunkRecord.output.aliases.length,
         questions_proposed: chunkRecord.output.questions.length,
+        removed_items: chunkRecord.removed.map(removalText),
         llm_calls: chunkLlmCalls,
         elapsed_seconds: (performance.now() - chunkStartedAt) / 1000,
         reused: false,
@@ -973,6 +1047,7 @@ export class TaguruIngester {
     if (!this.lossy) {
       await this.correctCrossChunkIssues(system, records, rules, chunks.length, outcome, schema);
     }
+    outcome.removed_items = removedItems(records, chunks.length);
 
     const extraction = merge(
       records.map((r) => r.output),
@@ -1322,7 +1397,13 @@ export class TaguruIngester {
     if (cached === null) {
       return null;
     }
-    return { output: cached.output, chunkIndex: cached.chunk_index, user: cached.user, answer: cached.answer };
+    return {
+      output: cached.output,
+      chunkIndex: cached.chunk_index,
+      user: cached.user,
+      answer: cached.answer,
+      removed: cached.removed,
+    };
   }
 
   /**
@@ -1346,6 +1427,7 @@ export class TaguruIngester {
       output: chunkRecord.output,
       user: chunkRecord.user,
       answer: chunkRecord.answer,
+      removed: chunkRecord.removed,
     });
     try {
       await this.checkpoint_store.save(source, checkpoints.toBytes());

@@ -52,6 +52,7 @@ from ._extract import (
     InvalidFault,
     ItemRules,
     ModelOutput,
+    Removal,
     SyntaxFault,
     chunk,
     combined_cross_output_issues,
@@ -66,6 +67,7 @@ from ._extract import (
     interpret_model_output,
     is_empty_answer,
     labeled_document,
+    mechanical_interpret,
     merge,
     render_batch,
     reparse_batch,
@@ -139,8 +141,9 @@ class IngestOutcome:
     invalid_dropped: int = 0
     """Under the strict default this counts only merge()'s policy trims
     (per-paragraph question-cap overflow, a volunteered question when
-    none was requested) — a business-rule-invalid item is corrected or
-    fails the segment before merge() ever runs (issue #180). Under
+    none was requested) — a business-rule-invalid item is corrected,
+    mechanically removed (``removed_items``, ADR 0013), or fails the
+    segment before merge() ever runs (issue #180). Under
     ``lossy=True`` it is the old drop-and-proceed tally: every item
     merge() silently discarded."""
     llm_calls: int = 0
@@ -149,6 +152,15 @@ class IngestOutcome:
     """How many corrective turns (Stage 1 syntax/validity retries plus any
     Stage 2 cross-chunk correction) this ingest needed — 0 means
     every chunk's first answer was accepted as-is."""
+    removed_items: list[str] = field(default_factory=list)
+    """Items the mechanical pass removed from accepted answers instead of
+    spending a corrective turn on them (ADR 0013, issue #1098): a
+    non-object element, a required field missing or empty, an alias whose
+    spelling equals its canonical. One path-first line per item, in chunk
+    order, worded as ``taguru extract`` reports them —
+    ``aliases[0]: alias equals its canonical``, prefixed ``chunk 2/3`` when
+    the document spans several chunks. Always empty under ``lossy=True``,
+    which validates nothing."""
     lossless_repairs: list[str] = field(default_factory=list)
     """Labels of automatic, information-preserving JSON repairs applied
     across every accepted answer (e.g. ``"trailing_comma"``, ``"bom"``,
@@ -188,6 +200,7 @@ class _Attempt:
     metadata: ProviderMetadata | None
     output: ModelOutput | None = None
     repairs: list[str] = field(default_factory=list)
+    removed: list[Removal] = field(default_factory=list)
     error: str | None = None
     issues: list[str] | None = None
 
@@ -210,13 +223,18 @@ def _classify_text(
             kind="empty", content=content, metadata=metadata, error=empty_answer_diagnosis()
         )
     try:
-        output, repairs = evaluate_answer(content, rules)
+        output, repairs, removed = evaluate_answer(content, rules)
     except InvalidFault as fault:
         return _Attempt(kind="invalid", content=content, metadata=metadata, issues=fault.issues)
     except SyntaxFault as fault:
         return _Attempt(kind="syntax", content=content, metadata=metadata, error=str(fault))
     return _Attempt(
-        kind="valid", content=content, metadata=metadata, output=output, repairs=repairs
+        kind="valid",
+        content=content,
+        metadata=metadata,
+        output=output,
+        repairs=repairs,
+        removed=removed,
     )
 
 
@@ -251,10 +269,15 @@ def _classify_structured(
         )
         return _Attempt(kind="syntax", content=content, metadata=metadata, error=str(error))
     value = parsed.model_dump() if isinstance(parsed, BaseModel) else parsed
-    output, issues = interpret_model_output(value, effective_item_rules(rules))
-    if rules is not None and issues:
+    if rules is None:
+        output, _issues = interpret_model_output(value, effective_item_rules(rules))
+        return _Attempt(kind="valid", content=content, metadata=metadata, output=output)
+    output, removed, issues = mechanical_interpret(value, rules)
+    if issues:
         return _Attempt(kind="invalid", content=content, metadata=metadata, issues=issues)
-    return _Attempt(kind="valid", content=content, metadata=metadata, output=output)
+    return _Attempt(
+        kind="valid", content=content, metadata=metadata, output=output, removed=removed
+    )
 
 
 def _diagnosis(result: _Attempt) -> str:
@@ -365,6 +388,21 @@ def _refuse_partial_listing(page: ContextPage, name: str) -> None:
     )
 
 
+def _removed_items(records: list[_ChunkRecord], chunk_total: int) -> list[str]:
+    """Every chunk's accepted-answer removals, in chunk order, as
+    ``taguru extract``'s report words them: the removal's own path-first
+    text, prefixed ``chunk K/N`` when the segment spans several chunks so a
+    path like ``aliases[0]`` still names one item. ``records`` holds one
+    record per chunk in chunk order, so K is the record's position — not
+    its ``chunk_index``, which a reused checkpoint piece carries from the
+    run that wrote it, under that run's chunking."""
+    items: list[str] = []
+    for position, record in enumerate(records):
+        prefix = f"chunk {position + 1}/{chunk_total} " if chunk_total > 1 else ""
+        items.extend(f"{prefix}{removal}" for removal in record.removed)
+    return items
+
+
 @dataclass
 class _ChunkRecord:
     """One chunk's accepted output, plus everything Stage 2's single
@@ -376,6 +414,10 @@ class _ChunkRecord:
     chunk_index: int
     user: str
     answer: str
+    removed: list[Removal] = field(default_factory=list)
+    """What the mechanical pass removed from THIS chunk's accepted answer
+    (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
+    chunk: removals never mix two answers (ADR 0013 §3.5)."""
 
 
 class TaguruIngester:
@@ -767,6 +809,7 @@ class TaguruIngester:
             chunk_index=cached.chunk_index,
             user=cached.user,
             answer=cached.answer,
+            removed=cached.removed,
         )
 
     def _record_checkpoint(
@@ -804,6 +847,7 @@ class TaguruIngester:
                 output=record.output,
                 user=record.user,
                 answer=record.answer,
+                removed=record.removed,
             ),
         )
         store = self.checkpoint_store
@@ -906,6 +950,7 @@ class TaguruIngester:
         for index, piece in enumerate(chunks):
             if stop():
                 outcome.interrupted = True
+                outcome.removed_items = _removed_items(records, len(chunks))
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
@@ -921,6 +966,7 @@ class TaguruIngester:
                         associations_proposed=len(cached.output.associations),
                         aliases_proposed=len(cached.output.aliases),
                         questions_proposed=len(cached.output.questions),
+                        removed_items=tuple(str(removal) for removal in cached.removed),
                         llm_calls=0,
                         elapsed_seconds=time.monotonic() - chunk_started_at,
                         reused=True,
@@ -960,7 +1006,11 @@ class TaguruIngester:
                 if result.kind == "valid":
                     assert result.output is not None
                     record = _ChunkRecord(
-                        output=result.output, chunk_index=index, user=user, answer=result.content
+                        output=result.output,
+                        chunk_index=index,
+                        user=user,
+                        answer=result.content,
+                        removed=result.removed,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1032,6 +1082,7 @@ class TaguruIngester:
                     associations_proposed=len(record.output.associations),
                     aliases_proposed=len(record.output.aliases),
                     questions_proposed=len(record.output.questions),
+                    removed_items=tuple(str(removal) for removal in record.removed),
                     llm_calls=chunk_llm_calls,
                     elapsed_seconds=time.monotonic() - chunk_started_at,
                 )
@@ -1041,6 +1092,7 @@ class TaguruIngester:
             self._correct_cross_chunk_issues(
                 source, system, records, rules, len(chunks), outcome, schema
             )
+        outcome.removed_items = _removed_items(records, len(chunks))
 
         ndjson = self._build_batch(
             self._header_context_id(dry_run=dry_run),
@@ -1308,6 +1360,7 @@ class TaguruIngester:
                     chunk_index=record.chunk_index,
                     user=record.user,
                     answer=result.content,
+                    removed=result.removed,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue
@@ -1382,6 +1435,7 @@ class TaguruIngester:
         for index, piece in enumerate(chunks):
             if stop():
                 outcome.interrupted = True
+                outcome.removed_items = _removed_items(records, len(chunks))
                 return outcome
             chunk_started_at = time.monotonic()
             self._emit(ChunkStarted(source=source, index=index, total=len(chunks)))
@@ -1397,6 +1451,7 @@ class TaguruIngester:
                         associations_proposed=len(cached.output.associations),
                         aliases_proposed=len(cached.output.aliases),
                         questions_proposed=len(cached.output.questions),
+                        removed_items=tuple(str(removal) for removal in cached.removed),
                         llm_calls=0,
                         elapsed_seconds=time.monotonic() - chunk_started_at,
                         reused=True,
@@ -1436,7 +1491,11 @@ class TaguruIngester:
                 if result.kind == "valid":
                     assert result.output is not None
                     record = _ChunkRecord(
-                        output=result.output, chunk_index=index, user=user, answer=result.content
+                        output=result.output,
+                        chunk_index=index,
+                        user=user,
+                        answer=result.content,
+                        removed=result.removed,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1508,6 +1567,7 @@ class TaguruIngester:
                     associations_proposed=len(record.output.associations),
                     aliases_proposed=len(record.output.aliases),
                     questions_proposed=len(record.output.questions),
+                    removed_items=tuple(str(removal) for removal in record.removed),
                     llm_calls=chunk_llm_calls,
                     elapsed_seconds=time.monotonic() - chunk_started_at,
                 )
@@ -1517,6 +1577,7 @@ class TaguruIngester:
             await self._acorrect_cross_chunk_issues(
                 source, system, records, rules, len(chunks), outcome, schema
             )
+        outcome.removed_items = _removed_items(records, len(chunks))
 
         ndjson = self._build_batch(
             await self._aheader_context_id(dry_run=dry_run),
@@ -1648,6 +1709,7 @@ class TaguruIngester:
                 output=record.output,
                 user=record.user,
                 answer=record.answer,
+                removed=record.removed,
             ),
         )
         store = self.checkpoint_store
@@ -1817,6 +1879,7 @@ class TaguruIngester:
                     chunk_index=record.chunk_index,
                     user=record.user,
                     answer=result.content,
+                    removed=result.removed,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue

@@ -50,6 +50,7 @@ const piece = (overrides: Partial<CheckpointPiece> = {}): CheckpointPiece => ({
   output: { associations: [], aliases: [], questions: [] },
   user: "u",
   answer: "a",
+  removed: [],
   ...overrides,
 });
 
