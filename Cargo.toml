@@ -72,7 +72,7 @@ libc = "0.2"
 url = "2.5"
 # std::sync locks poison on panic, bricking the whole registry for the
 # rest of the process; parking_lot's don't.
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Already in the tree through reqwest; made direct for CatchPanicLayer,
 # so a handler panic becomes a logged 500 instead of silently dropping
 # the request's metrics, access log, and trace out from under it.
