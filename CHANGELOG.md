@@ -7,6 +7,28 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-28
+
+A patch release. `TAGURU_EMBED_AUTO` embeds on the flusher tick again
+after silently doing nothing since 0.10.0 (#1096). Existing data needs
+one explicit refresh per context (see **Fixed**). The `url` crate moves
+to 2.5.9 for RUSTSEC-2026-0592. No on-disk format, response shape or
+SDK surface changes.
+
+### Security
+
+- Dependency advisory: `url` 2.5.9 (`form_urlencoded` 1.2.3) for
+  RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested
+  `blob:` URLs (#1084).
+
+### Changed
+
+- Dependencies: `parking_lot` 0.13 (#1088). Patch updates: `fastembed`
+  7.7.1, `ureq` 3.5.2, `uuid` 1.29.3, `sha2` 0.11.1,
+  `unicode-normalization` 0.1.26, `regex` 1.13.2, `libc` 0.2.191,
+  `opentelemetry-otlp` / `opentelemetry_sdk` 0.33.1. The SDK changes
+  are confined to dev dependencies.
+
 ### Fixed
 
 - **`TAGURU_EMBED_AUTO` embeds again** (#1096). Since 0.10.0 the
@@ -5359,7 +5381,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/t0k0sh1/taguru/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/t0k0sh1/taguru/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/t0k0sh1/taguru/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/t0k0sh1/taguru/compare/v0.9.6...v0.9.7
