@@ -6042,6 +6042,123 @@ fn an_uncorrected_shadowing_alias_is_removed_and_the_document_still_lands() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// A Stage 2 issue names the item in the ANSWER the corrective turn
+/// replays, not in the output Stage 1 left behind: with a self-alias
+/// removed at `aliases[0]`, the shadowing alias the model wrote at
+/// `aliases[1]` is the output's first alias, and the ask must still
+/// say `aliases[1]` — `aliases[0]` in the replayed text is the
+/// self-alias, which the model would "fix" instead.
+#[test]
+fn a_cross_chunk_corrective_turn_names_items_by_their_place_in_the_answer() {
+    let docs = batch_dir("extract-stage2-answer-index-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-stage2-answer-index-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "b", "canonical": "b", "kind": "concept"},
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "a", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![bad_reply, good_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].contains("aliases[1].alias: names something the associations already contain"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        !requests[1].contains("aliases[0].alias: names something"),
+        "{}",
+        requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0022's removal of an alias the corrective turn left standing
+/// records the alias's place in the answer, as every Stage 1 removal
+/// does — not its place in the output after Stage 1's own removals.
+#[test]
+fn an_uncorrected_alias_removal_names_its_place_in_the_answer() {
+    let docs = batch_dir("extract-uncorrected-answer-index-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-uncorrected-answer-index-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "b", "canonical": "b", "kind": "concept"},
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    // The corrective turn answers with the very same thing.
+    let (url, _requests) = stub_chat_server(vec![bad_reply.clone(), bad_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "2e7d2c03-a950-4ae2-a5ec-f5b5356885a5",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let self_alias = format!(
+        "taguru: extract: {}: removed: aliases[0]: alias equals its canonical",
+        doc.display()
+    );
+    let shadowing = format!(
+        "taguru: extract: {}: removed: aliases[1].alias: names something the associations \
+         already contain — still so after the corrective turn; removed",
+        doc.display()
+    );
+    assert!(stderr.contains(&self_alias), "{stderr}");
+    assert!(stderr.contains(&shadowing), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// ADR 0032 (#811): a Stage 2 corrective answer that ends at the
 /// output cap takes ADR 0019's one escalation exactly as a Stage 1
 /// piece does — the same corrective ask resent at the escalated

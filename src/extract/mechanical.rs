@@ -690,10 +690,11 @@ pub(super) fn prune_unresolvable_aliases(outputs: &mut [ChunkOutput]) -> usize {
     let (concept_names, label_names) = association_name_sets(outputs);
     let mut count = 0;
     for chunk in outputs.iter_mut() {
+        let positions = answer_positions(&chunk.removed, "aliases", chunk.output.aliases.len());
         let removed = &mut chunk.removed;
         let mut index = 0usize;
         chunk.output.aliases.retain(|alias| {
-            let path = format!("aliases[{index}]");
+            let path = format!("aliases[{}]", positions[index]);
             index += 1;
             let (Some(spelling), Some(canonical), Some(kind)) =
                 (&alias.alias, &alias.canonical, &alias.kind)
@@ -835,10 +836,11 @@ fn claim_aliases(namespace: &mut BTreeMap<String, String>, aliases: &BTreeMap<St
 pub(super) fn prune_claimed_aliases(outputs: &mut [ChunkOutput], claimed: &ClaimedNames) -> usize {
     let mut count = 0;
     for chunk in outputs.iter_mut() {
+        let positions = answer_positions(&chunk.removed, "aliases", chunk.output.aliases.len());
         let removed = &mut chunk.removed;
         let mut index = 0usize;
         chunk.output.aliases.retain(|alias| {
-            let path = format!("aliases[{index}]");
+            let path = format!("aliases[{}]", positions[index]);
             index += 1;
             let (Some(spelling), Some(canonical), Some(kind)) =
                 (&alias.alias, &alias.canonical, &alias.kind)
@@ -878,9 +880,52 @@ pub(super) fn prune_claimed_aliases(outputs: &mut [ChunkOutput], claimed: &Claim
 /// `aliases[3]: conflicts …`, `aliases[3].canonical: …`), or `None`
 /// for any issue about something other than an alias item.
 pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
-    let rest = issue.strip_prefix("aliases[")?;
-    let (digits, _) = rest.split_once(']')?;
-    digits.parse().ok()
+    array_index(issue, "aliases").map(|(index, _)| index)
+}
+
+/// The item index a path or issue opens with in `array`
+/// (`"associations"` or `"aliases"`), and the text after its `]`:
+/// `aliases[3].alias: …` → `(3, ".alias: …")`.
+fn array_index<'a>(text: &'a str, array: &str) -> Option<(usize, &'a str)> {
+    let rest = text.strip_prefix(array)?.strip_prefix('[')?;
+    let (digits, after) = rest.split_once(']')?;
+    Some((digits.parse().ok()?, after))
+}
+
+/// Where each item still in a chunk's `array` sat in the model's
+/// answer: the answer indices no removal recorded so far names, in
+/// order. Every removal path is an answer index — Stage 1 walks the
+/// answer itself, and the Stage 2 prunes record through this — so the
+/// output's item `i` is the answer's item `positions[i]`. That is what
+/// a corrective turn must name, because the model is shown its answer,
+/// not the output.
+fn answer_positions(removed: &[Removal], array: &str, survivors: usize) -> Vec<usize> {
+    let gone: BTreeSet<usize> = removed
+        .iter()
+        .filter_map(|removal| array_index(&removal.path, array).map(|(index, _)| index))
+        .collect();
+    (0..)
+        .filter(|index| !gone.contains(index))
+        .take(survivors)
+        .collect()
+}
+
+/// An issue the Stage 2 checks wrote against `chunk.output`
+/// (`aliases[0].alias: …` = the output's first alias) rewritten to
+/// name the same item in the chunk's answer — the text the corrective
+/// turn replays and the report quotes. Unchanged when Stage 1 removed
+/// nothing before that item, and for an issue naming no item.
+pub(super) fn issue_in_answer_terms(chunk: &ChunkOutput, issue: &str) -> String {
+    for (array, survivors) in [
+        ("associations", chunk.output.associations.len()),
+        ("aliases", chunk.output.aliases.len()),
+    ] {
+        if let Some((index, after)) = array_index(issue, array) {
+            let positions = answer_positions(&chunk.removed, array, survivors.max(index + 1));
+            return format!("{array}[{}]{after}", positions[index]);
+        }
+    }
+    issue.to_string()
 }
 
 /// ADR 0022 (#763): what the Stage 2 re-check still flags after the
@@ -895,7 +940,9 @@ pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
 /// domain/range violation on an association) is content, and keeps
 /// ADR 0001 §8's ruling: `Err` with that output's issues, the caller
 /// fails the segment. Indices are removed highest-first within an
-/// output so each recorded path still names the alias the issue did.
+/// output; each recorded path, like the failure's issues, names the
+/// item in the chunk's answer ([`issue_in_answer_terms`]), the one
+/// the report and the replayed corrective turn show.
 pub(super) fn prune_uncorrected_aliases(
     outputs: &mut [ChunkOutput],
     issues_by_output: Vec<(usize, Vec<String>)>,
@@ -905,15 +952,18 @@ pub(super) fn prune_uncorrected_aliases(
         let non_alias: Vec<String> = issues
             .iter()
             .filter(|issue| alias_issue_index(issue).is_none())
-            .cloned()
+            .map(|issue| issue_in_answer_terms(&outputs[output_index], issue))
             .collect();
         if !non_alias.is_empty() {
             return Err((output_index, non_alias));
         }
         let chunk = &mut outputs[output_index];
-        let mut doomed: Vec<(usize, &String)> = issues
+        // Translated before any removal below shifts the output.
+        let mut doomed: Vec<(usize, String)> = issues
             .iter()
-            .filter_map(|issue| alias_issue_index(issue).map(|index| (index, issue)))
+            .filter_map(|issue| {
+                alias_issue_index(issue).map(|index| (index, issue_in_answer_terms(chunk, issue)))
+            })
             .collect();
         doomed.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
         doomed.dedup_by_key(|(index, _)| *index);

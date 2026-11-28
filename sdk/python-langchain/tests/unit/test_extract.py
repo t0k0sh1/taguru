@@ -39,6 +39,7 @@ from taguru_langchain._extract import (
     indicates_length_limit,
     indicates_refusal,
     interpret_model_output,
+    issue_in_answer_terms,
     labeled_document,
     mechanical_interpret,
     merge,
@@ -1354,3 +1355,32 @@ def test_removal_round_trips_through_its_dict_form() -> None:
     assert Removal.from_dict(removal.to_dict()) == removal
     assert Removal.from_dict({"path": "aliases[0]"}) is None
     assert Removal.from_dict("aliases[0]: alias equals its canonical") is None
+
+
+def test_issue_in_answer_terms_skips_the_items_the_mechanical_pass_removed() -> None:
+    """Port of extract.rs issue_in_answer_terms_skips_the_items_stage_one_removed."""
+    output = ModelOutput(
+        associations=[
+            ModelAssociation(subject="a", label="l", object="b", weight=1.0, paragraph=None),
+            ModelAssociation(subject="c", label="l", object="d", weight=1.0, paragraph=None),
+        ],
+        aliases=[
+            ModelAlias(alias="x", canonical="a", kind="concept"),
+            ModelAlias(alias="y", canonical="c", kind="concept"),
+        ],
+        questions=[],
+    )
+    removed = [
+        Removal("associations[1]", "object empty", None),
+        Removal("aliases[0]", "alias equals its canonical", None),
+        Removal("aliases[2]", "alias equals its canonical", None),
+    ]
+    terms = lambda issue: issue_in_answer_terms(output, removed, issue)  # noqa: E731
+    assert terms("aliases[0].alias: names something") == "aliases[1].alias: names something"
+    assert terms("aliases[1]: conflicts with an earlier alias") == (
+        "aliases[3]: conflicts with an earlier alias"
+    )
+    assert terms("associations[0].subject: x") == "associations[0].subject: x"
+    assert terms("associations[1].object: y") == "associations[2].object: y"
+    assert terms("aliases: expected an array") == "aliases: expected an array"
+    assert issue_in_answer_terms(output, [], "aliases[1].alias: z") == "aliases[1].alias: z"

@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { AIMessageChunk } from "@langchain/core/messages";
+import { AIMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
 import type { ChatResult } from "@langchain/core/outputs";
 import { FakeListChatModel } from "@langchain/core/utils/testing";
 import { describe, expect, it } from "vitest";
@@ -24,6 +24,7 @@ import type { ChunkCompleted, IngestEvent } from "../../src/events.js";
 import {
   evaluateAnswer,
   InvalidFault,
+  issueInAnswerTerms,
   mechanicalInterpret,
   removalFromJson,
   removalText,
@@ -155,6 +156,34 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
     expect(evaluateAnswer(content, null).removed).toEqual([]);
   });
 
+  it("names an output item by its place in the answer", () => {
+    const output = {
+      associations: [
+        { subject: "a", label: "l", object: "b", weight: 1, paragraph: null },
+        { subject: "c", label: "l", object: "d", weight: 1, paragraph: null },
+      ],
+      aliases: [
+        { alias: "x", canonical: "a", kind: "concept" },
+        { alias: "y", canonical: "c", kind: "concept" },
+      ],
+      questions: [],
+    };
+    const removed = [
+      { path: "associations[1]", reason: "object empty", item: null },
+      { path: "aliases[0]", reason: "alias equals its canonical", item: null },
+      { path: "aliases[2]", reason: "alias equals its canonical", item: null },
+    ];
+    const terms = (issue: string) => issueInAnswerTerms(output, removed, issue);
+    expect(terms("aliases[0].alias: names something")).toBe("aliases[1].alias: names something");
+    expect(terms("aliases[1]: conflicts with an earlier alias")).toBe(
+      "aliases[3]: conflicts with an earlier alias",
+    );
+    expect(terms("associations[0].subject: x")).toBe("associations[0].subject: x");
+    expect(terms("associations[1].object: y")).toBe("associations[2].object: y");
+    expect(terms("aliases: expected an array")).toBe("aliases: expected an array");
+    expect(issueInAnswerTerms(output, [], "aliases[1].alias: z")).toBe("aliases[1].alias: z");
+  });
+
   it("round-trips a removal through its JSON form", () => {
     const removal = { path: "aliases[0]", reason: "alias equals its canonical", item: { alias: "b" } };
     expect(removalFromJson(JSON.parse(JSON.stringify(removal)))).toEqual(removal);
@@ -221,6 +250,24 @@ class ToolCallingFake extends BaseChatModel {
       tool_calls: [{ name: "ModelOutput", args, id: `call_${this.calls}` }],
     });
     return { generations: [{ text: "", message }] };
+  }
+}
+
+/** Scripted text answers that records every prompt it was sent. */
+class RecordingFake extends BaseChatModel {
+  calls = 0;
+  seenPrompts: BaseMessage[][] = [];
+  constructor(private readonly responses: string[]) {
+    super({});
+  }
+  _llmType(): string {
+    return "recording-fake";
+  }
+  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    this.seenPrompts.push(messages);
+    const text = this.responses[this.calls]!;
+    this.calls += 1;
+    return { generations: [{ text, message: new AIMessage(text) }] };
   }
 }
 
@@ -315,12 +362,18 @@ describe("TaguruIngester mechanical removal (ADR 0013, issue #1098)", () => {
       associations: [{ subject: "青嶺酒造", label: "杜氏", object: "高瀬", weight: 1.0 }],
       aliases: [{ alias: "Sake", canonical: "青嶺酒造", kind: "concept" }],
     });
-    const outcome = await make([chunk1, chunk2SelfAliasAndShadowing, corrected], {
-      chunk_bytes: CROSS_CHUNK_BYTES,
-    }).ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    const llm = new RecordingFake([chunk1, chunk2SelfAliasAndShadowing, corrected]);
+    const outcome = await make([], { llm, chunk_bytes: CROSS_CHUNK_BYTES }).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+    });
     expect(outcome.ok).toBe(true);
     expect(outcome.correction_attempts).toBe(1);
     expect(outcome.removed_items).toEqual([]);
+    // The shadowing alias is the OUTPUT's first alias but the ANSWER's
+    // second; the corrective ask names it as the replayed answer has it.
+    const ask = llm.seenPrompts.at(-1)!.at(-1)!.content as string;
+    expect(ask).toContain("aliases[1].alias: names something the associations already contain");
+    expect(ask).not.toContain("aliases[0].alias");
   });
 
   it("reports nothing removed in lossy mode", async () => {

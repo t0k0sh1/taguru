@@ -1659,7 +1659,7 @@ impl Run {
             .as_ref()
             .and_then(|ladder| ladder.max_output_tokens);
         for (output_index, issues) in cross_issues {
-            let (chunk_index, piece_id, corrected_attempt, user, answer) = {
+            let (chunk_index, piece_id, corrected_attempt, user, answer, answer_issues) = {
                 let chunk = &outputs[output_index];
                 (
                     chunk.chunk_index,
@@ -1667,6 +1667,10 @@ impl Run {
                     chunk.attempt.clone(),
                     chunk.user.clone(),
                     chunk.answer.clone(),
+                    issues
+                        .iter()
+                        .map(|issue| issue_in_answer_terms(chunk, issue))
+                        .collect::<Vec<_>>(),
                 )
             };
             let label = format!("chunk {}/{chunk_total}", chunk_index + 1);
@@ -1676,7 +1680,9 @@ impl Run {
                 corrective_assistant_turn(&answer, self.correction.corrective_replay_cap),
                 serde_json::json!({
                     "role": "user",
-                    "content": corrective_validation_message(&issues),
+                    // The checks indexed the output; the model is shown
+                    // its answer, where Stage 1's removals still stand.
+                    "content": corrective_validation_message(&answer_issues),
                 }),
             ];
             let round = CrossChunkRound {

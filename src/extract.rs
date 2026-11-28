@@ -187,8 +187,9 @@ use coverage::{CoverageGap, coverage_gaps};
 use diagnostics::{DiagnosticsAttempt, removed_item_texts};
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
 use mechanical::{
-    ClaimedNames, Removal, mechanical_interpret, name_occurs, normalize_for_occurrence,
-    prune_claimed_aliases, prune_uncorrected_aliases, prune_unresolvable_aliases,
+    ClaimedNames, Removal, issue_in_answer_terms, mechanical_interpret, name_occurs,
+    normalize_for_occurrence, prune_claimed_aliases, prune_uncorrected_aliases,
+    prune_unresolvable_aliases,
 };
 use parse::{
     ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,

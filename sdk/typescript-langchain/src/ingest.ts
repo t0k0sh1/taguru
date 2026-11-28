@@ -42,6 +42,7 @@ import {
   indicatesRefusal,
   interpretModelOutput,
   InvalidFault,
+  issueInAnswerTerms,
   mechanicalInterpret,
   removalText,
   isEmptyAnswer,
@@ -771,7 +772,15 @@ export class TaguruIngester {
         new AIMessage(
           correctiveAssistantTurnContent(chunkRecord.answer, this.corrective_replay_bytes),
         ),
-        new HumanMessage(correctiveValidationMessage(issues)),
+        // The checks indexed the output; the model is shown its answer,
+        // where the mechanical pass's removals still stand.
+        new HumanMessage(
+          correctiveValidationMessage(
+            issues.map((issue) =>
+              issueInAnswerTerms(chunkRecord.output, chunkRecord.removed, issue),
+            ),
+          ),
+        ),
       ];
       this.emit({
         kind: "attempt_started",

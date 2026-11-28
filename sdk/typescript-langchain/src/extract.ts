@@ -1345,6 +1345,61 @@ export function removalFromJson(value: unknown): Removal | null {
 }
 
 /**
+ * The item index a path or issue opens with in `array` ("associations" or
+ * "aliases"), and the text after its `]`: `aliases[3].alias: …` →
+ * `[3, ".alias: …"]`. Mirrors mechanical.rs.
+ */
+function arrayIndex(text: string, array: string): [number, string] | null {
+  const match = new RegExp(`^${array}\\[([0-9]+)\\]`).exec(text);
+  if (match === null) {
+    return null;
+  }
+  return [Number(match[1]), text.slice(match[0].length)];
+}
+
+/**
+ * An issue the Stage 2 checks wrote against `output` (`aliases[0]` = the
+ * output's first alias) rewritten to name the same item in the model's
+ * answer — the text the corrective turn replays, where the mechanical
+ * pass's removals still stand. Every removal path is an answer index, so
+ * the output's item `i` is the `i`-th answer index no removal names.
+ * Unchanged when nothing was removed before that item, and for an issue
+ * naming no item. Mirrors mechanical.rs's `issue_in_answer_terms`.
+ */
+export function issueInAnswerTerms(
+  output: ModelOutput,
+  removed: readonly Removal[],
+  issue: string,
+): string {
+  const arrays: [string, number][] = [
+    ["associations", output.associations.length],
+    ["aliases", output.aliases.length],
+  ];
+  for (const [array, survivors] of arrays) {
+    const found = arrayIndex(issue, array);
+    if (found === null) {
+      continue;
+    }
+    const [index, after] = found;
+    const gone = new Set<number>();
+    for (const removal of removed) {
+      const hit = arrayIndex(removal.path, array);
+      if (hit !== null) {
+        gone.add(hit[0]);
+      }
+    }
+    const positions: number[] = [];
+    for (let candidate = 0; positions.length <= Math.max(index, survivors - 1); candidate += 1) {
+      if (!gone.has(candidate)) {
+        positions.push(candidate);
+      }
+    }
+    return `${array}[${positions[index]}]${after}`;
+  }
+  return issue;
+}
+
+/**
  * A required field that is mechanically absent: missing (or null) or a
  * string that trims to nothing. A present wrong-typed value is NOT absent —
  * it is content a corrective turn can fix. Trims exactly as

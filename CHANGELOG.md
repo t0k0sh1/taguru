@@ -26,6 +26,23 @@ Entries that change an on-disk format or a response shape say so.
   single-character labels, and the per-segment alias prunes) are not
   ported yet.
 
+### Fixed
+
+- **A cross-chunk corrective turn names the item the model actually
+  wrote** (`taguru extract` and both LangChain ingesters). The cross-chunk
+  checks index each chunk's answer after the per-chunk removals. The
+  corrective turn replays the answer as the model wrote it, with the
+  removed items still in place. When a self-alias at `aliases[0]` had
+  been removed, the ask for a shadowing alias at `aliases[1]` named
+  `aliases[0]`, which in the replayed answer is the self-alias. The ask
+  now names `aliases[1]`. In `taguru extract`, the same fix applies to
+  three other places, which now name the item's position in the answer
+  as the per-chunk removals already do:
+  - the removal records of the dangling-canonical, claimed-alias (#758)
+    and uncorrected-alias (ADR 0022) prunes, on stderr, in the
+    diagnostics sidecar and in the attempts trace
+  - the issues quoted when a segment fails after its correction
+
 ## [0.11.1] - 2026-11-28
 
 A patch release. `TAGURU_EMBED_AUTO` embeds on the flusher tick again
