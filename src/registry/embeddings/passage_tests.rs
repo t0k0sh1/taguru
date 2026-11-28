@@ -36,8 +36,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            state.passage_embed_dirty_names(),
-            vec!["sake".to_string()],
+            state.passage_embed_dirty_contexts(),
+            vec![(state.id_of("sake"), "sake".to_string())],
             "a store marks the context for the auto ticker"
         );
 
@@ -55,7 +55,7 @@ mod tests {
             "three paragraphs fit one provider batch"
         );
         assert!(
-            state.passage_embed_dirty_names().is_empty(),
+            state.passage_embed_dirty_contexts().is_empty(),
             "the refresh claims the dirty flag"
         );
 
@@ -498,8 +498,8 @@ mod tests {
             "the batch that landed is durable despite the failure"
         );
         assert_eq!(
-            state.passage_embed_dirty_names(),
-            vec!["sake".to_string()],
+            state.passage_embed_dirty_contexts(),
+            vec![(state.id_of("sake"), "sake".to_string())],
             "unfinished work stays claimed for the ticker"
         );
 

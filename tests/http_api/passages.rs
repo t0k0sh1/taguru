@@ -681,3 +681,64 @@ fn search_semantic_floor_override_rides_every_search_surface() {
         "per-context effective floors, in target order: {split}"
     );
 }
+
+/// `TAGURU_EMBED_AUTO` must actually embed on the flusher tick: a
+/// context created over HTTP carries a minted id distinct from its
+/// display name, and the tick used to hand that NAME to the id-keyed
+/// refresh — the lookup missed, the refresh returned "no such context",
+/// and nothing was ever embedded, with no log line either way. Both
+/// lanes are pinned: the gloss refresh (driven by the flushed list) and
+/// the passage refresh (driven by its own dirty flag).
+#[test]
+fn auto_embed_refreshes_both_lanes_on_the_flusher_tick() {
+    let provider = spawn_fruity_embeddings();
+    let server = Server::start_with_env(
+        "auto-embed-tick",
+        &[
+            ("TAGURU_EMBED_URL", provider.as_str()),
+            ("TAGURU_EMBED_MODEL", "fruity-model"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+            ("TAGURU_EMBED_AUTO", "1"),
+            ("TAGURU_FLUSH_SECS", "1"),
+        ],
+    );
+    server.ok(
+        "POST",
+        "/contexts",
+        Some(json!({"name": "fruit", "description": "果樹園"})),
+    );
+    let id = server.cx("fruit");
+    assert_ne!(
+        id, "fruit",
+        "the regression needs an id distinct from the name"
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/sources"),
+        Some(json!({"passages": {"docs/apple.md": "りんごは真っ赤に実った。"}})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{id}/associations"),
+        Some(json!([
+            {"subject": "りんご", "label": "色", "object": "赤", "weight": 1.0}
+        ])),
+    );
+
+    // No explicit refresh anywhere: only the ticker may fill the lanes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        let status = server.ok("GET", &format!("/contexts/{id}/embeddings"), None);
+        if status.get("glosses").is_some() && status.get("passages").is_some() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flusher tick never embedded the context: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert_eq!(status["glosses"]["model"], "fruity-model", "{status}");
+    assert_eq!(status["passages"]["model"], "fruity-model", "{status}");
+    assert_eq!(status["passages"]["rows"], 1, "{status}");
+}

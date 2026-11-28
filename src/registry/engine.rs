@@ -39,15 +39,27 @@ impl AppState {
     /// when that is enabled. Called once more on graceful shutdown; a
     /// failed save is retried on the next tick (the entry stays dirty).
     pub fn flush_dirty(&self) -> Vec<String> {
+        self.flush_dirty_contexts()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// [`AppState::flush_dirty`] keyed for follow-up work: each flushed
+    /// `context` as `(id, display name)`. The flusher's auto embedding
+    /// refresh addresses the `context` by the id (refreshes look up by
+    /// id, and a display name is neither an id nor unique) and logs the
+    /// name.
+    pub(crate) fn flush_dirty_contexts(&self) -> Vec<(String, String)> {
         let mut flushed = Vec::new();
         for entry in self.snapshot() {
-            // The display name, for logs, metrics, and the refresh
-            // list — read once here; the files are addressed by
-            // `entry.id`, which no rename can move mid-flush.
+            // The display name, for logs and metrics — read once here;
+            // the files are addressed by `entry.id`, which no rename
+            // can move mid-flush.
             let name = entry.inner.read().name.clone();
             self.flush_bm25(&name, &entry);
             if self.flush_entry(&name, &entry) {
-                flushed.push(name);
+                flushed.push((entry.id.clone(), name));
             }
         }
         // After the images land: every caller of this (the flusher

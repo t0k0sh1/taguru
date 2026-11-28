@@ -1347,7 +1347,7 @@ fn run_flush_tick(
 ) {
     // Serialization and fsyncs are blocking work; keep the
     // async workers free while images land on disk.
-    let flushed = tokio::task::block_in_place(|| state.flush_dirty());
+    let flushed = tokio::task::block_in_place(|| state.flush_dirty_contexts());
     // Opt-in: a flushed context just changed on disk, so its
     // glosses may have changed too — re-embed the difference.
     if auto_embed && !flushed.is_empty() {
@@ -1364,14 +1364,16 @@ fn run_flush_tick(
         // tick exactly.
         let workers = state.embed_parallel();
         tokio::task::block_in_place(|| {
-            parallel_map(flushed, workers, |name| {
-                match state.auto_refresh_embeddings(&name, Deadline::unbounded()) {
+            parallel_map(flushed, workers, |(id, name)| {
+                // By id: the refresh looks the `context` up by id, and a
+                // display name is neither one nor unique.
+                match state.auto_refresh_embeddings(&id, Deadline::unbounded()) {
                     None | Some(Ok((0, _))) => {}
                     Some(Ok((embedded, _))) => {
-                        info!(context = %name, embedded, "auto-embedded glosses");
+                        info!(context = %id, name = %name, embedded, "auto-embedded glosses");
                     }
                     Some(Err(error)) => {
-                        warn!(context = %name, error, "auto embedding refresh failed");
+                        warn!(context = %id, name = %name, error, "auto embedding refresh failed");
                     }
                 }
             });
@@ -1381,27 +1383,29 @@ fn run_flush_tick(
     // marks the GRAPH dirty, so the flush list alone would
     // miss passage-only ingest.
     if auto_embed && state.passage_embedding_enabled() {
-        let stale = state.passage_embed_dirty_names();
+        let stale = state.passage_embed_dirty_contexts();
         if !stale.is_empty() {
             // Same independence — and the same `embed_parallel` cap,
             // for the same reason — as the gloss refresh above, under
             // `entry.passage_refresh` instead.
             let workers = state.embed_parallel();
             tokio::task::block_in_place(|| {
-                parallel_map(stale, workers, |name| {
-                    match state.auto_refresh_passage_embeddings(&name, Deadline::unbounded()) {
+                parallel_map(stale, workers, |(id, name)| {
+                    match state.auto_refresh_passage_embeddings(&id, Deadline::unbounded()) {
                         None => {}
                         Some(Ok(outcome)) if outcome.embedded == 0 => {}
                         Some(Ok(outcome)) => {
                             info!(
-                                context = %name,
+                                context = %id,
+                                name = %name,
                                 embedded = outcome.embedded,
                                 "auto-embedded paragraphs"
                             );
                         }
                         Some(Err(error)) => {
                             warn!(
-                                context = %name,
+                                context = %id,
+                                name = %name,
                                 error,
                                 "auto passage embedding failed"
                             );

@@ -7,6 +7,18 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`TAGURU_EMBED_AUTO` embeds again** (#1096). Since 0.10.0 the
+  flusher tick handed each flushed context's display name to the
+  refresh, which looks contexts up by id. Any context whose name differs
+  from its id was skipped silently, which is every context created
+  since #964. Neither glosses nor paragraphs were ever auto-embedded,
+  and passage search ran without its vector lane. Existing data is not
+  backfilled on upgrade: run `POST /contexts/{id}/embeddings/refresh`
+  once per context that was never refreshed by hand. New writes are
+  embedded on the flusher tick again.
+
 ## [0.11.0] - 2026-11-19
 
 A vocabulary and hardening release. Extraction's terms get one meaning
