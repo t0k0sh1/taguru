@@ -1307,13 +1307,23 @@ export function interpretModelOutput(
 // -- mechanical removal before corrective turns (ADR 0013, mirrors Python's ---
 // -- mechanical_interpret / src/extract/mechanical.rs's Stage 1) --------------
 //
-// Issue #1098, first slice: the removal classes that need nothing beyond the
-// item itself — a non-object element, a required field missing/null/empty,
-// and an alias whose spelling equals its canonical. mechanical.rs's other
-// Stage 1 rules (the occurrence check, ADR 0039's foreign ideographs, the
-// redaction placeholder and single-character label rules) and its Stage 2
-// prunes are not ported yet; until they are, those items keep this module's
-// corrective path exactly as before.
+// Ported so far (issues #1098, #1101): a non-object element, a required field
+// missing/null/empty, an alias whose spelling equals its canonical, a
+// single-character label, and a redaction placeholder in a subject, object,
+// or alias spelling. mechanical.rs's other Stage 1 rules (ADR 0039's foreign
+// ideographs, the occurrence check) and its Stage 2 prunes are not ported
+// yet (#1101); until they are, those items keep this module's corrective
+// path.
+
+// ADR 0038's placeholder form, as src/sensitive.rs matches it. Every class is
+// ASCII, so the pattern means the same in JavaScript as in Rust's regex.
+const PLACEHOLDER = /«redacted [a-z0-9_]+ [0-9a-f]{4,64}»/;
+
+/** Whether `text` carries a redaction placeholder anywhere — a mask copied
+ * out of the segment, not an entity or a spelling (ADR 0038 §3.3). */
+function isPlaceholderBearing(text: string): boolean {
+  return PLACEHOLDER.test(text);
+}
 
 /**
  * One mechanically removed item (ADR 0013, as ADR 0024 records it): the
@@ -1444,7 +1454,42 @@ function associationMechanically(
     removed.push({ path, reason: absent.join(", "), item });
     return null;
   }
-  return interpretAssociationItem(index, item, issues);
+  const itemIssues: string[] = [];
+  const parsed = interpretAssociationItem(index, item, itemIssues);
+  if (parsed === null || itemIssues.length > 0) {
+    // A present-but-wrong value is content a corrective turn can fix; the
+    // removal rules below judge only an otherwise valid item.
+    issues.push(...itemIssues);
+    return parsed;
+  }
+  const { subject, label, object } = parsed as { subject: string; label: string; object: string };
+  // A single character (a bare Japanese particle, most often) functions as
+  // no relation at all, and a survivor would be offered back to every later
+  // chunk through the label vocabulary. Counted in code points, as Rust's
+  // chars().count() does — not UTF-16 units.
+  if ([...label].length < 2) {
+    removed.push({
+      path,
+      reason:
+        `label ${quoteForIssue(label)} is a single character — ` + "too generic to be a relation",
+      item,
+    });
+    return null;
+  }
+  const placeholders: string[] = [];
+  for (const [field, name] of [
+    ["subject", subject],
+    ["object", object],
+  ] as const) {
+    if (isPlaceholderBearing(name)) {
+      placeholders.push(`${field} ${quoteForIssue(name)} is a redaction placeholder`);
+    }
+  }
+  if (placeholders.length > 0) {
+    removed.push({ path, reason: `${placeholders.join(", ")} — not an entity`, item });
+    return null;
+  }
+  return parsed;
 }
 
 function aliasMechanically(
@@ -1465,6 +1510,17 @@ function aliasMechanically(
   }
   const itemIssues: string[] = [];
   const parsed = interpretAliasItem(index, item, itemIssues);
+  // Judged before the self-alias rule, so a placeholder that is also its own
+  // canonical is accounted as the placeholder it is.
+  const spelling = parsed?.alias;
+  if (typeof spelling === "string" && isPlaceholderBearing(spelling)) {
+    removed.push({
+      path,
+      reason: `alias ${quoteForIssue(spelling)} is a redaction placeholder — not a spelling`,
+      item,
+    });
+    return null;
+  }
   if (
     parsed !== null &&
     parsed.alias !== null &&

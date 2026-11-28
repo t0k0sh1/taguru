@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "segment": "青嶺酒造の杜氏は高瀬さん。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "の",
+        "object": "杜氏"
+      },
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": []
+  },
+  "removed": [
+    "associations[0]: label \"の\" is a single character — too generic to be a relation"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}

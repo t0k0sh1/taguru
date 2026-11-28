@@ -135,6 +135,10 @@ without a corrective turn, as `taguru extract` removes them (ADR 0013):
 - an array element that is not an object
 - an association or alias with a required field missing, null or empty
 - an alias whose spelling equals its canonical
+- an association whose label is a single character (a bare particle such
+  as `の` relates nothing)
+- a redaction placeholder (`«redacted …»`) as a subject, object or alias
+  spelling: a mask copied out of the text, not an entity
 
 Each removal is listed in `IngestOutcome.removed_items` and in the chunk's `chunk_completed`
 event, worded as `taguru extract` reports it (`aliases[0]: alias equals its

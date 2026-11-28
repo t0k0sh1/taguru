@@ -88,8 +88,8 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
     const answer = {
       associations: [
         "not an object",
-        { subject: " ", label: "l" },
-        { subject: "a", label: "l", object: "b" },
+        { subject: " ", label: "is" },
+        { subject: "a", label: "is", object: "b" },
       ],
       aliases: [
         7,
@@ -110,10 +110,71 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
     expect(removed[1]).toEqual({
       path: "associations[1]",
       reason: "subject empty, object missing",
-      item: { subject: " ", label: "l" },
+      item: { subject: " ", label: "is" },
     });
     expect(output.associations.map((a) => [a.subject, a.object])).toEqual([["a", "b"]]);
     expect(output.aliases.map((a) => [a.alias, a.canonical])).toEqual([["B", "b"]]);
+  });
+
+  it("removes a single-character label", () => {
+    const answer = {
+      associations: [
+        { subject: "青嶺酒造", label: "の", object: "高瀬" },
+        { subject: "青嶺酒造", label: "杜氏", object: "高瀬" },
+        // One code point outside the BMP is two UTF-16 units but one char.
+        { subject: "青嶺酒造", label: "𠮷", object: "高瀬" },
+      ],
+    };
+    const { output, removed, issues } = mechanicalInterpret(answer, RULES);
+    expect(issues).toEqual([]);
+    expect(removed.map(removalText)).toEqual([
+      'associations[0]: label "の" is a single character — too generic to be a relation',
+      'associations[2]: label "𠮷" is a single character — too generic to be a relation',
+    ]);
+    expect(output.associations.map((a) => a.label)).toEqual(["杜氏"]);
+  });
+
+  it("removes a redaction placeholder from associations and aliases", () => {
+    const mask = "«redacted email 1a2b»";
+    const answer = {
+      associations: [
+        { subject: mask, label: "連絡先", object: `担当 ${mask}` },
+        { subject: "青嶺酒造", label: "杜氏", object: "高瀬" },
+      ],
+      aliases: [
+        { alias: mask, canonical: mask, kind: "concept" },
+        { alias: "Aomine", canonical: "青嶺酒造", kind: "concept" },
+      ],
+    };
+    const { output, removed, issues } = mechanicalInterpret(answer, RULES);
+    expect(issues).toEqual([]);
+    expect(removed.map(removalText)).toEqual([
+      `associations[0]: subject "${mask}" is a redaction placeholder, ` +
+        `object "担当 ${mask}" is a redaction placeholder — not an entity`,
+      `aliases[0]: alias "${mask}" is a redaction placeholder — not a spelling`,
+    ]);
+    expect(output.associations).toHaveLength(1);
+    expect(output.aliases).toHaveLength(1);
+  });
+
+  it("needs the exact placeholder form", () => {
+    const answer = {
+      associations: [
+        { subject: "«redacted email 1A2B»", label: "連絡先", object: "x" },
+        { subject: "«redacted email 1a2»", label: "連絡先", object: "x" },
+        { subject: "<redacted email 1a2b>", label: "連絡先", object: "x" },
+      ],
+    };
+    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    expect(issues).toEqual([]);
+    expect(removed).toEqual([]);
+  });
+
+  it("keeps a correctable item from the removal rules", () => {
+    const answer = { associations: [{ subject: "a", label: "の", object: "b", weight: 0 }] };
+    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    expect(removed).toEqual([]);
+    expect(issues).toEqual(["associations[0].weight: expected finite non-zero number, got 0"]);
   });
 
   it("drops a self-alias's other issues with it", () => {

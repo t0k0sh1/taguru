@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -1182,13 +1183,23 @@ def interpret_model_output(value: Any, rules: ItemRules) -> tuple[ModelOutput, l
 # -- mechanical removal before corrective turns (ADR 0013, mirrors -------------
 # -- src/extract/mechanical.rs's Stage 1) ---------------------------------------
 #
-# Issue #1098, first slice: the removal classes that need nothing beyond the
-# item itself — a non-object element, a required field missing/null/empty,
-# and an alias whose spelling equals its canonical. mechanical.rs's other
-# Stage 1 rules (the occurrence check, ADR 0039's foreign ideographs, the
-# redaction placeholder and single-character label rules) and its Stage 2
-# prunes are not ported yet; until they are, those items keep this module's
-# corrective path exactly as before.
+# Ported so far (issues #1098, #1101): a non-object element, a required field
+# missing/null/empty, an alias whose spelling equals its canonical, a
+# single-character label, and a redaction placeholder in a subject, object,
+# or alias spelling. mechanical.rs's other Stage 1 rules (ADR 0039's foreign
+# ideographs, the occurrence check) and its Stage 2 prunes are not ported yet
+# (#1101); until they are, those items keep this module's corrective path.
+
+# ADR 0038's placeholder form, as src/sensitive.rs matches it. Every class
+# is ASCII, so the pattern means the same in Python's re as in Rust's regex.
+_PLACEHOLDER = re.compile(r"«redacted [a-z0-9_]+ [0-9a-f]{4,64}»")
+
+
+def _is_placeholder_bearing(text: str) -> bool:
+    """Whether ``text`` carries a redaction placeholder anywhere — a mask
+    copied out of the segment, not an entity or a spelling (ADR 0038
+    §3.3)."""
+    return _PLACEHOLDER.search(text) is not None
 
 
 @dataclass(frozen=True)
@@ -1291,7 +1302,38 @@ def _association_mechanically(
     if absent:
         removed.append(Removal(path, ", ".join(absent), item))
         return None
-    return _interpret_association_item(index, item, issues)
+    item_issues: list[str] = []
+    parsed = _interpret_association_item(index, item, item_issues)
+    if parsed is None or item_issues:
+        # A present-but-wrong value is content a corrective turn can fix;
+        # the removal rules below judge only an otherwise valid item.
+        issues.extend(item_issues)
+        return parsed
+    assert parsed.subject is not None and parsed.label is not None
+    assert parsed.object is not None
+    # A single character (a bare Japanese particle, most often) functions as
+    # no relation at all, and a survivor would be offered back to every
+    # later chunk through the label vocabulary. Counted in code points, as
+    # Rust's chars().count() does.
+    if len(parsed.label) < 2:
+        removed.append(
+            Removal(
+                path,
+                f"label {_quote_for_issue(parsed.label)} is a single character — "
+                "too generic to be a relation",
+                item,
+            )
+        )
+        return None
+    placeholders = [
+        f"{field} {_quote_for_issue(name)} is a redaction placeholder"
+        for field, name in (("subject", parsed.subject), ("object", parsed.object))
+        if _is_placeholder_bearing(name)
+    ]
+    if placeholders:
+        removed.append(Removal(path, f"{', '.join(placeholders)} — not an entity", item))
+        return None
+    return parsed
 
 
 def _alias_mechanically(
@@ -1307,6 +1349,18 @@ def _alias_mechanically(
         return None
     item_issues: list[str] = []
     parsed = _interpret_alias_item(index, item, item_issues)
+    # Judged before the self-alias rule, so a placeholder that is also its
+    # own canonical is accounted as the placeholder it is.
+    if parsed is not None and parsed.alias is not None and _is_placeholder_bearing(parsed.alias):
+        removed.append(
+            Removal(
+                path,
+                f"alias {_quote_for_issue(parsed.alias)} is a redaction placeholder — "
+                "not a spelling",
+                item,
+            )
+        )
+        return None
     if (
         parsed is not None
         and parsed.alias is not None

@@ -21,10 +21,11 @@ Entries that change an on-disk format or a response shape say so.
   `IngestOutcome.removed_items` and in the `chunk_completed` event's
   `removed_items`, worded as `taguru extract` reports it. Checkpoints
   record removals too; checkpoints written before this change still load.
-  `lossy` mode is unchanged. The CLI's other removal rules (the
-  occurrence check, foreign ideographs, redaction placeholders,
-  single-character labels, and the per-segment alias prunes) are not
-  ported yet.
+  `lossy` mode is unchanged. Two more of the CLI's rules followed
+  (#1101): an association whose label is a single character, and a
+  redaction placeholder used as a subject, object or alias spelling. The
+  CLI's remaining rules (the occurrence check, foreign ideographs, and the
+  per-segment alias prunes) are not ported yet.
 
 ### Fixed
 
