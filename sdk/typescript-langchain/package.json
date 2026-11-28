@@ -52,7 +52,7 @@
   },
   "devDependencies": {
     "taguru": "^0.11.0",
-    "@langchain/core": "^1.4.1",
+    "@langchain/core": "^1.5.1",
     "pdfjs-dist": "^6.4.299",
     "fflate": "^0.8.2",
     "fast-xml-parser": "^5.12.1",
