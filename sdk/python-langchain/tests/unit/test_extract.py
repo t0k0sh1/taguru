@@ -1057,7 +1057,7 @@ def test_evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_igno
     )
     strict_rules = ItemRules(paragraph_count=1, questions_requested=False)
     try:
-        evaluate_answer(content, strict_rules)
+        evaluate_answer(content, strict_rules, "")
     except InvalidFault as fault:
         assert fault.issues == [
             'associations[0].weight: expected finite non-zero number, got string "strong"'
@@ -1067,7 +1067,7 @@ def test_evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_igno
 
     # Lossy mode (rules=None) ignores the same issue and hands back the
     # parsed output, byte-for-byte parse_model_output's behavior.
-    output, _repairs, removed = evaluate_answer(content, None)
+    output, _repairs, removed = evaluate_answer(content, None, "")
     assert removed == []
     assert len(output.associations) == 1
     assert output.associations[0].weight is None
@@ -1077,7 +1077,7 @@ def test_evaluate_answer_reports_a_syntax_fault_before_any_validation() -> None:
     """Port of extract.rs evaluate_answer_reports_a_syntax_fault_before_any_validation."""
     strict_rules = ItemRules(paragraph_count=1, questions_requested=False)
     try:
-        evaluate_answer("not json at all", strict_rules)
+        evaluate_answer("not json at all", strict_rules, "")
     except SyntaxFault as fault:
         assert "not a JSON object" in str(fault)
     else:
@@ -1234,7 +1234,6 @@ _REMOVED_FIXTURES_NOT_YET_PORTED = {
     "alias_dangling_canonical.json",  # Stage 2 prune
     "association_fabricated_object.json",  # occurrence check (ADR 0013 §4)
     "association_fabricated_sparse_object.json",  # occurrence check (ADR 0036)
-    "association_foreign_ideograph_label.json",  # foreign ideographs (ADR 0039)
 }
 
 
@@ -1253,7 +1252,7 @@ def test_removed_fixtures_are_removed_mechanically_with_zero_corrective_issues()
             paragraph_count=fixture["rules"]["paragraph_count"],
             questions_requested=fixture["rules"]["questions_cap"] > 0,
         )
-        output, removed, issues = mechanical_interpret(fixture["answer"], rules)
+        output, removed, issues = mechanical_interpret(fixture["answer"], rules, fixture["segment"])
         assert issues == [], path.name
         assert [str(removal) for removal in removed] == fixture["removed"], path.name
         assert len(output.associations) == fixture["surviving_associations"], path.name
@@ -1275,7 +1274,7 @@ def test_mechanical_pass_removes_each_stage_one_class_with_its_original_item() -
             {"alias": "B", "canonical": "b", "kind": "concept"},
         ],
     }
-    output, removed, issues = mechanical_interpret(answer, rules)
+    output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == []
     assert [str(removal) for removal in removed] == [
         'associations[0]: expected an object, got string "not an object"',
@@ -1299,7 +1298,7 @@ def test_a_self_alias_drops_its_other_issues_with_it() -> None:
     kind on a self-alias is not worth a corrective turn either."""
     rules = ItemRules(paragraph_count=1, questions_requested=False)
     answer = {"aliases": [{"alias": "b", "canonical": "b", "kind": "entity"}]}
-    _output, removed, issues = mechanical_interpret(answer, rules)
+    _output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == []
     assert [str(removal) for removal in removed] == ["aliases[0]: alias equals its canonical"]
 
@@ -1316,11 +1315,11 @@ def test_mechanical_pass_keeps_present_but_wrong_values_for_the_corrective_turn(
         ],
         "aliases": [],
     }
-    _output, removed, issues = mechanical_interpret(answer, rules)
+    _output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == ["associations[1].weight: expected finite non-zero number, got 0"]
     assert [str(removal) for removal in removed] == ["associations[0]: object empty"]
     try:
-        evaluate_answer(json.dumps(answer), rules)
+        evaluate_answer(json.dumps(answer), rules, "")
     except InvalidFault as fault:
         assert fault.issues == issues
     else:
@@ -1341,7 +1340,7 @@ def test_evaluate_answer_accepts_after_mechanical_removal_and_records_it() -> No
         },
         ensure_ascii=False,
     )
-    output, _repairs, removed = evaluate_answer(content, rules)
+    output, _repairs, removed = evaluate_answer(content, rules, "")
     assert [str(removal) for removal in removed] == [
         "associations[1]: object empty",
         "aliases[0]: alias equals its canonical",
@@ -1394,7 +1393,7 @@ def test_a_single_character_label_is_removed() -> None:
             {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
         ]
     }
-    output, removed, issues = mechanical_interpret(answer, rules)
+    output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == []
     assert [str(removal) for removal in removed] == [
         'associations[0]: label "の" is a single character — too generic to be a relation'
@@ -1417,7 +1416,7 @@ def test_a_redaction_placeholder_is_removed_from_associations_and_aliases() -> N
             {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"},
         ],
     }
-    output, removed, issues = mechanical_interpret(answer, rules)
+    output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == []
     assert [str(removal) for removal in removed] == [
         f'associations[0]: subject "{mask}" is a redaction placeholder, '
@@ -1438,7 +1437,7 @@ def test_a_placeholder_needs_the_exact_form() -> None:
             {"subject": "<redacted email 1a2b>", "label": "連絡先", "object": "x"},
         ]
     }
-    _output, removed, issues = mechanical_interpret(answer, rules)
+    _output, removed, issues = mechanical_interpret(answer, rules, "")
     assert issues == []
     assert removed == []
 
@@ -1448,6 +1447,116 @@ def test_a_correctable_issue_keeps_the_item_from_the_removal_rules() -> None:
     a wrong weight on a single-character label stays corrective."""
     rules = ItemRules(paragraph_count=1, questions_requested=False)
     answer = {"associations": [{"subject": "a", "label": "の", "object": "b", "weight": 0}]}
-    _output, removed, issues = mechanical_interpret(answer, rules)
+    _output, removed, issues = mechanical_interpret(answer, rules, "")
     assert removed == []
     assert issues == ["associations[0].weight: expected finite non-zero number, got 0"]
+
+
+# -- ADR 0039 foreign ideographs (issue #1101) ---------------------------------
+
+
+def test_the_jis_x0208_table_is_the_rust_one() -> None:
+    """The SDK's bitset is generated by the same script as
+    src/extract/jis_x0208.rs; a regeneration that missed one producer would
+    silently disagree on which ideographs are foreign."""
+    import re
+
+    from taguru_langchain._jis_x0208 import JIS_X0208_IDEOGRAPHS
+
+    rust = (repo_root() / "src" / "extract" / "jis_x0208.rs").read_text(encoding="utf-8")
+    rust_words = [int(word, 16) for word in re.findall(r"0x([0-9a-f]{16})", rust)]
+    assert list(JIS_X0208_IDEOGRAPHS) == rust_words
+    assert len(rust_words) == 328
+
+
+FOREIGN_RULES = ItemRules(paragraph_count=1, questions_requested=False)
+
+
+def test_a_label_with_an_ideograph_outside_the_segments_script_is_removed() -> None:
+    """Port of extract.rs
+    mechanical_pass_removes_a_label_with_an_ideograph_outside_the_documents_script."""
+    answer = {
+        "associations": [
+            {"subject": "前二項の罪", "label": "适用法律", "object": "刑法第二条の例"},
+            {"subject": "前二項の罪", "label": "適用法律", "object": "刑法第二条の例"},
+        ],
+        "aliases": [],
+    }
+    output, removed, issues = mechanical_interpret(
+        answer, FOREIGN_RULES, "前二項の罪は、刑法第二条の例に従う。"
+    )
+    assert issues == []
+    assert [a.label for a in output.associations] == ["適用法律"]
+    assert [str(removal) for removal in removed] == [
+        'associations[0]: label "适用法律" uses 适 — an ideograph outside the segment\'s script'
+    ]
+
+
+def test_a_foreign_ideograph_the_segment_contains_is_kept() -> None:
+    """Port of extract.rs mechanical_pass_keeps_a_foreign_ideograph_the_document_contains."""
+    answer = {
+        "associations": [
+            {"subject": "前二項の罪", "label": "适用法律", "object": "刑法第二条の例"}
+        ],
+        "aliases": [{"alias": "适用", "canonical": "刑法第二条の例", "kind": "concept"}],
+    }
+    output, removed, issues = mechanical_interpret(
+        answer, FOREIGN_RULES, "前二項の罪には刑法第二条の例を适用する。"
+    )
+    assert issues == []
+    assert removed == []
+    assert len(output.associations) == 1
+    assert len(output.aliases) == 1
+
+
+def test_every_foreign_field_of_an_item_is_named_in_one_record() -> None:
+    """Port of extract.rs mechanical_pass_names_every_foreign_field_of_an_item_in_one_record."""
+    answer = {
+        "associations": [{"subject": "主務大臣", "label": "适用法律", "object": "处分の例"}],
+        "aliases": [],
+    }
+    output, removed, _issues = mechanical_interpret(
+        answer, FOREIGN_RULES, "主務大臣は処分の例を適用する。"
+    )
+    assert output.associations == []
+    assert [str(removal) for removal in removed] == [
+        'associations[0]: label "适用法律" uses 适, object "处分の例" uses 处 — '
+        "ideographs outside the segment's script"
+    ]
+
+
+def test_an_alias_spelling_outside_the_segments_script_is_removed_alone() -> None:
+    """Port of extract.rs
+    mechanical_pass_removes_an_alias_spelling_outside_the_documents_script."""
+    answer = {
+        "associations": [{"subject": "主務大臣", "label": "適用", "object": "処分"}],
+        "aliases": [
+            {"alias": "处分", "canonical": "処分", "kind": "concept"},
+            {"alias": "処分等", "canonical": "処分", "kind": "concept"},
+        ],
+    }
+    output, removed, issues = mechanical_interpret(
+        answer, FOREIGN_RULES, "主務大臣は処分を適用する。処分等ともいう。"
+    )
+    assert issues == []
+    assert len(output.associations) == 1
+    assert [a.alias for a in output.aliases] == ["処分等"]
+    assert [str(removal) for removal in removed] == [
+        'aliases[0]: alias "处分" uses 处 — an ideograph outside the segment\'s script'
+    ]
+
+
+def test_ideographs_outside_the_unified_block_and_kana_are_judged_as_rust_does() -> None:
+    """An Extension B ideograph is outside JIS X 0208 by definition; kana is
+    not an ideograph at all; a repeated foreign ideograph is listed once."""
+    answer = {
+        "associations": [
+            {"subject": "𠮷野家", "label": "店舗", "object": "牛丼"},
+            {"subject": "カタカナ", "label": "说说", "object": "牛丼"},
+        ]
+    }
+    _output, removed, _issues = mechanical_interpret(answer, FOREIGN_RULES, "吉野家の牛丼。")
+    assert [str(removal) for removal in removed] == [
+        'associations[0]: subject "𠮷野家" uses 𠮷 — an ideograph outside the segment\'s script',
+        'associations[1]: label "说说" uses 说 — an ideograph outside the segment\'s script',
+    ]

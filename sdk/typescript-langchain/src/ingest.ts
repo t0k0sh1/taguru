@@ -43,6 +43,7 @@ import {
   interpretModelOutput,
   InvalidFault,
   issueInAnswerTerms,
+  MECHANICAL_RULES_VERSION,
   mechanicalInterpret,
   removalText,
   isEmptyAnswer,
@@ -329,6 +330,7 @@ function classifyText(
   content: string,
   metadata: ProviderMetadata | null,
   rules: ItemRules | null,
+  segment: string,
 ): AttemptResult {
   const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
@@ -365,7 +367,7 @@ function classifyText(
     };
   }
   try {
-    const { output, repairs, removed } = evaluateAnswer(content, rules);
+    const { output, repairs, removed } = evaluateAnswer(content, rules, segment);
     return {
       kind: "valid",
       content,
@@ -416,6 +418,7 @@ function classifyStructured(
   metadata: ProviderMetadata | null,
   parsed: Record<string, unknown> | null | undefined,
   rules: ItemRules | null,
+  segment: string,
 ): AttemptResult {
   const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
@@ -457,7 +460,7 @@ function classifyStructured(
     const { output } = interpretModelOutput(parsed, effectiveItemRules(rules));
     return { kind: "valid", content, output, repairs: [], error: null, issues: null, metadata };
   }
-  const { output, removed, issues } = mechanicalInterpret(parsed, rules);
+  const { output, removed, issues } = mechanicalInterpret(parsed, rules, segment);
   if (issues.length > 0) {
     return { kind: "invalid", content, output: null, repairs: [], error: null, issues, metadata };
   }
@@ -554,6 +557,11 @@ interface ChunkRecord {
    * (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
    * chunk: removals never mix two answers (ADR 0013 §3.5). */
   removed: Removal[];
+  /** The chunk text the model was shown — what a Stage 2 re-answer is
+   * judged against. Kept as the piece itself rather than re-parsed out of
+   * `user`, whose preamble quotes the caller's source string verbatim (a
+   * source holding a blank line would otherwise move the boundary). */
+  segment: string;
 }
 
 /**
@@ -716,17 +724,18 @@ export class TaguruIngester {
   private async attemptOnce(
     messages: BaseMessage[],
     rules: ItemRules | null,
+    segment: string,
   ): Promise<AttemptResult> {
     if (this.structuredLlm !== null) {
       const result = await this.structuredLlm.invoke(messages);
       const content = contentText(result.raw);
       const metadata = providerMetadata(result.raw);
-      return classifyStructured(content, metadata, result.parsed, rules);
+      return classifyStructured(content, metadata, result.parsed, rules, segment);
     }
     const response = await this.llm.invoke(messages);
     const content = contentText(response);
     const metadata = providerMetadata(response);
-    return classifyText(content, metadata, rules);
+    return classifyText(content, metadata, rules, segment);
   }
 
   /**
@@ -791,7 +800,7 @@ export class TaguruIngester {
         stage: "cross_chunk",
       });
       const attemptStartedAt = performance.now();
-      const result = await this.attemptOnce(messages, rules);
+      const result = await this.attemptOnce(messages, rules, chunkRecord.segment);
       outcome.llm_calls += 1;
       outcome.correction_attempts += 1;
       if (result.kind === "valid") {
@@ -801,6 +810,7 @@ export class TaguruIngester {
           user: chunkRecord.user,
           answer: result.content,
           removed: result.removed ?? [],
+          segment: chunkRecord.segment,
         };
         outcome.lossless_repairs.push(...result.repairs);
         continue;
@@ -957,7 +967,7 @@ export class TaguruIngester {
           stage: "item",
         });
         const attemptStartedAt = performance.now();
-        const result = await this.attemptOnce(messages, rules);
+        const result = await this.attemptOnce(messages, rules, chunks[index]!);
         outcome.llm_calls += 1;
         chunkLlmCalls += 1;
 
@@ -968,6 +978,7 @@ export class TaguruIngester {
             user,
             answer: result.content,
             removed: result.removed ?? [],
+            segment: chunks[index]!,
           };
           outcome.lossless_repairs.push(...result.repairs);
           break;
@@ -1359,6 +1370,7 @@ export class TaguruIngester {
       structured_output: this.structured_output ? "langchain" : "",
       lossy: this.lossy,
       schema_digest: digest,
+      mechanical_rules: MECHANICAL_RULES_VERSION,
     };
   }
 
@@ -1412,6 +1424,7 @@ export class TaguruIngester {
       user: cached.user,
       answer: cached.answer,
       removed: cached.removed,
+      segment: piece,
     };
   }
 

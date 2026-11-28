@@ -25,11 +25,13 @@ import {
   evaluateAnswer,
   InvalidFault,
   issueInAnswerTerms,
+  MECHANICAL_RULES_VERSION,
   mechanicalInterpret,
   removalFromJson,
   removalText,
   type ItemRules,
 } from "../../src/extract.js";
+import { JIS_X0208_IDEOGRAPHS } from "../../src/jis-x0208.js";
 import { TaguruIngester } from "../../src/ingest.js";
 import { FakeServer } from "./stub.js";
 
@@ -43,11 +45,11 @@ const REMOVED_FIXTURES_NOT_YET_PORTED = new Set([
   "alias_dangling_canonical.json", // Stage 2 prune
   "association_fabricated_object.json", // occurrence check (ADR 0013 §4)
   "association_fabricated_sparse_object.json", // occurrence check (ADR 0036)
-  "association_foreign_ideograph_label.json", // foreign ideographs (ADR 0039)
 ]);
 
 interface RemovedFixture {
   rules: { paragraph_count: number; questions_cap: number };
+  segment: string;
   answer: unknown;
   removed: string[];
   surviving_associations: number;
@@ -77,7 +79,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
       paragraphCount: fixture.rules.paragraph_count,
       questionsRequested: fixture.rules.questions_cap > 0,
     };
-    const { output, removed, issues } = mechanicalInterpret(fixture.answer, rules);
+    const { output, removed, issues } = mechanicalInterpret(fixture.answer, rules, fixture.segment);
     expect(issues).toEqual([]);
     expect(removed.map(removalText)).toEqual(fixture.removed);
     expect(output.associations).toHaveLength(fixture.surviving_associations);
@@ -98,7 +100,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
         { alias: "B", canonical: "b", kind: "concept" },
       ],
     };
-    const { output, removed, issues } = mechanicalInterpret(answer, RULES);
+    const { output, removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual([]);
     expect(removed.map(removalText)).toEqual([
       'associations[0]: expected an object, got string "not an object"',
@@ -125,7 +127,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
         { subject: "青嶺酒造", label: "𠮷", object: "高瀬" },
       ],
     };
-    const { output, removed, issues } = mechanicalInterpret(answer, RULES);
+    const { output, removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual([]);
     expect(removed.map(removalText)).toEqual([
       'associations[0]: label "の" is a single character — too generic to be a relation',
@@ -146,7 +148,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
         { alias: "Aomine", canonical: "青嶺酒造", kind: "concept" },
       ],
     };
-    const { output, removed, issues } = mechanicalInterpret(answer, RULES);
+    const { output, removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual([]);
     expect(removed.map(removalText)).toEqual([
       `associations[0]: subject "${mask}" is a redaction placeholder, ` +
@@ -165,21 +167,21 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
         { subject: "<redacted email 1a2b>", label: "連絡先", object: "x" },
       ],
     };
-    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    const { removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual([]);
     expect(removed).toEqual([]);
   });
 
   it("keeps a correctable item from the removal rules", () => {
     const answer = { associations: [{ subject: "a", label: "の", object: "b", weight: 0 }] };
-    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    const { removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(removed).toEqual([]);
     expect(issues).toEqual(["associations[0].weight: expected finite non-zero number, got 0"]);
   });
 
   it("drops a self-alias's other issues with it", () => {
     const answer = { aliases: [{ alias: "b", canonical: "b", kind: "entity" }] };
-    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    const { removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual([]);
     expect(removed.map(removalText)).toEqual(["aliases[0]: alias equals its canonical"]);
   });
@@ -192,10 +194,10 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
       ],
       aliases: [],
     };
-    const { removed, issues } = mechanicalInterpret(answer, RULES);
+    const { removed, issues } = mechanicalInterpret(answer, RULES, "");
     expect(issues).toEqual(["associations[1].weight: expected finite non-zero number, got 0"]);
     expect(removed.map(removalText)).toEqual(["associations[0]: object empty"]);
-    expect(() => evaluateAnswer(JSON.stringify(answer), RULES)).toThrow(InvalidFault);
+    expect(() => evaluateAnswer(JSON.stringify(answer), RULES, "")).toThrow(InvalidFault);
   });
 
   it("evaluateAnswer accepts after mechanical removal and records it", () => {
@@ -206,7 +208,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
       ],
       aliases: [{ alias: "nextest", canonical: "nextest", kind: "concept" }],
     });
-    const { output, removed } = evaluateAnswer(content, RULES);
+    const { output, removed } = evaluateAnswer(content, RULES, "");
     expect(removed.map(removalText)).toEqual([
       "associations[1]: object empty",
       "aliases[0]: alias equals its canonical",
@@ -214,7 +216,7 @@ describe("mechanicalInterpret (ADR 0013 Stage 1)", () => {
     expect(output.associations).toHaveLength(1);
     expect(output.aliases).toEqual([]);
     // Lossy mode validates nothing and so removes nothing.
-    expect(evaluateAnswer(content, null).removed).toEqual([]);
+    expect(evaluateAnswer(content, null, "").removed).toEqual([]);
   });
 
   it("names an output item by its place in the answer", () => {
@@ -437,6 +439,65 @@ describe("TaguruIngester mechanical removal (ADR 0013, issue #1098)", () => {
     expect(ask).not.toContain("aliases[0].alias");
   });
 
+  it("judges foreign ideographs against the chunk text", async () => {
+    // The same label is removed for a segment that never writes 适 and kept
+    // for one that does: the answer is judged against what the model saw.
+    const answer = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "适用", object: "高瀬", weight: 1.0 }],
+    });
+    const without = await make([answer]).ingestText(DOC_TEXT, { source: "docs/a.md", dry_run: true });
+    expect(without.removed_items).toEqual([
+      'associations[0]: label "适用" uses 适 — an ideograph outside the segment\'s script',
+    ]);
+    const withIt = await make([answer]).ingestText("青嶺酒造は高瀬に适用する。", {
+      source: "docs/a.md",
+      dry_run: true,
+    });
+    expect(withIt.removed_items).toEqual([]);
+  });
+
+  it("judges the chunk text, not a blank line the source happens to hold", async () => {
+    // The user turn's preamble quotes the source verbatim; a source holding a
+    // blank line and the ideograph must not make it count as segment text.
+    const answer = JSON.stringify({
+      associations: [{ subject: "青嶺酒造", label: "适用", object: "高瀬", weight: 1.0 }],
+    });
+    const outcome = await make([answer]).ingestText(DOC_TEXT, {
+      source: "docs/a\n\n适.md",
+      dry_run: true,
+    });
+    expect(outcome.removed_items).toEqual([
+      'associations[0]: label "适用" uses 适 — an ideograph outside the segment\'s script',
+    ]);
+  });
+
+  it("does not reuse a checkpoint from an older rule set", async () => {
+    // A reused piece skips the mechanical pass, so a piece accepted under
+    // fewer removal rules is re-extracted. A file written before the rule set
+    // was recorded reads as version 0.
+    const store = new MemoryCheckpointStore();
+    const source = "docs/aomine.md";
+    const options = {
+      chunk_bytes: CROSS_CHUNK_BYTES,
+      checkpoint_store: store,
+      checkpoint_model_id: "fake-model",
+    };
+    await expect(
+      make([CHUNK2_ANSWER, "not json", "not json"], options).ingestText(DOC_TEXT, { source }),
+    ).rejects.toThrow();
+    const file = JSON.parse(new TextDecoder().decode(store.state.get(source)!)) as {
+      fingerprint: Record<string, unknown>;
+    };
+    delete file.fingerprint.mechanical_rules;
+    store.state.set(source, new TextEncoder().encode(JSON.stringify(file)));
+
+    const llm = new RecordingFake([CHUNK2_ANSWER, CHUNK2_ANSWER]);
+    const outcome = await make([], { ...options, llm }).ingestText(DOC_TEXT, { source });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.chunks_reused).toBe(0);
+    expect(llm.seenPrompts).toHaveLength(2);
+  });
+
   it("reports nothing removed in lossy mode", async () => {
     const outcome = await make([REMOVABLE_ANSWER], { lossy: true }).ingestText(DOC_TEXT, {
       source: "docs/aomine.md",
@@ -512,6 +573,7 @@ describe("checkpoint pieces and removals", () => {
     structured_output: "",
     lossy: false,
     schema_digest: "",
+    mechanical_rules: MECHANICAL_RULES_VERSION,
   };
   const fileWith = (piece: Record<string, unknown>): Uint8Array =>
     new TextEncoder().encode(JSON.stringify({ fingerprint, pieces: { h: piece } }));
@@ -542,4 +604,101 @@ describe("checkpoint pieces and removals", () => {
     );
     expect(loaded.lookup("h")).toBeNull();
   });
+});
+
+describe("ADR 0039 foreign ideographs (issue #1101)", () => {
+  it("uses the same JIS X 0208 table as Rust", () => {
+    const rust = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../../../src/extract/jis_x0208.rs"),
+      "utf-8",
+    );
+    const rustWords = [...rust.matchAll(/0x([0-9a-f]{16})/g)].map((match) => match[1]);
+    expect(JIS_X0208_IDEOGRAPHS).toEqual(rustWords);
+    expect(rustWords).toHaveLength(328);
+  });
+
+  it("removes a label with an ideograph outside the segment's script", () => {
+    const answer = {
+      associations: [
+        { subject: "前二項の罪", label: "适用法律", object: "刑法第二条の例" },
+        { subject: "前二項の罪", label: "適用法律", object: "刑法第二条の例" },
+      ],
+      aliases: [],
+    };
+    const { output, removed, issues } = mechanicalInterpret(
+      answer,
+      RULES,
+      "前二項の罪は、刑法第二条の例に従う。",
+    );
+    expect(issues).toEqual([]);
+    expect(output.associations.map((a) => a.label)).toEqual(["適用法律"]);
+    expect(removed.map(removalText)).toEqual([
+      'associations[0]: label "适用法律" uses 适 — an ideograph outside the segment\'s script',
+    ]);
+  });
+
+  it("keeps a foreign ideograph the segment contains", () => {
+    const answer = {
+      associations: [{ subject: "前二項の罪", label: "适用法律", object: "刑法第二条の例" }],
+      aliases: [{ alias: "适用", canonical: "刑法第二条の例", kind: "concept" }],
+    };
+    const { output, removed, issues } = mechanicalInterpret(
+      answer,
+      RULES,
+      "前二項の罪には刑法第二条の例を适用する。",
+    );
+    expect(issues).toEqual([]);
+    expect(removed).toEqual([]);
+    expect(output.associations).toHaveLength(1);
+    expect(output.aliases).toHaveLength(1);
+  });
+
+  it("names every foreign field of an item in one record", () => {
+    const answer = {
+      associations: [{ subject: "主務大臣", label: "适用法律", object: "处分の例" }],
+      aliases: [],
+    };
+    const { output, removed } = mechanicalInterpret(answer, RULES, "主務大臣は処分の例を適用する。");
+    expect(output.associations).toEqual([]);
+    expect(removed.map(removalText)).toEqual([
+      'associations[0]: label "适用法律" uses 适, object "处分の例" uses 处 — ' +
+        "ideographs outside the segment's script",
+    ]);
+  });
+
+  it("removes an alias spelling outside the segment's script alone", () => {
+    const answer = {
+      associations: [{ subject: "主務大臣", label: "適用", object: "処分" }],
+      aliases: [
+        { alias: "处分", canonical: "処分", kind: "concept" },
+        { alias: "処分等", canonical: "処分", kind: "concept" },
+      ],
+    };
+    const { output, removed, issues } = mechanicalInterpret(
+      answer,
+      RULES,
+      "主務大臣は処分を適用する。処分等ともいう。",
+    );
+    expect(issues).toEqual([]);
+    expect(output.associations).toHaveLength(1);
+    expect(output.aliases.map((a) => a.alias)).toEqual(["処分等"]);
+    expect(removed.map(removalText)).toEqual([
+      'aliases[0]: alias "处分" uses 处 — an ideograph outside the segment\'s script',
+    ]);
+  });
+
+  it("judges Extension B and kana as Rust does, and lists a repeat once", () => {
+    const answer = {
+      associations: [
+        { subject: "𠮷野家", label: "店舗", object: "牛丼" },
+        { subject: "カタカナ", label: "说说", object: "牛丼" },
+      ],
+    };
+    const { removed } = mechanicalInterpret(answer, RULES, "吉野家の牛丼。");
+    expect(removed.map(removalText)).toEqual([
+      'associations[0]: subject "𠮷野家" uses 𠮷 — an ideograph outside the segment\'s script',
+      'associations[1]: label "说说" uses 说 — an ideograph outside the segment\'s script',
+    ]);
+  });
+
 });

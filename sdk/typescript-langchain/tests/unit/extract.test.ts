@@ -876,7 +876,7 @@ describe("evaluateAnswer", () => {
     });
     const strictRules: ItemRules = { paragraphCount: 1, questionsRequested: false };
     try {
-      evaluateAnswer(content, strictRules);
+      evaluateAnswer(content, strictRules, "");
       expect.unreachable("expected InvalidFault");
     } catch (error) {
       expect(error).toBeInstanceOf(InvalidFault);
@@ -887,7 +887,7 @@ describe("evaluateAnswer", () => {
 
     // Lossy mode (rules: null) ignores the same issue and hands back the
     // parsed output, byte-for-byte parseModelOutput's behavior.
-    const { output } = evaluateAnswer(content, null);
+    const { output } = evaluateAnswer(content, null, "");
     expect(output.associations).toHaveLength(1);
     expect(output.associations[0]!.weight).toBeNull();
   });
@@ -895,7 +895,7 @@ describe("evaluateAnswer", () => {
   it("reports a syntax fault before any validation", () => {
     const strictRules: ItemRules = { paragraphCount: 1, questionsRequested: false };
     try {
-      evaluateAnswer("not json at all", strictRules);
+      evaluateAnswer("not json at all", strictRules, "");
       expect.unreachable("expected SyntaxFault");
     } catch (error) {
       expect(error).toBeInstanceOf(SyntaxFault);

@@ -46,6 +46,7 @@ from ._extract import (
     CHUNK_BYTES,
     MAX_PASSAGE_BYTES,
     MAX_QUESTIONS_PER_PARAGRAPH,
+    MECHANICAL_RULES_VERSION,
     MODEL_OUTPUT_JSON_SCHEMA,
     PROMPT_VERSION,
     VOCABULARY_CAP,
@@ -207,7 +208,7 @@ class _Attempt:
 
 
 def _classify_text(
-    content: str, metadata: ProviderMetadata | None, rules: ItemRules | None
+    content: str, metadata: ProviderMetadata | None, rules: ItemRules | None, segment: str
 ) -> _Attempt:
     finish_reason = metadata.finish_reason if metadata else None
     if indicates_length_limit(finish_reason):
@@ -224,7 +225,7 @@ def _classify_text(
             kind="empty", content=content, metadata=metadata, error=empty_answer_diagnosis()
         )
     try:
-        output, repairs, removed = evaluate_answer(content, rules)
+        output, repairs, removed = evaluate_answer(content, rules, segment)
     except InvalidFault as fault:
         return _Attempt(kind="invalid", content=content, metadata=metadata, issues=fault.issues)
     except SyntaxFault as fault:
@@ -245,6 +246,7 @@ def _classify_structured(
     parsed: Any,
     parsing_error: Any,
     rules: ItemRules | None,
+    segment: str,
 ) -> _Attempt:
     """The structured-output twin of ``_classify_text``: the provider has
     already parsed (or failed to parse) its own tool-call args against
@@ -273,7 +275,7 @@ def _classify_structured(
     if rules is None:
         output, _issues = interpret_model_output(value, effective_item_rules(rules))
         return _Attempt(kind="valid", content=content, metadata=metadata, output=output)
-    output, removed, issues = mechanical_interpret(value, rules)
+    output, removed, issues = mechanical_interpret(value, rules, segment)
     if issues:
         return _Attempt(kind="invalid", content=content, metadata=metadata, issues=issues)
     return _Attempt(
@@ -419,6 +421,11 @@ class _ChunkRecord:
     """What the mechanical pass removed from THIS chunk's accepted answer
     (ADR 0013). Replaced, not appended to, when Stage 2 re-answers the
     chunk: removals never mix two answers (ADR 0013 §3.5)."""
+    segment: str = ""
+    """The chunk text the model was shown — what a Stage 2 re-answer is
+    judged against. Kept as the piece itself rather than re-parsed out of
+    ``user``, whose preamble quotes the caller's source string verbatim (a
+    source holding a blank line would otherwise move the boundary)."""
 
 
 class TaguruIngester:
@@ -756,6 +763,7 @@ class TaguruIngester:
             structured_output="langchain" if self.structured_output else "",
             lossy=self.lossy,
             schema_digest=schema_digest,
+            mechanical_rules=MECHANICAL_RULES_VERSION,
         )
 
     def _load_checkpoints(
@@ -811,6 +819,7 @@ class TaguruIngester:
             user=cached.user,
             answer=cached.answer,
             removed=cached.removed,
+            segment=piece,
         )
 
     def _record_checkpoint(
@@ -1000,7 +1009,7 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                result = self._attempt_once(messages, rules)
+                result = self._attempt_once(messages, rules, piece)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
 
@@ -1012,6 +1021,7 @@ class TaguruIngester:
                         user=user,
                         answer=result.content,
                         removed=result.removed,
+                        segment=piece,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1291,7 +1301,9 @@ class TaguruIngester:
         except NotFoundError:
             return None
 
-    def _attempt_once(self, messages: list[BaseMessage], rules: ItemRules | None) -> _Attempt:
+    def _attempt_once(
+        self, messages: list[BaseMessage], rules: ItemRules | None, segment: str
+    ) -> _Attempt:
         """Runs one model call for one attempt and classifies it (issue
         #180's §7-style state machine: length -> refusal -> empty ->
         syntax/invalid/valid). Goes through the ``with_structured_output()``
@@ -1304,12 +1316,12 @@ class TaguruIngester:
             content = self._content_text(raw)
             metadata = self._provider_metadata(raw)
             return _classify_structured(
-                content, metadata, result["parsed"], result["parsing_error"], rules
+                content, metadata, result["parsed"], result["parsing_error"], rules, segment
             )
         response = self.llm.invoke(messages)
         content = self._content_text(response)
         metadata = self._provider_metadata(response)
-        return _classify_text(content, metadata, rules)
+        return _classify_text(content, metadata, rules, segment)
 
     def _correct_cross_chunk_issues(
         self,
@@ -1356,7 +1368,7 @@ class TaguruIngester:
                 )
             )
             attempt_started_at = time.monotonic()
-            result = self._attempt_once(messages, rules)
+            result = self._attempt_once(messages, rules, record.segment)
             outcome.llm_calls += 1
             outcome.correction_attempts += 1
             if result.kind == "valid":
@@ -1367,6 +1379,7 @@ class TaguruIngester:
                     user=record.user,
                     answer=result.content,
                     removed=result.removed,
+                    segment=record.segment,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue
@@ -1490,7 +1503,7 @@ class TaguruIngester:
                     )
                 )
                 attempt_started_at = time.monotonic()
-                result = await self._aattempt_once(messages, rules)
+                result = await self._aattempt_once(messages, rules, piece)
                 outcome.llm_calls += 1
                 chunk_llm_calls += 1
 
@@ -1502,6 +1515,7 @@ class TaguruIngester:
                         user=user,
                         answer=result.content,
                         removed=result.removed,
+                        segment=piece,
                     )
                     outcome.lossless_repairs.extend(result.repairs)
                     break
@@ -1827,7 +1841,7 @@ class TaguruIngester:
             return None
 
     async def _aattempt_once(
-        self, messages: list[BaseMessage], rules: ItemRules | None
+        self, messages: list[BaseMessage], rules: ItemRules | None, segment: str
     ) -> _Attempt:
         """Async twin of ``_attempt_once``."""
         if self._structured_llm is not None:
@@ -1837,12 +1851,12 @@ class TaguruIngester:
             content = self._content_text(raw)
             metadata = self._provider_metadata(raw)
             return _classify_structured(
-                content, metadata, result["parsed"], result["parsing_error"], rules
+                content, metadata, result["parsed"], result["parsing_error"], rules, segment
             )
         response = await self.llm.ainvoke(messages)
         content = self._content_text(response)
         metadata = self._provider_metadata(response)
-        return _classify_text(content, metadata, rules)
+        return _classify_text(content, metadata, rules, segment)
 
     async def _acorrect_cross_chunk_issues(
         self,
@@ -1880,7 +1894,7 @@ class TaguruIngester:
                 )
             )
             attempt_started_at = time.monotonic()
-            result = await self._aattempt_once(messages, rules)
+            result = await self._aattempt_once(messages, rules, record.segment)
             outcome.llm_calls += 1
             outcome.correction_attempts += 1
             if result.kind == "valid":
@@ -1891,6 +1905,7 @@ class TaguruIngester:
                     user=record.user,
                     answer=result.content,
                     removed=result.removed,
+                    segment=record.segment,
                 )
                 outcome.lossless_repairs.extend(result.repairs)
                 continue

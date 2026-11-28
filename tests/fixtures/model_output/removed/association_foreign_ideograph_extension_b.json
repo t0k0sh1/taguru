@@ -1,0 +1,34 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "segment": "吉野家の牛丼は並盛が定番。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "𠮷野家",
+        "label": "商品",
+        "object": "牛丼"
+      },
+      {
+        "subject": "吉野家",
+        "label": "定番",
+        "object": "並盛"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "𠮷野家",
+        "canonical": "吉野家",
+        "kind": "concept"
+      }
+    ]
+  },
+  "removed": [
+    "associations[0]: subject \"𠮷野家\" uses 𠮷 — an ideograph outside the segment's script",
+    "aliases[0]: alias \"𠮷野家\" uses 𠮷 — an ideograph outside the segment's script"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}

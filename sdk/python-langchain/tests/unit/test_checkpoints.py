@@ -1319,3 +1319,30 @@ def test_an_interrupted_ingest_reports_the_removals_of_its_completed_chunks(
         )
         assert outcome.interrupted, run
         assert outcome.removed_items == ["chunk 1/2 aliases[0]: alias equals its canonical"], run
+
+
+def test_a_checkpoint_from_an_older_rule_set_is_not_reused(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """A reused piece skips the mechanical pass, so a piece accepted under
+    fewer removal rules is re-extracted rather than reused unjudged. A file
+    written before the rule set was recorded reads as version 0."""
+    store = RecordingCheckpointStore()
+    source = _seed_failed_run(sync_client, async_client, store)
+    assert _piece_count(store, source) == 1
+    lines = store.state[source].split(b"\n")
+    header = json.loads(lines[0])
+    del header["fingerprint"]["mechanical_rules"]
+    store.state[source] = b"\n".join([json.dumps(header).encode(), *lines[1:]])
+
+    ingester, llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert outcome.chunks_reused == 0
+    assert len(llm.seen_prompts) == 2
