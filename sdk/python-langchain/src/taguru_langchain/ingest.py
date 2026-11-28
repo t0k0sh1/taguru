@@ -66,6 +66,7 @@ from ._extract import (
     indicates_refusal,
     interpret_model_output,
     is_empty_answer,
+    issue_in_answer_terms,
     labeled_document,
     mechanical_interpret,
     merge,
@@ -1335,10 +1336,15 @@ class TaguruIngester:
         ):
             record = records[record_index]
             label = f"chunk {record.chunk_index + 1}/{chunk_total}"
+            # The checks indexed the output; the model is shown its answer,
+            # where the mechanical pass's removals still stand.
+            answer_issues = [
+                issue_in_answer_terms(record.output, record.removed, issue) for issue in issues
+            ]
             messages = self._corrective_turn(
                 [SystemMessage(content=system), HumanMessage(content=record.user)],
                 record.answer,
-                corrective_validation_message(issues),
+                corrective_validation_message(answer_issues),
             )
             self._emit(
                 AttemptStarted(
@@ -1854,10 +1860,15 @@ class TaguruIngester:
         ):
             record = records[record_index]
             label = f"chunk {record.chunk_index + 1}/{chunk_total}"
+            # The checks indexed the output; the model is shown its answer,
+            # where the mechanical pass's removals still stand.
+            answer_issues = [
+                issue_in_answer_terms(record.output, record.removed, issue) for issue in issues
+            ]
             messages = self._corrective_turn(
                 [SystemMessage(content=system), HumanMessage(content=record.user)],
                 record.answer,
-                corrective_validation_message(issues),
+                corrective_validation_message(answer_issues),
             )
             self._emit(
                 AttemptStarted(

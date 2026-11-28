@@ -1498,7 +1498,7 @@ def test_a_stage_two_reanswer_replaces_the_chunks_removals(
         ensure_ascii=False,
     )
     for run in ("sync", "async"):
-        ingester, _llm = make_ingester(
+        ingester, llm = make_ingester(
             sync_client,
             async_client,
             [CHUNK1_ANSWER, chunk2_self_alias_and_shadowing, CHUNK2_CORRECTED_ANSWER],
@@ -1512,3 +1512,8 @@ def test_a_stage_two_reanswer_replaces_the_chunks_removals(
         assert outcome.ok, run
         assert outcome.correction_attempts == 1, run
         assert outcome.removed_items == [], run
+        # The shadowing alias is the OUTPUT's first alias but the ANSWER's
+        # second; the corrective ask names it as the replayed answer has it.
+        ask = llm.seen_prompts[-1][-1].content
+        assert "aliases[1].alias: names something the associations already contain" in ask, run
+        assert "aliases[0].alias" not in ask, run

@@ -1219,6 +1219,49 @@ class Removal:
         return cls(path=path, reason=reason, item=data.get("item"))
 
 
+def _array_index(text: str, array: str) -> tuple[int, str] | None:
+    """The item index a path or issue opens with in ``array``
+    (``"associations"`` or ``"aliases"``), and the text after its ``]``:
+    ``aliases[3].alias: …`` → ``(3, ".alias: …")``. Mirrors mechanical.rs."""
+    prefix = f"{array}["
+    if not text.startswith(prefix):
+        return None
+    digits, sep, after = text[len(prefix) :].partition("]")
+    if not sep or not digits.isascii() or not digits.isdigit():
+        return None
+    return int(digits), after
+
+
+def issue_in_answer_terms(output: ModelOutput, removed: Sequence[Removal], issue: str) -> str:
+    """An issue the Stage 2 checks wrote against ``output`` (``aliases[0]``
+    = the output's first alias) rewritten to name the same item in the
+    model's answer — the text the corrective turn replays, where the
+    mechanical pass's removals still stand. Every removal path is an answer
+    index, so the output's item ``i`` is the ``i``-th answer index no
+    removal names. Unchanged when nothing was removed before that item, and
+    for an issue naming no item. Mirrors mechanical.rs's
+    ``issue_in_answer_terms``."""
+    for array, survivors in (
+        ("associations", len(output.associations)),
+        ("aliases", len(output.aliases)),
+    ):
+        found = _array_index(issue, array)
+        if found is None:
+            continue
+        index, after = found
+        gone = {
+            hit[0] for removal in removed if (hit := _array_index(removal.path, array)) is not None
+        }
+        positions: list[int] = []
+        candidate = 0
+        while len(positions) <= max(index, survivors - 1):
+            if candidate not in gone:
+                positions.append(candidate)
+            candidate += 1
+        return f"{array}[{positions[index]}]{after}"
+    return issue
+
+
 def _field_absence(obj: dict[str, Any], key: str) -> str | None:
     """A required field that is mechanically absent: missing (or null) or a
     string that trims to nothing. A present wrong-typed value is NOT absent —

@@ -9740,3 +9740,145 @@ fn completions_strict_miss_names_zero_recorded_attempts_for_an_unknown_piece() {
     assert!(message.contains("--replay strict"), "{message}");
     assert!(message.contains("has no recorded attempts"), "{message}");
 }
+
+/// Stage 2's issues and prunes index `chunk.output`; what the model
+/// and the report see is the answer, where Stage 1's removals still
+/// stand. `issue_in_answer_terms` maps the one onto the other.
+#[test]
+fn issue_in_answer_terms_skips_the_items_stage_one_removed() {
+    let mut chunk = chunk_output(ModelOutput {
+        associations: vec![
+            association("a", "l", "b", 1.0),
+            association("c", "l", "d", 1.0),
+        ],
+        aliases: vec![alias("x", "a", "concept"), alias("y", "c", "concept")],
+        questions: Vec::new(),
+    });
+    chunk.removed = vec![
+        Removal::new("associations[1]", "object empty", &serde_json::Value::Null),
+        Removal::new(
+            "aliases[0]",
+            "alias equals its canonical",
+            &serde_json::Value::Null,
+        ),
+        Removal::new(
+            "aliases[2]",
+            "alias equals its canonical",
+            &serde_json::Value::Null,
+        ),
+    ];
+    // Output alias 0 was answer alias 1; output alias 1 was answer alias 3
+    // (0 and 2 removed). Output association 1 was answer association 2.
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "aliases[0].alias: names something"),
+        "aliases[1].alias: names something"
+    );
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "aliases[1]: conflicts with an earlier alias"),
+        "aliases[3]: conflicts with an earlier alias"
+    );
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "associations[0].subject: x"),
+        "associations[0].subject: x"
+    );
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "associations[1].object: y"),
+        "associations[2].object: y"
+    );
+    // An issue naming no item is left alone.
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "aliases: expected an array"),
+        "aliases: expected an array"
+    );
+}
+
+#[test]
+fn issue_in_answer_terms_is_the_identity_when_nothing_was_removed() {
+    let chunk = chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("x", "a", "concept"), alias("y", "a", "concept")],
+        questions: Vec::new(),
+    });
+    assert_eq!(
+        issue_in_answer_terms(&chunk, "aliases[1].alias: z"),
+        "aliases[1].alias: z"
+    );
+}
+
+#[test]
+fn stage_two_prunes_record_the_answer_index_after_stage_one_removals() {
+    // Answer aliases: [0] self-alias (removed by Stage 1), [1] dangling,
+    // [2] claimed by an earlier segment. The prunes must name 1 and 2.
+    let make = || {
+        let mut chunk = chunk_output(ModelOutput {
+            associations: vec![association("a", "l", "b", 1.0)],
+            aliases: vec![alias("d", "nowhere", "concept"), alias("X", "a", "concept")],
+            questions: Vec::new(),
+        });
+        chunk.removed = vec![Removal::new(
+            "aliases[0]",
+            "alias equals its canonical",
+            &serde_json::Value::Null,
+        )];
+        chunk
+    };
+
+    let mut outputs = [make()];
+    assert_eq!(prune_unresolvable_aliases(&mut outputs), 1);
+    assert_eq!(
+        outputs[0].removed.last().unwrap().path,
+        "aliases[1]",
+        "the dangling alias was the answer's second alias"
+    );
+    // The claimed prune runs after it: with 0 and 1 now both removed,
+    // the output's only alias is the answer's third.
+    let concepts: BTreeSet<String> = ["X".to_string()].into();
+    let claimed = ClaimedNames::seeded(&concepts, &BTreeSet::new());
+    assert_eq!(prune_claimed_aliases(&mut outputs, &claimed), 1);
+    assert_eq!(outputs[0].removed.last().unwrap().path, "aliases[2]");
+}
+
+#[test]
+fn an_uncorrected_alias_and_a_standing_issue_name_their_answer_index() {
+    let make = || {
+        let mut chunk = chunk_output(ModelOutput {
+            associations: vec![
+                association("a", "l", "b", 1.0),
+                association("c", "l", "d", 1.0),
+            ],
+            aliases: vec![alias("a", "b", "concept")],
+            questions: Vec::new(),
+        });
+        chunk.removed = vec![
+            Removal::new("associations[0]", "subject empty", &serde_json::Value::Null),
+            Removal::new(
+                "aliases[0]",
+                "alias equals its canonical",
+                &serde_json::Value::Null,
+            ),
+        ];
+        chunk
+    };
+    let mut outputs = [make()];
+    let pruned = prune_uncorrected_aliases(
+        &mut outputs,
+        vec![(0, vec!["aliases[0].alias: names something".to_string()])],
+    );
+    assert_eq!(pruned, Ok(1));
+    assert_eq!(
+        outputs[0].removed.last().unwrap().path,
+        "aliases[1].alias",
+        "the shadowing alias was the answer's second alias"
+    );
+
+    // A non-alias issue fails the segment, named in answer terms too.
+    let mut outputs = [make()];
+    let failed = prune_uncorrected_aliases(
+        &mut outputs,
+        vec![(0, vec!["associations[1].subject: wrong type".to_string()])],
+    );
+    assert_eq!(
+        failed,
+        Err((0, vec!["associations[2].subject: wrong type".to_string()]))
+    );
+}
