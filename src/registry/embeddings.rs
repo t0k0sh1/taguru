@@ -659,13 +659,15 @@ impl AppState {
     }
 
     /// Contexts whose passages changed since their last embedding
-    /// refresh — the auto-refresh ticker's work list. Claiming is the
-    /// caller's job via [`AppState::refresh_passage_embeddings`].
-    pub fn passage_embed_dirty_names(&self) -> Vec<String> {
+    /// refresh — the auto-refresh ticker's work list, as `(id, display
+    /// name)`: the refresh looks the `context` up by id, the log names
+    /// it. Claiming is the caller's job via
+    /// [`AppState::refresh_passage_embeddings`].
+    pub fn passage_embed_dirty_contexts(&self) -> Vec<(String, String)> {
         self.snapshot()
             .into_iter()
             .filter(|entry| entry.passages_embed_dirty.load(Ordering::Relaxed))
-            .map(|entry| entry.inner.read().name.clone())
+            .map(|entry| (entry.id.clone(), entry.inner.read().name.clone()))
             .collect()
     }
 
