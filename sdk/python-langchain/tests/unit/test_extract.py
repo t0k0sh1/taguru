@@ -1265,8 +1265,8 @@ def test_mechanical_pass_removes_each_stage_one_class_with_its_original_item() -
     answer = {
         "associations": [
             "not an object",
-            {"subject": " ", "label": "l"},
-            {"subject": "a", "label": "l", "object": "b"},
+            {"subject": " ", "label": "is"},
+            {"subject": "a", "label": "is", "object": "b"},
         ],
         "aliases": [
             7,
@@ -1288,7 +1288,7 @@ def test_mechanical_pass_removes_each_stage_one_class_with_its_original_item() -
     assert removed[1] == Removal(
         path="associations[1]",
         reason="subject empty, object missing",
-        item={"subject": " ", "label": "l"},
+        item={"subject": " ", "label": "is"},
     )
     assert [(a.subject, a.object) for a in output.associations] == [("a", "b")]
     assert [(a.alias, a.canonical) for a in output.aliases] == [("B", "b")]
@@ -1384,3 +1384,70 @@ def test_issue_in_answer_terms_skips_the_items_the_mechanical_pass_removed() -> 
     assert terms("associations[1].object: y") == "associations[2].object: y"
     assert terms("aliases: expected an array") == "aliases: expected an array"
     assert issue_in_answer_terms(output, [], "aliases[1].alias: z") == "aliases[1].alias: z"
+
+
+def test_a_single_character_label_is_removed() -> None:
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {
+        "associations": [
+            {"subject": "青嶺酒造", "label": "の", "object": "高瀬"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
+        ]
+    }
+    output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == []
+    assert [str(removal) for removal in removed] == [
+        'associations[0]: label "の" is a single character — too generic to be a relation'
+    ]
+    assert [a.label for a in output.associations] == ["杜氏"]
+
+
+def test_a_redaction_placeholder_is_removed_from_associations_and_aliases() -> None:
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    mask = "«redacted email 1a2b»"
+    answer = {
+        "associations": [
+            {"subject": mask, "label": "連絡先", "object": f"担当 {mask}"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
+        ],
+        "aliases": [
+            # A placeholder that is also its own canonical is accounted as the
+            # placeholder, not the self-alias.
+            {"alias": mask, "canonical": mask, "kind": "concept"},
+            {"alias": "Aomine", "canonical": "青嶺酒造", "kind": "concept"},
+        ],
+    }
+    output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == []
+    assert [str(removal) for removal in removed] == [
+        f'associations[0]: subject "{mask}" is a redaction placeholder, '
+        f'object "担当 {mask}" is a redaction placeholder — not an entity',
+        f'aliases[0]: alias "{mask}" is a redaction placeholder — not a spelling',
+    ]
+    assert len(output.associations) == 1
+    assert len(output.aliases) == 1
+
+
+def test_a_placeholder_needs_the_exact_form() -> None:
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {
+        "associations": [
+            # Uppercase hex, a short tag, and the wrong brackets are not the form.
+            {"subject": "«redacted email 1A2B»", "label": "連絡先", "object": "x"},
+            {"subject": "«redacted email 1a2»", "label": "連絡先", "object": "x"},
+            {"subject": "<redacted email 1a2b>", "label": "連絡先", "object": "x"},
+        ]
+    }
+    _output, removed, issues = mechanical_interpret(answer, rules)
+    assert issues == []
+    assert removed == []
+
+
+def test_a_correctable_issue_keeps_the_item_from_the_removal_rules() -> None:
+    """mechanical.rs judges the removal rules only on an otherwise valid item:
+    a wrong weight on a single-character label stays corrective."""
+    rules = ItemRules(paragraph_count=1, questions_requested=False)
+    answer = {"associations": [{"subject": "a", "label": "の", "object": "b", "weight": 0}]}
+    _output, removed, issues = mechanical_interpret(answer, rules)
+    assert removed == []
+    assert issues == ["associations[0].weight: expected finite non-zero number, got 0"]

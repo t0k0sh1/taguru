@@ -1,0 +1,34 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "segment": "青嶺酒造の杜氏は高瀬さん。連絡先は «redacted email 1a2b» まで。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      {
+        "subject": "青嶺酒造",
+        "label": "連絡先",
+        "object": "«redacted email 1a2b»"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "«redacted email 1a2b»",
+        "canonical": "高瀬",
+        "kind": "concept"
+      }
+    ]
+  },
+  "removed": [
+    "associations[1]: object \"«redacted email 1a2b»\" is a redaction placeholder — not an entity",
+    "aliases[0]: alias \"«redacted email 1a2b»\" is a redaction placeholder — not a spelling"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}
