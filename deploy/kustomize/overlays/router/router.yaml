@@ -41,7 +41,7 @@ spec:
           # Upgrading from 0.9.7? Each shard behind the router migrates on
           # its own (0.10.0 refuses a data directory 0.9.7 wrote) -
           # deploy/README.md, "Upgrading from 0.9.7".
-          image: ghcr.io/t0k0sh1/taguru:0.10.0 # pin; `latest` moves
+          image: ghcr.io/t0k0sh1/taguru:0.11.1 # pin; `latest` moves
           args: ["router"]
           ports:
             - containerPort: 8248

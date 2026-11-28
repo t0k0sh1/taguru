@@ -69,7 +69,7 @@ images:
     # Upgrading from 0.9.7? 0.10.0 refuses a data directory (or bucket)
     # 0.9.7 wrote: export and re-import first - ../README.md, "Upgrading
     # from 0.9.7".
-    newTag: "0.10.0"                # releases move the in-repo pin; you can too
+    newTag: "0.11.1"                # releases move the in-repo pin; you can too
     # digest: "sha256:…"           # from `cosign verify` — a digest pin is a
     #                              # guarantee where a tag pin is a convention
     #                              # (../README.md has the how and the why)
