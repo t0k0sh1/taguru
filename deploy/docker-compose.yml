@@ -11,7 +11,7 @@ services:
     # Upgrading from 0.9.7? 0.10.0 refuses a data directory (or bucket)
     # 0.9.7 wrote: export and re-import first - deploy/README.md,
     # "Upgrading from 0.9.7".
-    image: ghcr.io/t0k0sh1/taguru:0.10.0 # pin; `latest` moves
+    image: ghcr.io/t0k0sh1/taguru:0.11.1 # pin; `latest` moves
     ports:
       - "127.0.0.1:8248:8248"
     environment:
@@ -48,7 +48,7 @@ services:
   # start a writer against the bucket with TAGURU_TAKEOVER=1.
   #
   # taguru-replica:
-  #   image: ghcr.io/t0k0sh1/taguru:0.10.0
+  #   image: ghcr.io/t0k0sh1/taguru:0.11.1
   #   ports:
   #     - "127.0.0.1:8249:8248"
   #   environment:
@@ -80,7 +80,7 @@ services:
   # through the router — which now routes it to the new shard.
   #
   # taguru-router:
-  #   image: ghcr.io/t0k0sh1/taguru:0.10.0
+  #   image: ghcr.io/t0k0sh1/taguru:0.11.1
   #   command: ["router"]
   #   ports:
   #     - "127.0.0.1:8250:8248"
