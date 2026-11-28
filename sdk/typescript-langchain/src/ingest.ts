@@ -54,6 +54,7 @@ import {
   SyntaxFault,
   systemPrompt,
   userMessage,
+  userMessageSegment,
   type ItemRules,
   type ModelOutput,
   type Removal,
@@ -329,6 +330,7 @@ function classifyText(
   content: string,
   metadata: ProviderMetadata | null,
   rules: ItemRules | null,
+  segment: string,
 ): AttemptResult {
   const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
@@ -365,7 +367,7 @@ function classifyText(
     };
   }
   try {
-    const { output, repairs, removed } = evaluateAnswer(content, rules);
+    const { output, repairs, removed } = evaluateAnswer(content, rules, segment);
     return {
       kind: "valid",
       content,
@@ -416,6 +418,7 @@ function classifyStructured(
   metadata: ProviderMetadata | null,
   parsed: Record<string, unknown> | null | undefined,
   rules: ItemRules | null,
+  segment: string,
 ): AttemptResult {
   const finishReason = metadata?.finish_reason ?? undefined;
   if (indicatesLengthLimit(finishReason)) {
@@ -457,7 +460,7 @@ function classifyStructured(
     const { output } = interpretModelOutput(parsed, effectiveItemRules(rules));
     return { kind: "valid", content, output, repairs: [], error: null, issues: null, metadata };
   }
-  const { output, removed, issues } = mechanicalInterpret(parsed, rules);
+  const { output, removed, issues } = mechanicalInterpret(parsed, rules, segment);
   if (issues.length > 0) {
     return { kind: "invalid", content, output: null, repairs: [], error: null, issues, metadata };
   }
@@ -716,17 +719,18 @@ export class TaguruIngester {
   private async attemptOnce(
     messages: BaseMessage[],
     rules: ItemRules | null,
+    segment: string,
   ): Promise<AttemptResult> {
     if (this.structuredLlm !== null) {
       const result = await this.structuredLlm.invoke(messages);
       const content = contentText(result.raw);
       const metadata = providerMetadata(result.raw);
-      return classifyStructured(content, metadata, result.parsed, rules);
+      return classifyStructured(content, metadata, result.parsed, rules, segment);
     }
     const response = await this.llm.invoke(messages);
     const content = contentText(response);
     const metadata = providerMetadata(response);
-    return classifyText(content, metadata, rules);
+    return classifyText(content, metadata, rules, segment);
   }
 
   /**
@@ -791,7 +795,11 @@ export class TaguruIngester {
         stage: "cross_chunk",
       });
       const attemptStartedAt = performance.now();
-      const result = await this.attemptOnce(messages, rules);
+      const result = await this.attemptOnce(
+        messages,
+        rules,
+        userMessageSegment(chunkRecord.user),
+      );
       outcome.llm_calls += 1;
       outcome.correction_attempts += 1;
       if (result.kind === "valid") {
@@ -957,7 +965,7 @@ export class TaguruIngester {
           stage: "item",
         });
         const attemptStartedAt = performance.now();
-        const result = await this.attemptOnce(messages, rules);
+        const result = await this.attemptOnce(messages, rules, userMessageSegment(user));
         outcome.llm_calls += 1;
         chunkLlmCalls += 1;
 

@@ -139,6 +139,9 @@ without a corrective turn, as `taguru extract` removes them (ADR 0013):
   as `の` relates nothing)
 - a redaction placeholder (`«redacted …»`) as a subject, object or alias
   spelling: a mask copied out of the text, not an entity
+- a label, subject, object or alias spelling written with an ideograph
+  outside JIS X 0208 that the text itself never uses (`适用法律` for text
+  that says `適用法律`, ADR 0039): a second spelling of one term
 
 Each removal is listed in `IngestOutcome.removed_items` and in the chunk's `chunk_completed`
 event, worded as `taguru extract` reports it (`aliases[0]: alias equals its

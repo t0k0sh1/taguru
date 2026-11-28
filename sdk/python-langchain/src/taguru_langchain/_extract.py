@@ -32,6 +32,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from taguru import LocatorSpec, SchemaDocument, SectionSpec, TypeDef
 
+from ._jis_x0208 import JIS_X0208_IDEOGRAPHS
+
 # Kept equal to src/extract.rs's PROMPT_VERSION: a prompt revision in either
 # producer must bump both. 3 (ADR 0009 §11.1): system_prompt() gained the
 # schema block. 4 (#852): the discipline gained the text-alone and
@@ -607,6 +609,15 @@ def user_message(source: str, index: int, total: int, text: str) -> str:
     if total > 1:
         return f"Segment '{source}', chunk {index + 1} of {total}:\n\n{text}"
     return f"Segment '{source}':\n\n{text}"
+
+
+def user_message_segment(user: str) -> str:
+    """``user_message``'s inverse: the chunk text the model was shown, with
+    the preamble stripped — what the mechanical pass judges an answer
+    against, so the source path never counts as segment text. Mirrors
+    extract.rs's ``user_message_segment``."""
+    _preamble, sep, text = user.partition("\n\n")
+    return text if sep else user
 
 
 # -- model-answer parsing (fence-stripping + widest-braces fallback) --------------
@@ -1185,10 +1196,10 @@ def interpret_model_output(value: Any, rules: ItemRules) -> tuple[ModelOutput, l
 #
 # Ported so far (issues #1098, #1101): a non-object element, a required field
 # missing/null/empty, an alias whose spelling equals its canonical, a
-# single-character label, and a redaction placeholder in a subject, object,
-# or alias spelling. mechanical.rs's other Stage 1 rules (ADR 0039's foreign
-# ideographs, the occurrence check) and its Stage 2 prunes are not ported yet
-# (#1101); until they are, those items keep this module's corrective path.
+# single-character label, a redaction placeholder in a subject, object, or
+# alias spelling, and ADR 0039's foreign ideographs. mechanical.rs's
+# occurrence check and its Stage 2 prunes are not ported yet (#1101); until
+# they are, those items keep this module's corrective path.
 
 # ADR 0038's placeholder form, as src/sensitive.rs matches it. Every class
 # is ASCII, so the pattern means the same in Python's re as in Rust's regex.
@@ -1273,6 +1284,60 @@ def issue_in_answer_terms(output: ModelOutput, removed: Sequence[Removal], issue
     return issue
 
 
+def _is_ideograph(char: str) -> bool:
+    """A CJK ideograph at all — the ranges src/extract/jis_x0208.rs's
+    ``is_ideograph`` names. Kana, punctuation, and every non-ideograph are
+    not judged."""
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x20000 <= code <= 0x3347F
+    )
+
+
+def _in_jis_x0208(char: str) -> bool:
+    """An ideograph in JIS X 0208's repertoire: the Unified Ideographs block
+    only, by the same bitset as Rust."""
+    code = ord(char)
+    if not 0x4E00 <= code <= 0x9FFF:
+        return False
+    bit = code - 0x4E00
+    return (JIS_X0208_IDEOGRAPHS[bit // 64] >> (bit % 64)) & 1 == 1
+
+
+def _foreign_ideographs(name: str, segment: str) -> list[str]:
+    """ADR 0039 §3.1–3.2: the ideographs of ``name`` outside JIS X 0208 that
+    the segment never uses, in first-appearance order, each once. Empty for a
+    name in the segment's own script and for a Chinese or Korean segment
+    (every character it uses is in the text). Containment is by character;
+    Rust's normalized haystack leaves ideographs untouched, so the raw
+    segment answers the same."""
+    found: list[str] = []
+    for char in name:
+        if (
+            _is_ideograph(char)
+            and not _in_jis_x0208(char)
+            and char not in segment
+            and char not in found
+        ):
+            found.append(char)
+    return found
+
+
+def _foreign_script_reason(fields: list[tuple[str, str, list[str]]]) -> str:
+    """mechanical.rs's ``foreign_script_reason``: every offending field of the
+    item in one record — ``label "适用法律" uses 适, object "处分" uses 处 —
+    ideographs outside the segment's script``."""
+    parts = [
+        f"{field} {_quote_for_issue(name)} uses {', '.join(chars)}" for field, name, chars in fields
+    ]
+    total = sum(len(chars) for _field, _name, chars in fields)
+    noun = "an ideograph" if total == 1 else "ideographs"
+    return f"{', '.join(parts)} — {noun} outside the segment's script"
+
+
 def _field_absence(obj: dict[str, Any], key: str) -> str | None:
     """A required field that is mechanically absent: missing (or null) or a
     string that trims to nothing. A present wrong-typed value is NOT absent —
@@ -1292,7 +1357,7 @@ def _absent_fields(obj: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
 
 
 def _association_mechanically(
-    index: int, item: Any, issues: list[str], removed: list[Removal]
+    index: int, item: Any, segment: str, issues: list[str], removed: list[Removal]
 ) -> ModelAssociation | None:
     path = f"associations[{index}]"
     if not isinstance(item, dict):
@@ -1333,11 +1398,28 @@ def _association_mechanically(
     if placeholders:
         removed.append(Removal(path, f"{', '.join(placeholders)} — not an entity", item))
         return None
+    # ADR 0039: a label or name written with an ideograph from another
+    # language's repertoire is a second spelling of one term that query,
+    # resolve, and the label vocabulary would all treat as different. This
+    # port has no vocabulary allowlist (ADR 0015), so no name is exempt — the
+    # CLI's default too.
+    foreign = [
+        (field, name, chars)
+        for field, name in (
+            ("label", parsed.label),
+            ("subject", parsed.subject),
+            ("object", parsed.object),
+        )
+        if (chars := _foreign_ideographs(name, segment))
+    ]
+    if foreign:
+        removed.append(Removal(path, _foreign_script_reason(foreign), item))
+        return None
     return parsed
 
 
 def _alias_mechanically(
-    index: int, item: Any, issues: list[str], removed: list[Removal]
+    index: int, item: Any, segment: str, issues: list[str], removed: list[Removal]
 ) -> ModelAlias | None:
     path = f"aliases[{index}]"
     if not isinstance(item, dict):
@@ -1372,18 +1454,29 @@ def _alias_mechanically(
         # corrective ask, exactly as mechanical.rs drops item_issues here.
         removed.append(Removal(path, "alias equals its canonical", item))
         return None
+    # ADR 0039, the alias-spelling half: a spelling in another language's
+    # repertoire records a form the segment never uses. The canonical is
+    # judged where it is asserted — the association it must match.
+    if parsed is not None and parsed.alias is not None:
+        chars = _foreign_ideographs(parsed.alias, segment)
+        if chars:
+            reason = _foreign_script_reason([("alias", parsed.alias, chars)])
+            removed.append(Removal(path, reason, item))
+            return None
     issues.extend(item_issues)
     return parsed
 
 
 def mechanical_interpret(
-    value: Any, rules: ItemRules
+    value: Any, rules: ItemRules, segment: str
 ) -> tuple[ModelOutput, list[Removal], list[str]]:
     """The strict-mode replacement for ``interpret_model_output``: the same
     lenient walk and the same issue texts, but items whose departure is
     mechanically judgeable are removed (and returned as ``Removal`` records)
-    instead of flagged, so only genuinely corrective issues survive. Lossy
-    mode never calls this — its contract stays the plain lenient walk."""
+    instead of flagged, so only genuinely corrective issues survive.
+    ``segment`` is the chunk text the model was shown, preamble stripped
+    (``user_message_segment``). Lossy mode never calls this — its contract
+    stays the plain lenient walk."""
     issues: list[str] = []
     removed: list[Removal] = []
     obj = value if isinstance(value, dict) else {}
@@ -1392,7 +1485,7 @@ def mechanical_interpret(
     raw = _get_present(obj, "associations")
     if isinstance(raw, list):
         for index, item in enumerate(raw):
-            parsed_association = _association_mechanically(index, item, issues, removed)
+            parsed_association = _association_mechanically(index, item, segment, issues, removed)
             if parsed_association is not None:
                 associations.append(parsed_association)
     elif raw is not None:
@@ -1402,7 +1495,7 @@ def mechanical_interpret(
     raw = _get_present(obj, "aliases")
     if isinstance(raw, list):
         for index, item in enumerate(raw):
-            parsed_alias = _alias_mechanically(index, item, issues, removed)
+            parsed_alias = _alias_mechanically(index, item, segment, issues, removed)
             if parsed_alias is not None:
                 aliases.append(parsed_alias)
     elif raw is not None:
@@ -1430,7 +1523,7 @@ def effective_item_rules(rules: ItemRules | None) -> ItemRules:
 
 
 def evaluate_answer(
-    content: str, rules: ItemRules | None
+    content: str, rules: ItemRules | None, segment: str
 ) -> tuple[ModelOutput, list[str], list[Removal]]:
     """The Stage 1 gate every corrective loop calls instead of
     ``parse_model_output`` directly: parse, then — when ``rules`` is not
@@ -1442,12 +1535,13 @@ def evaluate_answer(
     ``rules=None`` (lossy mode) parses only and discards whatever
     ``interpret_model_output`` would have flagged, reproducing today's
     behavior byte for byte: ``merge()`` alone decides what survives, and
-    nothing is reported removed."""
+    nothing is reported removed. ``segment`` is the chunk text the answer is
+    judged against (see ``mechanical_interpret``); lossy mode ignores it."""
     value, repairs = candidate_json(content)
     if rules is None:
         output, _issues = interpret_model_output(value, _LENIENT_RULES)
         return output, repairs, []
-    output, removed, issues = mechanical_interpret(value, rules)
+    output, removed, issues = mechanical_interpret(value, rules, segment)
     if issues:
         raise InvalidFault(issues)
     return output, repairs, removed
@@ -1458,7 +1552,7 @@ def parse_model_output(content: str) -> ModelOutput:
     Raises ``ValueError`` with a message fit for a corrective turn.
     Lenient-mode-only (like extract.rs's test-only twin): every production
     corrective loop calls ``evaluate_answer`` directly instead."""
-    output, _repairs, _removed = evaluate_answer(content, None)
+    output, _repairs, _removed = evaluate_answer(content, None, "")
     return output
 
 

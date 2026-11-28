@@ -1517,3 +1517,37 @@ def test_a_stage_two_reanswer_replaces_the_chunks_removals(
         ask = llm.seen_prompts[-1][-1].content
         assert "aliases[1].alias: names something the associations already contain" in ask, run
         assert "aliases[0].alias" not in ask, run
+
+
+def test_the_ingester_judges_foreign_ideographs_against_the_chunk_text(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0039 through the ingester: the answer is judged against the text
+    the model was shown, so the same label is removed for a segment that
+    never writes 适 and kept for one that does — sync and async."""
+    answer = json.dumps(
+        {
+            "associations": [
+                {"subject": "青嶺酒造", "label": "适用", "object": "高瀬", "weight": 1.0}
+            ]
+        },
+        ensure_ascii=False,
+    )
+    for run in ("sync", "async"):
+        for text, expected in (
+            (
+                DOC_TEXT,
+                [
+                    'associations[0]: label "适用" uses 适 — an ideograph outside the '
+                    "segment's script"
+                ],
+            ),
+            ("青嶺酒造は高瀬に适用する。", []),
+        ):
+            ingester, _llm = make_ingester(sync_client, async_client, [answer])
+            outcome = (
+                ingester.ingest_text(text, source="docs/a.md", dry_run=True)
+                if run == "sync"
+                else asyncio.run(ingester.aingest_text(text, source="docs/a.md", dry_run=True))
+            )
+            assert outcome.removed_items == expected, (run, text)

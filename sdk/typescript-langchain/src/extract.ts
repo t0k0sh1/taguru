@@ -22,6 +22,8 @@
 
 import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
 
+import { JIS_X0208_IDEOGRAPHS } from "./jis-x0208.js";
+
 // Kept equal to src/extract.rs's PROMPT_VERSION. 3 (ADR 0009 §11.1):
 // systemPrompt() gained the schema block. 4 (#852): the discipline gained
 // the text-alone and empty-answer ground rules. 5 (#812): the citation
@@ -613,6 +615,17 @@ function relationLine(label: string, domain: string[], range: string[]): string 
     return `${label} range: ${range.join(", ")}`;
   }
   return null;
+}
+
+/**
+ * userMessage's inverse: the chunk text the model was shown, with the
+ * preamble stripped — what the mechanical pass judges an answer against, so
+ * the source path never counts as segment text. Mirrors extract.rs's
+ * `user_message_segment`.
+ */
+export function userMessageSegment(user: string): string {
+  const at = user.indexOf("\n\n");
+  return at === -1 ? user : user.slice(at + 2);
 }
 
 export function userMessage(source: string, index: number, total: number, text: string): string {
@@ -1310,10 +1323,9 @@ export function interpretModelOutput(
 // Ported so far (issues #1098, #1101): a non-object element, a required field
 // missing/null/empty, an alias whose spelling equals its canonical, a
 // single-character label, and a redaction placeholder in a subject, object,
-// or alias spelling. mechanical.rs's other Stage 1 rules (ADR 0039's foreign
-// ideographs, the occurrence check) and its Stage 2 prunes are not ported
-// yet (#1101); until they are, those items keep this module's corrective
-// path.
+// or alias spelling, and ADR 0039's foreign ideographs. mechanical.rs's
+// occurrence check and its Stage 2 prunes are not ported yet (#1101); until
+// they are, those items keep this module's corrective path.
 
 // ADR 0038's placeholder form, as src/sensitive.rs matches it. Every class is
 // ASCII, so the pattern means the same in JavaScript as in Rust's regex.
@@ -1409,6 +1421,61 @@ export function issueInAnswerTerms(
   return issue;
 }
 
+// The JIS X 0208 bitset, one BigInt per 64 code points from U+4E00 — parsed
+// once from the generated hex words.
+const JIS_WORDS: readonly bigint[] = JIS_X0208_IDEOGRAPHS.map((word) => BigInt(`0x${word}`));
+
+/** A CJK ideograph at all — the ranges src/extract/jis_x0208.rs's
+ * `is_ideograph` names. Kana, punctuation, and every non-ideograph are not
+ * judged. */
+function isIdeograph(code: number): boolean {
+  return (
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0x20000 && code <= 0x3347f)
+  );
+}
+
+/** An ideograph in JIS X 0208's repertoire: the Unified Ideographs block
+ * only, by the same bitset as Rust. */
+function inJisX0208(code: number): boolean {
+  if (code < 0x4e00 || code > 0x9fff) {
+    return false;
+  }
+  const bit = code - 0x4e00;
+  return ((JIS_WORDS[Math.floor(bit / 64)]! >> BigInt(bit % 64)) & 1n) === 1n;
+}
+
+/**
+ * ADR 0039 §3.1–3.2: the ideographs of `name` outside JIS X 0208 that the
+ * segment never uses, in first-appearance order, each once — iterated by
+ * code point, so an Extension B ideograph is one character. Containment is
+ * by character; Rust's normalized haystack leaves ideographs untouched, so
+ * the raw segment answers the same.
+ */
+function foreignIdeographs(name: string, segment: string): string[] {
+  const found: string[] = [];
+  for (const char of name) {
+    const code = char.codePointAt(0)!;
+    if (isIdeograph(code) && !inJisX0208(code) && !segment.includes(char) && !found.includes(char)) {
+      found.push(char);
+    }
+  }
+  return found;
+}
+
+/** mechanical.rs's `foreign_script_reason`: every offending field of the
+ * item in one record. */
+function foreignScriptReason(fields: [string, string, string[]][]): string {
+  const parts = fields.map(
+    ([field, name, chars]) => `${field} ${quoteForIssue(name)} uses ${chars.join(", ")}`,
+  );
+  const total = fields.reduce((sum, [, , chars]) => sum + chars.length, 0);
+  const noun = total === 1 ? "an ideograph" : "ideographs";
+  return `${parts.join(", ")} — ${noun} outside the segment's script`;
+}
+
 /**
  * A required field that is mechanically absent: missing (or null) or a
  * string that trims to nothing. A present wrong-typed value is NOT absent —
@@ -1441,6 +1508,7 @@ function absentFields(obj: Record<string, unknown>, keys: readonly string[]): st
 function associationMechanically(
   index: number,
   item: unknown,
+  segment: string,
   issues: string[],
   removed: Removal[],
 ): ModelAssociation | null {
@@ -1489,12 +1557,33 @@ function associationMechanically(
     removed.push({ path, reason: `${placeholders.join(", ")} — not an entity`, item });
     return null;
   }
+  // ADR 0039: a label or name written with an ideograph from another
+  // language's repertoire is a second spelling of one term that query,
+  // resolve, and the label vocabulary would all treat as different. This
+  // port has no vocabulary allowlist (ADR 0015), so no name is exempt — the
+  // CLI's default too.
+  const foreign: [string, string, string[]][] = [];
+  for (const [field, name] of [
+    ["label", label],
+    ["subject", subject],
+    ["object", object],
+  ] as const) {
+    const chars = foreignIdeographs(name, segment);
+    if (chars.length > 0) {
+      foreign.push([field, name, chars]);
+    }
+  }
+  if (foreign.length > 0) {
+    removed.push({ path, reason: foreignScriptReason(foreign), item });
+    return null;
+  }
   return parsed;
 }
 
 function aliasMechanically(
   index: number,
   item: unknown,
+  segment: string,
   issues: string[],
   removed: Removal[],
 ): ModelAlias | null {
@@ -1533,6 +1622,16 @@ function aliasMechanically(
     removed.push({ path, reason: "alias equals its canonical", item });
     return null;
   }
+  // ADR 0039, the alias-spelling half: a spelling in another language's
+  // repertoire records a form the segment never uses. The canonical is
+  // judged where it is asserted — the association it must match.
+  if (typeof spelling === "string") {
+    const chars = foreignIdeographs(spelling, segment);
+    if (chars.length > 0) {
+      removed.push({ path, reason: foreignScriptReason([["alias", spelling, chars]]), item });
+      return null;
+    }
+  }
   issues.push(...itemIssues);
   return parsed;
 }
@@ -1541,12 +1640,14 @@ function aliasMechanically(
  * The strict-mode replacement for interpretModelOutput: the same lenient
  * walk and the same issue texts, but items whose departure is mechanically
  * judgeable are removed (and returned as Removal records) instead of
- * flagged, so only genuinely corrective issues survive. Lossy mode never
- * calls this — its contract stays the plain lenient walk.
+ * flagged, so only genuinely corrective issues survive. `segment` is the
+ * chunk text the model was shown, preamble stripped (userMessageSegment).
+ * Lossy mode never calls this — its contract stays the plain lenient walk.
  */
 export function mechanicalInterpret(
   value: unknown,
   rules: ItemRules,
+  segment: string,
 ): { output: ModelOutput; removed: Removal[]; issues: string[] } {
   const issues: string[] = [];
   const removed: Removal[] = [];
@@ -1556,7 +1657,7 @@ export function mechanicalInterpret(
   const rawAssociations = getPresent(obj, "associations");
   if (Array.isArray(rawAssociations)) {
     rawAssociations.forEach((item, index) => {
-      const parsed = associationMechanically(index, item, issues, removed);
+      const parsed = associationMechanically(index, item, segment, issues, removed);
       if (parsed !== null) {
         associations.push(parsed);
       }
@@ -1569,7 +1670,7 @@ export function mechanicalInterpret(
   const rawAliases = getPresent(obj, "aliases");
   if (Array.isArray(rawAliases)) {
     rawAliases.forEach((item, index) => {
-      const parsed = aliasMechanically(index, item, issues, removed);
+      const parsed = aliasMechanically(index, item, segment, issues, removed);
       if (parsed !== null) {
         aliases.push(parsed);
       }
@@ -1614,13 +1715,14 @@ export function effectiveItemRules(rules: ItemRules | null): ItemRules {
 export function evaluateAnswer(
   content: string,
   rules: ItemRules | null,
+  segment: string,
 ): { output: ModelOutput; repairs: string[]; removed: Removal[] } {
   const { value, repairs } = candidateJson(content);
   if (rules === null) {
     const { output } = interpretModelOutput(value, LENIENT_RULES);
     return { output, repairs, removed: [] };
   }
-  const { output, removed, issues } = mechanicalInterpret(value, rules);
+  const { output, removed, issues } = mechanicalInterpret(value, rules, segment);
   if (issues.length > 0) {
     throw new InvalidFault(issues);
   }
@@ -1634,7 +1736,7 @@ export function evaluateAnswer(
  * evaluateAnswer directly instead.
  */
 export function parseModelOutput(content: string): ModelOutput {
-  const { output } = evaluateAnswer(content, null);
+  const { output } = evaluateAnswer(content, null, "");
   return output;
 }
 
