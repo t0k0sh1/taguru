@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
       - uses: actions/download-artifact@v8
         with:
           name: taguru-server-binary
@@ -203,7 +203,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
       # Locked like the `python` job: mutmut itself is a dev dependency
       # with no upper bound, and an unannounced mutmut release reaching
       # this gate is the drift ADR 0049 locks out.
